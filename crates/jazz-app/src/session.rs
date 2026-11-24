@@ -377,8 +377,74 @@ pub(crate) fn watch_sync(client: JazzClient) -> watch::Receiver<SyncStatus> {
 
 /// What the session proves its user with, and renews.
 pub(crate) enum Credential {
-    Device { key: DeviceKey, app: AppId },
-    Bearer { provider: Bearer, token: String },
+    Device {
+        key: DeviceKey,
+        app: AppId,
+    },
+    Bearer {
+        provider: Bearer,
+        token: String,
+        /// Set for a session opened offline: the server has not signed
+        /// this bearer in yet, so the client is held off the server.
+        unverified: Option<Unverified>,
+    },
+}
+
+/// What verifying a session opened offline needs.
+pub(crate) struct Unverified {
+    pub endpoint: String,
+    pub app: AppId,
+    /// The store dir, where sign-ins are remembered.
+    pub root: std::path::PathBuf,
+}
+
+/// How verifying a session opened offline came out.
+enum Verdict {
+    /// The server signed the bearer in (as `token`); sign-ins are
+    /// remembered at `root`.
+    SignedIn {
+        signed_in: crate::backend::SignedIn,
+        token: String,
+        root: std::path::PathBuf,
+    },
+    /// The server names no one, or refuses the bearer.
+    Refused,
+}
+
+/// Longest wait between attempts to verify a session opened offline.
+const VERIFY_RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// Signs the bearer of a session opened offline in, until the server
+/// signs it in or says no (`401`, `403`): otherwise again with a backoff,
+/// with a fresh token from the provider each time.
+async fn verify(unverified: Unverified, provider: Bearer, mut token: String) -> Verdict {
+    let mut attempt = 0;
+    loop {
+        match crate::backend::try_sign_in(&unverified.endpoint, unverified.app, &token).await {
+            Ok(crate::backend::SignIn::SignedIn(signed_in)) => {
+                return Verdict::SignedIn {
+                    signed_in,
+                    token,
+                    root: unverified.root,
+                };
+            }
+            // Only the server saying no to this bearer signs out: no one
+            // (`401`) or refused (`403`). Anything else (no answer, a `5xx`,
+            // a `429`, a captive portal's page) is tried again, held.
+            Ok(crate::backend::SignIn::NoOne | crate::backend::SignIn::Refused(_)) | Err(_) => {
+                return Verdict::Refused;
+            }
+            Ok(crate::backend::SignIn::Unreachable(_) | crate::backend::SignIn::Failing(_)) => {}
+        }
+        tokio::time::sleep(auth_retry_delay(attempt).min(VERIFY_RETRY_CAP)).await;
+        attempt += 1;
+        match provider.token(TokenReason::Connect).await {
+            Ok(Some(next)) => token = next,
+            Ok(None) => return Verdict::Refused,
+            // The provider failed: try again with the token held.
+            Err(_) => {}
+        }
+    }
 }
 
 impl Credential {
@@ -516,11 +582,15 @@ impl Session {
                 crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
             }
         };
-        let linked = linking
-            .runtime
-            .spawn(request)
-            .await
-            .map_err(|_| Error::Stopped)??;
+        // Dropped with this call, which aborts the request.
+        let mut requesting = tokio::task::JoinSet::new();
+        requesting.spawn_on(request, &linking.runtime);
+        let linked = tokio::select! {
+            biased;
+            Some(linked) = requesting.join_next() => linked.map_err(|_| Error::Stopped)??,
+            // The session ended (the client is stopping, or signed out).
+            () = self.commands.closed() => return Err(Error::Stopped),
+        };
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
@@ -595,7 +665,19 @@ pub(crate) fn start(
     };
     let (state, receiver) = watch::channel(SessionState::SignedIn { user: user.clone() });
     let (commands, inbox) = mpsc::unbounded_channel();
+    let mut credential = credential;
+    let verifying: Option<Verifying> = match &mut credential {
+        Credential::Bearer {
+            provider,
+            token,
+            unverified,
+        } => unverified
+            .take()
+            .map(|unverified| Box::pin(verify(unverified, provider.clone(), token.clone())) as _),
+        Credential::Device { .. } => None,
+    };
     let machine = Machine {
+        verifying,
         client,
         user,
         credential,
@@ -640,6 +722,9 @@ struct Pending {
     replies: Vec<oneshot::Sender<Result<()>>>,
 }
 
+/// A session opened offline being verified ([`verify`]).
+type Verifying = std::pin::Pin<Box<dyn std::future::Future<Output = Verdict>>>;
+
 /// The session state machine, as the TypeScript client renews
 /// (`accounts/context.ts`, `runtime/auth-renewal-backoff.ts`):
 ///
@@ -654,6 +739,9 @@ struct Pending {
 /// The provider's future is polled beside the machine's other inputs, so a
 /// slow provider (an interactive sign-in) never holds up a sign-out.
 struct Machine {
+    /// Set while a session opened offline waits for the server to sign its
+    /// bearer in: until then the client is held off the server.
+    verifying: Option<Verifying>,
     client: JazzClient,
     user: User,
     credential: Credential,
@@ -677,9 +765,15 @@ impl Machine {
         mut inbox: mpsc::UnboundedReceiver<Command>,
     ) {
         self.schedule_ahead();
+        let client = self.client.clone();
+        let stopping = client.waits_ended();
+        tokio::pin!(stopping);
         loop {
             let at = self.renewal.as_ref().map(|renewal| renewal.at);
             let flow = tokio::select! {
+                // The client is stopping: nothing more to renew, and who
+                // waits for a renewal hears `Stopped`.
+                () = &mut stopping => ControlFlow::Break(()),
                 changed = sync.changed() => {
                     if changed.is_err() {
                         return;
@@ -694,6 +788,10 @@ impl Machine {
                         self.streak = 0;
                     }
                     self.renew(reason, None)
+                }
+                verdict = poll_verifying(&mut self.verifying) => {
+                    self.verifying = None;
+                    self.verified(verdict)
                 }
                 token = poll_pending(&mut self.pending) => {
                     let Pending { reason, replies, .. } =
@@ -778,6 +876,50 @@ impl Machine {
             }
             Link::Offline { .. } | Link::LocalOnly | Link::Connecting => {}
         }
+        ControlFlow::Continue(())
+    }
+
+    /// After the server answered for a session opened offline: the same
+    /// account goes on, and the client may reach the server now; another
+    /// account, or a refusal, signs out (stopping the client, which never
+    /// reached the server).
+    fn verified(&mut self, verdict: Verdict) -> ControlFlow<()> {
+        let Verdict::SignedIn {
+            signed_in,
+            token: verified,
+            root,
+        } = verdict
+        else {
+            self.sign_out();
+            return ControlFlow::Break(());
+        };
+        // What the server says now is what this device remembers.
+        let _ = crate::remembered::record(
+            &root,
+            &verified,
+            signed_in.account,
+            &signed_in.identity.issuer,
+            &signed_in.identity.subject,
+            &signed_in.claims,
+        );
+        if signed_in.account != self.user.account {
+            self.sign_out();
+            return ControlFlow::Break(());
+        }
+        if let Credential::Bearer { token, .. } = &mut self.credential
+            && *token != verified
+        {
+            if self.client.update_bearer(verified.clone()).is_err() {
+                self.sign_out();
+                return ControlFlow::Break(());
+            }
+            *token = verified;
+        }
+        self.user.claims = signed_in.claims;
+        self.client.release_held();
+        self.set(SessionState::SignedIn {
+            user: self.user.clone(),
+        });
         ControlFlow::Continue(())
     }
 
@@ -923,6 +1065,13 @@ impl Machine {
 async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn poll_verifying(verifying: &mut Option<Verifying>) -> Verdict {
+    match verifying {
+        Some(verifying) => verifying.as_mut().await,
         None => std::future::pending().await,
     }
 }

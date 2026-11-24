@@ -271,7 +271,7 @@ fn agree<T: PartialEq + std::fmt::Debug>(what: &str, read: impl Fn() -> T) -> T 
 fn as_member(db: &Db, query: &Query) -> Vec<jazz::db::CurrentRow> {
     let prepared = db.prepare_query(query).unwrap();
     let roots = block_on(db.all_for_identity(&prepared, ReadOpts::default(), member(0))).unwrap();
-    db.nest_relations(&prepared, roots).unwrap()
+    block_on(db.nest_relations(&prepared, roots)).unwrap()
 }
 
 #[test]
@@ -820,7 +820,7 @@ mod randomized {
                 });
                 agree(&format!("{what}: nested rows"), || {
                     let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
-                    db.nest_relations(&prepared, roots).unwrap()
+                    block_on(db.nest_relations(&prepared, roots)).unwrap()
                 });
                 agree(&format!("{what}: snapshot"), || {
                     block_on(db.all_result_tree(&prepared, at_snapshot.clone()))
@@ -1800,7 +1800,7 @@ fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
             set_mode(mode);
             let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
             jazz::db::take_vm_steps_for_test();
-            let rows = db.nest_relations(&prepared, roots).unwrap();
+            let rows = block_on(db.nest_relations(&prepared, roots)).unwrap();
             (rows, jazz::db::take_vm_steps_for_test())
         };
         let (per_parent, per_parent_steps) = read((true, false));

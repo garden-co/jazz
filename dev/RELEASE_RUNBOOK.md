@@ -331,6 +331,32 @@ in between their own line in its `case`, so their smoke keeps working. Change
 where Kotlin publishes needs Anselm's approval. `release-maven` artifacts expire after
 90 days: backfill a paused version before its run's do.
 
+### The Maven repository zip (Kotlin Multiplatform)
+
+Once `packages/jazz-kotlin` is Kotlin Multiplatform, each release also carries
+`jazz-kotlin-maven-<version>.zip`, next to the jar and AAR (which are
+unchanged). It's a local Maven repository: `tools/jazz/jazz-kotlin/<version>/`
+(the root, with the Gradle module metadata that sends Gradle to the right
+variant), `tools/jazz/jazz-kotlin-jvm/<version>/` and
+`tools/jazz/jazz-kotlin-android/<version>/`, each with its POM, `.module`,
+jar or AAR, sources and javadoc jars. Users unzip it and add the directory as a
+`maven { url = … }` repository, and then `implementation("tools.jazz:jazz-kotlin:<version>")`
+resolves on the JVM and on Android (`setup/kotlin.mdx`).
+
+- Built by `attach-language-artifacts.yml`'s `maven` job (called by
+  `release-artifacts.yml`) from the tree `dev/scripts/publish-kotlin.sh <natives> local`
+  leaves, zipped reproducibly by `dev/scripts/pack-kotlin-maven-zip.sh`, and
+  checked by `dev/scripts/check-kotlin-maven-zip.sh`. That check fails without the root `.module`,
+  `jazz-kotlin-jvm` or `jazz-kotlin-android`, or if a sources jar holds a native library.
+- Its checksum is in `SHA256SUMS-languages` (never the release's `SHA256SUMS`),
+  and it has `release-artifacts.yml`'s build provenance attestation. It holds no
+  `.asc` files: the tree is signed with a throwaway key at build time, and the
+  release key lives in the `publish` environment, which is only reached after the
+  draft already has its assets.
+- `release-publish.yml` checks it again and attaches it with the other
+  language files. A commit where jazz-kotlin isn't Kotlin Multiplatform yet
+  builds no zip, and the release ships without it.
+
 ### Maven Central
 
 When the channel is `central`,

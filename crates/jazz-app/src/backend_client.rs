@@ -19,10 +19,11 @@ use jazz::account_registry::{AccountId, SYSTEM_ACCOUNT_ID};
 use jazz::tools::{AppContext, AppId, JazzClient, Session};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
 use crate::auth::{Bearer, TokenReason};
 use crate::error::{Error, Result};
-use crate::handle::Jazz;
+use crate::handle::{Command, Jazz};
 use crate::session::{Credential, User, UserKind};
 
 /// What a trusted backend client states as its secret: its credential, on
@@ -62,7 +63,7 @@ pub(crate) struct BackendClientLink {
 const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
@@ -148,6 +149,7 @@ pub(crate) async fn connect(
         let credential = Credential::Bearer {
             provider: credential,
             token: first,
+            unverified: None,
         };
         return Ok((client, user, credential, link));
     }
@@ -180,6 +182,7 @@ pub(crate) async fn connect(
     let credential = Credential::Bearer {
         provider: credential,
         token: first,
+        unverified: None,
     };
     Ok((client, user, credential, link))
 }
@@ -292,7 +295,13 @@ impl Jazz {
         // On the client's runtime, whatever the caller's executor.
         let (link, user) = (link.clone(), user_id.to_owned());
         let session = self
-            .with_client(move |_| async move { user_session(&link, &user, claims).await })
+            .with_client(move |client| async move {
+                tokio::select! {
+                    biased;
+                    session = user_session(&link, &user, claims) => session,
+                    () = client.waits_ended() => Err(Error::Stopped),
+                }
+            })
             .await?;
         Ok(self.scoped(session))
     }
@@ -307,8 +316,13 @@ impl Jazz {
     /// waiting at most `timeout` ([`CLOSE_TIMEOUT`] as TypeScript's
     /// `close()`; `close({ timeoutMs })`). With [`crate::Storage::Memory`],
     /// writes that still have not arrived are lost, and this fails with
-    /// [`Error::Unsynced`] saying how many; `Duration::ZERO` closes at once
-    /// and accepts that. A persistent store keeps them for the next open.
+    /// [`Error::Unsynced`] saying how many; `Duration::ZERO` doesn't wait
+    /// for them and accepts that. A persistent store keeps them for the
+    /// next open.
+    ///
+    /// Calls waiting on the server go on while it waits for the writes,
+    /// then fail with [`Error::Stopped`] as [`Jazz::shutdown`] says: `close`
+    /// takes about `timeout`, plus local work already started.
     ///
     /// A handle acting for a user ([`Jazz::for_user`]) closes nothing: the
     /// client is its trusted client's.
@@ -319,16 +333,24 @@ impl Jazz {
         // An open of its store waits for this close rather than being refused.
         self.begin_stopping();
         let started = std::time::Instant::now();
-        if !self.info.serverless && !timeout.is_zero() {
-            // An outage, or the server refusing, ends the wait: what is still
-            // pending then is counted below.
-            // Every write the client holds, its users' handles' too (TS
-            // `close()` drains them all), not only this handle's: wait until
-            // none is pending, re-reading on each change of the client's
-            // status. The wait ends on the client's thread too, so shutting
-            // down does not wait for it in turn.
-            let _ = self
-                .with_client(move |client| async move {
+        let drains = !self.info.serverless && !timeout.is_zero();
+        // Once begun, the close runs on the client's thread to its end, even
+        // if its caller stops waiting (its call dropped, as
+        // `tokio::time::timeout` drops it): the job sends the shutdown
+        // itself, so the client stops and lets go of its store.
+        let (stop, stopped) = oneshot::channel();
+        let commands = self.commands.clone();
+        let pending = self
+            .with_client(move |client| async move {
+                if drains {
+                    // An outage, or the server refusing, ends the wait: what
+                    // is still pending then is counted below.
+                    // Every write the client holds, its users' handles' too
+                    // (TS `close()` drains them all), not only this
+                    // handle's: wait until none is pending, re-reading on
+                    // each change of the client's status. The wait ends on
+                    // the client's thread too, so shutting down does not
+                    // wait for it in turn.
                     let mut changes = client.status_changes();
                     let drained = async {
                         while client.pending_uploads() > 0 {
@@ -337,19 +359,40 @@ impl Jazz {
                             }
                         }
                     };
-                    let _ = tokio::time::timeout(timeout, drained).await;
-                    Ok(())
-                })
-                .await;
+                    tokio::select! {
+                        _ = tokio::time::timeout(timeout, drained) => {}
+                        // A shutdown meanwhile.
+                        () = client.waits_ended() => {}
+                    }
+                }
+                let pending = client.pending_uploads();
+                // Ending the client's HTTP stream sessions gets what is left
+                // of `timeout`: nothing at all for `Duration::ZERO`. Once
+                // the client stops, nothing takes this: `stopped` reads it.
+                let _ = commands.send(Command::Shutdown(
+                    stop,
+                    session_end_budget(timeout, started.elapsed()),
+                ));
+                Ok(pending)
+            })
+            .await;
+        let pending = match pending {
+            Ok(pending) => pending,
+            // Stopped already (or its job cut short by a shutdown): stop it,
+            // as `shutdown` would, if it isn't.
+            Err(_) => {
+                self.shutdown_within(session_end_budget(timeout, started.elapsed()))
+                    .await?;
+                0
+            }
+        };
+        match stopped.await {
+            Ok(result) => result?,
+            // Nothing took the shutdown: another caller's stop, or the
+            // client's own. As `shutdown`, return once the store is let go
+            // of.
+            Err(_) => self.info.life.ended().await,
         }
-        let pending = self
-            .with_client(|client| async move { Ok(client.pending_uploads()) })
-            .await
-            .unwrap_or(0);
-        // Ending the client's HTTP stream sessions gets what is left of
-        // `timeout`: nothing at all for `Duration::ZERO`.
-        self.shutdown_within(session_end_budget(timeout, started.elapsed()))
-            .await?;
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }

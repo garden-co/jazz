@@ -9,7 +9,7 @@
 //! once the user changes it fails with `Replaced`, and the snapshot's
 //! `clientEpoch` says to fetch the new one.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_executor::block_on;
@@ -17,22 +17,26 @@ use jazz_app_support::jazz::tools::Schema;
 use jazz_app_support::{AppFiles, AppId, Initial, JazzSession, SessionConfig, Storage};
 use serde_json::Value as Json;
 
+use crate::closing::Closed;
 use crate::convert;
-use crate::core::{Core, Watch, spawn_watch};
+use crate::core::{Core, Watch, clean_up, spawn_watch};
 use crate::error::{FfiError, Result, refused};
+use crate::gate::HostGate;
 
 pub(crate) struct SessionCore {
     session: JazzSession,
     schema: OnceLock<Arc<Schema>>,
     relations: convert::Relations,
     pub(crate) contract: u64,
-    closed: Arc<AtomicBool>,
+    closed: Closed,
     /// Shared by every handle the session hands out: their transaction and
     /// upload ids never collide.
     next_tx: Arc<AtomicU64>,
     watches: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
-    /// Run when the session closes: a C host's token callback stops here.
-    close_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A C host's token callback: closing waits for it, and so does free.
+    gates: Mutex<Vec<Arc<dyn HostGate>>>,
+    /// A C host's call controls (`callBegin`), by id.
+    controls: Mutex<std::collections::HashMap<u64, jazz_app_support::CallControl>>,
 }
 
 impl SessionCore {
@@ -50,21 +54,55 @@ impl SessionCore {
             schema: OnceLock::new(),
             relations,
             contract,
-            closed: Arc::new(AtomicBool::new(false)),
+            closed: Closed::new(),
             next_tx: Arc::new(AtomicU64::new(
                 AppId::random().uuid().as_u64_pair().1 >> 12 | 1,
             )),
             watches: Mutex::new(Vec::new()),
-            close_hook: Mutex::new(None),
+            gates: Mutex::new(Vec::new()),
+            controls: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
-    fn open_session(&self) -> Result<&JazzSession> {
-        if self.closed.load(Ordering::Acquire) {
+    fn open_session(&self) -> Result<JazzSession> {
+        if self.closed.is_closed() {
             Err(FfiError::Closed)
         } else {
-            Ok(&self.session)
+            // The call's control, if it was made with one.
+            Ok(match crate::core::current_control() {
+                Some(control) => self.session.controlled(control),
+                None => self.session.clone(),
+            })
         }
+    }
+
+    /// A C host's call control (`callBegin`), as a handle's.
+    pub(crate) fn call_begin(&self, timeout: Option<std::time::Duration>) -> Result<u64> {
+        self.open_session()?;
+        let id = self
+            .next_tx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.controls()
+            .insert(id, jazz_app_support::CallControl::new(timeout));
+        Ok(id)
+    }
+
+    pub(crate) fn control(&self, id: u64) -> Result<jazz_app_support::CallControl> {
+        self.controls()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| refused(format!("call {id} is not begun (or ended)")))
+    }
+
+    pub(crate) fn call_end(&self, id: u64) {
+        self.controls().remove(&id);
+    }
+
+    fn controls(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, jazz_app_support::CallControl>>
+    {
+        self.controls.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The snapshot as JSON: `{"status", "user"?, "clientEpoch", "error"?:
@@ -77,6 +115,23 @@ impl SessionCore {
     /// session's status) while there is none.
     pub fn jazz(&self) -> Result<Core> {
         let session = self.open_session()?;
+        // Closed meanwhile, the handle is too: they share the state.
+        self.unless_closed(self.handle(&session))
+    }
+
+    /// A result of work in flight when the session closed: its failure,
+    /// however it shows (no user, replaced, stopped), is `Closed`.
+    fn unless_closed<T>(&self, result: Result<T>) -> Result<T> {
+        result.map_err(|error| {
+            if self.closed.is_closed() {
+                FfiError::Closed
+            } else {
+                error
+            }
+        })
+    }
+
+    fn handle(&self, session: &JazzSession) -> Result<Core> {
         // The client and the epoch it belongs to, read together: a change
         // of user between the two reads is retried.
         let (jazz, epoch) = loop {
@@ -108,9 +163,18 @@ impl SessionCore {
         ))
     }
 
-    /// Runs one of the session's operations by name.
+    /// Runs one of the session's operations by name. `close` may run beside
+    /// any other, and on a closed session.
     pub fn call(&self, method: &str, args: &Json) -> Result<Json> {
+        if method == "close" {
+            self.close()?;
+            return Ok(Json::Null);
+        }
         let session = self.open_session()?;
+        self.unless_closed(Self::operate(&session, method, args))
+    }
+
+    fn operate(session: &JazzSession, method: &str, args: &Json) -> Result<Json> {
         match method {
             "refresh" => block_on(session.refresh())?,
             "createDeviceAccount" => block_on(session.create_device_account())?,
@@ -144,28 +208,44 @@ impl SessionCore {
         spawn_watch(stream, listener, &self.watches, &self.closed)
     }
 
-    pub(crate) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
-        *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
-    }
-
-    /// Closes the session and its client: every handle it gave fails with
-    /// `Closed`, and every watch ends. Closing again does nothing.
-    pub fn close(&self) -> Result<()> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let result = block_on(self.session.close());
-        let hook = self
-            .close_hook
+    pub(crate) fn on_close(&self, gate: Arc<dyn HostGate>) {
+        self.gates
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(hook) = hook {
-            hook();
+            .push(gate);
+    }
+
+    fn close_gates(&self) {
+        let gates = self.gates.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for gate in gates {
+            gate.close();
         }
+    }
+
+    /// Before the session is freed: waits for the host's callback again, as
+    /// the one that closed it from inside may still be running.
+    pub(crate) fn before_free(&self) {
+        self.close_gates();
+    }
+
+    /// Closes the session and its client, beside any other call on it: an
+    /// operation in flight fails `Closed` without being waited for and
+    /// installs no client, every handle it gave fails with `Closed`, and
+    /// every watch ends. Returns once no host callback runs but the
+    /// caller's own. Closing again does nothing and returns at once.
+    pub fn close(&self) -> Result<()> {
+        if !self.closed.close() {
+            return Ok(());
+        }
+        // Its handles' transactions and uploads, while their client runs.
+        if let Ok(jazz) = self.session.jazz() {
+            clean_up(&jazz);
+        }
+        let result = block_on(self.session.close());
         for close in std::mem::take(&mut *self.watches.lock().unwrap_or_else(|e| e.into_inner())) {
             let _ = close.send(());
         }
+        self.close_gates();
         result?;
         Ok(())
     }

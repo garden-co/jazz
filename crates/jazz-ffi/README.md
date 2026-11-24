@@ -90,7 +90,8 @@ A token trusted neither way fails the open with `Refused`.
 writes the client holds (its `for_user` handles' too) to reach the backend,
 as TS's `close({ timeoutMs })` (10 000 there by default): with memory
 storage, writes still unsent fail it with `Unsynced { pending }` (kind
-`"unsynced"`), and the app closes all the same; `0` closes at once.
+`"unsynced"`), and the app closes all the same. `0` waits for no writes; it
+isn't instant (see "Closing").
 
 **End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
 backend's `createJazz` handler, never the core) and `"auth"` says who signs
@@ -152,9 +153,50 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   and leave the handle open: use the session's `sign_out` and
   `link_device_account`.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
-  `Closed`, its watches end, and no token callback runs after.
+  `Closed` and its watches end. No C token callback runs after; a Swift or
+  Kotlin token provider already asked may outlive it (see "Closing").
 
 Not yet: deleting a session account's store through its handle (refused).
+
+## Closing
+
+Every close (`shutdown`, `shutdown_within`, C `"close"` and the functions
+that free) gives the calls in flight the same guarantees:
+
+- Calls waiting on the server or the network (`wait_for_sync`, a global
+  tier, remote reads, `for_user`, `link`, `refresh`) fail `Closed`: when the
+  write drain (`timeout_ms`) ends on a root handle, at once with `0` and on
+  a `for_user` or session handle. What they sent may still apply, and a
+  later refusal of it is still reported.
+- Local work already started finishes, with 30 s as its backstop, and
+  stream sessions get up to 2 s to end. So closing takes about `timeout_ms`,
+  plus that: `0` is not instant. Nor is that a hard limit: work can't be
+  interrupted while it runs, and closing also waits for the store to close
+  (but not for a host name lookup in progress). Don't close on a UI thread.
+- A `for_user` or session handle closes only itself, and rolls back what it
+  began.
+- A session doesn't wait for the operation in flight, which fails `Closed`
+  and installs no client; an open it interrupted gets up to 2 s to let go of
+  its store. `Replaced` is only for a session that goes on: closing is
+  always `Closed`, and wins when both hold.
+- On the C ABI, closing waits for a token callback that is running, as the
+  host frees its `ctx` after: hosts make theirs cancellable. Through UniFFI
+  (Swift, Kotlin) it doesn't wait: a token provider already asked may still
+  run after `shutdown` returns, and what it gives is dropped.
+
+On the C ABI, `jazz_close`, `jazz_close_within` and `jazz_session_close`
+free, so nothing may run beside them. To close with calls in flight:
+
+1. `jazz_call(h, "close", {"timeoutMs"?})`, or
+   `jazz_session_call(s, "close", {})`: closes without freeing, beside any
+   other call, and again if need be. Keep its error (`unsynced`, say).
+2. Start no more calls, and wait for every call in flight, other closes
+   included.
+3. Free with `jazz_close` or `jazz_session_close`.
+4. Only then free the token callback's `ctx`.
+
+From inside a token callback do step 1 only and the rest later from
+another thread: waiting there deadlocks.
 
 ## Lifecycle (as TS's)
 
@@ -170,8 +212,9 @@ Not yet: deleting a session account's store through its handle (refused).
 - `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
   the server, with local reads and writes going on, then resume sync.
 - `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
-  deletes its local store, so the next open starts empty. The store stays
-  locked until it is gone.
+  deletes its local store, so the next open starts empty; open transactions
+  roll back and uploads abort first. The store stays locked until it is
+  gone.
   On the C ABI, free the handle with `jazz_close` afterwards, as after
   `signOut`.
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
@@ -352,7 +395,7 @@ closes, each open subscription gets one last error, `Closed`
 callback is running, so the host may free `ctx` right after. Called from
 inside the callback, it doesn't wait. A subscription may be freed before or
 after `jazz_close`. No call on a handle may run concurrently with, or follow,
-its `jazz_close`.
+its `jazz_close`: with calls in flight, use `"close"` first (see "Closing").
 
 Listeners run on a thread owned by the subscription, so they may call back
 into the handle. Every method blocks and is safe to call from any thread.

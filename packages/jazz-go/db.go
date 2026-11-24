@@ -100,8 +100,12 @@ const (
 
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
+	// mu guards handle and closed, and admitting calls. It is never held
+	// across a call into Jazz: only closing ends some of those.
 	mu       sync.RWMutex
 	handle   uintptr
+	calls    sync.WaitGroup // the calls in flight
+	closed   chan struct{}  // made as closing begins, closed as it ends
 	app      any
 	provider uint64 // the TokenProvider's id, if any
 
@@ -169,6 +173,10 @@ func (db *DB) computed() any { return db.app }
 
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
+//
+// When ctx ends first, Open cancels the TokenProvider's ctx and returns
+// ctx.Err() once the app it was opening is closed again, so its store is
+// free for the next Open.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err := cfg.checkTransport(); err != nil {
 		return nil, err
@@ -197,9 +205,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		provider uint64
 	}
 	done := make(chan opened, 1)
+	var id uint64
+	t, withTokens := cfg.Auth.(tokenAuth)
+	if withTokens {
+		id = nextProvider.Add(1)
+	}
 	go func() {
-		if t, ok := cfg.Auth.(tokenAuth); ok {
-			h, provider, err := openUser(string(config), t.provider)
+		if withTokens {
+			h, provider, err := openUser(string(config), id, t.provider)
 			done <- opened{h, err, provider}
 			return
 		}
@@ -214,34 +227,48 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		}
 		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
 	case <-ctx.Done():
-		go func() {
-			if o := <-done; o.h != 0 {
-				ffi.close(o.h)
-			}
-		}()
+		// Stop asking the provider, and close what the open still gives
+		// before answering, so the store is free again when Open returns.
+		cancelFetches(id)
+		if o := <-done; o.h != 0 {
+			ffi.close(o.h)
+		}
+		releaseProvider(id)
 		return nil, ctx.Err()
 	}
 }
 
-// Close closes the app; later calls return ErrClosed.
+// Close closes the app without waiting for its writes to reach the server
+// (Shutdown does). Calls waiting for the server end with ErrClosed (or with
+// the answer they already had, a refusal say), though what they sent may
+// still apply, and later calls return ErrClosed. Close returns once the app
+// is closed: work already running locally finishes first, and sync gets up
+// to 2 seconds to end. An error says what failed as it closed: the DB is
+// closed and freed all the same.
+//
+// Close cancels the TokenProvider's ctx and waits for the provider to
+// return. A provider may call Close itself, but mustn't wait for a Close
+// made on another goroutine. Called from the provider, Close returns at
+// once and the app is closed and freed once the provider has returned.
+//
+// Close blocks until the app is closed: run it in a goroutine not to wait.
 func (db *DB) Close() error {
-	db.endStreams()
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.handle != 0 {
-		ffi.close(db.handle)
-		db.handle = 0
-		// The token callback is valid until jazz_close returns.
-		providers.Delete(db.provider)
-	}
-	return nil
+	return db.closeAndFree(0,
+		func(h uintptr) error { return callClose(ffi.call, h, "{}") },
+		ffi.close)
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
-// result is dropped, but the call itself runs to its end: a write may
-// still apply.
+// result is dropped, but the call itself runs until it ends or the DB
+// closes: a write may still apply.
 func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
+	return db.callOr(ctx, method, args, out, nil)
+}
+
+// callOr is call, with abandoned, if any, given the result of a call
+// that ctx's end returned from: to undo or finish what it began.
+func (db *DB) callOr(ctx context.Context, method string, args map[string]any, out any, abandoned func(text string, err error)) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -255,14 +282,14 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 	}
 	done := make(chan result, 1)
 	go func() {
-		db.mu.RLock()
-		defer db.mu.RUnlock()
-		if db.handle == 0 {
-			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
+		h, release, err := db.acquire(nil)
+		if err != nil {
+			done <- result{err: err}
 			return
 		}
+		defer release()
 		var cerr uintptr
-		res := ffi.call(db.handle, cstr(method), cstr(string(argsJSON)), &cerr)
+		res := ffi.call(h, cstr(method), cstr(string(argsJSON)), &cerr)
 		var r result
 		r.text, _ = takeString(res)
 		r.err = takeError(cerr)
@@ -278,6 +305,12 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 		}
 		return json.Unmarshal([]byte(r.text), out)
 	case <-ctx.Done():
+		if abandoned != nil {
+			go func() {
+				r := <-done
+				abandoned(r.text, r.err)
+			}()
+		}
 		return ctx.Err()
 	}
 }

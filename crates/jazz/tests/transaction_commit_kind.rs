@@ -8,6 +8,7 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 fn open() -> Db {

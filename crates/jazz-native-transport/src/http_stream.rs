@@ -627,7 +627,7 @@ impl HttpStreamFallbackConnector {
         Self {
             // Redirects would carry the credential elsewhere; a backend
             // never redirects its sync routes.
-            http: reqwest::Client::builder()
+            http: crate::http_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 // An idle stream session has no silence deadline (see
                 // `HTTP_STREAM_LIVENESS`): TCP keepalive finds a dead one,

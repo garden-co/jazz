@@ -90,7 +90,7 @@ impl Source {
 
     pub(super) fn open(&self) -> Result<StoreFile, String> {
         match self {
-            Self::Memory(name) => StoreFile::shared_memory(name),
+            Self::Memory(name) => jazz::db::block_on(StoreFile::shared_memory(name)),
             Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
@@ -98,13 +98,13 @@ impl Source {
                 }
                 // Every commit (rows, catalogue, account registry) is durable
                 // when it returns.
-                StoreFile::open(
+                jazz::db::block_on(StoreFile::open(
                     path,
                     FileOptions {
                         synchronous_full: true,
                         ..FileOptions::default()
                     },
-                )
+                ))
             }
         }
         .map_err(|error| format!("open server store: {error}"))
@@ -353,9 +353,9 @@ impl ChunkIoRunner {
         } = self.plan();
         if batch {
             let taken = if fetches {
-                owner.db.take_chunk_io()
+                block_on(owner.db.take_chunk_io())
             } else {
-                owner.db.take_chunk_io_holding_fetches()
+                block_on(owner.db.take_chunk_io_holding_fetches())
             };
             match taken {
                 // Nothing to do: dropping an empty batch ends it.
@@ -373,7 +373,7 @@ impl ChunkIoRunner {
         if !fetch_lane {
             return;
         }
-        match owner.db.take_chunk_fetches() {
+        match block_on(owner.db.take_chunk_fetches()) {
             Ok(Some(io)) => {
                 self.fetching.set(true);
                 if !self.fetches.send(io) {
@@ -696,33 +696,37 @@ impl HostSender {
 /// Host tables of a store that could not be opened: each use reports why.
 pub(super) struct Unavailable(pub(super) String);
 
+#[async_trait::async_trait(?Send)]
 impl HostTables for Unavailable {
-    fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
+    async fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
         Err(self.error())
     }
 
-    fn catalogue_put(&self, _: &jazz::catalogue::CataloguePut) -> Result<(), jazz::db::Error> {
+    async fn catalogue_put(
+        &self,
+        _: &jazz::catalogue::CataloguePut,
+    ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
 
-    fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
+    async fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
         Err(self.error())
     }
-    fn host_prefix(
+    async fn host_prefix(
         &self,
         _: HostTable,
         _: &[u8],
     ) -> Result<Vec<jazz::host::HostPair>, jazz::db::Error> {
         Err(self.error())
     }
-    fn host_put_many(
+    async fn host_put_many(
         &self,
         _: HostTable,
         _: &[jazz::host::HostPair],
     ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
-    fn host_put_if_absent(
+    async fn host_put_if_absent(
         &self,
         _: HostTable,
         _: &[u8],
@@ -730,13 +734,10 @@ impl HostTables for Unavailable {
     ) -> Result<Option<Vec<u8>>, jazz::db::Error> {
         Err(self.error())
     }
-    fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
+    async fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
-    fn host_sql(
-        &self,
-        _: &mut dyn FnMut(&jazz::storage::Storage) -> Result<(), jazz::db::Error>,
-    ) -> Result<(), jazz::db::Error> {
+    async fn host_sql(&self, _: &mut dyn jazz::host::HostSqlBody) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
 }
@@ -1600,7 +1601,7 @@ impl ServerRuntimeHandle {
 
     /// The store's catalogue: every schema, lens and permissions revision.
     pub async fn catalogue(&self) -> Result<CatalogueRows, String> {
-        self.run(|owner| owner.db.catalogue().map_err(|error| error.to_string()))
+        self.run(|owner| block_on(owner.db.catalogue()).map_err(|error| error.to_string()))
             .await
     }
 

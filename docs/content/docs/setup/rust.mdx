@@ -9,9 +9,13 @@ mobile app, or it acts as a [backend client](/docs/setup/backend-client) with a 
 credential. Like every other language, it works from your app's TypeScript schema and permissions:
 `npx jazz-tools generate` writes its typed bindings from them.
 
-<Callout type="warn" title="Known issue: a bearer user can't open offline">
-  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
-  while your backend is unreachable, even with a persistent store.
+<Callout title="Opening offline with a bearer">
+  An app signed in with a JWT bearer token opens its persistent store when your backend can't be
+  reached, if that user signed in on this device before. Until your backend signs them in again as
+  the same account, the client makes no request and uploads nothing; their writes queue locally. If
+  the backend names another account or refuses the token, the client stops and the session reads
+  signed out; writes made offline stay in that account's store for its next sign-in. An opaque
+  token, or a user who never signed in on this device, still needs the backend to open.
 </Callout>
 
 ## Install
@@ -98,12 +102,15 @@ does.
 
 ### Closing
 
-- `jazz.shutdown()` stops the client: calls already made finish (for up to 30 seconds), then
-  subscriptions end. Call it before exiting with `Storage::Dir`, so the store is flushed and closed.
+- `jazz.shutdown()` stops the client. Calls waiting on the server fail with `Error::Stopped` at
+  once (what they sent may still apply); local work already started finishes (for up to 30
+  seconds, though work that doesn't yield can't be cut short, so it has no hard time limit), then
+  subscriptions end. Call it before exiting with `Storage::Dir`, so the store is flushed and
+  closed.
 - `jazz.close(timeout)` first waits up to `timeout` (`CLOSE_TIMEOUT` is 10 seconds) for queued
   writes to reach the server, then shuts down. With `Storage::Memory`, writes that never arrived are
-  lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` closes at once and accepts
-  that.
+  lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` doesn't wait for them and
+  accepts that.
 - With `JazzSession`, `session.sign_out()` signs out and keeps the session usable, while
   `session.close()` ends it. `sign_out()` and `link()` on a handle from `session.jazz()` fail
   with `Error::Unsupported`: use `session.sign_out()` and `session.link_device_account()`.

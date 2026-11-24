@@ -2052,14 +2052,17 @@ dependencies = [
  "jazz-text",
  "libc",
  "postcard",
+ "rcgen",
  "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
 ]
@@ -2143,6 +2146,7 @@ dependencies = [
 name = "jazz-db"
 version = "2.0.0-beta.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "futures",
  "jazz-model",
@@ -2154,6 +2158,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
  "web-time",
@@ -2390,6 +2395,7 @@ name = "jazz-native-transport"
 version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.9",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "hex",
@@ -2397,13 +2403,17 @@ dependencies = [
  "jazz-core",
  "jazz-server",
  "postcard",
+ "rcgen",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "tracing",
  "uuid",
 ]
 
@@ -2457,6 +2467,7 @@ version = "0.8.3"
 name = "jazz-server"
 version = "2.0.0-beta.1"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
@@ -2596,6 +2607,7 @@ dependencies = [
 name = "jazz-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "console_error_panic_hook",

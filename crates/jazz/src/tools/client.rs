@@ -95,6 +95,9 @@ pub struct JazzClient {
     /// The branch view this client reads and writes through
     /// ([`JazzClient::on_branch`]); `None` is the root branch.
     branch: Option<BranchScope>,
+    /// Ends this client's (and its scoped clones') waits on the server
+    /// once any reads true: [`JazzClient::ending_waits_with`].
+    waits_end: Vec<watch::Receiver<bool>>,
     shared: Rc<Shared>,
 }
 
@@ -103,6 +106,7 @@ impl Clone for JazzClient {
         Self {
             write_context: self.write_context.clone(),
             branch: self.branch.clone(),
+            waits_end: self.waits_end.clone(),
             shared: self.shared.clone(),
         }
     }
@@ -125,6 +129,9 @@ struct Shared {
     work: Arc<Notify>,
     /// Bumped after every tick; waiters re-poll on each change.
     progress: watch::Sender<u64>,
+    /// True once the client is stopping: no wait on the server goes on
+    /// ([`JazzClient::end_waits`]).
+    waits_ended: watch::Sender<bool>,
     /// True while a test holds the upstream detached; the keeper neither
     /// keeps nor re-opens a link until it turns false.
     upstream_paused: watch::Sender<bool>,
@@ -141,6 +148,13 @@ struct Shared {
 #[derive(Default)]
 struct State {
     closed: bool,
+    /// Opened held ([`JazzClient::connect_with_native_transport_bearer_held`])
+    /// and not released yet: only [`JazzClient::release_held`] lets it reach
+    /// the server; `disconnect` and `reconnect` don't.
+    held: bool,
+    /// The host disconnected while held: released, the client stays off
+    /// the server until it reconnects.
+    disconnected_while_held: bool,
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
@@ -772,7 +786,8 @@ struct LinkKeeper {
 }
 
 impl LinkKeeper {
-    fn new() -> Self {
+    /// `held`: offline until released ([`JazzClient::release_held`]).
+    fn new(held: bool) -> Self {
         let seed = Uuid::new_v4().as_u64_pair().0;
         let mut keeper = Self {
             link: UpstreamLink::new(LinkPolicy::default(), seed),
@@ -780,6 +795,9 @@ impl LinkKeeper {
             actions: Vec::new(),
             live: None,
         };
+        if held {
+            keeper.handle(LinkInput::SetOffline(true));
+        }
         keeper.handle(LinkInput::ServerConfigured(true));
         keeper
     }
@@ -792,7 +810,7 @@ impl LinkKeeper {
 
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
-        shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        crate::db::block_on(shared.db.set_remote_link_hint(self.link.remote_link_hint()));
         let mut changed = false;
         for event in self.link.drain_events() {
             match event {
@@ -874,7 +892,7 @@ impl JazzClient {
     /// use [`Self::connect_with_native_transport`] from their process or
     /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context, None, None).await
+        Self::connect_inner(context, None, None, false).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -882,7 +900,7 @@ impl JazzClient {
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self> {
-        Self::connect_inner(context, Some(connector), None).await
+        Self::connect_inner(context, Some(connector), None, false).await
     }
 
     /// Connect as a user of an app whose backend (`createJazz`) signs its
@@ -897,6 +915,28 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
+        Self::connect_bearer(context, connector, bearer, false).await
+    }
+
+    /// [`Self::connect_with_native_transport_bearer`], but nothing reaches
+    /// the server until [`Self::release_held`]: for a session the server has not
+    /// verified yet (one opened offline from what this device remembers), so
+    /// no request is made, and nothing uploads, under it. Local reads and
+    /// writes work meanwhile; writes queue for upload.
+    pub async fn connect_with_native_transport_bearer_held(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+    ) -> Result<Self> {
+        Self::connect_bearer(context, connector, bearer, true).await
+    }
+
+    async fn connect_bearer(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+        held: bool,
+    ) -> Result<Self> {
         // A trusted backend client states a stand-in secret its credential
         // on the upgrade vouches for, and the backend replaces with its own.
         let trusted = context.backend_secret.is_some() && context.backend_session.is_none();
@@ -907,13 +947,20 @@ impl JazzClient {
                     .to_owned(),
             ));
         }
-        Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
+        Self::connect_inner(
+            context,
+            Some(connector),
+            Some(format!("Bearer {bearer}")),
+            held,
+        )
+        .await
     }
 
     async fn connect_inner(
         context: AppContext,
         connector: Option<Arc<dyn NativeTransportConnector>>,
         authorization: Option<String>,
+        held: bool,
     ) -> Result<Self> {
         let has_server = !context.server_url.is_empty();
         let connector = match (has_server, connector) {
@@ -964,7 +1011,9 @@ impl JazzClient {
             _ => JazzError::Storage(error.to_string()),
         })?;
         if let Some(session) = default_session.as_ref() {
-            db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
+            crate::db::block_on(
+                db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?),
+            );
         }
         let work = Arc::new(Notify::new());
         let (progress, _) = watch::channel(0);
@@ -975,7 +1024,8 @@ impl JazzClient {
             schema: context.schema.clone(),
             work: work.clone(),
             progress,
-            upstream_paused: watch::channel(false).0,
+            waits_ended: watch::Sender::new(false),
+            upstream_paused: watch::channel(held).0,
             credentials: watch::channel(Credentials {
                 auth: AuthConfig {
                     // With the backend secret, a client's own proof is the
@@ -997,13 +1047,16 @@ impl JazzClient {
                 || (context.backend_secret.is_some()
                     && context.backend_session.is_none()
                     && context.jwt_token.is_none()),
-            state: RefCell::new(State::default()),
+            state: RefCell::new(State {
+                held,
+                ..State::default()
+            }),
         });
 
         if connector.is_none() {
             // Still a replica: its writes queue for upload, so a store opened
             // without a server keeps them for the first one it connects to.
-            shared.db.set_remote_link_hint(RemoteLinkHint::NoServer);
+            crate::db::block_on(shared.db.set_remote_link_hint(RemoteLinkHint::NoServer));
         }
         if let Some(connector) = connector {
             let wake = work.clone();
@@ -1024,7 +1077,7 @@ impl JazzClient {
             // attempt runs in the keeper like every later one, so a refusal
             // reaches the link's status (and ends waits it makes hopeless)
             // however fast or slow the server answers it.
-            let mut keeper = LinkKeeper::new();
+            let mut keeper = LinkKeeper::new(held);
             keeper.publish(&shared);
             let keeper = tokio::task::spawn_local(keep_upstream(
                 Rc::downgrade(&shared),
@@ -1040,6 +1093,7 @@ impl JazzClient {
         Ok(Self {
             write_context: None,
             branch: None,
+            waits_end: Vec::new(),
             shared,
         })
     }
@@ -1098,9 +1152,11 @@ impl JazzClient {
             return Ok(None);
         };
         let author = session.author_subject()?;
-        self.shared
-            .db
-            .set_identity_claims(author, session_claims_to_core_claims(session)?);
+        crate::db::block_on(
+            self.shared
+                .db
+                .set_identity_claims(author, session_claims_to_core_claims(session)?),
+        );
         Ok(Some(author))
     }
 
@@ -1382,7 +1438,16 @@ impl JazzClient {
     /// A [`ReadTier::Remote`] read, and a local-first read that waits for
     /// the server, return the first answer of a subscription held for the
     /// read: the server's settled result once it arrives.
-    pub async fn query_with_opts(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
+    pub fn query_with_opts(
+        &self,
+        query: Query,
+        opts: ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Vec<QueryResult>>> + '_ {
+        // Concurrent reads would otherwise embed each SQL future in the caller's stack frame.
+        Box::pin(self.read_query(query, opts))
+    }
+
+    async fn read_query(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
@@ -1393,21 +1458,26 @@ impl JazzClient {
             // which needs ticks to answer. A branch view composes over the
             // staged writes of a mergeable transaction; a serializable one
             // refuses it (its read set is the root view's alone).
-            self.shared
-                .settle(db.tx_ref(transaction_id).all_prepared_in(
-                    &prepared,
-                    false,
-                    session,
-                    ReadTier::LocalFirst,
-                    &opts.read_view.source,
-                ))
-                .await?
-                .map_err(|error| JazzError::Query(error.to_string()))?
+            self.unless_waits_end(
+                self.shared
+                    .settle(db.tx_ref(transaction_id).all_prepared_in(
+                        &prepared,
+                        false,
+                        session,
+                        ReadTier::LocalFirst,
+                        &opts.read_view.source,
+                    )),
+            )
+            .await?
+            .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
         {
             let mut stream = self.open_core_subscription(&read, opts)?;
-            match self.shared.until(|| stream.try_next_event()).await? {
+            let answer = self
+                .unless_waits_end(self.shared.until(|| stream.try_next_event()))
+                .await?;
+            match answer {
                 SubscriptionEvent::Delta { mut added, .. } => {
                     added.sort_by_key(|row| row.index);
                     added.into_iter().map(|row| row.row).collect()
@@ -1428,13 +1498,12 @@ impl JazzClient {
             // A row whose large values are still being fetched answers once
             // their chunks arrive, while the upstream that will send them is
             // connected.
-            self.shared
-                .until(|| match read_local() {
-                    Err(error) if error.is_missing_chunks() && db.awaiting_chunks() => None,
-                    result => Some(result),
-                })
-                .await?
-                .map_err(|error| JazzError::Query(error.to_string()))?
+            self.unless_waits_end(self.shared.until(|| match read_local() {
+                Err(error) if error.is_missing_chunks() && db.awaiting_chunks() => None,
+                result => Some(result),
+            }))
+            .await?
+            .map_err(|error| JazzError::Query(error.to_string()))?
         };
         Decoder::new(&self.shared.schema, &query, None).results(&rows)
     }
@@ -1465,9 +1534,12 @@ impl JazzClient {
             }
         }
         let db = self.db()?;
-        db.read_value_range(table, RowUuid(*object_id.uuid()), column, range)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))
+        self.unless_waits_end(async {
+            db.read_value_range(table, RowUuid(*object_id.uuid()), column, range)
+                .await
+                .map_err(|error| JazzError::Query(error.to_string()))
+        })
+        .await
     }
 
     /// Stream one bytes, text or JSON cell into a new row from a reader.
@@ -1800,7 +1872,8 @@ impl JazzClient {
         let db = self.db()?;
         let id = db.request_permission_advice(action, None);
         self.shared.tick_soon();
-        self.shared.settle(db.permission_advice(id)).await
+        self.unless_waits_end(self.shared.settle(db.permission_advice(id)))
+            .await
     }
 
     /// [`JazzClient::update`] with edits of large-capable columns: a text
@@ -2041,9 +2114,11 @@ impl JazzClient {
         request: &crate::thin::ThinRequest,
     ) -> Result<crate::thin::ThinBody> {
         let db = self.db()?;
-        self.shared
-            .settle(transactions.serve(db, request.id, &request.op))
-            .await
+        self.unless_waits_end(
+            self.shared
+                .settle(transactions.serve(db, request.id, &request.op)),
+        )
+        .await
     }
 
     /// End the thin session's open transactions and uploads: nothing of
@@ -2075,16 +2150,18 @@ impl JazzClient {
             WriteIdentity::Session(author) => Some(author),
             _ => None,
         };
-        self.shared
-            .settle_upstream(db.wait_for_sync(CoreDurabilityTier::Global, writer))
-            .await?
-            .map_err(|error| {
-                JazzError::write_rejected(&error).unwrap_or_else(|| {
-                    JazzError::Write(format!(
-                        "a write was rejected before reaching the server: {error}"
-                    ))
-                })
+        self.unless_waits_end(
+            self.shared
+                .settle_upstream(db.wait_for_sync(CoreDurabilityTier::Global, writer)),
+        )
+        .await?
+        .map_err(|error| {
+            JazzError::write_rejected(&error).unwrap_or_else(|| {
+                JazzError::Write(format!(
+                    "a write was rejected before reaching the server: {error}"
+                ))
             })
+        })
     }
 
     /// Wait until a commit of this client reaches `tier`, failing if the
@@ -2094,8 +2171,37 @@ impl JazzClient {
         transaction_id: TransactionId,
         tier: DurabilityTier,
     ) -> Result<()> {
-        let seq = self
-            .shared
+        self.await_transaction(transaction_id, tier, true).await
+    }
+
+    /// [`JazzClient::wait_for_transaction`], but a refusal it sees stays
+    /// unreported: a later [`JazzClient::wait_for_sync`] reports it, unless
+    /// [`JazzClient::mark_transaction_reported`] says its caller heard it.
+    /// Owned by `jazz-app-support`: not public API.
+    #[doc(hidden)]
+    pub async fn observe_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        self.await_transaction(transaction_id, tier, false).await
+    }
+
+    /// The refusal of this client's commit was reported to a caller (see
+    /// [`JazzClient::observe_transaction`]): [`JazzClient::wait_for_sync`]
+    /// doesn't report it again. Not public API.
+    #[doc(hidden)]
+    pub fn mark_transaction_reported(&self, transaction_id: TransactionId) {
+        let Ok(seq) = self.committed_seq(transaction_id) else {
+            return;
+        };
+        if let Ok(db) = self.db() {
+            db.mark_rejection_reported(seq);
+        }
+    }
+
+    fn committed_seq(&self, transaction_id: TransactionId) -> Result<u64> {
+        self.shared
             .state
             .borrow()
             .writes
@@ -2105,7 +2211,16 @@ impl JazzClient {
                 JazzError::Write(format!(
                     "transaction {transaction_id} was not committed by this client"
                 ))
-            })?;
+            })
+    }
+
+    async fn await_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+        reports: bool,
+    ) -> Result<()> {
+        let seq = self.committed_seq(transaction_id)?;
         let core_tier = match tier {
             DurabilityTier::Local => CoreDurabilityTier::Local,
             DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
@@ -2116,9 +2231,16 @@ impl JazzClient {
             )));
         }
         let db = self.db()?;
-        let wait = db.wait_for_transaction(seq, core_tier);
+        let wait = async {
+            if reports {
+                db.wait_for_transaction(seq, core_tier).await
+            } else {
+                db.observe_transaction(seq, core_tier).await
+            }
+        };
         let settled = if core_tier > CoreDurabilityTier::Local {
-            self.shared.settle_upstream(wait).await?
+            self.unless_waits_end(self.shared.settle_upstream(wait))
+                .await?
         } else {
             self.shared.settle(wait).await?
         };
@@ -2234,6 +2356,7 @@ impl JazzClient {
         JazzClient {
             write_context: Some(write_context),
             branch: self.branch.clone(),
+            waits_end: self.waits_end.clone(),
             shared: self.shared.clone(),
         }
     }
@@ -2255,6 +2378,7 @@ impl JazzClient {
         JazzClient {
             write_context: self.write_context.clone(),
             branch: Some(BranchScope { head, base }),
+            waits_end: self.waits_end.clone(),
             shared: self.shared.clone(),
         }
     }
@@ -2333,8 +2457,7 @@ impl JazzClient {
     /// dataset with enough history retained.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef> {
         let db = self.db()?;
-        self.shared
-            .settle(db.capture_snapshot())
+        self.unless_waits_end(self.shared.settle(db.capture_snapshot()))
             .await?
             .map_err(|error| JazzError::Query(error.to_string()))
     }
@@ -2451,10 +2574,49 @@ impl JazzClient {
         if self.shared.serverless {
             return false;
         }
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                // Never attached; stays off the server once released too.
+                state.disconnected_while_held = true;
+                return false;
+            }
+        }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        crate::db::block_on(self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed));
         detached
+    }
+
+    /// Lets a client opened held
+    /// ([`JazzClient::connect_with_native_transport_bearer_held`]) reach its
+    /// server, without waiting for the link: once whoever opened it has
+    /// verified its session. The only way out of the hold:
+    /// [`JazzClient::reconnect`] does not release it. A host that
+    /// disconnected meanwhile stays disconnected until it reconnects.
+    #[doc(hidden)]
+    pub fn release_held(&self) {
+        if self.shared.serverless {
+            return;
+        }
+        let resume = {
+            let mut state = self.shared.state();
+            if !state.held {
+                return;
+            }
+            state.held = false;
+            !std::mem::take(&mut state.disconnected_while_held)
+        };
+        if resume {
+            self.shared.upstream_paused.send_replace(false);
+        }
+    }
+
+    /// Whether the client is held off its server, waiting for
+    /// [`JazzClient::release_held`].
+    #[doc(hidden)]
+    pub fn is_held(&self) -> bool {
+        self.shared.state.borrow().held
     }
 
     /// Resume sync after [`JazzClient::disconnect`], or restart a link
@@ -2465,6 +2627,15 @@ impl JazzClient {
     pub async fn reconnect(&self) -> Result<bool> {
         if self.shared.serverless {
             return Ok(false);
+        }
+        // Held: nothing reaches the server before the session is verified.
+        // The host's wish to be connected is kept for the release.
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                state.disconnected_while_held = false;
+                return Ok(false);
+            }
         }
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here
@@ -2495,20 +2666,90 @@ impl JazzClient {
         }
         // The first attempt either attaches or fails; the keeper retries
         // after a failure on its own.
-        self.shared
-            .until(|| {
-                let state = self.shared.state.borrow();
-                if state.upstream.is_some() {
-                    return Some(Ok(true));
+        self.unless_waits_end(self.shared.until(|| {
+            let state = self.shared.state.borrow();
+            if state.upstream.is_some() {
+                return Some(Ok(true));
+            }
+            match &state.connect_failed {
+                Some((attempt, error)) if *attempt > started => {
+                    Some(Err(JazzError::Connection(error.clone())))
                 }
-                match &state.connect_failed {
-                    Some((attempt, error)) if *attempt > started => {
-                        Some(Err(JazzError::Connection(error.clone())))
+                _ => None,
+            }
+        }))
+        .await?
+    }
+
+    /// Ends every wait on the server or network, of this client and all
+    /// its clones, from now on: each fails [`JazzError::ChannelClosed`]
+    /// unless what it waits for is already there. Local work goes on, for
+    /// a shutdown to finish it. Owned by `jazz-app-support`: not public
+    /// API.
+    #[doc(hidden)]
+    pub fn end_waits(&self) {
+        self.shared.waits_ended.send_replace(true);
+    }
+
+    /// This client with its waits on the server also ended once `ends`
+    /// reads true, as [`JazzClient::end_waits`] ends all: for a handle
+    /// that closes while the client lives on, or a call its caller
+    /// cancelled. Adds to the signals it has already. Not public API.
+    #[doc(hidden)]
+    pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
+        self.waits_end.push(ends);
+        self
+    }
+
+    /// Ready once this client's waits on the server are over, for a
+    /// caller's own network wait beside them. Not public API.
+    #[doc(hidden)]
+    pub async fn waits_ended(&self) {
+        let mut all = self.shared.waits_ended.subscribe();
+        let scoped = async {
+            // A signal whose sender went without ending anything never ends.
+            let ends = self.waits_end.iter().cloned().map(|mut ends| {
+                Box::pin(async move {
+                    if ends.wait_for(|ended| *ended).await.is_err() {
+                        std::future::pending::<()>().await;
                     }
-                    _ => None,
-                }
-            })
-            .await?
+                })
+            });
+            let ends: Vec<_> = ends.collect();
+            if ends.is_empty() {
+                std::future::pending::<()>().await;
+            }
+            futures::future::select_all(ends).await;
+        };
+        tokio::select! {
+            _ = all.wait_for(|ended| *ended) => {}
+            () = scoped => {}
+        }
+    }
+
+    /// Whether this client's waits on the server are over already. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn waits_are_over(&self) -> bool {
+        *self.shared.waits_ended.borrow() || self.waits_end.iter().any(|ends| *ends.borrow())
+    }
+
+    /// A wait on the server. The answer wins over the end of waiting: it
+    /// is polled first, so what is already there is still returned.
+    fn unless_waits_end<T>(
+        &self,
+        wait: impl std::future::Future<Output = Result<T>>,
+    ) -> impl std::future::Future<Output = Result<T>> {
+        // Keep the SQL future out of the caller's cancellation select, even
+        // before its first poll on a small client or session thread stack.
+        let wait = Box::pin(wait);
+        async move {
+            tokio::select! {
+                biased;
+                answer = wait => answer,
+                () = self.waits_ended() => Err(JazzError::ChannelClosed),
+            }
+        }
     }
 
     /// Keep the writes the server refuses, for
@@ -2534,7 +2775,7 @@ impl JazzClient {
             if rejection.writer != *node.as_bytes() {
                 continue;
             }
-            let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let _ = crate::db::block_on(self.shared.db.discard_rejected_transaction(rejection.seq));
             let (code, reason) =
                 super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
                     // Any other refusal is a plain `write_rejected`, as TS
@@ -3263,8 +3504,7 @@ impl<'a> Decoder<'a> {
             return Ok(projected);
         };
         Ok(
-            match db
-                .row_provenance(row.table(), row.row_uuid())
+            match jazz_db::options::block_on(db.row_provenance(row.table(), row.row_uuid()))
                 .map_err(|error| JazzError::Query(error.to_string()))?
             {
                 Some((created_at, created_by, updated_at, updated_by)) => {

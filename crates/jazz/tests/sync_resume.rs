@@ -6,6 +6,7 @@
 //! the result's row ids, so the client drops cached rows that left.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -1368,7 +1369,7 @@ fn relay_background_checkpoints_end_with_their_connection() {
     use std::task::{Context, Poll, Waker};
     let relay = open(2, alice());
     let tab = open(1, alice());
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (up, _down, _) = pipe();
     let mut upstream = block_on(relay.connect_upstream(up));
     let (up, down, _) = pipe();

@@ -68,6 +68,7 @@ mod backend;
 mod backend_client;
 mod branch;
 mod config;
+mod control;
 mod edit;
 #[cfg(feature = "unstable-endpoint")]
 pub mod endpoint;
@@ -81,6 +82,7 @@ mod lifecycle;
 mod query;
 mod read;
 mod relation;
+mod remembered;
 mod session;
 mod subscription;
 mod table;
@@ -95,6 +97,7 @@ pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason}
 pub use backend_client::{BackendClientKind, CLOSE_TIMEOUT};
 pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
+pub use control::{CallControl, Interruption};
 pub use edit::{Edits, TextColumn};
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
@@ -110,6 +113,8 @@ pub use jazz_session::{
 };
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
+#[doc(hidden)]
+pub use lifecycle::before_client_stops;
 pub use query::{
     Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, ValuePart, created_at,
     deleted_at, id, updated_at,
@@ -123,6 +128,8 @@ pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, Value
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
+#[doc(hidden)]
+pub use writes::note_committed;
 
 pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, TransactionId};

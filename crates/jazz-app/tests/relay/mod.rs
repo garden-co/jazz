@@ -4,7 +4,8 @@
 //! way `admitPrelude` does (`packages/jazz-tools/src/backend/create-jazz.ts`).
 //!
 //! It also links a device account to a user (`backend-link`, with its
-//! challenge). Its `authenticate` reads `Authorization: Bearer token-<user>`.
+//! challenge). Its `authenticate` reads `Authorization: Bearer token-<user>`,
+//! or a JWT ([`jwt`]) whose `sub` is `<user>`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,30 @@ struct Backend {
     /// Link challenges issued, with the user each is for.
     challenges: Arc<Mutex<std::collections::HashMap<String, String>>>,
     links: Arc<Mutex<Links>>,
+    events: Events,
+}
+
+/// What the relay saw, with the time since it started: for a test to show
+/// when it fails ([`Relay::event_log`]).
+#[derive(Clone)]
+struct Events(Arc<(std::time::Instant, Mutex<Vec<String>>)>);
+
+impl Events {
+    fn new() -> Self {
+        Self(Arc::new((
+            std::time::Instant::now(),
+            Mutex::new(Vec::new()),
+        )))
+    }
+
+    fn log(&self, what: impl std::fmt::Display) {
+        let at = self.0.0.elapsed();
+        self.0
+            .1
+            .lock()
+            .unwrap()
+            .push(format!("{:>9.3?} {what}", at));
+    }
 }
 
 /// How `backend-link` behaves, beyond the core's own answer.
@@ -45,6 +70,15 @@ pub struct Links {
     pub attempts: usize,
     /// Users whose next `backend-sign-in` fails (`503`), once each.
     pub fail_sign_in: std::collections::HashSet<String>,
+    /// Users `backend-sign-in` names no one for (`401`).
+    pub no_one: std::collections::HashSet<String>,
+    /// Users `backend-sign-in` signs in as another user's account.
+    pub sign_in_as: HashMap<String, String>,
+    /// `backend-sign-in` requests answered so far, by user.
+    pub sign_ins: Vec<String>,
+    /// Users `backend-sign-in` answers with this status (and no sign-in),
+    /// every time.
+    pub sign_in_status: HashMap<String, u16>,
 }
 
 pub struct Relay {
@@ -64,18 +98,34 @@ pub struct Relay {
     /// unreachable.
     unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
+    events: Events,
 }
 
 impl Relay {
+    /// What the relay saw, one line each with the time since it started
+    /// (connections accepted, socket preludes passed on or refused, sockets
+    /// admitted and ended, kicks), readable from any thread, at any time:
+    /// for a test to show when it fails.
+    #[allow(dead_code)]
+    pub fn event_log(&self) -> impl Fn() -> Vec<String> + Send + 'static {
+        let events = self.events.clone();
+        move || events.0.1.lock().unwrap().clone()
+    }
+
     /// Drops every open connection, as a backend restart would.
     pub fn kick(&self) {
-        for connection in self.connections.lock().unwrap().drain(..) {
+        // Counted under the same lock as the drain: what was kicked.
+        let mut connections = self.connections.lock().unwrap();
+        self.events
+            .log(format_args!("kick: {} connection(s)", connections.len()));
+        for connection in connections.drain(..) {
             connection.abort();
         }
     }
 
     /// Makes the backend unreachable (`true`: open connections drop, new
-    /// ones are closed at once) or reachable again.
+    /// ones are closed at once) or reachable again. Nothing a client sends
+    /// after this returns reaches the core while it is unreachable.
     pub fn set_unreachable(&self, unreachable: bool) {
         self.unreachable
             .store(unreachable, std::sync::atomic::Ordering::SeqCst);
@@ -115,7 +165,9 @@ pub async fn start(
         bundle: bundle.to_owned(),
         challenges: Arc::default(),
         links: Arc::default(),
+        events: Events::new(),
     };
+    let events = backend.events.clone();
     let links = backend.links.clone();
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
@@ -128,13 +180,22 @@ pub async fn start(
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            backend.events.log("accepted a connection");
+            // Checked and registered under `kick`'s lock: a connection is
+            // either there to be dropped, or sees the backend unreachable.
+            let mut open = open.lock().unwrap();
             if down.load(std::sync::atomic::Ordering::SeqCst) {
                 drop(stream);
                 continue;
             }
-            let connection =
-                tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
-            open.lock().unwrap().push(connection.abort_handle());
+            let connection = tokio::spawn(serve(
+                stream,
+                backend.clone(),
+                log.clone(),
+                refused.clone(),
+                down.clone(),
+            ));
+            open.push(connection.abort_handle());
         }
     });
     Relay {
@@ -145,6 +206,7 @@ pub async fn start(
         links,
         unreachable,
         task,
+        events,
     }
 }
 
@@ -180,9 +242,72 @@ async fn existing_account_of(backend: &Backend, user: &str) -> Result<Option<Str
 
 /// `authenticate`: the user a bearer names (`token-<user>[.<n>]`).
 fn authenticate(authorization: Option<&str>) -> Option<String> {
-    let token = authorization?.strip_prefix("Bearer token-")?;
+    let bearer = authorization?.strip_prefix("Bearer ")?;
+    if let Some(sub) = jwt_subject(bearer) {
+        return Some(sub);
+    }
+    let token = bearer.strip_prefix("token-")?;
     let user = token.split('.').next()?;
     (!user.is_empty()).then(|| user.to_owned())
+}
+
+const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn base64url(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, byte)| n | (u32::from(*byte) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(BASE64URL[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+fn unbase64url(text: &str) -> Option<Vec<u8>> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for c in text.bytes() {
+        let value = BASE64URL.iter().position(|b| *b == c)? as u32;
+        bits = (bits << 6) | value;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// An (unsigned) JWT from the app's identity provider for `user`, as the
+/// app hands its bearer over: `iss` is the provider, `sub` the user, and
+/// `n` makes another token for the same user.
+#[allow(dead_code)]
+pub fn jwt(user: &str, n: u32) -> String {
+    jwt_from("https://idp.test", user, n)
+}
+
+/// A JWT from `issuer`: this backend authenticates only its own provider's.
+#[allow(dead_code)]
+pub fn jwt_from(issuer: &str, user: &str, n: u32) -> String {
+    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
+    let claims = json!({ "iss": issuer, "sub": user, "n": n });
+    format!("{header}.{}.sig", base64url(claims.to_string().as_bytes()))
+}
+
+/// The `sub` of a JWT this provider issued.
+fn jwt_subject(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let (_, claims, _) = (parts.next()?, parts.next()?, parts.next()?);
+    let claims: Value = serde_json::from_slice(&unbase64url(claims)?).ok()?;
+    if claims["iss"] != "https://idp.test" {
+        return None;
+    }
+    claims["sub"].as_str().map(str::to_owned)
 }
 
 async fn serve(
@@ -190,6 +315,7 @@ async fn serve(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut head = vec![0; 8192];
     let n = loop {
@@ -204,7 +330,7 @@ async fn serve(
     };
     let text = String::from_utf8_lossy(&head[..n]).to_string();
     if text.to_ascii_lowercase().contains("upgrade: websocket") {
-        relay_socket(stream, backend, admitted, refusing).await;
+        relay_socket(stream, backend, admitted, refusing, unreachable).await;
     } else {
         http(stream, &text, backend).await;
     }
@@ -304,11 +430,35 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
-        let failing = user
-            .as_ref()
-            .is_some_and(|user| backend.links.lock().unwrap().fail_sign_in.remove(user));
+        let (failing, no_one, status, user) = {
+            let mut links = backend.links.lock().unwrap();
+            if let Some(user) = &user {
+                links.sign_ins.push(user.clone());
+            }
+            let status = user
+                .as_ref()
+                .and_then(|user| links.sign_in_status.get(user).copied());
+            let failing = user
+                .as_ref()
+                .is_some_and(|user| links.fail_sign_in.remove(user));
+            let no_one = user
+                .as_ref()
+                .is_some_and(|user| links.no_one.contains(user));
+            let user = user.map(|user| links.sign_in_as.get(&user).cloned().unwrap_or(user));
+            (failing, no_one, status, user)
+        };
+        let status_line = status.map(|status| match status {
+            400 => "400 Bad Request",
+            403 => "403 Forbidden",
+            404 => "404 Not Found",
+            429 => "429 Too Many Requests",
+            503 => "503 Service Unavailable",
+            _ => "500 Internal Server Error",
+        });
         match user {
+            Some(_) if status_line.is_some() => (status_line.unwrap(), "nope".to_owned()),
             None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(_) if no_one => ("401 Unauthorized", "signed_out".to_owned()),
             Some(_) if failing => (
                 "503 Service Unavailable",
                 "account_request_failed".to_owned(),
@@ -455,6 +605,7 @@ async fn relay_socket(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let authorization = Arc::new(Mutex::new(None::<String>));
     let seen = authorization.clone();
@@ -481,6 +632,15 @@ async fn relay_socket(
         .as_deref()
         .and_then(|header| header.strip_prefix("Bearer "))
         .and_then(|bearer| refusing.lock().unwrap().get(bearer).cloned());
+    backend.events.log(format_args!(
+        "socket prelude for {:?}: {}",
+        authorization.as_deref().unwrap_or("no authorization"),
+        if refusal.is_some() {
+            "refused"
+        } else {
+            "passed on"
+        }
+    ));
     if let Some(message) = refusal {
         use jazz_app_support::jazz::wire::{
             WireError, WireErrorCode, WireFrame, WireRetry, encode_frame,
@@ -494,9 +654,13 @@ async fn relay_socket(
         return;
     }
     let Some((prelude, who)) = admit(&backend, &prelude, authorization.as_deref()).await else {
+        backend.events.log("socket: not admitted");
         let _ = client.close(None).await;
         return;
     };
+    backend
+        .events
+        .log(format_args!("socket admitted for {who}"));
     admitted.lock().unwrap().push(who);
     let url = format!(
         "{}/apps/{}/ws",
@@ -504,6 +668,9 @@ async fn relay_socket(
         backend.app
     );
     let Ok((mut core, _)) = tokio_tungstenite::connect_async(url).await else {
+        backend
+            .events
+            .log("socket: the core refused the connection");
         return;
     };
     if core.send(Message::Binary(prelude.into())).await.is_err() {
@@ -513,6 +680,11 @@ async fn relay_socket(
     let (mut to_core, mut from_core) = core.split();
     let up = async {
         while let Some(Ok(message)) = from_client.next().await {
+            // An aborted task runs on until it next waits: it passes
+            // nothing on meanwhile.
+            if unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             if to_core.send(message).await.is_err() {
                 break;
             }
@@ -528,8 +700,8 @@ async fn relay_socket(
         let _ = to_client.close().await;
     };
     tokio::select! {
-        () = up => {}
-        () = down => {}
+        () = up => backend.events.log("socket ended by the client"),
+        () = down => backend.events.log("socket ended by the core"),
     }
 }
 

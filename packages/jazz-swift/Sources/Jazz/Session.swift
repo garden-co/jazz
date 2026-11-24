@@ -189,7 +189,7 @@ extension Client {
     /// The session's current state (`nil` for a backend or a local client).
     public func sessionState() async throws -> SessionState? {
         try await Self.typed {
-            guard let json = try await Self.run({ try self.handle.sessionState() }) else { return nil }
+            guard let json = try await self.controlled( { handle in try handle.sessionState() }) else { return nil }
             return try SessionState(json: json)
         }
     }
@@ -202,7 +202,7 @@ extension Client {
 
     public func syncStatus() async throws -> SyncStatus {
         try await Self.typed {
-            let json = try await Self.run { try self.handle.syncStatus() }
+            let json = try await self.controlled { handle in try handle.syncStatus() }
             return try Coding.decode(SyncStatus.self, json)
         }
     }
@@ -217,7 +217,7 @@ extension Client {
 
     /// Asks `Auth.bearer` for a fresh token now.
     public func refresh() async throws {
-        try await Self.typed { try await Self.run { try self.handle.refresh() } }
+        try await Self.typed { try await self.controlled { handle in try handle.refresh() } }
     }
 
     /// Signs out and closes the app. Not supported on a `JazzSession`'s
@@ -230,7 +230,7 @@ extension Client {
     /// token), returning the user it now acts as.
     public func link(bearer: String) async throws -> User {
         try await Self.typed {
-            let json = try await Self.run { try self.handle.link(bearer: bearer) }
+            let json = try await self.controlled { handle in try handle.link(bearer: bearer) }
             return try Coding.decode(User.self, json)
         }
     }
@@ -239,12 +239,12 @@ extension Client {
     /// on, and sync resumes with `reconnect`. Without a server it does
     /// nothing.
     public func disconnect() async throws {
-        try await Self.typed { try await Self.run { try self.handle.disconnect() } }
+        try await Self.typed { try await self.controlled { handle in try handle.disconnect() } }
     }
 
     /// Resumes sync after `disconnect` (TS's `reconnect`).
     public func reconnect() async throws {
-        try await Self.typed { try await Self.run { try self.handle.reconnect() } }
+        try await Self.typed { try await self.controlled { handle in try handle.reconnect() } }
     }
 
     /// Rolls back open transactions, closes the app and deletes its local
@@ -272,7 +272,12 @@ extension Client {
             // Set before starting: a state delivered during `start` may end
             // the stream, and the watch must still be cancelled then.
             let holder = WatchHolder()
-            continuation.onTermination = { _ in holder.cancel() }
+            // Cancelled off this thread: termination may run under the
+            // iterating task's status lock (its iteration was cancelled), and
+            // `cancel` waits for a state jazz-ffi is delivering, which needs
+            // that lock to reach this stream. Waiting here deadlocked both.
+            // A state delivered meanwhile is dropped: the stream is finished.
+            continuation.onTermination = { _ in DispatchQueue.global().async { holder.cancel() } }
             let listener = States { json in
                 // The app closed (`close`, `signOut`): the watch's last state.
                 if (try? Coding.decode(Closed.self, json))?.kind == "closed" {
@@ -301,7 +306,7 @@ extension Client {
     public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
-            let stored = try await Self.run { try self.handle.upsert(table: I.Row.table, id: id, rowJson: json) }
+            let stored = try await self.controlled { handle in try handle.upsert(table: I.Row.table, id: id, rowJson: json) }
             return try Coding.decode(I.Row.self, stored, userInfo)
         }
     }
@@ -310,7 +315,7 @@ extension Client {
     @discardableResult
     public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> R {
         try await Self.typed {
-            let stored = try await Self.run { try self.handle.restore(table: R.table, id: id, patchJson: nil) }
+            let stored = try await self.controlled { handle in try handle.restore(table: R.table, id: id, patchJson: nil) }
             return try Coding.decode(R.self, stored, userInfo)
         }
     }
@@ -319,7 +324,7 @@ extension Client {
     public func restore<I: Insert>(_ id: Jazz.ID, as row: I) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
-            let stored = try await Self.run { try self.handle.restore(table: I.Row.table, id: id, patchJson: json) }
+            let stored = try await self.controlled { handle in try handle.restore(table: I.Row.table, id: id, patchJson: json) }
             return try Coding.decode(I.Row.self, stored, userInfo)
         }
     }
