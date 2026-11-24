@@ -119,6 +119,8 @@ export type EncryptionReport =
    * reports are challenges, only a new challenge can replace the oldest.
    */
   | { type: "reports-dropped"; count: number }
+  /** A new listener could not replay existing reports and will receive live reports. */
+  | { type: "report-replay-failed"; code: string; message: string }
   | { type: string; [key: string]: unknown };
 
 /** The native calls the handle is built on. */
@@ -436,13 +438,12 @@ export class Encryption {
   }
 
   private deliver() {
-    // The listener snapshot drains the queue itself.
-    if (this.replaying) return;
-    if (this.waitingListeners.size > 0) {
+    if (!this.replaying && this.waitingListeners.size > 0) {
       this.replaying = true;
       void this.replayReports();
-      return;
     }
+    // With no established listeners, leave the queue for the snapshot.
+    if (this.listeners.size === 0) return;
     for (const report of this.pendingReports.splice(0)) this.emit(report);
     for (const text of this.native.takeEncryptionReports()) {
       this.emit(JSON.parse(text) as EncryptionReport);
@@ -454,20 +455,29 @@ export class Encryption {
       const snapshot = await this.call<{ active: EncryptionReport[]; queued: string[] }>(
         "reportsForListener",
         {},
-      ).catch(() => undefined);
-      if (!snapshot || this.closed) return;
+      ).catch((error: EncryptionError) => ({ error }));
+      if (this.closed) return;
 
       const waiting = [...this.waitingListeners];
-      const queued = snapshot.queued.map((text) => JSON.parse(text) as EncryptionReport);
-      const pending = this.pendingReports.splice(0);
-      for (const report of [...pending, ...queued]) this.emit(report);
+      let replay: EncryptionReport[];
+      if ("error" in snapshot) {
+        const { code, message } = snapshot.error;
+        replay = [{ type: "report-replay-failed", code, message }];
+      } else {
+        const queued = snapshot.queued.map((text) => JSON.parse(text) as EncryptionReport);
+        const pending = this.pendingReports.splice(0);
+        for (const report of [...pending, ...queued]) this.emit(report);
 
-      // The active set already accounts for queued unreadables and withdrawals.
-      const replay = [
-        ...snapshot.active,
-        ...pending,
-        ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
-      ];
+        // The native queue puts the overflow notice first.
+        const dropped = queued[0]?.type === "reports-dropped" ? queued.splice(0, 1) : [];
+        // The active set already accounts for queued unreadables and withdrawals.
+        replay = [
+          ...dropped,
+          ...snapshot.active,
+          ...pending,
+          ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+        ];
+      }
       for (const listener of waiting) {
         if (!this.waitingListeners.delete(listener)) continue;
         this.listeners.add(listener);
