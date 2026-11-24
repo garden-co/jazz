@@ -80,6 +80,15 @@ pub fn create(
         bindings::check_recorded_transition(&recorded, &app.compiled)?;
         return Ok(unchanged());
     }
+    // If history already holds the bindings' version, another migration
+    // stub would duplicate that schema. Report why the authored file failed.
+    if versions
+        .split_last()
+        .is_some_and(|(_, history)| history.contains(&recorded.current))
+        && let Err(error) = loaded
+    {
+        return Err(CodegenError::from_artifact(error));
+    }
     let from = &recorded.current_schema;
     // The current version as the file will load once the migration below
     // leads to it from the bindings' version: with Jazz's system tables

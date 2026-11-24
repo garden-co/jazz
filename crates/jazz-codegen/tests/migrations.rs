@@ -700,3 +700,58 @@ fn running_again_over_an_unresolved_stub_names_its_todos() {
     assert!(error.contains("TODO"), "{error}");
     assert!(!error.contains("already has a version"), "{error}");
 }
+
+/// Alice supplies a default in her migration, but its enum downgrade is
+/// invalid. Creating a migration reports the load error and leaves her files alone.
+#[test]
+fn an_invalid_authored_migration_keeps_the_app_file_and_bindings() {
+    let shipped = serde_json::json!({
+        "format": 1,
+        "tables": {
+            "notes": {
+                "columns": { "status": "bytes" },
+                "encryption": {
+                    "space": "id", "scope": "notes",
+                    "columns": {
+                        "status": { "type": { "enum": ["a", "b"] }, "sealedType": { "enum": ["a"] } }
+                    }
+                }
+            }
+        }
+    });
+    let lang = Lang::Rust;
+    let bindings = generate(lang, shipped.to_string().as_bytes()).unwrap();
+    let mut edited = shipped.clone();
+    edited["history"]["shipped"]["tables"] = shipped["tables"].clone();
+    edited["tables"]["notes"]["encryption"]["columns"]["status"]["type"]["enum"] =
+        serde_json::json!(["a"]);
+    edited["tables"]["notes"]["columns"]["rank"] = serde_json::json!("int");
+    edited["migrations"] = serde_json::json!([{
+        "from": "shipped", "migrate": { "notes": { "rank": { "add": "int", "default": 0 } } }
+    }]);
+    let edited = edited.to_string();
+    let load_error = App::load(edited.as_bytes()).unwrap_err().to_string();
+    assert!(
+        load_error.contains("notes.status: only appending enum variants"),
+        "{load_error}"
+    );
+
+    let dir = std::env::temp_dir().join(format!("jazz-invalid-migration-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let app_path = dir.join(artifact::APP_FILE);
+    let bindings_path = dir.join(lang.file());
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, &edited).unwrap();
+    std::fs::write(&bindings_path, &bindings).unwrap();
+    let result = jazz_codegen::project::migrations_create(&dir, &[lang.into()], "retry");
+    let app_after = std::fs::read_to_string(app_path).unwrap();
+    let bindings_after = std::fs::read_to_string(bindings_path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    assert_eq!(
+        result.expect_err("the authored migration is invalid"),
+        load_error
+    );
+    assert_eq!(app_after, edited);
+    assert_eq!(bindings_after, bindings);
+}
