@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { commands } from "vitest/browser";
 import { createJazzClient, openBrowserSessionCore } from "../../src/session/create-jazz-session.js";
 import { unreadableRows } from "../../src/encryption/unreadable.js";
 import { browserPrivateStore } from "../../src/encryption/browser-store.js";
@@ -36,7 +37,7 @@ afterEach(async () => {
 
 async function serverAt(
   name: string,
-  options?: { onDisk?: boolean; permissions?: typeof permissions },
+  options?: { onDisk?: boolean; permissions?: typeof permissions; user?: string },
 ) {
   const core = await getJazzServerInfo(uniqueDbName(name), options);
   const { appId, serverUrl: coreUrl, adminSecret } = core;
@@ -46,7 +47,9 @@ async function serverAt(
     { appId, serverUrl: coreUrl, adminSecret },
     { schema: app, permissions: served },
   );
-  const url = await jazzAppVisitor(backend);
+  const url = options?.user
+    ? await jazzAppUserUrl(backend, options.user)
+    : await jazzAppVisitor(backend);
   const pageFetch = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const target = input instanceof Request ? input.url : String(input);
@@ -703,3 +706,57 @@ it("with clearOnSignOut, a sign-out wipes the account's keys from the browser's 
     "The next load should wipe the signed-out user's keys",
   );
 }, 180_000);
+
+it("leaves the second tab able to use its keys when Alice signs out of the first tab", async () => {
+  const server = await serverAt("encryption-sign-out-two-tabs", { user: "alice" });
+  const first = await openBrowserSessionCore({
+    scope: server.appId,
+    serverUrl: server.url,
+    fetch: jazzAppFetch,
+    clearOnSignOut: true,
+    localFirst: "now",
+    client: async () => ({ createClient: createLocalFirstDb }),
+    encryption: { app },
+  } as never);
+  cleanups.push(() => first.close());
+  if (first.getSnapshot().status !== "ready") await first.reauthenticate();
+  const { account, client } = first.getSnapshot();
+  const db = client!.db;
+  expect(await db.encryption.ready({ timeoutMs: 40_000 })).toBe("active");
+
+  const projectId = crypto.randomUUID();
+  const member = await db.encryption.members.row({ table: "projects", id: projectId }, account!.id);
+  const project = await db.transaction((tx) => {
+    tx.insert(app.projects, { name: "shared project", ownerId: account!.id }, { id: projectId });
+    tx.insert(app.__e2ee_members, member);
+  });
+  await project.wait({ tier: "global" });
+  await db.insert(app.tasks, { projectId, title: "before sign-out" }).wait({ tier: "global" });
+
+  const id = server.appId;
+  cleanups.push(() => commands.encryptedSessionTab({ action: "close", id }));
+  await commands.encryptedSessionTab({
+    action: "open",
+    id,
+    appId: server.appId,
+    serverUrl: server.url,
+  });
+  await expect
+    .poll(() => commands.encryptedSessionTab({ action: "tasks", id, projectId }), {
+      timeout: 15_000,
+    })
+    .toEqual(["before sign-out"]);
+
+  await first.logout();
+  expect(first.getSnapshot().status).toBe("signed-out");
+  const scope = encryptionStoreScope(server.appId, "dev", account!.id);
+  expect(await browserPrivateStore().list(scope)).toContain("device");
+  expect(
+    await commands.encryptedSessionTab({
+      action: "tasks",
+      id,
+      projectId,
+      insertTitle: "after sign-out",
+    }),
+  ).toEqual(["after sign-out", "before sign-out"]);
+}, 120_000);
