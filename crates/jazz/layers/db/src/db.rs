@@ -682,6 +682,19 @@ impl Held {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static DERIVED_BINDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many cells this thread bound from a descriptor its own edit derived
+/// for the write in flight ([`Store::derived`]), trusted as built.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn derived_binds_for_test() -> usize {
+    DERIVED_BINDS.with(Cell::get)
+}
+
 /// Test-visible runtime counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
@@ -2545,6 +2558,15 @@ impl Db {
         write(&scoped).await.map(OriginWrite::Written)
     }
 
+    /// Whether the lease [`Db::write_operation`] takes is held (by someone:
+    /// a lease does not say whose).
+    fn holds_write_operation(&self) -> bool {
+        match &self.origin {
+            Some(origin) => origin.operation.try_lock().is_none(),
+            None => self.inner.operation.try_lock().is_none(),
+        }
+    }
+
     async fn write_operation(&self) -> futures::lock::MutexGuard<'_, ()> {
         if let Some(origin) = &self.origin {
             origin.operation.lock().await
@@ -4203,12 +4225,21 @@ impl Db {
 
     /// Seal a write and commit its internal companion rows before it, in
     /// the same transaction.
+    ///
+    /// The caller holds the write operation's lease ([`Db::write_operation`],
+    /// taken by [`Db::fetching_with`] for every caller), as
+    /// [`Db::prepare_write`]'s callers do: the schema it reads stays the one
+    /// the write is sealed and applied under.
     async fn write_sealed(
         &self,
         mut op: StagedOp,
         who: Who,
         streamed: Option<large_ops::StreamedSeal<'_>>,
     ) -> Result<WriteHandle, Error> {
+        debug_assert!(
+            self.holds_write_operation(),
+            "a sealed write runs under the write operation's lease"
+        );
         let schema = self.operation_schema();
         let mut companions = Vec::new();
         let written = self
@@ -8409,6 +8440,8 @@ impl Store {
                 .await?;
         } else if self.derived.borrow().contains(large) {
             // Derived here from a stored tree by an append or splice.
+            #[cfg(any(test, feature = "testing"))]
+            DERIVED_BINDS.with(|binds| binds.set(binds.get() + 1));
             complete = self.client().is_none();
         } else if let Some(possession) = &possession
             && !crate::large::possessed(&self.conn, &self.chunks, large, possession).await?

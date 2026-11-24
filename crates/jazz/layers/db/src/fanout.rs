@@ -2920,7 +2920,6 @@ impl Store {
         }
     }
 
-    /// A group's rows, with array relations nested in their cells.
     /// A group's rows, with array relations nested in their cells, and
     /// the rows the run left out because they could not be opened.
     async fn group_rows(

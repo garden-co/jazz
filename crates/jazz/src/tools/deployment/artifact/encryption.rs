@@ -890,21 +890,36 @@ fn scopes(entries: &Entries) -> BTreeMap<&str, bool> {
     scopes
 }
 
-/// Own entries have already been checked against their schema. Inherited
-/// entries can name a space that no longer exists under its original name.
-pub fn check_space_tables(schema: &Schema, entries: &Entries) -> Result<(), String> {
+/// Refuse a space table of `entries` that `schema` doesn't have. `inherited`
+/// says whose entries they are: a version without declarations follows the
+/// nearest earlier ones, which can name a space table it dropped or renamed;
+/// a version's own entries name its own tables, which its entry checks
+/// ([`check_entry`]) refuse first, so for them this is a backstop.
+pub fn check_space_tables(
+    schema: &Schema,
+    entries: &Entries,
+    inherited: bool,
+) -> Result<(), String> {
     for entry in entries.values() {
         let scope = entry.scope.as_str();
-        if !schema.contains_key(&TableName::from(scope)) {
+        if schema.contains_key(&TableName::from(scope)) {
+            continue;
+        }
+        if !inherited {
             return Err(format!(
-                "space table {scope} is not in this version (dropped or renamed). This version \
-                 declares no encryption entries, so it follows the nearest earlier declarations, \
-                 which use {scope}. Either keep {scope} under its original name or declare encryption in this version. \
-                 Even one entry with no encrypted columns makes this version follow its own declarations. \
-                 If this version has already been deployed to a server without declarations, they can't be added to it: \
-                 make the change in a new version."
+                "space table {scope} is not in this version: its encryption entries name \
+                 {scope} as a space table. Keep {scope}, or declare its entries with a space \
+                 table this version has."
             ));
         }
+        return Err(format!(
+            "space table {scope} is not in this version (dropped or renamed). This version \
+             declares no encryption entries, so it follows the nearest earlier declarations, \
+             which use {scope}. Either keep {scope} under its original name or declare encryption in this version. \
+             Even one entry with no encrypted columns makes this version follow its own declarations. \
+             If this version has already been deployed to a server without declarations, they can't be added to it: \
+             make the change in a new version."
+        ));
     }
     Ok(())
 }

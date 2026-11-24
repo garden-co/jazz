@@ -1487,6 +1487,66 @@ fn a_sealed_partial_update_keeps_the_nodes_its_edit_built() {
     assert_eq!(all(&alice, "projects").len(), 1, "the companion committed");
 }
 
+/// Contract: when sealing a partial large-value update stages a companion
+/// row, the descriptor its edit derived from the stored tree stays the
+/// write's: the row's cell is bound from it as built, not re-checked as a
+/// descriptor from elsewhere. Alice patches encrypted `body` and appends a
+/// little to her chunked `title` (a tail entry, no new tree) while the
+/// hooks stage a companion project.
+///
+/// White-box: on Alice's store both paths store the same cell (her own
+/// tree admits the derived tail), so only the store's count of cells it
+/// bound from a derived descriptor tells them apart.
+///
+/// ```text
+/// alice ──edit (derived tail) + sealed patch──► companion, then the row (bound as derived)
+/// ```
+#[test]
+fn a_sealed_partial_update_binds_the_descriptor_its_edit_derived() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let title: String = (0..256 * 1024)
+        .map(|i| char::from(b'a' + (i * 7 % 26) as u8))
+        .collect();
+    let mut cells = note(space, "first");
+    cells.insert("title".to_owned(), text(&title));
+    let row = block_on(alice.insert("notes", cells, Default::default()))
+        .unwrap()
+        .row_uuid();
+    *hooks.companion_project.borrow_mut() =
+        Some((RowUuid(uuid::Uuid::new_v4()), "companion".to_owned()));
+    let end = title.len() as u64;
+
+    let before = jazz::derived_binds_for_test();
+    block_on(alice.update_with_large_value_mutations(
+        "notes",
+        row,
+        BTreeMap::from([("body".to_owned(), text("second"))]),
+        vec![jazz::db::LargeValueUpdate::Splice {
+            column: "title".to_owned(),
+            within: jazz::db::LargeValueUpdatePage::TextUtf8 { from: end, to: end },
+            splices: vec![jazz::db::LargeValueUpdateSplice {
+                at: 0,
+                delete: 0,
+                insert: b"-appended".to_vec(),
+            }],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+
+    assert_eq!(jazz::derived_binds_for_test() - before, 1);
+    let rows = all(&alice, "notes");
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(text(&format!("{title}-appended")))
+    );
+    assert_eq!(rows[0].cell("body"), Some(text("second")));
+    assert_eq!(all(&alice, "projects").len(), 1, "the companion committed");
+}
+
 /// Contract: a sealed value the hooks give only a row an upsert creates
 /// (the sealed default of a column it leaves out) travels as a chunked
 /// reference when it is above the inline threshold, as a written value

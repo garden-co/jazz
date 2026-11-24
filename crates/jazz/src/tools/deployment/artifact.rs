@@ -457,11 +457,13 @@ pub(super) fn add_system_policies(
     declarations: &DeclaredEncryption,
     version: SchemaHash,
 ) -> Result<Vec<String>, SystemPolicyError> {
-    encryption::check_space_tables(schema, entries).map_err(SystemPolicyError::Space)?;
+    let own = declarations.entries(&version.to_string());
+    encryption::check_space_tables(schema, entries, own.is_none())
+        .map_err(SystemPolicyError::Space)?;
     encryption::check_space_read_rules(permissions, entries)
         .map_err(SystemPolicyError::Permissions)?;
     // A policy may read a column that is plaintext in this version.
-    if let Some(own) = declarations.entries(&version.to_string()) {
+    if let Some(own) = own {
         encryption::check_encrypted_reads(permissions, own)
             .map_err(SystemPolicyError::Permissions)?;
     }
