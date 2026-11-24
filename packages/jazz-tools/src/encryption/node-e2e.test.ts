@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { NapiDb } from "jazz-napi";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { startTestJazz, testApp } from "../testing/index.js";
@@ -936,6 +937,39 @@ describe("encryption on Node, end to end", () => {
     const stored = await storedBytes(host.storePath);
     expect(stored.includes(Buffer.from("BACKEND-PLAINTEXT"))).toBe(false);
     expect(stored.includes(Buffer.from("ALICE-ONLY-PLAINTEXT"))).toBe(false);
+  }, 90_000);
+
+  it("keeps encrypted rows across close and detaches old views at sign-out", async () => {
+    const host = await serve();
+    const dataPath = `${await mkdtemp(`${tmpdir()}/e2ee-sign-out-`)}/device`;
+    const stores = { dataPath, accounts: memoryStore(), privateStore: memoryPrivateStore() };
+    const alice = await device(host, stores);
+    const projectId = await makeProject(alice, "plans");
+    const tasks = app.tasks.where({ projectId });
+    await alice.db.insert(app.tasks, { projectId, title: "kept" }).wait({ tier: "global" });
+    const id = await alice.db.encryption.deviceId();
+    await alice.session.close();
+
+    const { session, db } = await device(host, stores);
+    expect(await db.encryption.deviceId()).toBe(id);
+    expect(await db.all(tasks, { tier: "local-first" })).toMatchObject([{ title: "kept" }]);
+    const key = session.exportDeviceKey();
+    const runtime = db.currentRuntime() as NativeRuntimeAdapter;
+    const native = db.encryption["native"];
+    if (!(native instanceof NapiDb)) throw new Error("expected the Node binding");
+    const view = native.registerSchema(runtime["schemaBytes"]);
+    try {
+      expect(await view.encryptionCall("deviceId", {})).toBe(JSON.stringify(id));
+      await session.signOut();
+      expect(() => view.encryptionState()).toThrow(/no encryption runtime/);
+      await session.restoreDeviceAccount(key);
+      expect(await session.db.encryption.deviceId()).toBe(id);
+      expect(await session.db.all(tasks, { tier: "local-first" })).toMatchObject([
+        { title: "kept" },
+      ]);
+    } finally {
+      await view.close();
+    }
   }, 90_000);
 
   it("an encrypted app without a private store fails, naming the option", async () => {
