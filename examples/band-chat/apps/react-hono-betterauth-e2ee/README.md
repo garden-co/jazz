@@ -91,7 +91,7 @@ authenticator, which needs a host name (`localhost`), not an IP address.
    browser", and "Set up recovery" (a passkey, or a phrase shown once). A
    browser waiting for approval can restore with the phrase or the passkey.
 10. **Its own first schema version and its own store.** No migration from the
-    plain app: encrypting a column of existing data is a conversion.
+    plain app: existing data must be copied into a new table to encrypt it.
 11. **The server** is `server/index.ts` and `server/jazz.ts`, plus one route,
     `POST /api/end-other-sign-ins`, used before a lost device is removed.
 

@@ -34,14 +34,14 @@ export const schema = s.defineSchema({
     },
   ),
   // #endregion bandchat-schema-rooms
-  // A member's profile, so co-members see their name and avatar. Who may read
-  // a room is Jazz's members table (`isMember` in permissions.ts), not this.
+  // Names and avatars for room members. Jazz's members table decides who may
+  // read a room.
   roomMembers: s.table(
     {
       roomId: s.uuid(),
       memberAuthor: s.uuid(),
-      // The admitted member's profile, so co-members can see their name and
-      // avatar. Permissions require it to belong to `memberAuthor`.
+      // The admitted member's profile. Permissions require it to belong to
+      // `memberAuthor`.
       memberProfileId: s.uuid().optional(),
     },
     { room: s.rel("rooms", "roomId"), memberProfile: s.rel("profiles", "memberProfileId") },
