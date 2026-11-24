@@ -405,7 +405,7 @@ describe("the schema printer", () => {
     const out = printSchemaTs(
       {
         ...app({ rooms: { ...rooms, encryption } as AppJson["tables"][string] }),
-        encryption: { allowAccountReset: true },
+        encryption: { mechanisms: {} },
       } as AppJson,
       { format: 1, tables: { rooms: {} } },
     );
@@ -427,9 +427,9 @@ describe("the schema printer", () => {
           "Unknown encrypted column field from. Expected a type declaration, sealedType or default.",
       },
       {
-        path: "encryption",
-        text: '{"allowAccountReset":true}',
-        reason: "Printing app-wide encryption settings is not supported yet",
+        path: "encryption.mechanisms",
+        text: "{}",
+        reason: "Printing this app-wide encryption setting is not supported yet",
       },
     ]);
   });

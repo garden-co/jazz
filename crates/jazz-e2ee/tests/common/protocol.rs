@@ -2,6 +2,7 @@
 //! row by row at increasing positions, for protocol tests.
 
 use jazz_e2ee::agility::MechanismConfig;
+use jazz_e2ee::envelope::Mechanism;
 use jazz_e2ee::protocol::account::build::{
     self, AccountWriter, ApprovalRecords, LocalDevice, ResetPolicy, RootAuthority, RotationRecords,
     RotationTarget,
@@ -13,8 +14,8 @@ use jazz_e2ee::protocol::account::{
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::{AccountDomain, AppDomain};
-use jazz_e2ee::protocol::records::account::RecoveryRoot;
-use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult};
+use jazz_e2ee::protocol::records::account::{AccountSealingKey, RecoveryRoot};
+use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, ids, signing};
 use jazz_e2ee::registry::Registry;
 
 use super::TestRandom;
@@ -89,6 +90,34 @@ impl Env {
         )
         .unwrap()
     }
+}
+
+/// Builds a signed sealing-key fixture for the supplied public key and mechanism.
+pub fn sealing_key_record(
+    env: &Env,
+    signer: &LocalDevice,
+    epoch_id: &str,
+    mechanism: Mechanism<'_>,
+    public_key: Vec<u8>,
+    rng: &mut TestRandom,
+) -> AccountSealingKey {
+    let mut record = AccountSealingKey {
+        id: ids::random_v4(rng).unwrap(),
+        account_id: env.account.clone(),
+        epoch_id: epoch_id.to_owned(),
+        signer_id: signer.id.clone(),
+        mechanism: mechanism.id.to_owned(),
+        version: mechanism.version,
+        public_key,
+        signature: Vec::new(),
+    };
+    let bytes = record.signed_bytes(&env.application()).unwrap();
+    let signer_impl = env
+        .registry
+        .signer(signer.signing.public.mechanism.as_mechanism())
+        .unwrap();
+    record.signature = signing::sign(signer_impl, &signer.signing, &bytes).unwrap();
+    record
 }
 
 /// One account's public and private rows, with the next position to accept

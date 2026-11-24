@@ -58,13 +58,6 @@ pub struct SpaceRoots {
     pub lost: Vec<LostRoot>,
 }
 
-impl SpaceRoots {
-    /// Whether the root with this ID is a lost creation.
-    pub fn is_lost(&self, root_id: &str) -> bool {
-        self.lost.iter().any(|root| root.root_id == root_id)
-    }
-}
-
 fn lost(root: &Accepted<SpaceRoot>, invalid: Option<InvalidSpaceRoot>) -> LostRoot {
     LostRoot {
         root_id: root.row.id.clone(),

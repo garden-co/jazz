@@ -455,9 +455,7 @@ fn successor(
 /// first valid sealing key record of its current epoch (§2.12). A record of
 /// another mechanism than the selected one is "recipient unsupported".
 /// `recipient` comes only from
-/// [`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient)
-/// (or, for the writer's own account,
-/// [`AccountDirectory::own_recipient`](super::ledger::AccountDirectory::own_recipient)),
+/// [`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient),
 /// and its record must name the recipient's account and epoch. A recipient
 /// of another read than `chain`'s, or a version that is not `chain`'s, is
 /// [`ProtocolError::InconsistentEvidence`]. Whether the recipient is a

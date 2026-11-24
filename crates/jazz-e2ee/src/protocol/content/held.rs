@@ -477,12 +477,6 @@ impl HeldKeys {
         self.spaces.iter().find(|space| space.root.id == root_id)
     }
 
-    pub fn space_mut(&mut self, root_id: &str) -> Option<&mut HeldSpace> {
-        self.spaces
-            .iter_mut()
-            .find(|space| space.root.id == root_id)
-    }
-
     /// The roots held for `address`, in root ID order.
     pub fn roots_of<'s>(&'s self, address: &SpaceAddress) -> Vec<&'s HeldSpace> {
         let mut roots: Vec<_> = self

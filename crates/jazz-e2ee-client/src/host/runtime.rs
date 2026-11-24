@@ -662,6 +662,11 @@ impl Encryption {
                 self.status.set(Some(status));
                 json!(status_name(status))
             }
+            "resetAccount" => {
+                let status = client.reset_account(db).await.map_err(describe)?;
+                self.status.set(Some(status));
+                json!(status_name(status))
+            }
             "devices" => json!(
                 client
                     .devices(db)
