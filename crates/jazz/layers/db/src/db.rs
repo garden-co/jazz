@@ -2584,6 +2584,16 @@ impl Db {
         write(&scoped).await.map(OriginWrite::Written)
     }
 
+    /// Whether the lease [`Db::write_operation`] takes is held (by someone:
+    /// a lease does not say whose).
+    #[cfg(feature = "e2ee-client")]
+    fn holds_write_operation(&self) -> bool {
+        match &self.origin {
+            Some(origin) => origin.operation.try_lock().is_none(),
+            None => self.inner.operation.try_lock().is_none(),
+        }
+    }
+
     async fn write_operation(&self) -> futures::lock::MutexGuard<'_, ()> {
         if let Some(origin) = &self.origin {
             origin.operation.lock().await
@@ -4229,6 +4239,11 @@ impl Db {
     /// One write sealed by the encryption hooks first ([`Db::write_prepared`]
     /// otherwise): the internal rows the hooks stage with it commit, and
     /// upload, before it, in the same transaction.
+    ///
+    /// The caller holds the write operation's lease ([`Db::write_operation`],
+    /// taken by [`Db::fetching_with`] for every caller), as
+    /// [`Db::prepare_write`]'s callers do: the schema it reads stays the one
+    /// the write is sealed and applied under.
     #[cfg(feature = "e2ee-client")]
     async fn write_sealed(
         &self,
@@ -4236,6 +4251,10 @@ impl Db {
         who: Who,
         streamed: Option<large_ops::StreamedSeal<'_>>,
     ) -> Result<WriteHandle, Error> {
+        debug_assert!(
+            self.holds_write_operation(),
+            "a sealed write runs under the write operation's lease"
+        );
         self.inner.without_overlay().require_mutation_admission()?;
         if let Some(row) = op.row() {
             self.inner.refuse_held(&[*row.0.as_bytes()])?;
