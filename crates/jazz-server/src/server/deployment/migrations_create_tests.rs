@@ -10,57 +10,26 @@
 //!     ▼ POST /bundles                                     ▼ POST /bundles
 //!   server keeps v1's declarations ──────────► v2 checked against them
 //! ```
-use super::super::{ServerBuilder, StorageBackend, routes::create_router};
-use crate::middleware::AuthConfig;
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{Request, StatusCode},
-};
+use axum::{Router, http::StatusCode};
 use jazz::tools::AppId;
 use jazz::tools::deployment::artifact;
 use jazz_codegen::Lang;
 use jazz_codegen::project::{self, Selected};
 use serde_json::Value;
-use tower::ServiceExt;
+
+#[path = "test_support.rs"]
+mod test_support;
 
 fn app_id() -> AppId {
     AppId::from_name("migrations-create-deployment-tests")
 }
 
 async fn router() -> Router {
-    let server = ServerBuilder::new(app_id())
-        .with_auth_config(AuthConfig {
-            admin_secret: Some("test-admin".into()),
-            ..Default::default()
-        })
-        .with_storage(StorageBackend::InMemory)
-        .build()
-        .await
-        .unwrap();
-    create_router(server.state.clone())
+    test_support::router(app_id()).await
 }
 
 async fn publish(router: &Router, body: Value) -> (StatusCode, Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/apps/{}/admin/bundles", app_id()))
-                .header("X-Jazz-Admin-Secret", "test-admin")
-                .header("Content-Type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    test_support::publish(app_id(), router, body).await
 }
 
 /// Two encrypted tables (each project is its own space, its tasks live in
