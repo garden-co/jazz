@@ -18,7 +18,6 @@
 //! - [`local`]: the device document, with its approval nonce state, and
 //!   the signed floor records of the private store (§6.1, §6.3a).
 
-mod canonical;
 pub mod cells;
 pub mod equality;
 pub mod held;
@@ -32,10 +31,7 @@ use super::domain::SharedDomain;
 use super::error::ProtocolError;
 use super::records::space::SpaceAddress;
 
-pub use cells::{
-    CellInput, EqualityValueBuf, Opened, SealedCell, SealedCells, begin_stream, open_cell,
-    seal_cells,
-};
+pub use cells::{CellInput, Opened, SealedCell, SealedCells, begin_stream, open_cell, seal_cells};
 pub use equality::{QueryPlan, QueryTokens, TableTarget, UnsupportedQuery, plan_equality};
 pub use held::{
     CreationFate, HeldKeys, HeldSpace, KeyMark, KnownChain, MissingKey, WriteChoice, WriteKey,
@@ -179,13 +175,11 @@ impl<'a> RowTarget<'a> {
     }
 
     fn equality<'c>(&'c self, column_id: &'c str, epoch_id: &'c str) -> EqualityIdentity<'c> {
-        EqualityIdentity {
-            application: self.domain.as_str(),
-            scope_id: &self.space.scope_id,
-            identifier: &self.space.identifier,
+        TableTarget {
+            domain: self.domain,
+            space: self.space,
             table_id: self.table_id,
-            column_id,
-            epoch_id,
         }
+        .equality(column_id, epoch_id)
     }
 }

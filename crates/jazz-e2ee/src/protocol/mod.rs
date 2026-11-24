@@ -30,6 +30,7 @@
 //! - [`error`]: the protocol's failures and their codes (§7).
 
 pub mod account;
+mod canonical;
 pub mod content;
 pub mod derive;
 pub mod device_account;

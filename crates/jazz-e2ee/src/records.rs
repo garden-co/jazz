@@ -11,7 +11,7 @@
 //! takes the canonical cell-type bytes (`{"column_type":…,"nullable":…}`) and
 //! the encoded value bytes as given.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::agility::{CellCipher, EqualityTagger, StreamCipher, StreamWriter};
 use crate::context::{CryptoContext, frame_record};
@@ -28,7 +28,7 @@ const STREAM_POLICY: &str = "jazz.e2ee.stream-record.v1";
 const EQUALITY_POLICY: &str = "jazz.e2ee.equality.v1";
 const EPOCH_BYTES: usize = 36;
 /// The epoch ID plus the shortest possible envelope.
-const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
+pub(crate) const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
 
 /// Stable catalogue identities of one encrypted cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +404,7 @@ impl EqualityColumn {
     /// `V` for `value`, which must be null or of the column's type (an
     /// integer column's values fit 32 bits) and fit the encoding's bounds.
     /// Other values return [`Error::InvalidInput`].
-    pub fn encode(&self, value: &EqualityValue<'_>) -> Result<Vec<u8>> {
+    pub fn encode(&self, value: &EqualityValue) -> Result<Vec<u8>> {
         if self.fits(self.depth, value) {
             equality_value(value)
         } else {
@@ -414,7 +414,7 @@ impl EqualityColumn {
 
     /// Whether `value` is null or a value of this column's type, `depth`
     /// arrays down (every element of an array fits one level further down).
-    fn fits(&self, depth: u8, value: &EqualityValue<'_>) -> bool {
+    fn fits(&self, depth: u8, value: &EqualityValue) -> bool {
         match (depth, value) {
             (_, EqualityValue::Null) => true,
             (0, _) => match (self.column_type, value) {
@@ -432,7 +432,7 @@ impl EqualityColumn {
                 (EqualityColumnType::Json, EqualityValue::Json(_)) => true,
                 _ => false,
             },
-            (_, EqualityValue::Array(items)) => items.all(|item| self.fits(depth - 1, item)),
+            (_, EqualityValue::Array(items)) => items.iter().all(|item| self.fits(depth - 1, item)),
             _ => false,
         }
     }
@@ -441,9 +441,9 @@ impl EqualityColumn {
 /// A logical value as an equality index encodes it (`E2EE_EQUALITY_FORMAT.md`,
 /// "Value encoding"). The column's type is bound by the context, so values
 /// of different types are never compared. Its `Debug` output names the
-/// variant only, never the value.
-#[derive(Clone, Copy, PartialEq)]
-pub enum EqualityValue<'a> {
+/// variant only. The value is cleared on drop.
+#[derive(Clone, PartialEq)]
+pub enum EqualityValue {
     Null,
     Bool(bool),
     /// 32- and 64-bit integers.
@@ -451,71 +451,38 @@ pub enum EqualityValue<'a> {
     Timestamp(u64),
     Float(f64),
     /// Compared by exact UTF-8 bytes, with no Unicode normalisation.
-    Text(&'a str),
-    Bytes(&'a [u8]),
+    Text(String),
+    Bytes(Vec<u8>),
     Uuid([u8; 16]),
     /// An enum value, by its variant name; compared by exact UTF-8 bytes.
-    Enum(&'a str),
+    Enum(String),
     /// A JSON value as Jazz stores it, the text as written: compared by
     /// exact UTF-8 bytes, with no canonicalisation (Jazz itself treats
     /// differently written JSON as different).
-    Json(&'a str),
+    Json(String),
     /// An array: its elements, in order, each an equality value of the
     /// element type (null elements included).
-    Array(EqualityItems<'a>),
+    Array(Vec<EqualityValue>),
 }
 
-/// The elements of an [`EqualityValue::Array`], borrowed either as
-/// equality values or as the owned values of [`EqualityValueBuf`]. Its
-/// `Debug` output names no element.
-#[derive(Clone, Copy)]
-pub enum EqualityItems<'a> {
-    Values(&'a [EqualityValue<'a>]),
-    Bufs(&'a [crate::protocol::content::EqualityValueBuf]),
-}
-
-impl EqualityItems<'_> {
-    /// The number of elements.
-    pub fn len(&self) -> usize {
+impl Drop for EqualityValue {
+    fn drop(&mut self) {
         match self {
-            Self::Values(items) => items.len(),
-            Self::Bufs(items) => items.len(),
+            Self::Null => {}
+            Self::Bool(value) => value.zeroize(),
+            Self::Int(value) => value.zeroize(),
+            Self::Timestamp(value) => value.zeroize(),
+            Self::Float(value) => value.zeroize(),
+            Self::Text(value) | Self::Enum(value) | Self::Json(value) => value.zeroize(),
+            // Each element clears itself as it drops.
+            Self::Array(_) => {}
+            Self::Bytes(value) => value.zeroize(),
+            Self::Uuid(value) => value.zeroize(),
         }
     }
-
-    /// Whether there is no element.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Whether `test` holds for every element, in order.
-    pub fn all(&self, mut test: impl FnMut(&EqualityValue<'_>) -> bool) -> bool {
-        self.iter().all(|item| test(&item))
-    }
-
-    fn iter(&self) -> impl Iterator<Item = EqualityValue<'_>> {
-        (0..self.len()).map(move |index| match self {
-            Self::Values(items) => items[index],
-            Self::Bufs(items) => items[index].as_value(),
-        })
-    }
 }
 
-impl PartialEq for EqualityItems<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len()
-            && self
-                .iter()
-                .zip(other.iter())
-                .all(|(left, right)| match (&left, &right) {
-                    (EqualityValue::Array(left), EqualityValue::Array(right)) => left == right,
-                    _ => equality_value(&left)
-                        .is_ok_and(|left| equality_value(&right).is_ok_and(|right| left == right)),
-                })
-    }
-}
-
-impl core::fmt::Debug for EqualityValue<'_> {
+impl core::fmt::Debug for EqualityValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Null => "Null",
@@ -548,17 +515,17 @@ const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 /// big-endian) followed by each element as its own `V` framed by its length
 /// (four bytes, big-endian), in order. An array count or element length
 /// outside the corresponding 32-bit bound returns [`Error::InvalidInput`].
-pub fn equality_value(value: &EqualityValue<'_>) -> Result<Vec<u8>> {
+pub fn equality_value(value: &EqualityValue) -> Result<Vec<u8>> {
     let mut out = vec![1u8];
-    match *value {
+    match value {
         EqualityValue::Null => return Ok(vec![0]),
-        EqualityValue::Bool(value) => out.push(u8::from(value)),
+        EqualityValue::Bool(value) => out.push(u8::from(*value)),
         EqualityValue::Int(value) => out.extend_from_slice(&value.to_be_bytes()),
         EqualityValue::Timestamp(value) => out.extend_from_slice(&value.to_be_bytes()),
         EqualityValue::Float(value) => {
             let bits = if value.is_nan() {
                 CANONICAL_NAN
-            } else if value == 0.0 {
+            } else if *value == 0.0 {
                 0
             } else {
                 value.to_bits()
@@ -567,14 +534,14 @@ pub fn equality_value(value: &EqualityValue<'_>) -> Result<Vec<u8>> {
         }
         EqualityValue::Text(value) => out.extend_from_slice(value.as_bytes()),
         EqualityValue::Bytes(value) => out.extend_from_slice(value),
-        EqualityValue::Uuid(value) => out.extend_from_slice(&value),
+        EqualityValue::Uuid(value) => out.extend_from_slice(value),
         EqualityValue::Enum(variant) => out.extend_from_slice(variant.as_bytes()),
         EqualityValue::Json(text) => out.extend_from_slice(text.as_bytes()),
         EqualityValue::Array(items) => {
             let count = u32::try_from(items.len()).map_err(|_| Error::InvalidInput)?;
             out.extend_from_slice(&count.to_be_bytes());
-            for item in items.iter() {
-                let element = equality_value(&item)?;
+            for item in items {
+                let element = equality_value(item)?;
                 let len = u32::try_from(element.len()).map_err(|_| Error::InvalidInput)?;
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(&element);
@@ -594,7 +561,7 @@ pub fn equality_token_of(
     identity: &EqualityIdentity<'_>,
     cell_type: &[u8],
     column: &EqualityColumn,
-    value: &EqualityValue<'_>,
+    value: &EqualityValue,
 ) -> Result<Vec<u8>> {
     equality_token(tagger, key, identity, cell_type, &column.encode(value)?)
 }
