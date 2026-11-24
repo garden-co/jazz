@@ -9,7 +9,7 @@ use super::{
     Cells, Db, InsertOptions, LargeEdits, Located, StagedOp, Store, StreamingMutationKind,
     StreamingValueUpload, Target, WriteTarget, column_from_sql, quote, rejected, storage,
 };
-use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
+use crate::e2ee::{E2eeHooks, SealError, StreamTarget, WriteCells, WriteKind};
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
@@ -159,8 +159,7 @@ impl Drop for StagedCompanions {
 
 fn seal_error(error: SealError) -> Error {
     match error {
-        SealError::NeedsKey { space } => E2eeRefusal::NeedsKey { space }.error(),
-        SealError::SpacePending { space } => E2eeRefusal::SpacePending { space }.error(),
+        SealError::Pending(refusal) => refusal.error(),
         SealError::Refused(error) => error,
     }
 }

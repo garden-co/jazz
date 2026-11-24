@@ -23,7 +23,7 @@ pub trait E2eeHooks {
     fn seal_stream(&self, t: &StreamTarget<'_>)
         -> Result<Box<dyn StreamSealer>, SealError>;                     // H5
 }
-pub enum SealError { NeedsKey { space: SpaceAddress }, SpacePending { space: SpaceAddress }, Refused(Error) }
+pub enum SealError { Pending(E2eeRefusal), Refused(Error) }
 pub struct OpenOutcome { pub unreadable: Vec<Unreadable>, pub missing_epochs: Vec<(SpaceAddress, EpochId)> }
 ```
 

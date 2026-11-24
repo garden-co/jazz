@@ -134,22 +134,20 @@ fn encrypted(column_type: ColumnType, nullable: bool) -> EncryptedColumn {
 
 /// A streamed value: `st`, its space, the bytes XORed, then `END`.
 struct FakeSealer {
-    space: uuid::Uuid,
+    prefix: Vec<u8>,
 }
 
 impl StreamSealer for FakeSealer {
-    fn header(&mut self) -> Result<Vec<u8>, jazz::db::Error> {
-        let mut out = b"st".to_vec();
-        out.extend_from_slice(self.space.as_bytes());
+    fn push(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, jazz::db::Error> {
+        let mut out = std::mem::take(&mut self.prefix);
+        out.extend(plaintext.iter().map(|byte| byte ^ KEY));
         Ok(out)
     }
 
-    fn push(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, jazz::db::Error> {
-        Ok(plaintext.iter().map(|byte| byte ^ KEY).collect())
-    }
-
     fn finish(self: Box<Self>) -> Result<Vec<u8>, jazz::db::Error> {
-        Ok(b"END".to_vec())
+        let mut out = self.prefix;
+        out.extend_from_slice(b"END");
+        Ok(out)
     }
 }
 
@@ -337,9 +335,9 @@ impl E2eeHooks for Fake {
             .or(stored)
             .expect("an encrypted write names its space");
         if !self.held.borrow().contains(&space) {
-            return Err(SealError::NeedsKey {
+            return Err(SealError::Pending(E2eeRefusal::NeedsKey {
                 space: address(space),
-            });
+            }));
         }
         if let Some((id, name)) = self.companion_project.take() {
             write.companion_rows.push((
@@ -564,11 +562,13 @@ impl E2eeHooks for Fake {
             )));
         };
         if !self.held.borrow().contains(&space) {
-            return Err(SealError::NeedsKey {
+            return Err(SealError::Pending(E2eeRefusal::NeedsKey {
                 space: address(space),
-            });
+            }));
         }
-        Ok(Box::new(FakeSealer { space }))
+        let mut prefix = b"st".to_vec();
+        prefix.extend_from_slice(space.as_bytes());
+        Ok(Box::new(FakeSealer { prefix }))
     }
 }
 

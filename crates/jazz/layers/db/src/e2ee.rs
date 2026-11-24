@@ -161,13 +161,8 @@ pub struct WriteCells<'a> {
 /// Why [`E2eeHooks::seal_write`] or [`E2eeHooks::seal_stream`] did not seal.
 #[derive(Clone, Debug)]
 pub enum SealError {
-    /// No usable key for the space is held (or its root must first be
-    /// prepared, or it must first be rotated): the caller acquires it and
-    /// repeats the call.
-    NeedsKey { space: SpaceAddress },
-    /// This device may not create the space, which has no valid root
-    /// (protocol §3.2): the write fails `space-pending`.
-    SpacePending { space: SpaceAddress },
+    /// The write is waiting for a key or a valid space root.
+    Pending(E2eeRefusal),
     /// Any other refusal.
     Refused(Error),
 }
@@ -435,15 +430,12 @@ pub struct StreamTarget<'a> {
     pub space: Option<&'a Value>,
 }
 
-/// Seals one streamed value. Its output goes, in order, to the unchanged
-/// large-value chunker: [`StreamSealer::header`] first, then each push's
-/// output, then [`StreamSealer::finish`]'s.
+/// Seals one streamed value. The first output includes the routing record
+/// and stream header before any sealed bytes.
 pub trait StreamSealer {
-    /// The routing record and stream header, written before any content.
-    fn header(&mut self) -> Result<Vec<u8>, Error>;
     /// Seal the next source bytes.
     fn push(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error>;
-    /// The final, tagged record.
+    /// Emit the final, tagged record. Includes the header if nothing was pushed.
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error>;
 }
 
