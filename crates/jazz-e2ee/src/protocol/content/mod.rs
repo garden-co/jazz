@@ -1,5 +1,5 @@
 //! Content under held space keys (`E2EE_PROTOCOL.md` §4, §5, §6.2): the pure operations the write, read, query
-//! and streaming hooks and the runtime's lost-creation repair call.
+//! and streaming hooks call.
 //! Nothing here does I/O or keeps global state: callers pass the held keys,
 //! the stored values and the declarations, and run every transaction.
 //!
@@ -17,15 +17,12 @@
 //!   (§6.2).
 //! - [`local`]: the device document, with its approval nonce state, and
 //!   the signed floor records of the private store (§6.1, §6.3a).
-//! - [`repair`]: the plan that rewrites a refused or lost creation's cells
-//!   under the space's real key (§3.2).
 
 mod canonical;
 pub mod cells;
 pub mod equality;
 pub mod held;
 pub mod local;
-pub mod repair;
 pub mod store;
 mod stored;
 
@@ -36,9 +33,8 @@ use super::error::ProtocolError;
 use super::records::space::SpaceAddress;
 
 pub use cells::{
-    CellInput, EqualityValueBuf, Opened, PlaintextValues, SealedCell, SealedCells, StreamOpen,
-    StreamResealer, StreamRouting, StreamValueReader, begin_stream, open_cell, seal_cells,
-    stream_routing,
+    CellInput, EqualityValueBuf, Opened, SealedCell, SealedCells, begin_stream, open_cell,
+    seal_cells,
 };
 pub use equality::{QueryPlan, QueryTokens, TableTarget, UnsupportedQuery, plan_equality};
 pub use held::{
@@ -82,12 +78,6 @@ impl DataError {
             Self::StaleSpace => "stale-space",
             Self::EncryptionFailed => "encryption-failed",
         }
-    }
-
-    /// Whether the code is reported once per `(table, space)` rather than
-    /// per cell (§4.3).
-    pub const fn is_per_space(self) -> bool {
-        matches!(self, Self::KeyPending | Self::SpacePending)
     }
 }
 

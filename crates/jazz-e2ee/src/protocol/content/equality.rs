@@ -22,38 +22,14 @@ use super::{ContentError, ContentResult, EncryptedColumn};
 /// the operation refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnsupportedQuery {
-    /// Ordering by an encrypted column.
-    OrderByEncrypted,
-    /// A traversal (join or `reachable`) through an encrypted table.
-    Traversal,
-    /// A union over an encrypted table.
-    Union,
-    /// A partial select of an encrypted table.
-    PartialSelect,
-    /// An include of an encrypted child table.
-    IncludeEncryptedChild,
-    /// An aggregate over an encrypted column.
-    Aggregate,
-    /// An encrypted predicate other than `eq`.
-    NonEqualityPredicate,
     /// `eq` on an encrypted column without an equality index.
     UnindexedEquality,
-    /// An encrypted predicate without a plaintext `eq` on the space column.
-    NoSpaceConstraint,
 }
 
 impl UnsupportedQuery {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::OrderByEncrypted => "ordering by an encrypted column",
-            Self::Traversal => "a traversal through an encrypted table",
-            Self::Union => "a union over an encrypted table",
-            Self::PartialSelect => "a partial select of an encrypted table",
-            Self::IncludeEncryptedChild => "an include of an encrypted table",
-            Self::Aggregate => "an aggregate over an encrypted column",
-            Self::NonEqualityPredicate => "an encrypted predicate other than eq",
             Self::UnindexedEquality => "eq on an encrypted column without an equality index",
-            Self::NoSpaceConstraint => "an encrypted predicate without eq on the space column",
         }
     }
 }

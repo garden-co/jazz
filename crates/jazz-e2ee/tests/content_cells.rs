@@ -16,8 +16,7 @@ use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{cell, equality};
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::cells::{
-    CellInput, EqualityValueBuf, Opened, StreamOpen, StreamResealer, StreamValueReader,
-    begin_stream, min_cell_record_len, open_cell, seal_cells, stream_routing,
+    CellInput, EqualityValueBuf, Opened, begin_stream, min_cell_record_len, open_cell, seal_cells,
 };
 use jazz_e2ee::protocol::content::{
     ContentError, CreationFate, DataError, HeldKeys, HeldSpace, KeyMark, MissingKey, RowTarget,
@@ -302,7 +301,6 @@ fn short_values_have_fixed_meanings() {
     let open = |stored: &[u8]| open_cell(registry, &held, &target, &title(), stored).unwrap();
     assert_eq!(open(b""), Opened::Empty);
     assert_eq!(open(b"").report(), Some(DataError::EmptyCell));
-    assert!(!open(b"").leaves_row_out());
     // Every nonempty value shorter than a cell record is invalid, even a
     // well-formed envelope of a mechanism nobody routes.
     let unknown = envelope::encode(Mechanism::new("com.example.short", 1), &[0; 30]).unwrap();
@@ -470,7 +468,6 @@ fn a_missing_version_settles_by_membership_and_chain() {
             epoch_id: epoch.clone()
         }
     );
-    assert!(opened.leaves_row_out());
     assert_eq!(opened.clone().strict(), Ok(opened));
     let chain = chain_of(&world, ROW);
     assert_eq!(
@@ -489,8 +486,6 @@ fn a_missing_version_settles_by_membership_and_chain() {
         bob.settle_missing(&address, &epoch, None, false),
         Ok(MissingKey::Report(DataError::KeyUnavailable))
     );
-    assert!(DataError::KeyPending.is_per_space() && DataError::SpacePending.is_per_space());
-    assert!(!DataError::KeyUnavailable.is_per_space());
     // A chain of another space is not evidence for this one.
     let other_world = {
         let mut other = World::new(8);
@@ -568,10 +563,9 @@ fn an_epoch_outside_the_chain_is_invalid_until_the_chain_advances() {
         Opened::Missing { .. }
     ));
     // Alice's own key, refused or not, still opens what she wrote under it.
-    alice
-        .space_mut(&lost.root.id)
-        .unwrap()
-        .settle(CreationFate::NotAccepted, None);
+    let mut settled = alice.space(&lost.root.id).unwrap().clone();
+    settled.settle(CreationFate::NotAccepted, None);
+    alice.hold(settled).unwrap();
     assert_eq!(
         value(open_cell(registry, &alice, &target, &title(), &stored).unwrap()),
         b"lost"
@@ -603,7 +597,6 @@ fn a_cell_of_another_space_this_device_holds_is_stale() {
     )
     .unwrap();
     assert_eq!(opened.report(), Some(DataError::StaleSpace));
-    assert!(!opened.leaves_row_out());
     match opened {
         Opened::StaleSpace { value, space } => {
             assert_eq!(value.as_slice(), b"moved");
@@ -706,10 +699,9 @@ fn a_refused_roots_key_never_decides_the_spaces_cells() {
     let mut device = HeldKeys::new();
     device.hold(creation(&world, &lost, "tx-lost")).unwrap();
     let (mine, _) = seal_title(&world, &write_key(&device, &address), &target, "mine");
-    device
-        .space_mut(&lost.root.id)
-        .unwrap()
-        .settle(CreationFate::NotAccepted, None);
+    let mut settled = device.space(&lost.root.id).unwrap().clone();
+    settled.settle(CreationFate::NotAccepted, None);
+    device.hold(settled).unwrap();
     let registry = &world.shared.registry;
     let open = |held: &HeldKeys, stored: &[u8]| {
         open_cell(registry, held, &target, &title(), stored).unwrap()
@@ -720,10 +712,10 @@ fn a_refused_roots_key_never_decides_the_spaces_cells() {
     assert_eq!(value(open(&device, &mine)), b"mine");
     assert_eq!(open(&device, &theirs), missing);
     assert!(!device.holds(&address, &epoch));
-    assert!(matches!(
-        StreamValueReader::open(registry, &device, &target, &blob(), &stream).unwrap(),
-        StreamOpen::Unreadable(Opened::Missing { epoch_id }) if epoch_id == epoch
-    ));
+    assert_eq!(
+        open_cell(registry, &device, &target, &blob(), &stream).unwrap(),
+        missing
+    );
     // The acquisition's read names the real root: the key is pending, not
     // held, and the cell stays missing.
     assert_eq!(
@@ -789,9 +781,9 @@ fn a_refused_key_never_writes() {
     let mut held = HeldKeys::new();
     held.hold(creation(&world, &lost, "tx-lost")).unwrap();
     assert!(held.holds_unpublished(&address));
-    held.space_mut(&lost.root.id)
-        .unwrap()
-        .settle(CreationFate::Accepted, Some(&space_root));
+    let mut settled = held.space(&lost.root.id).unwrap().clone();
+    settled.settle(CreationFate::Accepted, Some(&space_root));
+    held.hold(settled).unwrap();
     assert!(!held.holds_unpublished(&address));
     assert_eq!(
         held.space(&lost.root.id).unwrap().mark(0),
@@ -1016,30 +1008,6 @@ fn seal_stream(
     out
 }
 
-/// Reads a stored stream through [`StreamValueReader`] in chunks.
-fn read_stream(
-    registry: &Registry,
-    held: &HeldKeys,
-    target: &RowTarget<'_>,
-    stored: &[u8],
-    chunk: usize,
-) -> Result<Vec<u8>, ContentError> {
-    let StreamOpen::Reader {
-        mut reader,
-        initial,
-    } = StreamValueReader::open(registry, held, target, &blob(), &stored[..69])?
-    else {
-        panic!("a reader");
-    };
-    assert!(initial.is_empty(), "the routing alone holds no record");
-    let mut out = Vec::new();
-    for part in stored[69..].chunks(chunk) {
-        reader.update(part, &mut out)?;
-    }
-    reader.finish()?;
-    Ok(out)
-}
-
 /// Alice can open empty and large streams through the cell reader only in streamable columns.
 #[test]
 fn large_values_stream_in_bytes_columns_only() {
@@ -1087,6 +1055,7 @@ fn large_values_stream_in_bytes_columns_only() {
     );
 }
 
+/// Alice cannot open a damaged stream or a stream sealed for a different row.
 #[test]
 fn a_damaged_stream_never_completes() {
     let world = world(21);
@@ -1098,139 +1067,33 @@ fn a_damaged_stream_never_completes() {
     let registry = &world.shared.registry;
     let plaintext = TestRandom(21).bytes(70_000);
     let stored = seal_stream(&world, &key, &target, &plaintext, 70_000);
-    let invalid = Err(ContentError::Data(DataError::InvalidCiphertext));
-    // Truncated before the last record, or with trailing bytes.
-    assert_eq!(
-        read_stream(registry, &held, &target, &stored[..stored.len() - 20], 4096),
-        invalid
-    );
     let trailing = [&stored[..], b"x"].concat();
-    assert_eq!(
-        read_stream(registry, &held, &target, &trailing, 4096),
-        invalid
-    );
     let mut damaged = stored.clone();
     let at = damaged.len() - 30_000;
     damaged[at] ^= 1;
+    for invalid in [&stored[..stored.len() - 20], &trailing, &damaged] {
+        assert_eq!(
+            open_cell(registry, &held, &target, &blob(), invalid).unwrap(),
+            Opened::Unreadable(DataError::InvalidCiphertext)
+        );
+    }
     assert_eq!(
-        read_stream(registry, &held, &target, &damaged, 4096),
-        invalid
-    );
-    // Another row's context.
-    assert_eq!(
-        read_stream(
+        open_cell(
             registry,
             &held,
             &row(&domain, &address, ROW_2),
-            &stored,
-            4096
-        ),
-        invalid
+            &blob(),
+            &stored
+        )
+        .unwrap(),
+        Opened::Unreadable(DataError::InvalidCiphertext)
     );
-    // Routing: a cell record is another record mechanism; garbage is
-    // malformed; a version nobody holds is missing.
     assert_eq!(
-        stream_routing(&envelope::encode(CELL_RECORD, &[0x30; 60]).unwrap()),
-        Err(DataError::UnsupportedFormat)
-    );
-    assert_eq!(stream_routing(&[0; 80]), Err(DataError::InvalidCiphertext));
-    assert!(matches!(
-        StreamValueReader::open(registry, &HeldKeys::new(), &target, &blob(), &stored),
-        Ok(StreamOpen::Unreadable(Opened::Missing { .. }))
-    ));
-    assert!(matches!(
-        StreamValueReader::open(registry, &held, &target, &notes(), &stored),
-        Ok(StreamOpen::Unreadable(Opened::Unreadable(
-            DataError::UnsupportedFormat
-        )))
-    ));
-}
-
-#[test]
-fn a_stream_reseals_under_another_version_in_bounded_memory() {
-    let mut world = world(22);
-    let domain = shared(&world);
-    let address = space(ROW);
-    let target = row(&domain, &address, ROW_1);
-    let before = held_of(&world, ALICE, ROW);
-    let plaintext = TestRandom(22).bytes(150_000);
-    let stored = seal_stream(
-        &world,
-        &write_key(&before, &address),
-        &target,
-        &plaintext,
-        150_000,
-    );
-    world.rotate(ALICE);
-    let after = held_of(&world, ALICE, ROW);
-    let key = write_key(&after, &address);
-    let registry = &world.shared.registry;
-    let suite = registry.select(&Default::default()).unwrap();
-    let reseal = |source: &[u8]| -> Result<Vec<u8>, ContentError> {
-        let StreamOpen::Reader { reader, initial } =
-            StreamValueReader::open(registry, &after, &target, &blob(), &source[..69])?
-        else {
-            panic!("a reader");
-        };
-        let (writer, mut out) = begin_stream(&suite, &key, &target, &blob(), &mut TestRandom(5))?;
-        assert!(initial.is_empty(), "the routing alone holds no record");
-        let mut resealer = StreamResealer::new(reader, writer);
-        for part in source[69..].chunks(10_000) {
-            resealer.update(part, &mut out)?;
+        open_cell(registry, &HeldKeys::new(), &target, &blob(), &stored).unwrap(),
+        Opened::Missing {
+            epoch_id: key.epoch_id().to_owned()
         }
-        resealer.finish(&mut out)?;
-        Ok(out)
-    };
-    let resealed = reseal(&stored).unwrap();
-    assert_eq!(stream_routing(&resealed).unwrap().epoch_id, key.epoch_id());
-    assert_eq!(
-        read_stream(registry, &after, &target, &resealed, 4096).unwrap(),
-        plaintext
     );
-    // A truncated source never yields a complete new stream.
-    assert_eq!(
-        reseal(&stored[..stored.len() - 20]),
-        Err(ContentError::Data(DataError::InvalidCiphertext))
-    );
-}
-
-/// A first chunk may carry ciphertext beyond the routing: the records that
-/// complete inside it come back with the reader, never lost, whether the
-/// chunk is the whole value or ends inside a later record.
-#[test]
-fn plaintext_inside_the_first_chunk_is_returned() {
-    let world = world(21);
-    let held = held_of(&world, ALICE, ROW);
-    let domain = shared(&world);
-    let address = space(ROW);
-    let target = row(&domain, &address, ROW_1);
-    let key = write_key(&held, &address);
-    let registry = &world.shared.registry;
-    let plaintext = TestRandom(21).bytes(200_000);
-    let stored = seal_stream(&world, &key, &target, &plaintext, 10_000);
-    for split in [stored.len(), 69 + 70_000, 69 + 1] {
-        let StreamOpen::Reader {
-            mut reader,
-            initial,
-        } = StreamValueReader::open(registry, &held, &target, &blob(), &stored[..split]).unwrap()
-        else {
-            panic!("a reader");
-        };
-        let mut out = initial.to_vec();
-        reader.update(&stored[split..], &mut out).unwrap();
-        reader.finish().unwrap();
-        assert_eq!(out, plaintext, "first chunk of {split} bytes");
-    }
-    // A small value given whole: all of it comes back from `open`.
-    let small = TestRandom(22).bytes(300);
-    let stored = seal_stream(&world, &key, &target, &small, 300);
-    let StreamOpen::Reader { reader, initial } =
-        StreamValueReader::open(registry, &held, &target, &blob(), &stored).unwrap()
-    else {
-        panic!("a reader");
-    };
-    reader.finish().unwrap();
-    assert_eq!(&initial[..], &small[..]);
 }
 
 /// The stream counterpart of
@@ -1260,15 +1123,9 @@ fn another_spaces_key_of_the_same_epoch_never_decides_a_stream() {
     reader.hold(creation(&world, &ours, "tx-ours")).unwrap();
     let registry = &world.shared.registry;
     let missing = theirs.root.epoch_id.clone();
-    // Given whole, the first record already fails under the other key.
-    assert!(matches!(
-        StreamValueReader::open(registry, &reader, &target, &blob(), &stored).unwrap(),
-        StreamOpen::Unreadable(Opened::Missing { epoch_id }) if epoch_id == missing
-    ));
-    // Given in chunks, the failure surfaces as missing from `update`.
     assert_eq!(
-        read_stream(registry, &reader, &target, &stored, 10_000).err(),
-        Some(ContentError::Missing { epoch_id: missing })
+        open_cell(registry, &reader, &target, &blob(), &stored).unwrap(),
+        Opened::Missing { epoch_id: missing }
     );
 }
 
@@ -1306,11 +1163,8 @@ fn plaintext_and_equality_values_never_print() {
         equality: Some(EqualityValue::Text(text)),
     };
     let stored = seal_stream(&world, &write_key(&held, &address), &target, secret, 64);
-    let stream = StreamValueReader::open(registry, &held, &target, &blob(), &stored).unwrap();
-    let StreamOpen::Reader { initial, .. } = &stream else {
-        panic!("a reader");
-    };
-    assert_eq!(&initial[..], secret, "the whole value opened");
+    let stream = open_cell(registry, &held, &target, &blob(), &stored).unwrap();
+    assert_eq!(stream, opened);
     for debug in [
         format!("{opened:?}"),
         format!("{stale:?}"),
@@ -1478,9 +1332,7 @@ fn competing_roots_take_no_write_before_a_chain_read() {
     assert_eq!(write_key(&refused, &address).root_id(), space_root);
 }
 
-/// A stream is reported stale only once a record authenticated under one
-/// key of another space; before that, a key of another space proves
-/// nothing, and the value may turn out to be missing.
+/// Alice reports a stream as stale only if a key from another space opens it.
 #[test]
 fn a_stream_is_stale_only_once_a_record_authenticates() {
     let mut world = world(28);
@@ -1494,168 +1346,31 @@ fn a_stream_is_stale_only_once_a_record_authenticates() {
     let registry = &world.shared.registry;
     let key = write_key(&held, &there);
     let plaintext = TestRandom(28).bytes(20_000);
-    // Sealed for another row of the other space: no key opens it here.
     let unopenable = seal_stream(&world, &key, &row(&domain, &there, ROW_2), &plaintext, 4096);
-    let StreamOpen::Reader { mut reader, .. } =
-        StreamValueReader::open(registry, &held, &target, &blob(), &unopenable[..69]).unwrap()
-    else {
-        panic!("a reader");
-    };
-    assert_eq!(reader.stale_space(), None, "nothing authenticated yet");
     assert_eq!(
-        reader.update(&unopenable[69..], &mut Vec::new()),
-        Err(ContentError::Missing {
+        open_cell(registry, &held, &target, &blob(), &unopenable).unwrap(),
+        Opened::Missing {
             epoch_id: key.epoch_id().to_owned()
-        })
+        }
     );
-    // Sealed while the row was in the other space: stale once a record
-    // authenticated.
-    let moved = seal_stream(&world, &key, &row(&domain, &there, ROW_1), &plaintext, 4096);
-    let StreamOpen::Reader { mut reader, .. } =
-        StreamValueReader::open(registry, &held, &target, &blob(), &moved[..69]).unwrap()
-    else {
-        panic!("a reader");
-    };
-    assert_eq!(reader.stale_space(), None);
-    let mut out = Vec::new();
-    reader.update(&moved[69..], &mut out).unwrap();
-    assert_eq!(reader.stale_space(), Some(&there));
-    assert_eq!(reader.finish().unwrap(), Some(there.clone()));
-    assert_eq!(out, plaintext);
-    // A value with no plaintext, with two keys of other spaces naming its
-    // epoch: only its end shows which one it was sealed under.
+    // The earlier-sorted key of the same epoch fails before the right key is tried.
     let third = root_from(
         &world,
-        THIRD_ROW,
+        "008f2e3d-4c5b-7a69-8877-665544332233",
         root_random_with_epoch(9, 9, key.epoch_id()),
     );
     held.hold(creation(&world, &third, "tx-third")).unwrap();
     let key = write_key(&held, &there);
-    let empty = seal_stream(&world, &key, &row(&domain, &there, ROW_1), b"", 1);
-    let StreamOpen::Reader { mut reader, .. } =
-        StreamValueReader::open(registry, &held, &target, &blob(), &empty[..69]).unwrap()
-    else {
-        panic!("a reader");
-    };
-    assert!(
-        format!("{reader:?}").contains("candidates: 2"),
-        "{reader:?}"
-    );
-    reader.update(&empty[69..], &mut out).unwrap();
-    assert_eq!(reader.stale_space(), None);
-    assert_eq!(reader.finish().unwrap(), Some(there));
-}
-
-/// A third space, for values sealed under neither side of a move.
-const THIRD_ROW: &str = "038f2e3d-4c5b-7a69-8877-665544332233";
-
-/// Resealing a stream checks its original space even when it has no plaintext.
-#[test]
-fn a_stream_of_a_third_space_is_never_resealed() {
-    let mut world = world(29);
-    for identifier in [OTHER_ROW, THIRD_ROW] {
-        world.add_member_of(identifier, ALICE);
-        world.create_of(identifier, ALICE);
+    for plaintext in [&plaintext[..], b""] {
+        let moved = seal_stream(&world, &key, &row(&domain, &there, ROW_1), plaintext, 4096);
+        assert_eq!(
+            open_cell(registry, &held, &target, &blob(), &moved).unwrap(),
+            Opened::StaleSpace {
+                value: Zeroizing::new(plaintext.to_vec()),
+                space: there.clone()
+            }
+        );
     }
-    let mut held = held_of(&world, ALICE, ROW);
-    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
-    held.hold(acquire_held(&world, ALICE, THIRD_ROW)).unwrap();
-    let domain = shared(&world);
-    let (from, other, to) = (space(ROW), space(OTHER_ROW), space(THIRD_ROW));
-    let source = row(&domain, &from, ROW_1);
-    let sealed_in = row(&domain, &other, ROW_1);
-    let target = row(&domain, &to, ROW_1);
-    let registry = &world.shared.registry;
-    let suite = registry.select(&Default::default()).unwrap();
-    let to_key = write_key(&held, &to);
-
-    let reseal = |stored: &[u8]| -> Result<Vec<u8>, ContentError> {
-        let StreamOpen::Reader { reader, .. } =
-            StreamValueReader::open(registry, &held, &source, &blob(), &stored[..69])?
-        else {
-            panic!("a reader");
-        };
-        let (writer, mut out) =
-            begin_stream(&suite, &to_key, &target, &blob(), &mut TestRandom(30))?;
-        let mut resealer = StreamResealer::new(reader, writer);
-        for part in stored[69..].chunks(4096) {
-            resealer.update(part, &mut out)?;
-        }
-        resealer.finish(&mut out)?;
-        Ok(out)
-    };
-    let stale = Err(ContentError::Data(DataError::StaleSpace));
-    let other_key = write_key(&held, &other);
-    let plaintext = TestRandom(29).bytes(20_000);
-    let stream = seal_stream(&world, &other_key, &sealed_in, &plaintext, 4096);
-    assert_eq!(reseal(&stream), stale);
-    let empty = seal_stream(&world, &other_key, &sealed_in, b"", 1);
-    assert_eq!(reseal(&empty), stale);
-    // A stream of the source space itself reseals.
-    let own = seal_stream(&world, &write_key(&held, &from), &source, &plaintext, 4096);
-    let resealed = reseal(&own).unwrap();
-    assert_eq!(
-        read_stream(registry, &held, &target, &resealed, 4096).unwrap(),
-        plaintext
-    );
-}
-
-/// A stream sealed under a third space is refused by the first `update`
-/// whose record authenticates, before any of its plaintext is re-encrypted:
-/// `finish` is not the only check.
-#[test]
-fn a_resealer_refuses_a_third_spaces_stream_at_its_first_record() {
-    let mut world = world(40);
-    for identifier in [OTHER_ROW, THIRD_ROW] {
-        world.add_member_of(identifier, ALICE);
-        world.create_of(identifier, ALICE);
-    }
-    let mut held = held_of(&world, ALICE, ROW);
-    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
-    held.hold(acquire_held(&world, ALICE, THIRD_ROW)).unwrap();
-    let domain = shared(&world);
-    let (from, other, to) = (space(ROW), space(OTHER_ROW), space(THIRD_ROW));
-    let source = row(&domain, &from, ROW_1);
-    let target = row(&domain, &to, ROW_1);
-    let registry = &world.shared.registry;
-    let suite = registry.select(&Default::default()).unwrap();
-    let plaintext = TestRandom(34).bytes(200_000);
-    let stream = seal_stream(
-        &world,
-        &write_key(&held, &other),
-        &row(&domain, &other, ROW_1),
-        &plaintext,
-        4096,
-    );
-    let StreamOpen::Reader { reader, initial } =
-        StreamValueReader::open(registry, &held, &source, &blob(), &stream[..69]).unwrap()
-    else {
-        panic!("a reader");
-    };
-    assert!(initial.is_empty());
-    let (writer, mut out) = begin_stream(
-        &suite,
-        &write_key(&held, &to),
-        &target,
-        &blob(),
-        &mut TestRandom(35),
-    )
-    .unwrap();
-    let prefix = out.len();
-    let mut resealer = StreamResealer::new(reader, writer);
-    // Fed in small chunks: an update before the stream ends fails, and no
-    // earlier one wrote anything.
-    let chunks: Vec<_> = stream[69..].chunks(1024).collect();
-    let failed = chunks.iter().enumerate().find_map(|(at, part)| {
-        resealer
-            .update(part, &mut out)
-            .err()
-            .map(|error| (at, error))
-    });
-    let (at, error) = failed.expect("an update refuses the stream");
-    assert_eq!(error, ContentError::Data(DataError::StaleSpace));
-    assert!(at < chunks.len() - 1, "refused before the stream ends");
-    assert_eq!(out.len(), prefix, "nothing of the value was re-encrypted");
 }
 
 /// An acquisition whose read is older than the chain the device knows
