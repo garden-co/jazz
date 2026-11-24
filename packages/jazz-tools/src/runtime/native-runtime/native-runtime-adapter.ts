@@ -3112,20 +3112,11 @@ export class NativeRuntimeAdapter implements Runtime {
       unreadable = rows;
     };
     if (queryHasArraySubqueries(coreQueryJson)) {
-      if (pendingTx) {
-        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
-        this.emitQueryCoverageTrace("covered");
-        return rowsFromRelationSnapshot(
-          readRelationSnapshot(payload),
-          this.schema,
-          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-        );
-      }
       const payload = await this.readRowsForContextAsync(
         query,
         opts,
         readContext,
-        undefined,
+        pendingTx?.id,
         leftOut,
       );
       this.emitQueryCoverageTrace("covered");
