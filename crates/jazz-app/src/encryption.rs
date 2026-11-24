@@ -464,6 +464,23 @@ pub struct Encryption {
     pub(crate) jazz: Jazz,
 }
 
+macro_rules! with_runtime {
+    ($encryption:expr, $arguments:expr, $job:expr) => {{
+        if let Some(refusal) = $encryption.refusal() {
+            return Err(refusal);
+        }
+        #[cfg(feature = "e2ee-client")]
+        {
+            $encryption.jazz.with_client($job).await
+        }
+        #[cfg(not(feature = "e2ee-client"))]
+        {
+            let _ = $arguments;
+            unreachable!("no runtime without the feature")
+        }
+    }};
+}
+
 impl Encryption {
     fn refusal(&self) -> Option<Error> {
         match self.jazz.info.encryption {
@@ -490,19 +507,10 @@ impl Encryption {
     /// itself: take the string out of the answer (`Value::take`) into a
     /// zeroizing buffer, and keep no other copy.
     pub async fn call(&self, op: &str, args: Value) -> Result<Value> {
-        if let Some(refusal) = self.refusal() {
-            return Err(refusal);
-        }
-        #[cfg(feature = "e2ee-client")]
-        {
+        with_runtime!(self, (op, args), {
             let op = op.to_owned();
-            self.jazz.with_client(move |_| plan::call(op, args)).await
-        }
-        #[cfg(not(feature = "e2ee-client"))]
-        {
-            let _ = (op, args);
-            unreachable!("no runtime without the feature")
-        }
+            move |_| plan::call(op, args)
+        })
     }
 
     /// Verifies the account, enrols this device or founds the account's
@@ -511,52 +519,21 @@ impl Encryption {
     /// runtime's own loop (which retries while the server is out of reach).
     /// `active`, `awaiting-approval` or `reenrolled`.
     pub async fn ready(&self, timeout: Duration) -> Result<String> {
-        if let Some(refusal) = self.refusal() {
-            return Err(refusal);
-        }
-        #[cfg(feature = "e2ee-client")]
-        {
+        with_runtime!(self, timeout, {
             let started = std::time::Instant::now();
-            self.jazz
-                .with_client(move |_| plan::ready(timeout.saturating_sub(started.elapsed())))
-                .await
-        }
-        #[cfg(not(feature = "e2ee-client"))]
-        {
-            let _ = timeout;
-            unreachable!("no runtime without the feature")
-        }
+            move |_| plan::ready(timeout.saturating_sub(started.elapsed()))
+        })
     }
 
     /// What the runtime's loop is doing: `{ status, error, stage }`.
     pub async fn state(&self) -> Result<Value> {
-        if let Some(refusal) = self.refusal() {
-            return Err(refusal);
-        }
-        #[cfg(feature = "e2ee-client")]
-        {
-            self.jazz
-                .with_client(move |_| async move { plan::state() })
-                .await
-        }
-        #[cfg(not(feature = "e2ee-client"))]
-        unreachable!("no runtime without the feature")
+        with_runtime!(self, (), |_| async { plan::state() })
     }
 
     /// The reports waiting, as JSON texts (`type`: `unreadable`,
     /// `missing-key`, `challenged`, `ready-failed`, ...).
     pub async fn take_reports(&self) -> Result<Vec<String>> {
-        if let Some(refusal) = self.refusal() {
-            return Err(refusal);
-        }
-        #[cfg(feature = "e2ee-client")]
-        {
-            self.jazz
-                .with_client(move |_| async move { plan::take_reports() })
-                .await
-        }
-        #[cfg(not(feature = "e2ee-client"))]
-        unreachable!("no runtime without the feature")
+        with_runtime!(self, (), |_| async { plan::take_reports() })
     }
 }
 
@@ -605,8 +582,7 @@ pub(crate) fn spawn_start() {
     tokio::task::spawn_local(plan::start());
 }
 
-/// Retries a write that failed for want of a key (see the TypeScript
-/// binding's equivalent): a no-op without a device runtime.
+/// Retries a write that failed for want of a key when a device runtime is running.
 #[doc(hidden)]
 pub async fn with_key_wait<T>(
     mut operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,

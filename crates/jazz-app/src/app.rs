@@ -56,10 +56,9 @@ impl AppFiles {
         self
     }
 
-    /// The bytes of `jazz.app.json`.
-    #[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
-    pub(crate) fn app_bytes(&self) -> &[u8] {
-        &self.app
+    pub(crate) fn declares_encryption(&self, app_id: AppId, environment: &str) -> bool {
+        artifact::load_client_encrypted(&self.app, app_id, environment)
+            .is_ok_and(|(_, _, declarations)| declarations.is_some())
     }
 
     pub(crate) fn has_permissions(&self) -> bool {
@@ -74,55 +73,47 @@ impl AppFiles {
     /// hooks; without it such an app is refused.
     pub(crate) fn load(&self, encryption: Option<(AppId, &str)>) -> Result<LoadedFiles> {
         let refused = |error: artifact::ArtifactError| Error::App(error.to_string());
-        match &self.permissions {
-            Some(permissions) => {
-                let loaded = artifact::load(&self.app, permissions).map_err(refused)?;
-                let encrypted = loaded
-                    .current_schema()
-                    .keys()
-                    .any(|name| artifact::system_tables::is_system_table(name.as_str()));
-                let declarations = match encryption {
-                    Some((app_id, environment)) => {
-                        artifact::load_client_encrypted(&self.app, app_id, environment)
-                            .map_err(refused)?
-                            .2
-                    }
-                    None => {
-                        refuse_encrypted(encrypted)?;
-                        None
-                    }
-                };
-                Ok(LoadedFiles {
-                    schema: loaded.current_schema().clone(),
-                    migrations: loaded.client_migrations(),
-                    backend: Some(loaded),
-                    declarations,
-                })
+        let backend = self
+            .permissions
+            .as_deref()
+            .map(|permissions| artifact::load(&self.app, permissions))
+            .transpose()
+            .map_err(refused)?;
+        let encrypted_client_files = encryption
+            .map(|(app_id, environment)| {
+                artifact::load_client_encrypted(&self.app, app_id, environment)
+            })
+            .transpose()
+            .map_err(refused)?;
+        let (schema, migrations, declarations) = match (&backend, encrypted_client_files) {
+            (Some(loaded), client_files) => {
+                if client_files.is_none() {
+                    refuse_encrypted(
+                        loaded
+                            .current_schema()
+                            .keys()
+                            .any(|name| artifact::system_tables::is_system_table(name.as_str())),
+                    )?;
+                }
+                (
+                    loaded.current_schema().clone(),
+                    loaded.client_migrations(),
+                    client_files.and_then(|(_, _, declarations)| declarations),
+                )
             }
-            None => match encryption {
-                Some((app_id, environment)) => {
-                    let (schema, migrations, declarations) =
-                        artifact::load_client_encrypted(&self.app, app_id, environment)
-                            .map_err(refused)?;
-                    Ok(LoadedFiles {
-                        schema,
-                        migrations,
-                        backend: None,
-                        declarations,
-                    })
-                }
-                None => {
-                    let (schema, migrations) = artifact::load_client_current(&self.app)
-                        .map_err(|error| Error::App(error.to_string()))?;
-                    Ok(LoadedFiles {
-                        schema,
-                        migrations,
-                        backend: None,
-                        declarations: None,
-                    })
-                }
-            },
-        }
+            (None, Some(client_files)) => client_files,
+            (None, None) => {
+                let (schema, migrations) =
+                    artifact::load_client_current(&self.app).map_err(refused)?;
+                (schema, migrations, None)
+            }
+        };
+        Ok(LoadedFiles {
+            schema,
+            migrations,
+            backend,
+            declarations,
+        })
     }
 }
 
