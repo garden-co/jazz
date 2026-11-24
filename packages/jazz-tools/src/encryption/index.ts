@@ -198,6 +198,17 @@ export class Encryption {
     }
   }
 
+  /**
+   * Start a new encryption generation on this waiting device after losing
+   * access to all devices and recovery credentials. The app must enable
+   * allowAccountReset and authenticate the account through its own sign-in.
+   * Device accounts cannot reset. Earlier devices lose access to the
+   * account. Space members can deliver keys to the new generation.
+   */
+  resetAccount(): Promise<AccountStatus> {
+    return this.call("resetAccount", {});
+  }
+
   /** This installation's device ID. */
   deviceId(): Promise<string> {
     return this.call("deviceId", {});

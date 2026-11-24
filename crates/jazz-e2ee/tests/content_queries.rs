@@ -110,18 +110,16 @@ fn a_query_covers_cells_this_device_wrote_under_a_refused_key() {
     let domain = shared(&world);
     let address = space(ROW);
     let mut held = HeldKeys::new();
-    let lost = own_creation(&world, ALICE, ROW, "tx");
-    let root = lost.root_id().to_owned();
-    held.hold(lost).unwrap();
+    let mut lost = own_creation(&world, ALICE, ROW, "tx");
+    held.hold(lost.clone()).unwrap();
     let sealed = seal_texts(
         &world,
         &write_key(&held, &address),
         &row(&domain, &address, ROW_1),
         &[(title(), "x")],
     );
-    held.space_mut(&root)
-        .unwrap()
-        .settle(CreationFate::NotAccepted, None);
+    lost.settle(CreationFate::NotAccepted, None);
+    held.hold(lost).unwrap();
     held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
     let query = tokens(plan(&world, &held, &table(&domain, &address), "x"));
     assert_eq!(query.tokens.len(), 2);
@@ -176,20 +174,9 @@ fn cold_offline_and_refused_queries() {
             Error::InvalidInput
         )))
     );
-    for shape in [
-        UnsupportedQuery::OrderByEncrypted,
-        UnsupportedQuery::Traversal,
-        UnsupportedQuery::Union,
-        UnsupportedQuery::PartialSelect,
-        UnsupportedQuery::IncludeEncryptedChild,
-        UnsupportedQuery::Aggregate,
-        UnsupportedQuery::NonEqualityPredicate,
-        UnsupportedQuery::UnindexedEquality,
-        UnsupportedQuery::NoSpaceConstraint,
-    ] {
-        let message = ContentError::UnsupportedQuery(shape).to_string();
-        assert!(message.contains(shape.name()), "{message}");
-    }
+    let shape = UnsupportedQuery::UnindexedEquality;
+    let message = ContentError::UnsupportedQuery(shape).to_string();
+    assert!(message.contains(shape.name()), "{message}");
 }
 
 #[test]

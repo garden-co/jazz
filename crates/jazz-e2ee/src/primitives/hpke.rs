@@ -9,7 +9,7 @@ use hpke::{Deserializable, HpkeError, Kem, OpModeR, OpModeS, Serializable};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
-use crate::random::{RandomSource, random_array};
+use crate::random::RandomSource;
 
 pub const PUBLIC_KEY_BYTES: usize = 32;
 pub const SECRET_KEY_BYTES: usize = 32;
@@ -26,12 +26,6 @@ pub struct HpkeKeyPair {
 }
 
 impl HpkeKeyPair {
-    /// `DeriveKeyPair` (RFC 9180 §7.1.3) from 32 fresh random bytes.
-    pub fn generate(rng: &mut (impl RandomSource + ?Sized)) -> Result<Self> {
-        let ikm = Zeroizing::new(random_array::<32>(rng)?);
-        Ok(Self::derive(&ikm[..]))
-    }
-
     /// `DeriveKeyPair` from caller-supplied input keying material.
     pub fn derive(ikm: &[u8]) -> Self {
         let (secret, public) = Suite::derive_keypair(ikm);

@@ -23,8 +23,9 @@ export type ReadableJson =
 /** A readable Table: `{columns, relations?, indexes?, branchBy?, history?, computed?}`. */
 export type ReadableTable = { [key: string]: ReadableJson };
 
-/** What a schema contributes to `jazz.app.json`: its `tables` and `transforms`. */
+/** What a schema contributes to `jazz.app.json`: its tables, transforms and encryption settings. */
 export interface ReadableApp {
+  encryption?: { readonly allowAccountReset?: boolean };
   tables: { [table: string]: ReadableTable };
   transforms?: { [name: string]: { stored: ReadableJson; view: ReadableJson } };
 }

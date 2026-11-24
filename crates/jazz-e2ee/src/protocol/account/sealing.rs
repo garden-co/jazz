@@ -137,46 +137,9 @@ impl SealingKeys {
 
     /// The record a sender seals to: the first valid record of the current
     /// epoch and the selected mechanism. `None` means "recipient
-    /// unsupported": the sender waits (§2.12). The account's own devices
-    /// use [`current_for_own`](Self::current_for_own) instead.
+    /// unsupported": the sender waits (§2.12).
     pub fn current(&self, mechanism: Mechanism<'_>) -> Option<&Accepted<AccountSealingKey>> {
         self.first(&self.epoch_id, mechanism)
-    }
-
-    /// The record a device of this account seals to when it delivers to
-    /// its own account: the first valid record of the current epoch and
-    /// `mechanism` whose public key is the one the device derives from its
-    /// own key of that epoch (§2.12), so a record that does not derive is
-    /// never used, whenever it was published. Derivation is checked here,
-    /// against this read's records, never taken from an earlier report.
-    /// `None` when no such record exists, or when `registry` lacks
-    /// `mechanism`: the device waits, as a sender does for "recipient
-    /// unsupported". `own` must be this account's keys of this generation
-    /// and hold the current epoch's key; anything else is
-    /// [`ProtocolError::InconsistentEvidence`]. A device opens envelopes
-    /// sealed to its account with key pairs it derives itself, never with
-    /// a record.
-    pub fn current_for_own(
-        &self,
-        registry: &Registry,
-        own: &AccountEpochKeys,
-        mechanism: Mechanism<'_>,
-    ) -> ProtocolResult<Option<&Accepted<AccountSealingKey>>> {
-        self.check_same_chain(own)?;
-        let Some(key) = own.get(&self.epoch_id) else {
-            return Err(ProtocolError::InconsistentEvidence);
-        };
-        let sealer = match registry.key_sealer(mechanism) {
-            Ok(sealer) => sealer,
-            Err(Error::UnknownMechanism) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let derived = derive::account_sealing_key_pair(sealer, key)?;
-        Ok(self.valid.iter().find(|record| {
-            record.row.epoch_id == self.epoch_id
-                && Mechanism::new(&record.row.mechanism, record.row.version) == mechanism
-                && record.row.public_key == derived.public.bytes
-        }))
     }
 
     fn check_same_chain(&self, keys: &AccountEpochKeys) -> ProtocolResult<()> {

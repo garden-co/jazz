@@ -669,15 +669,11 @@ fn stored_values_round_trip() {
     );
 
     let large: Vec<u8> = (0..131_073u32).map(|index| index as u8).collect();
-    let streamed = records::encrypt_stream_value(
-        &stream::Builtin,
-        &key,
-        &IDENTITY,
-        BYTES_TYPE,
-        &large,
-        &mut rng,
-    )
-    .unwrap();
+    let (mut writer, mut streamed) =
+        records::begin_stream_value(&stream::Builtin, &key, &IDENTITY, BYTES_TYPE, &mut rng)
+            .unwrap();
+    writer.update(&large, &mut streamed).unwrap();
+    writer.finish(&mut streamed).unwrap();
     assert_eq!(
         records::read_stored_record(&streamed).unwrap().kind,
         records::RecordKind::Stream

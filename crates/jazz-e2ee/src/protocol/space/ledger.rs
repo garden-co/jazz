@@ -15,9 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::envelope::Mechanism;
 use crate::registry::Registry;
 
-use super::super::account::{
-    AccountEpochKeys, AccountReplay, AccountState, PublicAccountLedger, SealingKeys,
-};
+use super::super::account::{AccountReplay, AccountState, PublicAccountLedger, SealingKeys};
 use super::super::domain::AppDomain;
 use super::super::error::{IntrinsicContradiction, ProtocolError, ProtocolResult};
 use super::super::ids::{self, IdForm};
@@ -349,28 +347,6 @@ impl<'a> AccountDirectory<'a> {
             .map(|record| self.stamp(account_id, &keys, record)))
     }
 
-    /// Where a device of `own`'s account seals a delivery to its own
-    /// account: as [`recipient`](Self::recipient), but never to a sealing
-    /// key record the device's derivation check reported as not derived
-    /// ([`SealingKeys::current_for_own`]). `None` when no other valid
-    /// record of the current epoch and `mechanism` exists: the device
-    /// waits. `own` must be the account's keys of its current generation at
-    /// this read's state; anything else is
-    /// [`ProtocolError::InconsistentEvidence`].
-    pub fn own_recipient(
-        &self,
-        own: &AccountEpochKeys,
-        mechanism: Mechanism<'_>,
-    ) -> ProtocolResult<Option<Recipient>> {
-        let account_id = own.account_id();
-        let Some(keys) = self.sealing_keys(account_id)? else {
-            return Err(ProtocolError::InconsistentEvidence);
-        };
-        Ok(keys
-            .current_for_own(self.registry, own, mechanism)?
-            .map(|record| self.stamp(account_id, &keys, record)))
-    }
-
     fn stamp(
         &self,
         account_id: &str,
@@ -405,8 +381,7 @@ pub enum AuthorCheck {
 
 /// A member account's current epoch and the sealing key record a delivery
 /// to it is sealed to (§2.12, §3.4), at the cut of the read it came from.
-/// Built only by [`AccountDirectory::recipient`] or
-/// [`AccountDirectory::own_recipient`], from the account's replayed public
+/// Built by [`AccountDirectory::recipient`] from the account's replayed public
 /// history, so a delivery is never sealed to a record the caller assembled,
 /// and the builders refuse it with a chain of another read.
 #[derive(Debug, Clone, PartialEq, Eq)]

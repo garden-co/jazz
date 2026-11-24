@@ -2,21 +2,17 @@
 //! deployment (or `jazz-tools validate`) checks its policies, with a typed
 //! error, rather than accepted and then failing every check.
 //!
-//! The tables carry the system-table prefix only because schema validation
-//! accepts an undeclared `uuid` address correlation for that table class
-//! alone.
+//! Deployments use the registered system-table fragment with test policies.
 
 use crate::common;
 
+use jazz::tools::deployment::artifact::system_tables::{MEMBERS, SPACES, with_e2ee_fragment};
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
 };
-use jazz::tools::public_schema::{Schema as PublicSchema, SchemaHash, TablePolicies};
+use jazz::tools::public_schema::{Schema as PublicSchema, SchemaHash, TableName, TablePolicies};
 use jazz::tools::public_schema_convert::{UnsupportedPolicy, check_deployable_policies};
 use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
-
-const MEMBERS: &str = "__e2ee_members";
-const SPACES: &str = "__e2ee_spaces";
 
 fn inherits_from(operation: Operation, table: &str) -> PolicyExpr {
     PolicyExpr::InheritsFrom {
@@ -37,16 +33,12 @@ fn projects() -> TableSchemaBuilder {
         )
 }
 
-/// A table addressing rows by `(scopeId, identifier)`, with `identifier`
-/// declared a reference to `target` when one is given: the declaration is
-/// what lets a nested `InheritsFrom`'s join validate.
-fn address_table(name: &str, target: Option<&str>, policies: TablePolicies) -> TableSchemaBuilder {
-    let table = TableSchemaBuilder::new(name).column("scopeId", ColumnType::Uuid);
-    let table = match target {
-        Some(target) => table.fk_column("identifier", target),
-        None => table.column("identifier", ColumnType::Uuid),
-    };
-    table.policies(policies)
+fn fixture(policies: impl IntoIterator<Item = (&'static str, TablePolicies)>) -> PublicSchema {
+    let mut schema = with_e2ee_fragment(&SchemaBuilder::new().table(projects()).build());
+    for (name, policies) in policies {
+        schema.get_mut(&TableName::new(name)).unwrap().policies = policies;
+    }
+    schema
 }
 
 fn structural(schema: &PublicSchema) -> PublicSchema {
@@ -80,16 +72,21 @@ fn deploy(source: &PublicSchema) -> Result<(), DeploymentError> {
 /// `jazz-tools validate`, as `shape`.
 #[track_caller]
 fn assert_refused(schema: &PublicSchema, shape: UnsupportedPolicy, path: &str) {
+    assert_validation_refused(schema, shape, path);
+    let deployed = deploy(schema).expect_err("the deployment is refused");
+    assert!(
+        matches!(deployed, DeploymentError::InvalidPermissions { .. }),
+        "{deployed}"
+    );
+}
+
+#[track_caller]
+fn assert_validation_refused(schema: &PublicSchema, shape: UnsupportedPolicy, path: &str) {
     let error = check_deployable_policies(schema).expect_err("the policy is refused");
     assert_eq!(error.unsupported_policy(), Some(shape), "{error}");
     assert!(
         error.to_string().contains(path),
         "it names the path: {error}"
-    );
-    let deployed = deploy(schema).expect_err("the deployment is refused");
-    assert!(
-        matches!(deployed, DeploymentError::InvalidPermissions { .. }),
-        "{deployed}"
     );
 }
 
@@ -106,60 +103,49 @@ fn assert_refused(schema: &PublicSchema, shape: UnsupportedPolicy, path: &str) {
 #[test]
 fn an_inherits_from_whose_candidate_has_another_is_refused() {
     let spaces = || {
-        address_table(
-            SPACES,
-            Some("projects"),
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(inherits_from(Operation::Select, "projects")),
-        )
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(inherits_from(Operation::Select, "projects"))
     };
-    let nested = SchemaBuilder::new()
-        .table(projects())
-        .table(spaces())
-        .table(address_table(
+    let nested = fixture([
+        (SPACES, spaces()),
+        (
             MEMBERS,
-            None,
             TablePolicies::new().with_insert(inherits_from(Operation::Insert, SPACES)),
-        ))
-        .build();
+        ),
+    ]);
     assert_refused(
         &nested,
         UnsupportedPolicy::NestedInheritsFrom,
         "$.__e2ee_members.policies.insert.with_check",
     );
 
-    let itself = SchemaBuilder::new()
-        .table(address_table(
-            MEMBERS,
-            Some(MEMBERS),
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(PolicyExpr::Or(vec![
-                    PolicyExpr::False,
-                    inherits_from(Operation::Update, MEMBERS),
-                ]))
-                .with_update(
-                    Some(PolicyExpr::True),
-                    inherits_from(Operation::Select, MEMBERS),
-                ),
-        ))
-        .build();
+    let itself = fixture([(
+        MEMBERS,
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::Or(vec![
+                PolicyExpr::False,
+                inherits_from(Operation::Update, MEMBERS),
+            ]))
+            .with_update(
+                Some(PolicyExpr::True),
+                inherits_from(Operation::Select, MEMBERS),
+            ),
+    )]);
     assert_refused(
         &itself,
         UnsupportedPolicy::NestedInheritsFrom,
         "$.__e2ee_members.policies.insert.with_check.Or[1]",
     );
 
-    let one_level = SchemaBuilder::new()
-        .table(projects())
-        .table(spaces())
-        .table(address_table(
+    let one_level = fixture([
+        (SPACES, spaces()),
+        (
             MEMBERS,
-            None,
             TablePolicies::new().with_insert(inherits_from(Operation::Select, SPACES)),
-        ))
-        .build();
+        ),
+    ]);
     check_deployable_policies(&one_level).unwrap();
     deploy(&one_level).unwrap();
 }
@@ -177,20 +163,13 @@ fn an_inherits_from_whose_candidate_has_another_is_refused() {
 #[test]
 fn an_inherits_from_in_a_read_policy_is_refused() {
     let mine = || PolicyExpr::eq_session("accountId", vec!["user".to_owned()]);
-    let members = |read: PolicyExpr| {
-        SchemaBuilder::new()
-            .table(projects())
-            .table(
-                address_table(
-                    MEMBERS,
-                    None,
-                    TablePolicies::new()
-                        .with_select(read)
-                        .with_insert(inherits_from(Operation::Select, "projects")),
-                )
-                .column("accountId", ColumnType::Uuid),
-            )
-            .build()
+    let members = |read| {
+        fixture([(
+            MEMBERS,
+            TablePolicies::new()
+                .with_select(read)
+                .with_insert(inherits_from(Operation::Select, "projects")),
+        )])
     };
     let direct = members(inherits_from(Operation::Select, "projects"));
     assert_refused(
@@ -232,29 +211,34 @@ fn an_inherits_from_in_a_read_policy_is_refused() {
 /// ```
 #[test]
 fn a_read_policy_reaching_inherits_from_through_an_inherited_policy_is_refused() {
-    let schema = SchemaBuilder::new()
-        .table(projects())
-        .table(address_table(
-            SPACES,
-            None,
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(inherits_from(Operation::Select, "projects")),
-        ))
-        .table(
-            TableSchemaBuilder::new("tasks")
-                .fk_column("spaceRow", SPACES)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::inherits(Operation::Insert, "spaceRow")),
-                ),
-        )
-        .build();
-    assert_refused(
-        &schema,
-        UnsupportedPolicy::InheritsFromInReadPolicy,
-        "$.tasks.policies.select.using",
-    );
+    let mut schema = fixture([(
+        SPACES,
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(inherits_from(Operation::Select, "projects")),
+    )]);
+    let tasks = |table: TableSchemaBuilder, read| {
+        SchemaBuilder::new()
+            .table(table.policies(TablePolicies::new().with_select(read)))
+            .build()
+    };
+    let shape = UnsupportedPolicy::InheritsFromInReadPolicy;
+    let path = "$.tasks.policies.select.using";
+
+    // The fragment uses plain UUID addresses and the deploy forbids app
+    // foreign keys to system tables. Exercise reverse inheritance on the
+    // registered fragment, and validate the forward-reference AST separately.
+    schema.extend(tasks(
+        TableSchemaBuilder::new("tasks").column("name", ColumnType::Text),
+        PolicyExpr::inherits_referencing(Operation::Insert, SPACES, "identifier"),
+    ));
+    assert_refused(&schema, shape, path);
+
+    schema.extend(tasks(
+        TableSchemaBuilder::new("tasks").fk_column("spaceRow", SPACES),
+        PolicyExpr::inherits(Operation::Insert, "spaceRow"),
+    ));
+    assert_validation_refused(&schema, shape, path);
 }
 
 /// The creator clause's `exists`: the `projects` row this member row names,
@@ -286,16 +270,14 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
     let mine = || PolicyExpr::eq_session("accountId", vec!["user".to_owned()]);
     let inserted = || PolicyExpr::InsertedByThisTransaction;
     let not = |expr: PolicyExpr| PolicyExpr::Not(Box::new(expr));
-    let members = |policies: TablePolicies| {
-        SchemaBuilder::new()
-            .table(projects())
-            .table(
-                address_table(MEMBERS, None, policies.with_select(PolicyExpr::True))
-                    .column("accountId", ColumnType::Uuid),
-            )
-            .build()
+    let members = |policies| fixture([(MEMBERS, policies)]);
+    let insert = |check| {
+        members(
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(check),
+        )
     };
-    let insert = |check: PolicyExpr| members(TablePolicies::new().with_insert(check));
 
     for accepted in [
         insert(PolicyExpr::And(vec![mine(), created_here(inserted())])),
@@ -345,10 +327,7 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
             "delete.using",
         ),
     ] {
-        let schema = SchemaBuilder::new()
-            .table(projects())
-            .table(address_table(MEMBERS, None, policies).column("accountId", ColumnType::Uuid))
-            .build();
+        let schema = members(policies);
         assert_refused(
             &schema,
             refused,
@@ -356,28 +335,42 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
         );
     }
 
-    let inherited = SchemaBuilder::new()
-        .table(projects())
-        .table(
-            address_table(
-                MEMBERS,
-                None,
-                TablePolicies::new()
-                    .with_select(PolicyExpr::True)
-                    .with_insert(created_here(inserted())),
+    let mut inherited = members(
+        TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(created_here(inserted())),
+    );
+    let path = "$.tasks.policies.select.using";
+    inherited.extend(
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("name", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new().with_select(PolicyExpr::inherits_referencing(
+                            Operation::Insert,
+                            MEMBERS,
+                            "identifier",
+                        )),
+                    ),
             )
-            .column("accountId", ColumnType::Uuid),
-        )
-        .table(
-            TableSchemaBuilder::new("tasks")
-                .fk_column("memberRow", MEMBERS)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::inherits(Operation::Insert, "memberRow")),
-                ),
-        )
-        .build();
-    assert_refused(&inherited, refused, "$.tasks.policies.select.using");
+            .build(),
+    );
+    assert_refused(&inherited, refused, path);
+
+    inherited.extend(
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .fk_column("memberRow", MEMBERS)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::inherits(Operation::Insert, "memberRow")),
+                    ),
+            )
+            .build(),
+    );
+    assert_validation_refused(&inherited, refused, path);
 }
 
 /// An address names one row: an `InheritsFrom` whose `id_column` or
@@ -385,9 +378,8 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
 /// it is refused, under `Or` and inside an `exists` too.
 ///
 /// ```text
-/// members.insert = IF(scopeId, identifiers: [uuid])     ✗
-/// members.insert = IF(scopeIds: [uuid], identifier)     ✗
-/// members.insert = EXISTS members(IF(scopeId, identifiers: [uuid]))   ✗
+/// members.insert = exists addresses(IF(scopeId, identifiers: [uuid]))       ✗
+/// members.insert = exists addresses(false ∨ IF(scopeIds: [uuid], identifier)) ✗
 /// ```
 #[test]
 fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
@@ -401,21 +393,13 @@ fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
         id_column: id_column.to_owned(),
         tables: vec!["projects".to_owned()],
     };
-    let members = |check: PolicyExpr| {
-        SchemaBuilder::new()
-            .table(projects())
-            .table(
-                address_table(
-                    MEMBERS,
-                    None,
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::True)
-                        .with_insert(check),
-                )
-                .column("identifiers", uuids())
-                .column("scopeIds", uuids()),
-            )
-            .build()
+    let members = |check| {
+        fixture([(
+            MEMBERS,
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(check),
+        )])
     };
     let insert_path = "$.__e2ee_members.policies.insert.with_check";
 
@@ -423,39 +407,44 @@ fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
     check_deployable_policies(&scalar).unwrap();
     deploy(&scalar).unwrap();
 
+    // The registered fragment has only scalar columns. An Exists in the
+    // system write policy lets us exercise addresses on an app table.
+    let within = |condition| {
+        let mut schema = members(PolicyExpr::Exists {
+            table: "addresses".to_owned(),
+            condition: Box::new(condition),
+        });
+        schema.extend(
+            SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("addresses")
+                        .column("scopeId", ColumnType::Uuid)
+                        .fk_column("identifier", "projects")
+                        .column("identifiers", uuids())
+                        .column("scopeIds", uuids()),
+                )
+                .build(),
+        );
+        schema
+    };
+    check_deployable_policies(&within(address("scopeId", "identifier"))).unwrap();
+    let non_scalar_id = within(address("scopeId", "identifiers"));
     assert_refused(
-        &members(address("scopeId", "identifiers")),
+        &non_scalar_id,
         refused,
-        &format!("{insert_path}.InheritsFrom.id_column"),
+        &format!("{insert_path}.Exists.condition.InheritsFrom.id_column"),
+    );
+    let error = check_deployable_policies(&non_scalar_id).unwrap_err();
+    assert!(
+        error.message().contains("must be a scalar column"),
+        "{error}"
     );
     assert_refused(
-        &members(PolicyExpr::Or(vec![
+        &within(PolicyExpr::Or(vec![
             PolicyExpr::False,
             address("scopeIds", "identifier"),
         ])),
         refused,
-        &format!("{insert_path}.Or[1].InheritsFrom.table_column"),
-    );
-    let error = check_deployable_policies(&members(address("scopeId", "identifiers")))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("must be a scalar column"), "{error}");
-
-    // Inside an `exists`, the address columns are the consulted table's: a
-    // scalar pair passes, a non-scalar one is refused there too.
-    let within = |table_column: &str, id_column: &str| PolicyExpr::Exists {
-        table: MEMBERS.to_owned(),
-        condition: Box::new(address(table_column, id_column)),
-    };
-    check_deployable_policies(&members(within("scopeId", "identifier"))).unwrap();
-    assert_refused(
-        &members(within("scopeId", "identifiers")),
-        refused,
-        &format!("{insert_path}.Exists.condition.InheritsFrom.id_column"),
-    );
-    assert_refused(
-        &members(within("scopeIds", "identifier")),
-        refused,
-        &format!("{insert_path}.Exists.condition.InheritsFrom.table_column"),
+        &format!("{insert_path}.Exists.condition.Or[1].InheritsFrom.table_column"),
     );
 }

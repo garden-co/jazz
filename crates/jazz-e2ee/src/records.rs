@@ -265,21 +265,6 @@ pub fn begin_stream_value(
     Ok((writer, prefix))
 }
 
-/// Encrypts a whole value as a stored stream record with `cipher`.
-pub fn encrypt_stream_value(
-    cipher: &dyn StreamCipher,
-    key: &[u8; 32],
-    identity: &CellIdentity<'_>,
-    cell_type: &[u8],
-    value: &[u8],
-    rng: &mut dyn RandomSource,
-) -> Result<Vec<u8>> {
-    let (mut writer, mut out) = begin_stream_value(cipher, key, identity, cell_type, rng)?;
-    writer.update(value, &mut out)?;
-    writer.finish(&mut out)?;
-    Ok(out)
-}
-
 /// Decrypts a whole stored stream record written for `identity` with
 /// whichever registered stream cipher its encoding names. An unregistered
 /// mechanism is [`Error::UnsupportedFormat`]; malformed bytes or an
