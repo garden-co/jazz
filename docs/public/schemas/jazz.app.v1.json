@@ -315,20 +315,7 @@
               "type": "string"
             }
           },
-          "oneOf": [
-            {
-              "required": ["type"]
-            },
-            {
-              "required": ["enum"]
-            },
-            {
-              "required": ["json"]
-            },
-            {
-              "required": ["array"]
-            }
-          ]
+          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
         },
         {
           "type": "object",
@@ -401,21 +388,16 @@
               "type": "string"
             }
           },
-          "oneOf": [
-            {
-              "required": ["type"]
-            },
-            {
-              "required": ["enum"]
-            },
-            {
-              "required": ["json"]
-            },
-            {
-              "required": ["array"]
-            }
-          ]
+          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
         }
+      ]
+    },
+    "encryptedTypeVariant": {
+      "oneOf": [
+        {"required": ["type"]},
+        {"required": ["enum"]},
+        {"required": ["json"]},
+        {"required": ["array"]}
       ]
     },
     "encryptedTypeExpression": {
@@ -453,20 +435,7 @@
               "type": "string"
             }
           },
-          "oneOf": [
-            {
-              "required": ["type"]
-            },
-            {
-              "required": ["enum"]
-            },
-            {
-              "required": ["json"]
-            },
-            {
-              "required": ["array"]
-            }
-          ]
+          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
         }
       ]
     },
@@ -528,20 +497,7 @@
               "type": "string"
             }
           },
-          "oneOf": [
-            {
-              "required": ["type"]
-            },
-            {
-              "required": ["enum"]
-            },
-            {
-              "required": ["json"]
-            },
-            {
-              "required": ["array"]
-            }
-          ]
+          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
         }
       ]
     },

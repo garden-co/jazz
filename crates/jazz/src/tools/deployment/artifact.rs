@@ -965,9 +965,8 @@ fn client_migrations(history: &History) -> Result<crate::db::Migrations, Artifac
 /// [`load_client`], with the current schema: what a client that has no
 /// other copy of the schema opens with.
 ///
-/// A client has no encryption hooks yet, so it refuses an app whose current
-/// version declares encryption ([`load_client_encrypted`] reads one for a
-/// client that installs them).
+/// This schema-only loader refuses apps with Jazz's system tables; encrypted
+/// clients use [`load_client_encrypted`] to obtain declarations for their hooks.
 pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
     let history = check_history(&read_app(json)?)?;
     if has_system_tables(history.current_schema()) {
