@@ -633,12 +633,13 @@ fn removal_in(state: &AccountState, epoch_id: &str) -> Option<Option<(String, St
         .position(|epoch| epoch.epoch_id == epoch_id)?;
     Some(state.epochs[index + 1..].iter().find_map(|epoch| {
         let successor = &epoch.successor.as_ref()?.row;
-        (successor.action == AccountAction::RemoveDevice)
+        (successor.columns.action == AccountAction::RemoveDevice)
             .then(|| {
                 successor
+                    .columns
                     .removed_device_id
                     .clone()
-                    .map(|device| (successor.id.clone(), device))
+                    .map(|device| (successor.columns.id.clone(), device))
             })
             .flatten()
     }))

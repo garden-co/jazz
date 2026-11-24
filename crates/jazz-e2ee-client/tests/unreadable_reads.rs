@@ -52,11 +52,7 @@ fn forged(space: uuid::Uuid, title: &str) -> BTreeMap<String, Value> {
 /// ```
 #[test]
 fn a_read_names_the_rows_it_left_out_and_a_page_counts_them() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, _client, db, _link, space) = client_in_space();
     let mut ids = BTreeMap::new();
     for title in ["a", "c", "e"] {
         let mut cells = note(space, SECRET);

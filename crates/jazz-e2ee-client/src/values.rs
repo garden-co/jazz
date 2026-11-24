@@ -17,8 +17,8 @@ use jazz::e2ee::PlainType;
 use jazz::records::{RecordDescriptor, Value, ValueType};
 use jazz::tools::deployment::artifact::encryption::{cell_type_integer, encrypted_value_type};
 use jazz::tools::{ColumnType, Value as DeclaredValue};
-use jazz_e2ee::protocol::content::EqualityValueBuf;
 use jazz_e2ee::protocol::json::{push_string, utf16_cmp};
+use jazz_e2ee::records::EqualityValue;
 use jazz_e2ee::records::{EqualityColumn, EqualityColumnType};
 
 use crate::error::ClientError;
@@ -260,37 +260,37 @@ impl ColumnCodec {
     }
 
     /// The equality-index form of a value of the column's type.
-    pub(crate) fn equality_value(&self, value: &Value) -> Option<EqualityValueBuf> {
-        equality_buf(&self.column_type, self.typed(value)?)
+    pub(crate) fn equality_value(&self, value: &Value) -> Option<EqualityValue> {
+        equality_value(&self.column_type, self.typed(value)?)
     }
 }
 
 /// The equality-index form of `value`, a value of `column_type` (null
 /// elements of an array included): JSON by its exact stored text, an array
 /// element by element as the element's type.
-fn equality_buf(column_type: &ColumnType, value: Value) -> Option<EqualityValueBuf> {
+fn equality_value(column_type: &ColumnType, value: Value) -> Option<EqualityValue> {
     let inner = match value {
-        Value::Nullable(None) => return Some(EqualityValueBuf::Null),
+        Value::Nullable(None) => return Some(EqualityValue::Null),
         Value::Nullable(Some(inner)) => *inner,
         value => value,
     };
     Some(match (column_type, inner) {
-        (ColumnType::Array { element }, Value::Array(items)) => EqualityValueBuf::Array(
+        (ColumnType::Array { element }, Value::Array(items)) => EqualityValue::Array(
             items
                 .into_iter()
-                .map(|item| equality_buf(element, item))
+                .map(|item| equality_value(element, item))
                 .collect::<Option<_>>()?,
         ),
-        (ColumnType::Json { .. }, Value::String(text)) => EqualityValueBuf::Json(text),
-        (ColumnType::Enum { .. }, Value::String(variant)) => EqualityValueBuf::Enum(variant),
-        (_, Value::Bool(value)) => EqualityValueBuf::Bool(value),
-        (_, Value::I32(value)) => EqualityValueBuf::Int(value.into()),
-        (_, Value::I64(value)) => EqualityValueBuf::Int(value),
-        (_, Value::U64(value)) => EqualityValueBuf::Timestamp(value),
-        (_, Value::F64(value)) => EqualityValueBuf::Float(value),
-        (_, Value::String(value)) => EqualityValueBuf::Text(value),
-        (_, Value::Bytes(value)) => EqualityValueBuf::Bytes(value),
-        (_, Value::Uuid(value)) => EqualityValueBuf::Uuid(*value.as_bytes()),
+        (ColumnType::Json { .. }, Value::String(text)) => EqualityValue::Json(text),
+        (ColumnType::Enum { .. }, Value::String(variant)) => EqualityValue::Enum(variant),
+        (_, Value::Bool(value)) => EqualityValue::Bool(value),
+        (_, Value::I32(value)) => EqualityValue::Int(value.into()),
+        (_, Value::I64(value)) => EqualityValue::Int(value),
+        (_, Value::U64(value)) => EqualityValue::Timestamp(value),
+        (_, Value::F64(value)) => EqualityValue::Float(value),
+        (_, Value::String(value)) => EqualityValue::Text(value),
+        (_, Value::Bytes(value)) => EqualityValue::Bytes(value),
+        (_, Value::Uuid(value)) => EqualityValue::Uuid(*value.as_bytes()),
         _ => return None,
     })
 }
@@ -699,16 +699,16 @@ mod tests {
         );
         assert_eq!(
             status.equality_value(&Value::String("open".into())),
-            Some(EqualityValueBuf::Enum("open".into()))
+            Some(EqualityValue::Enum("open".into()))
         );
         assert_eq!(
             status.equality_value(&Value::Nullable(None)),
-            Some(EqualityValueBuf::Null)
+            Some(EqualityValue::Null)
         );
         let json = codec(ColumnType::Json { schema: None }, false, true);
         assert_eq!(
             json.equality_value(&Value::String(r#"{"b":1,"a":2}"#.into())),
-            Some(EqualityValueBuf::Json(r#"{"b":1,"a":2}"#.into()))
+            Some(EqualityValue::Json(r#"{"b":1,"a":2}"#.into()))
         );
         let tags = codec(
             ColumnType::Array {
@@ -722,9 +722,9 @@ mod tests {
                 Value::String("x".into()),
                 Value::String("y".into())
             ])),
-            Some(EqualityValueBuf::Array(vec![
-                EqualityValueBuf::Text("x".into()),
-                EqualityValueBuf::Text("y".into())
+            Some(EqualityValue::Array(vec![
+                EqualityValue::Text("x".into()),
+                EqualityValue::Text("y".into())
             ]))
         );
         let rows = PlainType {

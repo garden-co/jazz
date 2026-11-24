@@ -229,9 +229,9 @@ impl E2eeClient {
             .map(|id| (id.clone(), extra_devices.clone()))
             .collect();
         macro_rules! group {
-            ($rows:expr, $field:ident, $devices:expr) => {
+            ($rows:expr, $field:ident $(.$columns:ident)?, $devices:expr) => {
                 for row in $rows {
-                    let account = row.row.account_id.clone();
+                    let account = row.row$(.$columns)?.account_id.clone();
                     if let Some(ledger) = by_account.get_mut(&account) {
                         let named: Vec<String> = $devices(&row);
                         devices.entry(account).or_default().extend(named);
@@ -249,11 +249,11 @@ impl E2eeClient {
             a.row.device_id.clone(),
             a.row.signer_id.clone()
         ]);
-        group!(successors, successors, |x: &Accepted<
+        group!(successors, successors.columns, |x: &Accepted<
             PublicAccountSuccessor,
         >| {
-            let mut named = vec![x.row.signer_id.clone()];
-            named.extend(x.row.removed_device_id.clone());
+            let mut named = vec![x.row.columns.signer_id.clone()];
+            named.extend(x.row.columns.removed_device_id.clone());
             named
         });
         group!(recovery_roots, recovery_roots, |r: &Accepted<

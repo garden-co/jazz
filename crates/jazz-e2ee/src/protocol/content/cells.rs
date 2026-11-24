@@ -16,22 +16,20 @@
 //! reported `stale-space`. A provider failure is always an error, never an
 //! unreadable cell, and no other candidate key is tried after it.
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::agility::StreamWriter;
 use crate::error::Error;
 use crate::random::RandomSource;
-use crate::records::{self, CELL_RECORD, EqualityValue, RecordKind, read_stored_record};
+use crate::records::{
+    self, CELL_RECORD, EqualityValue, MIN_RECORD_PAYLOAD, RecordKind, read_stored_record,
+};
 use crate::registry::{Registry, Suite};
 
 use super::super::error::ProtocolError;
 use super::super::records::space::SpaceAddress;
 use super::held::{HeldKeys, HeldSpace, WriteKey};
 use super::{ContentError, ContentResult, DataError, EncryptedColumn, RowTarget};
-
-const EPOCH_BYTES: usize = 36;
-/// The smallest cell record payload: the epoch and the shortest envelope.
-const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
 
 /// The length of the shortest stored cell record (header plus 47 payload
 /// bytes). Any shorter non-empty stored value is `invalid-ciphertext` (§4.1).
@@ -43,79 +41,6 @@ pub fn min_cell_record_len() -> usize {
         + MIN_RECORD_PAYLOAD
 }
 
-/// A logical value as an equality index encodes it, owned, for values the
-/// caller decodes from plaintext. Cleared on drop and
-/// never printed.
-#[derive(Clone, PartialEq)]
-pub enum EqualityValueBuf {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Timestamp(u64),
-    Float(f64),
-    Text(String),
-    Bytes(Vec<u8>),
-    Uuid([u8; 16]),
-    Enum(String),
-    /// A JSON value as stored: the text as written.
-    Json(String),
-    /// An array's elements, in order.
-    Array(Vec<EqualityValueBuf>),
-}
-
-impl core::fmt::Debug for EqualityValueBuf {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::Null => "Null",
-            Self::Bool(_) => "Bool(..)",
-            Self::Int(_) => "Int(..)",
-            Self::Timestamp(_) => "Timestamp(..)",
-            Self::Float(_) => "Float(..)",
-            Self::Text(_) => "Text(..)",
-            Self::Bytes(_) => "Bytes(..)",
-            Self::Uuid(_) => "Uuid(..)",
-            Self::Enum(_) => "Enum(..)",
-            Self::Json(_) => "Json(..)",
-            Self::Array(_) => "Array(..)",
-        })
-    }
-}
-
-impl Drop for EqualityValueBuf {
-    fn drop(&mut self) {
-        match self {
-            Self::Null => {}
-            Self::Bool(value) => value.zeroize(),
-            Self::Int(value) => value.zeroize(),
-            Self::Timestamp(value) => value.zeroize(),
-            Self::Float(value) => value.zeroize(),
-            Self::Text(value) | Self::Enum(value) | Self::Json(value) => value.zeroize(),
-            // Each element clears itself as it drops.
-            Self::Array(_) => {}
-            Self::Bytes(value) => value.zeroize(),
-            Self::Uuid(value) => value.zeroize(),
-        }
-    }
-}
-
-impl EqualityValueBuf {
-    pub fn as_value(&self) -> EqualityValue<'_> {
-        match self {
-            Self::Null => EqualityValue::Null,
-            Self::Bool(value) => EqualityValue::Bool(*value),
-            Self::Int(value) => EqualityValue::Int(*value),
-            Self::Timestamp(value) => EqualityValue::Timestamp(*value),
-            Self::Float(value) => EqualityValue::Float(*value),
-            Self::Text(value) => EqualityValue::Text(value),
-            Self::Bytes(value) => EqualityValue::Bytes(value),
-            Self::Uuid(value) => EqualityValue::Uuid(*value),
-            Self::Enum(value) => EqualityValue::Enum(value),
-            Self::Json(value) => EqualityValue::Json(value),
-            Self::Array(items) => EqualityValue::Array(crate::records::EqualityItems::Bufs(items)),
-        }
-    }
-}
-
 /// One encrypted cell of a write: its column, Jazz's native encoding of
 /// the value, and, for an equality-indexed column, the logical value its
 /// token hashes. The value and the equality value are never printed.
@@ -123,7 +48,7 @@ impl EqualityValueBuf {
 pub struct CellInput<'a> {
     pub column: EncryptedColumn<'a>,
     pub value: &'a [u8],
-    pub equality: Option<EqualityValue<'a>>,
+    pub equality: Option<&'a EqualityValue>,
 }
 
 impl core::fmt::Debug for CellInput<'_> {
@@ -171,7 +96,7 @@ pub(crate) fn seal_one(
         cell.value,
         rng,
     )?;
-    let equality_token = match (&column.equality, &cell.equality) {
+    let equality_token = match (&column.equality, cell.equality) {
         (None, None) => None,
         (Some(index), Some(value)) => Some(records::equality_token_of(
             suite.equality,

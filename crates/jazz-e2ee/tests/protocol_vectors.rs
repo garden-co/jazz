@@ -337,6 +337,13 @@ fn canonical_json() {
             "{text}"
         );
     }
+    // An invalid list shape takes precedence over delivery-pair validation.
+    for text in [b"[[true]]".as_slice(), b"[[{}]]", b"[[[[]]]]"] {
+        assert!(matches!(
+            json::decode_delivery_map(text),
+            Err(ProtocolError::InvalidRecord("non-canonical JSON"))
+        ));
+    }
 }
 
 fn keys() -> KeyColumns {
@@ -662,15 +669,17 @@ fn signed_bytes() {
     assert_eq!(expected_code, "797911");
     let membership = json::encode_id_list([D1]).unwrap();
     let public_successor = PublicAccountSuccessor {
-        id: R1.into(),
-        account_id: ALICE.into(),
-        predecessor: E1.into(),
-        epoch_id: E2.into(),
-        signer_id: D1.into(),
-        action: AccountAction::RemoveDevice,
-        removed_device_id: Some(D2.into()),
-        retired_recovery_root_ids: b"[]".to_vec(),
-        membership: membership.clone(),
+        columns: AccountSuccessorColumns {
+            id: R1.into(),
+            account_id: ALICE.into(),
+            predecessor: E1.into(),
+            epoch_id: E2.into(),
+            signer_id: D1.into(),
+            action: AccountAction::RemoveDevice,
+            removed_device_id: Some(D2.into()),
+            retired_recovery_root_ids: b"[]".to_vec(),
+            membership: membership.clone(),
+        },
         revision: json::encode_revision([R2]).unwrap(),
         signature: vec![],
     };
@@ -701,15 +710,17 @@ fn signed_bytes() {
     ));
     let deliveries = json::encode_delivery_map([(D1, vec![7u8; 3])]).unwrap();
     let private_successor = AccountSuccessor {
-        id: R1.into(),
-        account_id: ALICE.into(),
-        predecessor: E1.into(),
-        epoch_id: E2.into(),
-        signer_id: D1.into(),
-        action: AccountAction::RetireRecoveryRoot,
-        removed_device_id: None,
-        retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
-        membership: membership.clone(),
+        columns: AccountSuccessorColumns {
+            id: R1.into(),
+            account_id: ALICE.into(),
+            predecessor: E1.into(),
+            epoch_id: E2.into(),
+            signer_id: D1.into(),
+            action: AccountAction::RetireRecoveryRoot,
+            removed_device_id: None,
+            retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+            membership: membership.clone(),
+        },
         revision: json::encode_id_list([R2]).unwrap(),
         verification: b"marker".to_vec(),
         history: b"history".to_vec(),
@@ -1085,15 +1096,17 @@ fn row_validation() {
     }
 
     let successor = PublicAccountSuccessor {
-        id: R1.into(),
-        account_id: ALICE.into(),
-        predecessor: E1.into(),
-        epoch_id: E2.into(),
-        signer_id: D1.into(),
-        action: AccountAction::RemoveDevice,
-        removed_device_id: Some(D2.into()),
-        retired_recovery_root_ids: b"[]".to_vec(),
-        membership: json::encode_id_list([D1]).unwrap(),
+        columns: AccountSuccessorColumns {
+            id: R1.into(),
+            account_id: ALICE.into(),
+            predecessor: E1.into(),
+            epoch_id: E2.into(),
+            signer_id: D1.into(),
+            action: AccountAction::RemoveDevice,
+            removed_device_id: Some(D2.into()),
+            retired_recovery_root_ids: b"[]".to_vec(),
+            membership: json::encode_id_list([D1]).unwrap(),
+        },
         revision: b"[]".to_vec(),
         signature: vec![1],
     };
@@ -1103,19 +1116,28 @@ fn row_validation() {
     let derived_root = ids::uuid_v8([0x5a; 16]);
     assert!(
         PublicAccountSuccessor {
-            retired_recovery_root_ids: json::encode_root_id_list([R2, &derived_root]).unwrap(),
+            columns: AccountSuccessorColumns {
+                retired_recovery_root_ids: json::encode_root_id_list([R2, &derived_root]).unwrap(),
+                ..successor.columns.clone()
+            },
             ..successor.clone()
         }
         .validate()
         .is_ok()
     );
     let retirement = PublicAccountSuccessor {
-        action: AccountAction::RetireRecoveryRoot,
-        removed_device_id: None,
-        retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+        columns: AccountSuccessorColumns {
+            action: AccountAction::RetireRecoveryRoot,
+            removed_device_id: None,
+            retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+            ..successor.columns.clone()
+        },
         ..successor.clone()
     };
-    assert_eq!(retirement.targets().unwrap(), (R2.to_owned(), Vec::new()));
+    assert_eq!(
+        retirement.columns.targets().unwrap(),
+        (R2.to_owned(), Vec::new())
+    );
     for ids in [
         b"[]".to_vec(),
         json::encode_root_id_list([R1, R2]).unwrap(),
@@ -1124,7 +1146,10 @@ fn row_validation() {
     ] {
         assert!(invalid(
             PublicAccountSuccessor {
-                retired_recovery_root_ids: ids,
+                columns: AccountSuccessorColumns {
+                    retired_recovery_root_ids: ids,
+                    ..retirement.columns.clone()
+                },
                 ..retirement.clone()
             }
             .validate()
@@ -1133,8 +1158,11 @@ fn row_validation() {
     }
     assert!(invalid(
         PublicAccountSuccessor {
-            action: AccountAction::RetireRecoveryRoot,
-            retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+            columns: AccountSuccessorColumns {
+                action: AccountAction::RetireRecoveryRoot,
+                retired_recovery_root_ids: json::encode_root_id_list([R2]).unwrap(),
+                ..successor.columns.clone()
+            },
             ..successor.clone()
         }
         .validate()
@@ -1142,7 +1170,10 @@ fn row_validation() {
     ));
     assert!(invalid(
         PublicAccountSuccessor {
-            action: AccountAction::RetireRecoveryRoot,
+            columns: AccountSuccessorColumns {
+                action: AccountAction::RetireRecoveryRoot,
+                ..successor.columns.clone()
+            },
             ..successor.clone()
         }
         .validate()
@@ -1150,7 +1181,10 @@ fn row_validation() {
     ));
     assert!(invalid(
         PublicAccountSuccessor {
-            membership: json::encode_id_list([D1, D2]).unwrap(),
+            columns: AccountSuccessorColumns {
+                membership: json::encode_id_list([D1, D2]).unwrap(),
+                ..successor.columns.clone()
+            },
             ..successor.clone()
         }
         .validate()
@@ -1158,7 +1192,10 @@ fn row_validation() {
     ));
     assert!(invalid(
         PublicAccountSuccessor {
-            epoch_id: E1.into(),
+            columns: AccountSuccessorColumns {
+                epoch_id: E1.into(),
+                ..successor.columns.clone()
+            },
             ..successor.clone()
         }
         .validate()

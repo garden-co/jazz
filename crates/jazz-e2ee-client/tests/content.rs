@@ -31,11 +31,7 @@ impl std::io::Read for Unread {
 /// A mistyped plain title alongside an encrypted body leaves the attachment source unread.
 #[test]
 fn invalid_plain_stream_sibling_leaves_the_attachment_unread() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, _client, db, _link, space) = client_in_space();
     let mut cells = note(space, SECRET);
     cells.insert("title".into(), Value::I32(4));
     let error =
@@ -47,11 +43,7 @@ fn invalid_plain_stream_sibling_leaves_the_attachment_unread() {
 /// Alice's streamed insert reports a missing required sibling before it reads her attachment.
 #[test]
 fn missing_required_stream_sibling_leaves_the_attachment_unread() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, _client, db, _link, space) = client_in_space();
     for missing in ["title", "body"] {
         let mut cells = note(space, SECRET);
         cells.remove(missing);
@@ -73,11 +65,7 @@ fn missing_required_stream_sibling_leaves_the_attachment_unread() {
 fn upsert_of_an_absent_row_checks_required_siblings_before_reading() {
     use jazz::db::StreamingMutationKind::Upsert;
 
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, _client, db, _link, space) = client_in_space();
     let mut cells = note(space, SECRET);
     cells.remove("title");
     let absent = jazz::ids::RowUuid(uuid::Uuid::now_v7());
@@ -139,11 +127,7 @@ fn invalid_plain_stream_sibling_is_rejected_at_rowless_begin() {
 }
 
 fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, _client, db, _link, space) = client_in_space();
     let existing = block_on(db.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
@@ -198,11 +182,7 @@ fn invalid_stream_metadata_leaves_an_upsert_source_unread() {
 fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
     use jazz::db::StreamingMutationKind::Update;
 
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, _client, db, _link, space) = client_in_space();
     let row = block_on(db.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
@@ -462,11 +442,7 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
 /// ```
 #[test]
 fn cells_that_do_not_authenticate_are_reported_not_returned() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, client, db, _link, space) = client_in_space();
     let good = block_on(db.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
@@ -665,11 +641,7 @@ fn unsealed(space: uuid::Uuid, value: Value) -> BTreeMap<String, Value> {
 /// never matches by accident.
 #[test]
 fn unanswerable_encrypted_queries_are_refused() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, _client, db, _link, space) = client_in_space();
     let in_space = || Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
     for refused in [
         in_space().order_by("body", OrderDirection::Asc),
@@ -701,11 +673,7 @@ fn unanswerable_encrypted_queries_are_refused() {
 /// as online.
 #[test]
 fn offline_equality_queries_compare_opened_values() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (_server, client, db, _link, space) = client_in_space();
     for body in ["x", "y", "x"] {
         block_on(db.insert("notes", note(space, body), Default::default())).unwrap();
     }

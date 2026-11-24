@@ -1244,8 +1244,7 @@ impl Db {
         }
         whole_only(&self.inner, table, column)?;
         #[cfg(feature = "e2ee-client")]
-        self.inner
-            .check_rowless_stream(&self.operation_schema(), table, cells, None)?;
+        self.inner.check_rowless_stream(table, cells, None)?;
         self.begin_upload(table, cells, column)
     }
 
@@ -1361,8 +1360,6 @@ impl Db {
             sealer: None,
             #[cfg(feature = "e2ee-client")]
             sealed_for: None,
-            #[cfg(feature = "e2ee-client")]
-            header_written: false,
         })
     }
 
@@ -1378,12 +1375,7 @@ impl Db {
         // An encrypted value is sealed before the chunker sees it.
         #[cfg(feature = "e2ee-client")]
         if let Some(sealer) = upload.sealer.as_mut() {
-            let mut sealed = Vec::new();
-            if !upload.header_written {
-                sealed = sealer.header()?;
-                upload.header_written = true;
-            }
-            sealed.extend(sealer.push(bytes)?);
+            let sealed = sealer.push(bytes)?;
             return self.stage_streaming_bytes(upload, &sealed).await;
         }
         self.stage_streaming_bytes(upload, bytes).await
@@ -1603,7 +1595,7 @@ impl Db {
             *cells = std::mem::take(&mut sealed.cells);
         } else {
             self.inner
-                .check_rowless_stream(&active_schema, table, cells, Some(mutation))?;
+                .check_rowless_stream(table, cells, Some(mutation))?;
         }
         #[cfg(not(feature = "e2ee-client"))]
         let _ = (mutation, row, target);
@@ -1612,16 +1604,9 @@ impl Db {
                 "the streamed column is also set in the other cells",
             ));
         }
-        // A sealed value ends with its final record (and starts with its
-        // header, even when no byte was pushed).
         #[cfg(feature = "e2ee-client")]
-        if let Some(mut sealer) = upload.sealer.take() {
-            let mut tail = Vec::new();
-            if !upload.header_written {
-                tail = sealer.header()?;
-                upload.header_written = true;
-            }
-            tail.extend(sealer.finish()?);
+        if let Some(sealer) = upload.sealer.take() {
+            let tail = sealer.finish()?;
             self.stage_streaming_bytes(upload, &tail).await?;
         }
         let value = {
@@ -1821,8 +1806,6 @@ pub struct StreamingValueUpload {
     /// it, and leaves it to the hooks as it is.
     #[cfg(feature = "e2ee-client")]
     pub(super) sealed_for: Option<SealedFor>,
-    #[cfg(feature = "e2ee-client")]
-    header_written: bool,
 }
 
 pub(crate) type StreamedSeal<'a> = &'a SealedFor;

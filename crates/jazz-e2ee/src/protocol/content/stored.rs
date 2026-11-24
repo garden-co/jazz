@@ -12,7 +12,7 @@
 //!                      envelope, signature }
 //! ```
 //!
-//! Every value is canonical JSON ([`super::canonical`]); `B(f, x) =
+//! Every value is canonical JSON ([`super::super::canonical`]); `B(f, x) =
 //! UTF8(json(canonical([f, x])))`. Stored root and successor rows are
 //! objects of their §1.3 columns plus `id`, bytes as arrays. A decoder
 //! rebuilds each record and refuses input whose canonical encoding differs;
@@ -22,9 +22,9 @@
 use crate::agility::{MechanismId, PublicKey};
 use crate::primitives::hash::sha256;
 
+use super::super::canonical::{self, MAX_SAFE_INTEGER, Value, invalid, parse_canonical};
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::records::space::{SpaceRoot, SpaceSuccessor};
-use super::canonical::{self, MAX_SAFE_INTEGER, Value};
 
 /// The format of a held-key document (one per space root).
 pub const DOCUMENT_FORMAT: &str = "jazz-e2ee-held-space-v1";
@@ -36,10 +36,6 @@ pub const KEY_FORMAT: &str = "jazz-e2ee-held-key-v3";
 pub const DEVICE_HASH_FORMAT: &str = "jazz-e2ee-held-device-v1";
 /// The format `B` names in the lineage prefix hash.
 pub const PREFIX_FORMAT: &str = "jazz-e2ee-held-prefix-v1";
-
-fn invalid<T>(what: &'static str) -> ProtocolResult<T> {
-    Err(ProtocolError::InvalidRecord(what))
-}
 
 /// Lowercase hex.
 fn hex(bytes: &[u8]) -> String {
@@ -69,65 +65,75 @@ pub fn device_hash(sealing: &PublicKey, signing: &PublicKey) -> ProtocolResult<S
     Ok(hex(&sha256(&bytes)))
 }
 
-/// A stored space root row: its §1.3 columns plus `id`.
-pub(crate) fn root_value(root: &SpaceRoot) -> Value {
-    Value::object(vec![
-        ("id", Some(Value::string(&root.id))),
-        ("scopeId", Some(Value::string(&root.scope_id))),
-        ("identifier", Some(Value::string(&root.identifier))),
-        (
-            "creatorAccountId",
-            Some(Value::string(&root.creator_account_id)),
-        ),
-        ("deviceId", Some(Value::string(&root.device_id))),
-        (
-            "accountEpochId",
-            Some(Value::string(&root.account_epoch_id)),
-        ),
-        ("epochId", Some(Value::string(&root.epoch_id))),
-        ("mechanism", Some(Value::string(&root.mechanism))),
-        ("version", Some(Value::Number(root.version.into()))),
-        ("verification", Some(Value::bytes(&root.verification))),
-        (
-            "accountEnvelope",
-            Some(Value::bytes(&root.account_envelope)),
-        ),
-        ("signature", Some(Value::bytes(&root.signature))),
-    ])
+/// Declares the stored field names and codecs once for both directions.
+macro_rules! stored_row {
+    (
+        $(#[$doc:meta])*
+        $vis:vis $encode:ident, $decode:ident for $row:ident $(checked by $check:ident)? {
+            $($field:ident: $name:literal => $codec:ident $(($error:literal))?),+ $(,)?
+        }
+    ) => {
+        $(#[$doc])*
+        $vis fn $encode(row: &$row) -> Value {
+            Value::object(vec![
+                $(($name, Some(stored_row!(@encode $codec, row.$field))),)+
+            ])
+        }
+
+        $vis fn $decode(value: &Value) -> ProtocolResult<$row> {
+            let fields = Fields::new(value)?;
+            let row = $row {
+                $($field: fields.$codec($name $(, $error)?)?,)+
+            };
+            $($check(value, &$encode(&row))?;)?
+            Ok(row)
+        }
+    };
+    (@encode version, $value:expr) => {
+        Value::Number($value.into())
+    };
+    (@encode $codec:ident, $value:expr) => {
+        Value::$codec(&$value)
+    };
 }
 
-/// A stored space successor row: its §1.3 columns plus `id`.
-pub(crate) fn successor_value(successor: &SpaceSuccessor) -> Value {
-    Value::object(vec![
-        ("id", Some(Value::string(&successor.id))),
-        ("scopeId", Some(Value::string(&successor.scope_id))),
-        ("identifier", Some(Value::string(&successor.identifier))),
-        ("predecessor", Some(Value::string(&successor.predecessor))),
-        (
-            "historyEpochId",
-            Some(Value::string(&successor.history_epoch_id)),
-        ),
-        ("epochId", Some(Value::string(&successor.epoch_id))),
-        (
-            "authorAccountId",
-            Some(Value::string(&successor.author_account_id)),
-        ),
-        (
-            "authorDeviceId",
-            Some(Value::string(&successor.author_device_id)),
-        ),
-        (
-            "authorEpochId",
-            Some(Value::string(&successor.author_epoch_id)),
-        ),
-        ("verification", Some(Value::bytes(&successor.verification))),
-        ("history", Some(Value::bytes(&successor.history))),
-        (
-            "accountEnvelope",
-            Some(Value::bytes(&successor.account_envelope)),
-        ),
-        ("signature", Some(Value::bytes(&successor.signature))),
-    ])
+pub(super) use stored_row;
+
+stored_row! {
+    /// A stored space root row: its §1.3 columns plus `id`.
+    pub(crate) root_value, root_from for SpaceRoot checked by ensure_canonical {
+        id: "id" => string,
+        scope_id: "scopeId" => string,
+        identifier: "identifier" => string,
+        creator_account_id: "creatorAccountId" => string,
+        device_id: "deviceId" => string,
+        account_epoch_id: "accountEpochId" => string,
+        epoch_id: "epochId" => string,
+        mechanism: "mechanism" => string,
+        version: "version" => version("version out of range"),
+        verification: "verification" => bytes,
+        account_envelope: "accountEnvelope" => bytes,
+        signature: "signature" => bytes,
+    }
+}
+
+stored_row! {
+    /// A stored space successor row: its §1.3 columns plus `id`.
+    pub(crate) successor_value, successor_from for SpaceSuccessor checked by ensure_canonical {
+        id: "id" => string,
+        scope_id: "scopeId" => string,
+        identifier: "identifier" => string,
+        predecessor: "predecessor" => string,
+        history_epoch_id: "historyEpochId" => string,
+        epoch_id: "epochId" => string,
+        author_account_id: "authorAccountId" => string,
+        author_device_id: "authorDeviceId" => string,
+        author_epoch_id: "authorEpochId" => string,
+        verification: "verification" => bytes,
+        history: "history" => bytes,
+        account_envelope: "accountEnvelope" => bytes,
+        signature: "signature" => bytes,
+    }
 }
 
 /// Reads object fields of a decoded value; a missing field or one of
@@ -156,6 +162,10 @@ impl<'v> Fields<'v> {
         self.get(name)?.as_bytes()
     }
 
+    pub(super) fn version(&self, name: &str, error: &'static str) -> ProtocolResult<u32> {
+        u32::try_from(self.get(name)?.as_number()?).map_err(|_| ProtocolError::InvalidRecord(error))
+    }
+
     pub(super) fn format(&self, expected: &str) -> ProtocolResult<()> {
         if self.get("format")?.as_str()? == expected {
             Ok(())
@@ -173,48 +183,6 @@ pub(super) fn ensure_canonical(value: &Value, rebuilt: &Value) -> ProtocolResult
     } else {
         invalid("non-canonical record")
     }
-}
-
-pub(crate) fn root_from(value: &Value) -> ProtocolResult<SpaceRoot> {
-    let fields = Fields::new(value)?;
-    let root = SpaceRoot {
-        id: fields.string("id")?,
-        scope_id: fields.string("scopeId")?,
-        identifier: fields.string("identifier")?,
-        creator_account_id: fields.string("creatorAccountId")?,
-        device_id: fields.string("deviceId")?,
-        account_epoch_id: fields.string("accountEpochId")?,
-        epoch_id: fields.string("epochId")?,
-        mechanism: fields.string("mechanism")?,
-        version: u32::try_from(fields.get("version")?.as_number()?)
-            .map_err(|_| ProtocolError::InvalidRecord("version out of range"))?,
-        verification: fields.bytes("verification")?,
-        account_envelope: fields.bytes("accountEnvelope")?,
-        signature: fields.bytes("signature")?,
-    };
-    ensure_canonical(value, &root_value(&root))?;
-    Ok(root)
-}
-
-pub(crate) fn successor_from(value: &Value) -> ProtocolResult<SpaceSuccessor> {
-    let fields = Fields::new(value)?;
-    let successor = SpaceSuccessor {
-        id: fields.string("id")?,
-        scope_id: fields.string("scopeId")?,
-        identifier: fields.string("identifier")?,
-        predecessor: fields.string("predecessor")?,
-        history_epoch_id: fields.string("historyEpochId")?,
-        epoch_id: fields.string("epochId")?,
-        author_account_id: fields.string("authorAccountId")?,
-        author_device_id: fields.string("authorDeviceId")?,
-        author_epoch_id: fields.string("authorEpochId")?,
-        verification: fields.bytes("verification")?,
-        history: fields.bytes("history")?,
-        account_envelope: fields.bytes("accountEnvelope")?,
-        signature: fields.bytes("signature")?,
-    };
-    ensure_canonical(value, &successor_value(&successor))?;
-    Ok(successor)
 }
 
 /// `<lineage prefix hash>`: `sha256hex(B("jazz-e2ee-held-prefix-v1",
@@ -411,27 +379,6 @@ impl HeldKeyRecord {
         ensure_canonical(value, &record.value(true, true))?;
         Ok(record)
     }
-}
-
-/// Parses text that must be the canonical encoding of what it parses to.
-pub(super) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
-    fn sorted(value: &Value) -> bool {
-        match value {
-            Value::Array(items) => items.iter().all(sorted),
-            Value::Object(fields) => {
-                fields
-                    .windows(2)
-                    .all(|pair| super::super::json::utf16_cmp(&pair[0].0, &pair[1].0).is_lt())
-                    && fields.iter().all(|(_, value)| sorted(value))
-            }
-            _ => true,
-        }
-    }
-    let value = canonical::parse(bytes)?;
-    if !sorted(&value) || value.encode()? != bytes {
-        return invalid("non-canonical JSON");
-    }
-    Ok(value)
 }
 
 /// One held-key document: `{ format, revision, lineage, keys }`.

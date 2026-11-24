@@ -5,17 +5,11 @@
 //! mechanism is [`UnsupportedCapability`], never invalid; a provider failure
 //! is [`crate::Error::CryptoFailure`], never `Ok(false)` (§0, §7).
 
-use crate::agility::{KeyPair, PublicKey, Signer};
+use crate::agility::PublicKey;
 use crate::envelope::Mechanism;
 use crate::registry::Registry;
 
 use super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
-
-/// Signs `bytes` with `signer` and the device's (or epoch's, or recovery
-/// root's) key pair.
-pub fn sign(signer: &dyn Signer, key: &KeyPair, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
-    Ok(signer.sign(key, bytes)?)
-}
 
 /// The capability a signing key of `mechanism` needs, if this registry lacks
 /// it.

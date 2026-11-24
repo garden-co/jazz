@@ -455,7 +455,9 @@ async fn a_renamed_scope_table_keeps_its_stored_identity() {
         .unwrap()
         .with_db_for_test(move |db| {
             let names = |hash| {
-                jazz::db::block_on(db.catalogue_stored_names(&hash)).map_err(|err| err.to_string())
+                jazz::db::block_on(db.catalogue_schema_and_stored_names(&hash))
+                    .map(|(_, names)| names)
+                    .map_err(|err| err.to_string())
             };
             Ok((names(from)?, names(to)?))
         })

@@ -149,6 +149,6 @@ impl DeviceAccountIdentity {
 
     /// Signs `bytes` with the built-in Ed25519 mechanism.
     pub(crate) fn sign(&self, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
-        signing::sign(&signature::Builtin, &self.signing, bytes)
+        Ok(signature::Builtin.sign(&self.signing, bytes)?)
     }
 }

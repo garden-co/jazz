@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use super::error::{ProtocolError, ProtocolResult};
 
 /// An accepted position: an unsigned 64-bit integer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position(pub u64);
 
 /// A row with its accepted position.

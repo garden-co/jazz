@@ -189,12 +189,21 @@ pub fn seal_texts(
         .registry
         .select(&MechanismConfig::default())
         .unwrap();
+    let equalities: Vec<_> = cells
+        .iter()
+        .map(|(column, text)| {
+            column
+                .equality
+                .map(|_| EqualityValue::Text((*text).to_owned()))
+        })
+        .collect();
     let inputs: Vec<_> = cells
         .iter()
-        .map(|(column, text)| CellInput {
+        .zip(&equalities)
+        .map(|((column, text), equality)| CellInput {
             column: *column,
             value: text.as_bytes(),
-            equality: column.equality.map(|_| EqualityValue::Text(text)),
+            equality: equality.as_ref(),
         })
         .collect();
     seal_cells(&suite, key, target, &inputs, &mut fresh_rng())

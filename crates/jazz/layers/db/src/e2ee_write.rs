@@ -4,12 +4,15 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use jazz_model::model::public_api::types::equality_column;
+
 use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
-    Cells, Db, InsertOptions, LargeEdits, Located, StagedOp, Store, StreamingMutationKind,
-    StreamingValueUpload, Target, WriteTarget, column_from_sql, quote, rejected, storage,
+    Batch, BatchPrefix, Cells, Db, GroundedRows, InsertOptions, InsertedRows, LargeEdits, Located,
+    StagedOp, Store, StreamingMutationKind, StreamingValueUpload, Target, WriteTarget,
+    column_from_sql, quote, rejected, storage,
 };
-use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
+use crate::e2ee::{E2eeHooks, SealError, StreamTarget, WriteCells, WriteKind};
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
@@ -48,36 +51,14 @@ impl Db {
         if companions.is_empty() {
             return self.stage_chunked(id, op, edits).await;
         }
-        let names: Vec<(String, RowUuid)> = companions
-            .iter()
-            .filter_map(|companion| match companion {
-                StagedOp::Insert(table, _, opts) => opts.row_id.map(|row| (table.clone(), row)),
-                _ => None,
-            })
-            .collect();
-        let (prefix, rows, inserted, claims, new_check_keys) = {
-            let batches = self.inner.batches.borrow();
-            let batch = batches
-                .get(&id)
-                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-            // Only absent entries can be added by these inserts. An unknown
-            // table fails staging before it can record a check.
-            let new_check_keys: Vec<_> = names
-                .iter()
-                .filter_map(|(table, row)| {
-                    let stored = schema.stored_table(table).ok()?;
-                    let key = (stored.to_owned(), *row.0.as_bytes());
-                    (!batch.first_checks.contains_key(&key)).then_some(key)
-                })
-                .collect();
-            (
-                batch.prefix(),
-                batch.rows.clone(),
-                batch.inserted.clone(),
-                batch.claims.clone(),
-                new_check_keys,
-            )
-        };
+        let names = companion_names(&companions);
+        let checkpoint = self
+            .inner
+            .batches
+            .borrow()
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .checkpoint(&schema, &names);
         let staged = async {
             for companion in companions {
                 self.stage_chunked(id, companion, LargeEdits::default())
@@ -93,15 +74,7 @@ impl Db {
                 // what stays staged.
                 inner.settle_overlay();
                 if let Some(batch) = inner.batches.borrow_mut().get_mut(&id) {
-                    batch.ops.truncate(prefix.ops);
-                    batch.edits.derived.truncate(prefix.derived);
-                    batch.edits.pending_nodes.truncate(prefix.pending_nodes);
-                    for key in new_check_keys {
-                        batch.first_checks.remove(&key);
-                    }
-                    batch.rows = rows;
-                    batch.inserted = inserted;
-                    batch.claims = claims;
+                    batch.restore(checkpoint);
                 }
                 inner.e2ee.clone()
             } else {
@@ -118,6 +91,56 @@ impl Db {
         }
         staged
     }
+}
+
+struct BatchCheckpoint {
+    prefix: BatchPrefix,
+    rows: std::sync::Arc<GroundedRows>,
+    inserted: std::sync::Arc<InsertedRows>,
+    claims: Option<BTreeMap<String, Value>>,
+    new_check_keys: Vec<(String, [u8; 16])>,
+}
+
+impl Batch {
+    fn checkpoint(&self, schema: &Schema, names: &[(String, RowUuid)]) -> BatchCheckpoint {
+        // Only absent entries can be added by these inserts. An unknown
+        // table fails staging before it can record a check.
+        let new_check_keys = names
+            .iter()
+            .filter_map(|(table, row)| {
+                let stored = schema.stored_table(table).ok()?;
+                let key = (stored.to_owned(), *row.0.as_bytes());
+                (!self.first_checks.contains_key(&key)).then_some(key)
+            })
+            .collect();
+        BatchCheckpoint {
+            prefix: self.prefix(),
+            rows: self.rows.clone(),
+            inserted: self.inserted.clone(),
+            claims: self.claims.clone(),
+            new_check_keys,
+        }
+    }
+
+    fn restore(&mut self, checkpoint: BatchCheckpoint) {
+        self.restore_prefix(checkpoint.prefix);
+        for key in checkpoint.new_check_keys {
+            self.first_checks.remove(&key);
+        }
+        self.rows = checkpoint.rows;
+        self.inserted = checkpoint.inserted;
+        self.claims = checkpoint.claims;
+    }
+}
+
+pub(super) fn companion_names(companions: &[StagedOp]) -> Vec<(String, RowUuid)> {
+    companions
+        .iter()
+        .filter_map(|companion| match companion {
+            StagedOp::Insert(table, _, opts) => opts.row_id.map(|row| (table.clone(), row)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The companion rows the sealed writes of one open transaction staged:
@@ -159,8 +182,7 @@ impl Drop for StagedCompanions {
 
 fn seal_error(error: SealError) -> Error {
     match error {
-        SealError::NeedsKey { space } => E2eeRefusal::NeedsKey { space }.error(),
-        SealError::SpacePending { space } => E2eeRefusal::SpacePending { space }.error(),
+        SealError::Pending(refusal) => refusal.error(),
         SealError::Refused(error) => error,
     }
 }
@@ -191,23 +213,32 @@ impl Store {
             return Ok(Vec::new());
         };
         let identity = op.identity();
-        // Where the write finds its row: its target in stored names, as the
-        // store applies it.
-        let found = if hooks.declarations().tables.contains_key(op.table()) {
+        let table = op.table();
+        let stored_space = if hooks.declarations().tables.contains_key(table) {
             let located = self.prepare_write(schema.clone(), op.clone())?;
-            let target = match &located.op {
-                StagedOp::Update(_, _, _, opts) => {
-                    Some((Target::of(&opts.target, self).await?, false))
+            match &located.op {
+                StagedOp::Update(_, row, _, opts) => {
+                    self.found_space(&*hooks, table, &located.layout, *row, &opts.target)
+                        .await?
                 }
-                StagedOp::Upsert(_, _, _, _, opts) => {
-                    Some((Target::of(&opts.target, self).await?, false))
+                StagedOp::Upsert(_, row, _, _, opts) => {
+                    self.found_space(&*hooks, table, &located.layout, *row, &opts.target)
+                        .await?
                 }
-                // A restore finds the row deleted: its space is the one the
-                // row had when it was deleted.
-                StagedOp::Restore(_, _, _, opts) => Some((Target::exact(&opts.target), true)),
+                // A restore finds the row deleted and uses its previous space.
+                StagedOp::Restore(_, row, _, opts) => {
+                    self.stored_space(
+                        &*hooks,
+                        table,
+                        &located.layout,
+                        *row,
+                        &Target::exact(&opts.target),
+                        true,
+                    )
+                    .await?
+                }
                 _ => None,
-            };
-            target.map(|target| (located.layout, target))
+            }
         } else {
             None
         };
@@ -236,21 +267,6 @@ impl Store {
                 content.as_mut().unwrap_or(&mut none),
             ),
             StagedOp::Move(..) => return Ok(Vec::new()),
-        };
-        let stored_space = match found {
-            Some((layout, (target, deleted))) => {
-                self.stored_space(
-                    &*hooks,
-                    schema,
-                    &table,
-                    &layout.table,
-                    row,
-                    &target,
-                    deleted,
-                )
-                .await?
-            }
-            None => None,
         };
         let mut companions = Vec::new();
         let mut insert_only = BTreeMap::new();
@@ -310,17 +326,28 @@ impl Store {
             .collect())
     }
 
-    /// The space cell of `row` of `table` (stored as `physical`) as a write
+    async fn found_space(
+        &self,
+        hooks: &dyn E2eeHooks,
+        table: &str,
+        layout: &super::WriteTable,
+        row: RowUuid,
+        target: &WriteTarget,
+    ) -> Result<Option<Value>, Error> {
+        let target = Target::of(target, self).await?;
+        self.stored_space(hooks, table, layout, row, &target, false)
+            .await
+    }
+
+    /// The space cell of `row` of `table` as a write
     /// to `target` (in stored names) finds it, live or (for a restore,
     /// `deleted`) deleted: `None` for a table without an encryption entry,
     /// or no such row.
-    #[allow(clippy::too_many_arguments)]
     async fn stored_space(
         &self,
         hooks: &dyn E2eeHooks,
-        schema: &Schema,
         table: &str,
-        physical: &crate::values::Table,
+        layout: &super::WriteTable,
         row: RowUuid,
         target: &Target,
         deleted: bool,
@@ -328,17 +355,16 @@ impl Store {
         let Some(entry) = hooks.declarations().tables.get(table) else {
             return Ok(None);
         };
-        let t = schema.table(table)?;
-        let key = match self.locate(physical, row, target).await? {
+        let key = match self.locate(&layout.table, row, target).await? {
             Located::Absent { .. } => return Ok(None),
             Located::Row { deleted: is, .. } if is != deleted => return Ok(None),
             Located::Row { key, .. } => key,
             Located::Inherited { from, .. } => from,
         };
-        if entry.space == "id" {
+        if entry.is_own_space() {
             return Ok(Some(Value::Uuid(row.0)));
         }
-        let column = t.column(&entry.space).ok_or_else(|| {
+        let column = layout.source.column(&entry.space).ok_or_else(|| {
             Error::new(
                 ErrorCode::Schema,
                 format!("`{table}` has no space column `{}`", entry.space),
@@ -347,7 +373,7 @@ impl Store {
         let sql = format!(
             "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(&column.stored),
-            quote(&t.stored)
+            quote(&layout.source.stored)
         );
         let cell: Sql = self
             .conn
@@ -417,7 +443,6 @@ impl Store {
 
     pub(super) fn check_rowless_stream(
         &self,
-        _schema: &Schema,
         table: &str,
         cells: &BTreeMap<String, Value>,
         mutation: Option<StreamingMutationKind>,
@@ -473,34 +498,17 @@ impl Store {
         let stored = match mutation {
             StreamingMutationKind::Insert => None,
             _ => {
-                // Where the write will find its row: its target in stored
-                // names, as the store applies it.
-                let located = self.prepare_write(
-                    schema.clone(),
-                    StagedOp::Update(
-                        table.clone(),
-                        row,
-                        BTreeMap::new(),
-                        super::UpdateOptions {
-                            target: target.clone(),
-                            ..Default::default()
-                        },
-                    ),
-                )?;
-                let StagedOp::Update(_, _, _, opts) = &located.op else {
-                    unreachable!("prepared as an update")
+                let source = schema.table(table)?;
+                let layout = self.write_layout(schema, source);
+                let stored;
+                let target = if schema.stored_names {
+                    target
+                } else {
+                    stored = source.stored_write_target(target.clone());
+                    &stored
                 };
-                let found = Target::of(&opts.target, self).await?;
-                self.stored_space(
-                    &**hooks,
-                    schema,
-                    table,
-                    &located.layout.table,
-                    row,
-                    &found,
-                    false,
-                )
-                .await?
+                self.found_space(&**hooks, table, &layout, row, target)
+                    .await?
             }
         };
         // An upsert of a row this store does not hold inserts it; publication
@@ -517,7 +525,7 @@ impl Store {
             let tokens: std::collections::BTreeSet<_> = entry
                 .equality
                 .iter()
-                .map(|name| format!("__e2ee_eq_{name}"))
+                .map(|name| equality_column(name))
                 .collect();
             for sibling in &schema.columns {
                 let name = &sibling.name;
@@ -609,7 +617,7 @@ impl Store {
     ) -> Option<Value> {
         let hooks = self.e2ee.as_ref()?;
         let entry = hooks.declarations().tables.get(table)?;
-        if entry.space == "id" {
+        if entry.is_own_space() {
             return Some(Value::Uuid(row.0));
         }
         cells.get(&entry.space).cloned()

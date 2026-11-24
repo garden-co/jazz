@@ -12,7 +12,7 @@ use crate::e2ee::{
 };
 use crate::options::{Error, ErrorCode};
 use crate::query::{ArraySubquery, JoinVia, Operand, Predicate, Query, ReachableVia};
-use crate::schema::history::history_source_table;
+use crate::schema::{SYSTEM_TABLE_PREFIX, history::history_source_table};
 use crate::values::{Schema, unsupported};
 
 /// What a rewritten query keeps beside its physical query.
@@ -147,72 +147,54 @@ impl Store {
     ) -> Result<(), Error> {
         let encrypted = &hooks.declarations().tables;
         refuse_unopened(schema, encrypted, query)?;
-        refuse_unplannable(encrypted, query, |entry, filter| {
+        let is_encrypted = |table: &str, column: &str| {
+            encrypted
+                .get(table)
+                .is_some_and(|entry| entry.columns.contains_key(column))
+        };
+        let entry = encrypted.get(&query.table);
+        refuse_unplannable(&is_encrypted, query, |filter| {
             plannable
                 && matches!(filter, Predicate::Eq(Operand::Column(column), value)
-                if entry.equality.contains(column)
+                if entry.is_some_and(|entry| entry.equality.contains(column))
                     && matches!(value, Operand::Literal(_) | Operand::Param(_) | Operand::Claim(_)))
         })?;
         // Application queries cannot name reserved columns. A worker receives
         // the tab's rewritten query and may serve its physical token filters.
-        let reserved = plannable.then(|| reserved_columns(schema));
+        let is_reserved = |table: &str, column: &str| {
+            column.starts_with(SYSTEM_TABLE_PREFIX)
+                && schema.jazz.tables().iter().any(|candidate| {
+                    candidate.name.as_str() == table
+                        && candidate.columns.iter().any(|c| c.name.as_str() == column)
+                })
+        };
         if let Some(union) = crate::db::union_plan(query, schema)? {
             let table = query.table.as_str();
             for term in &union.order_by {
-                refuse_column(encrypted, table, &term.column, "a union's ORDER BY")?;
+                refuse_column(&is_encrypted, table, &term.column, "in a union's ORDER BY")?;
             }
             for (_, arm) in &union.arms {
                 refuse_unopened(schema, encrypted, arm)?;
-                refuse_unplannable(encrypted, arm, |_, _| false)?;
-                if let Some(reserved) = &reserved {
-                    refuse_reserved(reserved, arm, |_| false)?;
+                refuse_unplannable(&is_encrypted, arm, |_| false)?;
+                if plannable {
+                    refuse_reserved(&is_reserved, arm, |_| false)?;
                 }
             }
         }
-        if let Some(reserved) = &reserved {
-            refuse_reserved(reserved, query, |filter| {
-                hooks.relays_token_filter(&query.table, filter)
+        if plannable {
+            let can_relay = schema.jazz.tables().iter().any(|table| {
+                table.name == query.table
+                    && table
+                        .columns
+                        .iter()
+                        .any(|column| column.name.starts_with(SYSTEM_TABLE_PREFIX))
+            });
+            refuse_reserved(&is_reserved, query, |filter| {
+                can_relay && hooks.relays_token_filter(&query.table, filter)
             })?;
         }
         Ok(())
     }
-}
-
-/// The reserved (`__e2ee_`) columns of each table of `schema`, as entries
-/// the conditions walk reads: none is plannable.
-fn reserved_columns(schema: &Schema) -> BTreeMap<String, EncryptionEntry> {
-    let column = || crate::e2ee::EncryptedColumn {
-        plain: crate::e2ee::PlainType {
-            column_type: crate::tools::ColumnType::Bytea,
-            nullable: true,
-            default: None,
-        },
-        sealed_type: None,
-    };
-    schema
-        .jazz
-        .tables()
-        .iter()
-        .filter_map(|table| {
-            let columns: BTreeMap<_, _> = table
-                .columns
-                .iter()
-                .filter(|c| c.name.as_str().starts_with("__e2ee_"))
-                .map(|c| (c.name.to_string(), column()))
-                .collect();
-            (!columns.is_empty()).then(|| {
-                (
-                    table.name.to_string(),
-                    EncryptionEntry {
-                        space: String::new(),
-                        scope: String::new(),
-                        columns,
-                        equality: Vec::new(),
-                    },
-                )
-            })
-        })
-        .collect()
 }
 
 /// Refuse a read that would return cells of an encrypted table that
@@ -282,41 +264,31 @@ fn refuse_unopened(
 /// Only top-level filters can be exempted. A plan returned by a hook
 /// must pass this check without any exemption on encrypted columns.
 fn refuse_unplannable(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     query: &Query,
-    allows_filter: impl Fn(&EncryptionEntry, &Predicate) -> bool,
+    allows_filter: impl Fn(&Predicate) -> bool,
 ) -> Result<(), Error> {
-    refuse_in_relations(encrypted, query)?;
-    let Some(entry) = encrypted.get(&query.table) else {
-        return Ok(());
-    };
+    refuse_in_relations(is_refused, query)?;
     let table = query.table.as_str();
-    let refuse = |column: &str, shape: &str| {
-        entry.columns.contains_key(column).then(|| {
-            unsupported(format!(
-                "Reading encrypted column `{table}.{column}` {shape}"
-            ))
-        })
-    };
-    for filter in &query.filters {
-        if allows_filter(entry, filter) {
-            continue;
-        }
-        if let Some(error) = refused_in_predicate(entry, table, filter) {
-            return Err(error);
-        }
-    }
-    for branch in &query.policy_branches {
-        for filter in &branch.filters {
-            if let Some(error) = refused_in_predicate(entry, table, filter) {
-                return Err(error);
-            }
-        }
-    }
+    let refuse = |column: &str, shape: &str| refuse_column(is_refused, table, column, shape);
+    let filters = query
+        .filters
+        .iter()
+        .filter(|filter| !allows_filter(filter))
+        .chain(
+            query
+                .policy_branches
+                .iter()
+                .flat_map(|branch| &branch.filters),
+        );
+    refuse_filters(
+        is_refused,
+        table,
+        filters,
+        "in a filter other than a top-level equality",
+    )?;
     for order in &query.order_by {
-        if let Some(error) = refuse(&order.column, "in ORDER BY") {
-            return Err(error);
-        }
+        refuse(&order.column, "in ORDER BY")?;
     }
     if let Some(aggregate) = &query.aggregate {
         let columns = aggregate
@@ -325,64 +297,34 @@ fn refuse_unplannable(
             .filter_map(|a| a.column.as_deref())
             .chain(aggregate.group_by.as_deref());
         for column in columns {
-            if let Some(error) = refuse(column, "in an aggregate") {
-                return Err(error);
-            }
+            refuse(column, "in an aggregate")?;
         }
     }
     for partial in &query.partial {
-        if let Some(error) = refuse(&partial.column, "in part") {
-            return Err(error);
-        }
+        refuse(&partial.column, "in part")?;
     }
     for join in &query.joins {
-        if let Some(column) = &join.source_column
-            && let Some(error) = refuse(column, "in a join")
-        {
-            return Err(error);
+        if let Some(column) = &join.source_column {
+            refuse(column, "in a join")?;
         }
     }
     Ok(())
 }
 
-/// The error for the first encrypted column `predicate` names, if any.
-fn refused_in_predicate(
-    entry: &EncryptionEntry,
-    table: &str,
-    predicate: &Predicate,
-) -> Option<Error> {
-    let mut named = None;
-    predicate.any_operand(&mut |operand| {
-        if let Operand::Column(column) = operand
-            && entry.columns.contains_key(column.as_str())
-        {
-            named = Some(column.clone());
-        }
-        named.is_some()
-    });
-    named.map(|column| {
-        unsupported(format!(
-            "Reading encrypted column `{table}.{column}` in a filter other than a top-level equality"
-        ))
-    })
-}
-
 /// Refuse a query of the application that names a reserved column in a
 /// condition, an ordering, an aggregate or its selection.
 fn refuse_reserved(
-    reserved: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     query: &Query,
     relays_token_filter: impl Fn(&Predicate) -> bool,
 ) -> Result<(), Error> {
-    refuse_unplannable(reserved, query, |_, filter| relays_token_filter(filter))?;
-    if let Some(entry) = reserved.get(&query.table) {
-        for column in query.select.iter().flatten() {
-            if entry.columns.contains_key(column.as_str()) {
-                return Err(unsupported(format!(
-                    "Reading reserved column `{}.{column}`",
-                    query.table
-                )));
-            }
+    refuse_unplannable(is_refused, query, relays_token_filter)?;
+    for column in query.select.iter().flatten() {
+        if is_refused(&query.table, column) {
+            return Err(unsupported(format!(
+                "Reading reserved column `{}.{column}`",
+                query.table
+            )));
         }
     }
     Ok(())
@@ -412,46 +354,43 @@ fn refuse_changed_beyond_conditions(original: &Query, returned: &Query) -> Resul
 /// Refuse a condition that names an encrypted column of `table` in one of
 /// the places a query runs conditions on other tables than its own.
 fn refuse_column(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     table: &str,
     column: &str,
     place: &str,
 ) -> Result<(), Error> {
-    if encrypted
-        .get(table)
-        .is_some_and(|entry| entry.columns.contains_key(column))
-    {
+    if is_refused(table, column) {
         return Err(unsupported(format!(
-            "Reading encrypted column `{table}.{column}` in {place}"
+            "Reading encrypted column `{table}.{column}` {place}"
         )));
     }
     Ok(())
 }
 
-fn refuse_filters(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+fn refuse_filters<'a>(
+    is_refused: &impl Fn(&str, &str) -> bool,
     table: &str,
-    filters: &[Predicate],
+    filters: impl IntoIterator<Item = &'a Predicate>,
     place: &str,
 ) -> Result<(), Error> {
-    let Some(entry) = encrypted.get(table) else {
-        return Ok(());
-    };
     for filter in filters {
-        if let Some(column) = first_encrypted_column(entry, filter) {
+        if let Some(column) = first_refused_column(filter, |column| is_refused(table, column)) {
             return Err(unsupported(format!(
-                "Reading encrypted column `{table}.{column}` in {place}"
+                "Reading encrypted column `{table}.{column}` {place}"
             )));
         }
     }
     Ok(())
 }
 
-fn first_encrypted_column(entry: &EncryptionEntry, predicate: &Predicate) -> Option<String> {
+fn first_refused_column(
+    predicate: &Predicate,
+    is_refused: impl Fn(&str) -> bool,
+) -> Option<String> {
     let mut named = None;
     predicate.any_operand(&mut |operand| {
         if let Operand::Column(column) = operand
-            && entry.columns.contains_key(column.as_str())
+            && is_refused(column)
         {
             named = Some(column.clone());
         }
@@ -463,90 +402,105 @@ fn first_encrypted_column(entry: &EncryptionEntry, predicate: &Predicate) -> Opt
 /// Refuse conditions of joins, reachability, inheritance and policy
 /// branches that name an encrypted column of the table they run on.
 fn refuse_in_relations(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     query: &Query,
 ) -> Result<(), Error> {
     let root = query.table.as_str();
-    refuse_joins(encrypted, root, &query.joins)?;
-    refuse_reachable(encrypted, root, &query.reachable)?;
+    refuse_joins(is_refused, root, &query.joins)?;
+    refuse_reachable(is_refused, root, &query.reachable)?;
     for inherit in &query.inherits {
-        refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
+        refuse_column(
+            is_refused,
+            root,
+            &inherit.parent_column,
+            "in an inheritance",
+        )?;
     }
     for branch in &query.policy_branches {
-        refuse_joins(encrypted, root, &branch.joins)?;
-        refuse_reachable(encrypted, root, &branch.reachable)?;
+        refuse_joins(is_refused, root, &branch.joins)?;
+        refuse_reachable(is_refused, root, &branch.reachable)?;
         for inherit in &branch.inherits {
-            refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
+            refuse_column(
+                is_refused,
+                root,
+                &inherit.parent_column,
+                "in an inheritance",
+            )?;
         }
     }
-    refuse_correlations(encrypted, root, &query.array_subqueries)
+    refuse_correlations(is_refused, root, &query.array_subqueries)
 }
 
 /// The columns that correlate relation arrays with their parent rows.
 fn refuse_correlations(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     parent: &str,
     arrays: &[ArraySubquery],
 ) -> Result<(), Error> {
     for array in arrays {
-        let place = "a relation correlation";
-        refuse_column(encrypted, parent, &array.outer_column, place)?;
-        refuse_column(encrypted, &array.table, &array.inner_column, place)?;
-        refuse_correlations(encrypted, &array.table, &array.nested_arrays)?;
+        let place = "in a relation correlation";
+        refuse_column(is_refused, parent, &array.outer_column, place)?;
+        refuse_column(is_refused, &array.table, &array.inner_column, place)?;
+        refuse_correlations(is_refused, &array.table, &array.nested_arrays)?;
     }
     Ok(())
 }
 
 /// `parent` is the table the joins are evaluated against.
 fn refuse_joins(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     parent: &str,
     joins: &[JoinVia],
 ) -> Result<(), Error> {
     for join in joins {
         let table = join.table.as_str();
-        refuse_column(encrypted, table, &join.on_column, "a join")?;
+        refuse_column(is_refused, table, &join.on_column, "in a join")?;
         if let Some(column) = &join.source_column {
-            refuse_column(encrypted, parent, column, "a join")?;
+            refuse_column(is_refused, parent, column, "in a join")?;
         }
         if let Some(lookup) = &join.source_lookup {
-            refuse_column(encrypted, parent, &lookup.row_id_source_column, "a join")?;
-            refuse_column(encrypted, &lookup.table, &lookup.value_column, "a join")?;
+            refuse_column(
+                is_refused,
+                parent,
+                &lookup.row_id_source_column,
+                "in a join",
+            )?;
+            refuse_column(is_refused, &lookup.table, &lookup.value_column, "in a join")?;
         }
         for correlation in &join.correlated_filters {
-            refuse_column(encrypted, table, &correlation.join_column, "a join")?;
-            refuse_column(encrypted, parent, &correlation.source_column, "a join")?;
+            refuse_column(is_refused, table, &correlation.join_column, "in a join")?;
+            refuse_column(is_refused, parent, &correlation.source_column, "in a join")?;
         }
-        refuse_filters(encrypted, table, &join.filters, "a join filter")?;
-        refuse_joins(encrypted, table, &join.nested_joins)?;
+        refuse_filters(is_refused, table, &join.filters, "in a join filter")?;
+        refuse_joins(is_refused, table, &join.nested_joins)?;
     }
     Ok(())
 }
 
 fn refuse_reachable(
-    encrypted: &BTreeMap<String, EncryptionEntry>,
+    is_refused: &impl Fn(&str, &str) -> bool,
     root: &str,
     reachable: &[ReachableVia],
 ) -> Result<(), Error> {
     for via in reachable {
-        let place = "a reachability";
+        let place = "in a reachability";
         if let Operand::Column(column) = &via.from {
-            refuse_column(encrypted, root, column, place)?;
+            refuse_column(is_refused, root, column, place)?;
         }
         let (access, edge) = (via.access_table.as_str(), via.edge_table.as_str());
-        refuse_column(encrypted, access, &via.access_row_column, place)?;
-        refuse_column(encrypted, access, &via.access_team_column, place)?;
-        refuse_column(encrypted, edge, &via.edge_member_column, place)?;
-        refuse_column(encrypted, edge, &via.edge_parent_column, place)?;
-        refuse_filters(encrypted, access, &via.access_filters, place)?;
-        refuse_filters(encrypted, edge, &via.edge_filters, place)?;
+        refuse_column(is_refused, access, &via.access_row_column, place)?;
+        refuse_column(is_refused, access, &via.access_team_column, place)?;
+        refuse_column(is_refused, edge, &via.edge_member_column, place)?;
+        refuse_column(is_refused, edge, &via.edge_parent_column, place)?;
+        refuse_filters(is_refused, access, &via.access_filters, place)?;
+        refuse_filters(is_refused, edge, &via.edge_filters, place)?;
         if let Some(seed) = &via.seed {
             let table = seed.table.as_str();
-            refuse_column(encrypted, table, &seed.team_column, place)?;
+            refuse_column(is_refused, table, &seed.team_column, place)?;
             if let Some(column) = &seed.user_column {
-                refuse_column(encrypted, table, column, place)?;
+                refuse_column(is_refused, table, column, place)?;
             }
-            refuse_filters(encrypted, table, &seed.filters, place)?;
+            refuse_filters(is_refused, table, &seed.filters, place)?;
         }
     }
     Ok(())

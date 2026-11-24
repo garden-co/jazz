@@ -77,6 +77,27 @@ fn device_with_wire(
     (device, wire)
 }
 
+fn bob_with_failing_store(server: &Db) -> (Device, FaultyStore) {
+    let settings = EncryptionSettings::default();
+    let store = FaultyStore::default();
+    let client = open_account(
+        Rc::new(store.clone()),
+        account(0xb0),
+        settings.clone(),
+        None,
+    );
+    let (db, link) = session(&client, server, account(0xb0), &settings, 2, None);
+    let bob = Device {
+        who: account(0xb0),
+        client,
+        db,
+        _link: Some(link),
+        live: Default::default(),
+    };
+    bob.activate(server);
+    (bob, store)
+}
+
 impl Device {
     /// Verifies (and, the first time, founds) the account.
     fn activate(&self, server: &Db) {
@@ -94,6 +115,35 @@ impl Device {
 
     fn id(&self) -> String {
         account_id(self.who)
+    }
+
+    fn rotate(
+        &self,
+        server: &Db,
+        address: &jazz::e2ee::SpaceAddress,
+    ) -> Result<usize, ClientError> {
+        drive(server, &[&self.db], self.client.rotate(&self.db, address))
+    }
+
+    fn acquire(
+        &self,
+        server: &Db,
+        address: &jazz::e2ee::SpaceAddress,
+    ) -> Result<SpaceKeyState, ClientError> {
+        drive(server, &[&self.db], self.client.acquire(&self.db, address))
+    }
+
+    fn sync_spaces(
+        &self,
+        server: &Db,
+        watch: &mut jazz_e2ee_client::SpaceWatch,
+    ) -> Result<Vec<(jazz::e2ee::SpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError>
+    {
+        drive(
+            server,
+            &[&self.db],
+            self.client.sync_spaces(&self.db, watch),
+        )
     }
 }
 
@@ -287,18 +337,13 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
             pump(&server, &alice.db);
             let address = space_address(&alice, space);
             for _ in 0..rotations {
-                drive(
-                    &server,
-                    &[&alice.db],
-                    alice.client.rotate(&alice.db, &address),
-                )
-                .unwrap();
+                alice.rotate(&server, &address).unwrap();
             }
             add_member(&server, &alice, space, &bob.id());
             bob.client.take_delivery_reads();
             server.take_slow_queries();
             server.set_slow_query_threshold(Some(std::time::Duration::ZERO));
-            let state = drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap();
+            let state = bob.acquire(&server, &address).unwrap();
             assert_eq!(state, SpaceKeyState::KeyPending);
             server.set_slow_query_threshold(None);
             let plans: Vec<_> = server
@@ -330,12 +375,7 @@ fn a_rejoining_member_opens_an_older_delivery_while_waiting_for_the_current_key(
         block_on(server.delete(MEMBERS, member_row(&server, &bob.id()), Default::default()))
             .unwrap();
         let address = space_address(&alice, space);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.rotate(&alice.db, &address),
-        )
-        .unwrap();
+        alice.rotate(&server, &address).unwrap();
         write_note(&server, &alice, space, "while Bob was away").unwrap();
         pump(&server, &alice.db);
         server_member(&server, &alice, space, &bob.id());
@@ -343,7 +383,7 @@ fn a_rejoining_member_opens_an_older_delivery_while_waiting_for_the_current_key(
 
         assert!(marks(&bob, space).is_empty());
         assert_eq!(
-            drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap(),
+            bob.acquire(&server, &address).unwrap(),
             SpaceKeyState::KeyPending
         );
         assert_eq!(marks(&bob, space), [KeyMark::Published]);
@@ -456,12 +496,7 @@ fn a_member_without_a_delivery_sees_key_pending_once() {
             [(UnreadableCode::KeyPending, false)]
         );
         assert_eq!(
-            drive(
-                &server,
-                &[&bob.db],
-                bob.client.acquire(&bob.db, &space_address(&bob, space))
-            )
-            .unwrap(),
+            bob.acquire(&server, &space_address(&bob, space)).unwrap(),
             SpaceKeyState::KeyPending
         );
 
@@ -606,23 +641,7 @@ fn one_failed_space_does_not_drop_the_others_reports() {
         pump(&server, &alice.db);
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
 
-        let settings = EncryptionSettings::default();
-        let store = FaultyStore::default();
-        let client = open_account(
-            Rc::new(store.clone()),
-            account(0xb0),
-            settings.clone(),
-            None,
-        );
-        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
-        let bob = Device {
-            who: account(0xb0),
-            client,
-            db,
-            _link: Some(link),
-            live: Default::default(),
-        };
-        bob.activate(&server);
+        let (bob, store) = bob_with_failing_store(&server);
         add_member(&server, &alice, first, &bob.id());
         assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
 
@@ -687,23 +706,7 @@ fn a_failing_space_is_not_read_at_every_settle() {
         pump(&server, &alice.db);
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
 
-        let settings = EncryptionSettings::default();
-        let store = FaultyStore::default();
-        let client = open_account(
-            Rc::new(store.clone()),
-            account(0xb0),
-            settings.clone(),
-            None,
-        );
-        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
-        let bob = Device {
-            who: account(0xb0),
-            client,
-            db,
-            _link: Some(link),
-            live: Default::default(),
-        };
-        bob.activate(&server);
+        let (bob, store) = bob_with_failing_store(&server);
         add_member(&server, &alice, first, &bob.id());
         assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
 
@@ -758,23 +761,7 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         pump(&server, &alice.db);
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
 
-        let settings = EncryptionSettings::default();
-        let store = FaultyStore::default();
-        let client = open_account(
-            Rc::new(store.clone()),
-            account(0xb0),
-            settings.clone(),
-            None,
-        );
-        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
-        let bob = Device {
-            who: account(0xb0),
-            client,
-            db,
-            _link: Some(link),
-            live: Default::default(),
-        };
-        bob.activate(&server);
+        let (bob, store) = bob_with_failing_store(&server);
         add_member(&server, &alice, first, &bob.id());
         assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
         bob.follow_notes(&server);
@@ -855,23 +842,7 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
         pump(&server, &alice.db);
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
 
-        let settings = EncryptionSettings::default();
-        let store = FaultyStore::default();
-        let client = open_account(
-            Rc::new(store.clone()),
-            account(0xb0),
-            settings.clone(),
-            None,
-        );
-        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
-        let bob = Device {
-            who: account(0xb0),
-            client,
-            db,
-            _link: Some(link),
-            live: Default::default(),
-        };
-        bob.activate(&server);
+        let (bob, store) = bob_with_failing_store(&server);
         for space in [first, second] {
             add_member(&server, &alice, space, &bob.id());
             assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
@@ -1007,12 +978,7 @@ fn reenrolment_forgets_the_old_devices_reports() {
         );
         assert!(reports_of(&first).borrow().is_empty());
         assert!(first.client.take_reports().is_empty());
-        let synced = drive(
-            &server,
-            &[&first.db],
-            first.client.sync_spaces(&first.db, &mut watch),
-        )
-        .unwrap();
+        let synced = first.sync_spaces(&server, &mut watch).unwrap();
         assert!(synced.is_empty(), "{synced:?}");
     });
 }
@@ -1235,7 +1201,7 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         watch.use_space(&address);
         let sync = |watch: &mut jazz_e2ee_client::SpaceWatch| {
             for _ in 0..2 {
-                drive(&server, &[&bob.db], bob.client.sync_spaces(&bob.db, watch)).unwrap();
+                bob.sync_spaces(&server, watch).unwrap();
                 pump(&server, &bob.db);
             }
         };
@@ -1262,7 +1228,7 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         dave.activate(&server);
         sync(&mut watch);
         assert!(!watched().contains(&daves_keys));
-        drive(&server, &[&bob.db], bob.client.rotate(&bob.db, &address)).unwrap_err();
+        bob.rotate(&server, &address).unwrap_err();
         let refused = bob.client.delivery_mark_checks();
         deliver(&server, &bob, &[], space);
         sync(&mut watch);
@@ -1270,6 +1236,39 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         assert!(!watched().contains(&successors));
         assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
     });
+}
+
+fn rotation_refusal_members() -> (Db, Device, Device, Device, uuid::Uuid) {
+    let authority = block_on(Db::open(jazz::db::DbConfig::new(
+        owned_schema(),
+        identity(0),
+    )))
+    .unwrap();
+    jazz::db::block_on(authority.set_authority()).unwrap();
+    let server = authority;
+    let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
+    alice.activate(&server);
+    let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
+    bob.activate(&server);
+    let carol = owned_device(&server, account(0xc0), MemoryStore::new(), 3);
+    carol.activate(&server);
+    let owner = Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap());
+    let space = block_on(alice.db.insert(
+        "projects",
+        BTreeMap::from([
+            ("name".to_owned(), text("plans")),
+            ("ownerId".to_owned(), owner),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid()
+    .0;
+    pump(&server, &alice.db);
+    for member in [&alice, &bob, &carol] {
+        add_member(&server, &alice, space, &member.id());
+    }
+    (server, alice, bob, carol, space)
 }
 
 /// Contract: a member who may not update the space row is refused when
@@ -1656,12 +1655,7 @@ fn watched_rows_acquire_and_withdraw_reports() {
         assert_eq!(codes(&events), [(UnreadableCode::SpacePending, false)]);
 
         let mut watch = block_on(bob.client.watch_spaces(&bob.db)).unwrap();
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.sync_spaces(&bob.db, &mut watch),
-        )
-        .unwrap();
+        bob.sync_spaces(&server, &mut watch).unwrap();
         write_note(&server, &alice, space, SECRET).unwrap();
         pump(&server, &alice.db);
         pump(&server, &bob.db);
@@ -2128,12 +2122,7 @@ fn junk_in_an_account_history_does_not_make_the_space_incomplete() {
         ))
         .unwrap();
         bob.follow_notes(&server);
-        let state = drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        let state = bob.acquire(&server, &space_address(&bob, space)).unwrap();
         assert_eq!(state, SpaceKeyState::KeyPending);
     });
 }
@@ -2336,12 +2325,9 @@ fn explicit_rotation_refuses_when_a_root_row_is_skipped() {
         undecodable_root(&server, &alice, space, -1);
         assert!(marks(&alice, space).is_empty());
         let address = space_address(&alice, space);
-        let error = drive(
-            &server,
-            &[&alice.db],
-            alice.client.rotate(&alice.db, &address),
-        )
-        .expect_err("the skipped row could be the root");
+        let error = alice
+            .rotate(&server, &address)
+            .expect_err("the skipped row could be the root");
         let ClientError::Protocol(ProtocolError::Refused(code)) = error else {
             panic!("unexpected rotation error: {error}");
         };
@@ -2356,12 +2342,9 @@ fn explicit_rotation_tells_a_member_to_wait_for_the_key() {
     within(|| {
         let server = secure_authority_with(&EncryptionSettings::default(), None);
         let (_alice, bob, space) = shared_space(&server);
-        let error = drive(
-            &server,
-            &[&bob.db],
-            bob.client.rotate(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap_err();
+        let error = bob
+            .rotate(&server, &space_address(&bob, space))
+            .unwrap_err();
         assert!(matches!(
             error,
             ClientError::Protocol(ProtocolError::Refused(RefusalCode::RotationNeedsKey))
@@ -2382,10 +2365,7 @@ fn explicit_rotation_refuses_a_removed_member_who_holds_the_key() {
         let (alice, bob, space) = shared_space(&server);
         assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
         let address = space_address(&bob, space);
-        assert_eq!(
-            drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap(),
-            SpaceKeyState::Held
-        );
+        assert_eq!(bob.acquire(&server, &address).unwrap(), SpaceKeyState::Held);
         block_on(
             alice
                 .db
@@ -2507,12 +2487,7 @@ fn two_holders_racing_write_exactly_one_delivery() {
         let (alice, bob, space) = shared_space(&server);
         deliver(&server, &alice, &[&bob], space);
         pump(&server, &bob.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
         let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
         carol.activate(&server);
         add_member(&server, &alice, space, &carol.id());
@@ -2944,12 +2919,7 @@ fn a_garbage_delivery_is_reported_and_a_rotation_repairs_it() {
         pump(&server, &bob.db);
         let events = reports_of(&bob);
         for _ in 0..2 {
-            let state = drive(
-                &server,
-                &[&bob.db],
-                bob.client.acquire(&bob.db, &space_address(&bob, space)),
-            )
-            .unwrap();
+            let state = bob.acquire(&server, &space_address(&bob, space)).unwrap();
             assert_eq!(state, SpaceKeyState::KeyPending);
         }
         let bad: Vec<_> = events
@@ -3135,32 +3105,17 @@ fn a_member_change_in_a_watched_space_runs_the_pass() {
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         // Nothing uses the space: nothing is watched. Bob, whom alice added
         // herself, is served once that write committed.
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(count(&server, "__e2ee_space_deliveries"), 1);
 
         watch.use_space(&address);
         watch.use_space(&address);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
         carol.activate(&server);
         add_member(&server, &alice, space, &carol.id());
         pump(&server, &alice.db);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(
             count(&server, "__e2ee_space_deliveries"),
             2,
@@ -3174,12 +3129,7 @@ fn a_member_change_in_a_watched_space_runs_the_pass() {
         dave.activate(&server);
         server_member(&server, &alice, space, &dave.id());
         pump(&server, &alice.db);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(
             count(&server, "__e2ee_space_deliveries"),
             3,
@@ -3191,12 +3141,7 @@ fn a_member_change_in_a_watched_space_runs_the_pass() {
         erin.activate(&server);
         server_member(&server, &alice, space, &erin.id());
         pump(&server, &alice.db);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(
             count(&server, "__e2ee_space_deliveries"),
             3,
@@ -3227,12 +3172,7 @@ fn a_member_this_client_adds_to_a_space_not_in_use_is_served() {
         let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
         carol.activate(&server);
         add_member(&server, &alice, space, &carol.id());
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(count(&server, "__e2ee_space_deliveries"), 1);
     });
 }
@@ -3257,12 +3197,7 @@ fn a_member_write_that_never_commits_is_dropped_after_the_wait() {
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         // What the setup committed is served and off the queue.
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(alice.client.pending_member_changes(), 0);
         let scope = jazz::db::block_on(alice.db.table_identity("projects"))
             .unwrap()
@@ -3289,23 +3224,13 @@ fn a_member_write_that_never_commits_is_dropped_after_the_wait() {
         alice
             .client
             .set_member_change_wait(std::time::Duration::from_secs(3600));
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(alice.client.pending_member_changes(), 1, "still waited for");
 
         alice
             .client
             .set_member_change_wait(std::time::Duration::ZERO);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(alice.client.pending_member_changes(), 0, "dropped");
     });
 }
@@ -3332,12 +3257,7 @@ fn one_bad_space_address_is_reported_and_the_others_still_sync() {
         };
         watch.use_space(&bad);
         watch.use_space(&space_address(&alice, space));
-        let results = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let results = alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(results.len(), 2, "{results:?}");
         for (address, state) in &results {
             assert_eq!(state.is_err(), *address == bad, "{address:?}: {state:?}");
@@ -3383,35 +3303,7 @@ fn a_recovery_rotation_extends_the_chain_and_delivers() {
 #[test]
 fn a_refused_rotation_never_blocks_the_write() {
     within(|| {
-        let authority = block_on(Db::open(jazz::db::DbConfig::new(
-            owned_schema(),
-            identity(0),
-        )))
-        .unwrap();
-        jazz::db::block_on(authority.set_authority()).unwrap();
-        let server = authority;
-        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
-        alice.activate(&server);
-        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
-        bob.activate(&server);
-        let carol = owned_device(&server, account(0xc0), MemoryStore::new(), 3);
-        carol.activate(&server);
-        let owner = Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap());
-        let space = block_on(alice.db.insert(
-            "projects",
-            BTreeMap::from([
-                ("name".to_owned(), text("plans")),
-                ("ownerId".to_owned(), owner),
-            ]),
-            Default::default(),
-        ))
-        .unwrap()
-        .row_uuid()
-        .0;
-        pump(&server, &alice.db);
-        for member in [&alice, &bob, &carol] {
-            add_member(&server, &alice, space, &member.id());
-        }
+        let (server, alice, bob, carol, space) = rotation_refusal_members();
         alice.follow_notes(&server);
         bob.follow_notes(&server);
         write_note(&server, &alice, space, SECRET).unwrap();
@@ -3419,12 +3311,7 @@ fn a_refused_rotation_never_blocks_the_write() {
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
         deliver(&server, &alice, &[&bob, &carol], space);
         pump(&server, &bob.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
 
         let member = all(&server, Query::from(MEMBERS))
             .unwrap()
@@ -3458,11 +3345,7 @@ fn a_refused_rotation_never_blocks_the_write() {
                 .unwrap()
         );
         // Her explicit rotation attempts again (and is refused again).
-        let again = drive(
-            &server,
-            &[&bob.db],
-            bob.client.rotate(&bob.db, &space_address(&bob, space)),
-        );
+        let again = bob.rotate(&server, &space_address(&bob, space));
         assert!(again.is_err());
         // The owner's rotation works.
         drive(
@@ -3489,35 +3372,7 @@ fn a_refused_rotation_never_blocks_the_write() {
 #[test]
 fn a_failed_rotation_before_a_write_is_reported_with_its_reason() {
     within(|| {
-        let authority = block_on(Db::open(jazz::db::DbConfig::new(
-            owned_schema(),
-            identity(0),
-        )))
-        .unwrap();
-        jazz::db::block_on(authority.set_authority()).unwrap();
-        let server = authority;
-        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
-        alice.activate(&server);
-        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
-        bob.activate(&server);
-        let carol = owned_device(&server, account(0xc0), MemoryStore::new(), 3);
-        carol.activate(&server);
-        let owner = Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap());
-        let space = block_on(alice.db.insert(
-            "projects",
-            BTreeMap::from([
-                ("name".to_owned(), text("plans")),
-                ("ownerId".to_owned(), owner),
-            ]),
-            Default::default(),
-        ))
-        .unwrap()
-        .row_uuid()
-        .0;
-        pump(&server, &alice.db);
-        for member in [&alice, &bob, &carol] {
-            add_member(&server, &alice, space, &member.id());
-        }
+        let (server, alice, bob, carol, space) = rotation_refusal_members();
         alice.follow_notes(&server);
         bob.follow_notes(&server);
         carol.follow_notes(&server);
@@ -3527,12 +3382,7 @@ fn a_failed_rotation_before_a_write_is_reported_with_its_reason() {
         deliver(&server, &alice, &[&bob, &carol], space);
         pump(&server, &bob.db);
         pump(&server, &carol.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
         assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 1);
 
         block_on(alice.db.delete(
@@ -3609,12 +3459,7 @@ fn a_write_under_a_stale_key_is_not_gated() {
         let (alice, bob, space) = shared_space(&server);
         deliver(&server, &alice, &[&bob], space);
         pump(&server, &bob.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
         drive(
             &server,
             &[&alice.db],
@@ -3683,30 +3528,15 @@ fn deliveries_of_earlier_versions_are_not_watched() {
         let root = all(&server, Query::from(SPACES)).unwrap().remove(0);
         let first_epoch = root.cell("epochId").unwrap();
         deliver(&server, &alice, &[&bob], space);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.rotate(&alice.db, &address),
-        )
-        .unwrap();
+        alice.rotate(&server, &address).unwrap();
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         watch.use_space(&address);
         // Opens the watch, then settles on the new current version.
         for _ in 0..3 {
-            drive(
-                &server,
-                &[&alice.db],
-                alice.client.sync_spaces(&alice.db, &mut watch),
-            )
-            .unwrap();
+            alice.sync_spaces(&server, &mut watch).unwrap();
             pump(&server, &alice.db);
         }
-        let quiet = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let quiet = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(quiet.is_empty(), "nothing changed");
 
         // A delivery of the first version, written by the server.
@@ -3733,12 +3563,7 @@ fn deliveries_of_earlier_versions_are_not_watched() {
         ))
         .unwrap();
         pump(&server, &alice.db);
-        let after = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let after = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(
             after.is_empty(),
             "an earlier version's delivery is not watched"
@@ -3756,19 +3581,9 @@ fn an_explicit_pass_serves_a_member_the_store_has_not_seen() {
         let address = space_address(&alice, space);
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         watch.use_space(&address);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         watch.release_space(&address);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         let _ = bob;
         let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
         carol.activate(&server);
@@ -3796,12 +3611,7 @@ fn a_member_whose_sealing_key_appears_after_a_quiet_pass_is_served() {
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         watch.use_space(&address);
         for _ in 0..2 {
-            drive(
-                &server,
-                &[&alice.db],
-                alice.client.sync_spaces(&alice.db, &mut watch),
-            )
-            .unwrap();
+            alice.sync_spaces(&server, &mut watch).unwrap();
             pump(&server, &alice.db);
         }
         assert_eq!(count(&server, "__e2ee_space_deliveries"), 1, "bob only");
@@ -3809,12 +3619,7 @@ fn a_member_whose_sealing_key_appears_after_a_quiet_pass_is_served() {
         let dave = device(&server, account(0xd0), MemoryStore::new(), 8);
         dave.activate(&server);
         pump(&server, &alice.db);
-        let results = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let results = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(!results.is_empty(), "the account watch saw the new rows");
         assert_eq!(count(&server, "__e2ee_space_deliveries"), 2, "and dave");
     });
@@ -3831,20 +3636,10 @@ fn a_members_public_successor_after_a_quiet_pass_runs_the_pass() {
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         watch.use_space(&address);
         for _ in 0..2 {
-            drive(
-                &server,
-                &[&alice.db],
-                alice.client.sync_spaces(&alice.db, &mut watch),
-            )
-            .unwrap();
+            alice.sync_spaces(&server, &mut watch).unwrap();
             pump(&server, &alice.db);
         }
-        let quiet = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let quiet = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(quiet.is_empty());
 
         let id = |n: u8| Value::Uuid(uuid::Uuid::from_bytes([n; 16]));
@@ -3869,12 +3664,7 @@ fn a_members_public_successor_after_a_quiet_pass_runs_the_pass() {
         ))
         .unwrap();
         pump(&server, &alice.db);
-        let seen = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let seen = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(!seen.is_empty(), "the successor row ran the pass");
     });
 }
@@ -3999,12 +3789,7 @@ fn a_holder_that_is_no_longer_a_member_delivers_nothing() {
         let (alice, bob, space) = shared_space(&server);
         deliver(&server, &alice, &[&bob], space);
         pump(&server, &bob.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
         let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
         carol.activate(&server);
         add_member(&server, &alice, space, &carol.id());
@@ -4102,12 +3887,7 @@ fn a_member_holding_only_an_older_version_does_not_deliver() {
         add_member(&server, &alice, space, &carol.id());
         deliver(&server, &alice, &[&bob, &carol], space);
         pump(&server, &bob.db);
-        drive(
-            &server,
-            &[&bob.db],
-            bob.client.acquire(&bob.db, &space_address(&bob, space)),
-        )
-        .unwrap();
+        bob.acquire(&server, &space_address(&bob, space)).unwrap();
         let member_of = |who: &Device| {
             all(&server, Query::from(MEMBERS))
                 .unwrap()
@@ -4185,12 +3965,7 @@ fn a_holder_of_a_skipped_version_delivers_it_without_the_current_one() {
         };
         let acquire = |who: &Device| {
             pump(&server, &who.db);
-            drive(
-                &server,
-                &[&who.db],
-                who.client.acquire(&who.db, &space_address(who, space)),
-            )
-            .unwrap()
+            who.acquire(&server, &space_address(who, space)).unwrap()
         };
         acquire(&bob);
         acquire(&carol);
@@ -4244,12 +4019,7 @@ fn a_holder_of_a_skipped_version_delivers_it_without_the_current_one() {
         assert_eq!(deliver(&server, &carol, &[&alice, &bob], space), 2);
         assert_eq!(count(&server, "__e2ee_space_deliveries"), before + 2);
         pump(&server, &dave.db);
-        drive(
-            &server,
-            &[&dave.db],
-            dave.client.acquire(&dave.db, &space_address(&dave, space)),
-        )
-        .unwrap();
+        dave.acquire(&server, &space_address(&dave, space)).unwrap();
         let depths: Vec<usize> = dave.client.with_held(|held| {
             held.roots_of(&address(&dave.db, space))
                 .into_iter()
@@ -4493,12 +4263,7 @@ fn a_repair_interrupted_between_batches_finishes_after_a_restart() {
         assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
         pump(&server, &alice.db);
         let address = space_address(&alice, space);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.acquire(&alice.db, &address),
-        )
-        .unwrap();
+        alice.acquire(&server, &address).unwrap();
 
         // What bob's store shows him: his note, and alice's rows once they
         // are under the real key.
@@ -4829,12 +4594,7 @@ fn a_hidden_delivery_makes_the_repair_wait() {
         let alice = device(&server, account(0xa1), alice_store, 4);
         alice.activate(&server);
         alice.follow_notes(&server);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.acquire(&alice.db, &address),
-        )
-        .unwrap();
+        alice.acquire(&server, &address).unwrap();
         assert_eq!(
             drive(
                 &server,
@@ -4867,24 +4627,14 @@ fn a_watched_space_is_repaired_when_its_real_key_arrives() {
         let address = space_address(&alice, space);
         let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
         watch.use_space(&address);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        alice.sync_spaces(&server, &mut watch).unwrap();
         pump(&server, &bob.db);
         assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
 
         // Bob delivers; alice's watch sees it and repairs.
         assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
         pump(&server, &alice.db);
-        let results = drive(
-            &server,
-            &[&alice.db],
-            alice.client.sync_spaces(&alice.db, &mut watch),
-        )
-        .unwrap();
+        let results = alice.sync_spaces(&server, &mut watch).unwrap();
         assert!(
             results.iter().all(|(_, state)| state.is_ok()),
             "{results:?}"
@@ -4999,12 +4749,7 @@ fn a_refused_repair_stops_at_the_natural_moments() {
         assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
         pump(&server, &alice.db);
         let address = space_address(&alice, space);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.acquire(&alice.db, &address),
-        )
-        .unwrap();
+        alice.acquire(&server, &address).unwrap();
 
         let first = drive(&server, &[&alice.db], alice.client.deliver_keys(&alice.db)).unwrap();
         assert!(
@@ -5044,12 +4789,7 @@ fn concurrent_reads_do_not_disturb_a_repair() {
         assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
         pump(&server, &alice.db);
         let address = space_address(&alice, space);
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.acquire(&alice.db, &address),
-        )
-        .unwrap();
+        alice.acquire(&server, &address).unwrap();
 
         let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
         let app_read = async || {

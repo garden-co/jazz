@@ -29,16 +29,16 @@ use super::super::key_crypto::{
 use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
-    ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
-    DeviceProof, DeviceRemovalRequest, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor,
-    PublicDeviceApproval, RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
-    challenge_signed_bytes, delivery_marker_context, identity_context, nonce_commitment,
-    proof_signed_bytes, recovery_delivery_context, successor_context,
+    AccountSuccessorColumns, ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery,
+    DeviceKeysRow, DeviceProof, DeviceRemovalRequest, DeviceRequest, LEDGER_VERSION,
+    PublicAccountSuccessor, PublicDeviceApproval, RecoveryDelivery, RecoveryRoot, approval_context,
+    approval_signed_bytes, challenge_signed_bytes, delivery_marker_context, identity_context,
+    nonce_commitment, proof_signed_bytes, recovery_delivery_context, successor_context,
 };
 use super::super::signing;
 use super::key::AccountKey;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
-use super::replay::AccountState;
+use super::replay::{AccountState, roots_held_by};
 
 /// A device's approval nonce `n_R` (§2.5): committed in its request,
 /// revealed in its one approval proof. Cleared on drop and never printed.
@@ -490,23 +490,15 @@ pub fn challenge(
     let application = writer.application()?;
     let secret = random_key(rng)?;
     let id = ids::random_v4(rng)?;
-    let coordinates = ChallengeCoordinates {
-        id: &id,
-        device_id: &requester.id,
-        epoch_id: state.epoch_id(),
-    };
-    let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
-    let envelope = writer.seal(&requester.keys.sealing_key(), &context, &secret, rng)?;
-    let nonce = random_key(rng)?;
     let challenge = signed_challenge(
         writer,
         &application,
         &id,
+        state.epoch_id(),
         approver,
         requester,
-        state.epoch_id(),
-        envelope,
-        &nonce[..],
+        &secret,
+        rng,
     )?;
     Ok(Challenge {
         challenge,
@@ -520,19 +512,22 @@ pub fn challenge(
 #[allow(clippy::too_many_arguments)]
 fn signed_challenge(
     writer: &AccountWriter<'_>,
-    application: &super::super::domain::AccountDomain,
+    application: &AccountDomain,
     id: &str,
+    epoch_id: &str,
     approver: &LocalDevice,
     requester: &DeviceRequest,
-    epoch_id: &str,
-    envelope: Vec<u8>,
-    nonce: &[u8],
+    secret: &[u8; 32],
+    rng: &mut dyn RandomSource,
 ) -> ProtocolResult<DeviceChallenge> {
     let coordinates = ChallengeCoordinates {
         id,
         device_id: &requester.id,
         epoch_id,
     };
+    let context = approval_context(application, writer.account_id, coordinates, "challenge")?;
+    let envelope = writer.seal(&requester.keys.sealing_key(), &context, secret, rng)?;
+    let nonce = random_key(rng)?;
     let bytes = challenge_signed_bytes(
         application,
         writer.account_id,
@@ -540,7 +535,7 @@ fn signed_challenge(
         &approver.id,
         requester,
         &envelope,
-        nonce,
+        &nonce[..],
     )?;
     Ok(DeviceChallenge {
         id: id.to_owned(),
@@ -856,26 +851,17 @@ pub fn recovery_approve(
     }
     let application = writer.application()?;
     let id = ids::random_v4(rng)?;
-    let coordinates = ChallengeCoordinates {
-        id: &id,
-        device_id: &device.id,
-        epoch_id: state.epoch_id(),
-    };
     let secret = random_key(rng)?;
-    let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
-    let envelope = writer.seal(&device.sealing.public, &context, &secret, rng)?;
-    // A recovery is approved by the recovery root, not an active device: the
-    // device signs its own challenge, which it never receives from anyone.
-    let nonce = random_key(rng)?;
+    // Recovery uses a challenge the recovering device signs for itself.
     let challenge = signed_challenge(
         writer,
         &application,
         &id,
+        state.epoch_id(),
         device,
         &request,
-        state.epoch_id(),
-        envelope,
-        &nonce[..],
+        &secret,
+        rng,
     )?;
     let Some(approval_nonce) = device.approval_nonce.take() else {
         return refuse(RefusalCode::InvalidChallenge);
@@ -997,24 +983,7 @@ pub fn rotate(
     )?;
     let verification = writer.wrap(&key, &context("verification", "")?, &Z32, rng)?;
     let history = writer.wrap(&key, &context("history", "")?, account_key, rng)?;
-    let mut private = AccountSuccessor {
-        id: id.clone(),
-        account_id: account_id.to_owned(),
-        predecessor: state.epoch_id().to_owned(),
-        epoch_id: epoch_id.clone(),
-        signer_id: author.id.clone(),
-        action,
-        removed_device_id: removed.clone(),
-        retired_recovery_root_ids: retired_ids.clone(),
-        membership: membership.clone(),
-        revision: private_revision,
-        verification,
-        history,
-        deliveries: json::encode_delivery_map(deliveries)?,
-        signature: Vec::new(),
-    };
-    private.signature = writer.sign(&author.signing, &private.signed_bytes(&application)?)?;
-    let mut public = PublicAccountSuccessor {
+    let columns = AccountSuccessorColumns {
         id,
         account_id: account_id.to_owned(),
         predecessor: state.epoch_id().to_owned(),
@@ -1024,6 +993,18 @@ pub fn rotate(
         removed_device_id: removed,
         retired_recovery_root_ids: retired_ids,
         membership,
+    };
+    let mut private = AccountSuccessor {
+        columns: columns.clone(),
+        revision: private_revision,
+        verification,
+        history,
+        deliveries: json::encode_delivery_map(deliveries)?,
+        signature: Vec::new(),
+    };
+    private.signature = writer.sign(&author.signing, &private.signed_bytes(&application)?)?;
+    let mut public = PublicAccountSuccessor {
+        columns,
         revision: public_revision,
         signature: Vec::new(),
     };
@@ -1055,21 +1036,15 @@ pub fn rotate(
 /// generation, by position then ID. The SDK then asks for a new recovery
 /// secret backup.
 pub fn held_recovery_roots(state: &AccountState, device: &str) -> Vec<String> {
-    if state.root.row.kind != AccountKind::App {
-        return Vec::new();
-    }
-    state
-        .recovery_roots
-        .iter()
-        .filter(|root| {
-            root.row.signer_id == device
-                || state.approvals.iter().any(|approval| {
-                    approval.row.device_id == device
-                        && approval.row.recovery_root_id.as_deref() == Some(root.row.id.as_str())
-                })
-        })
-        .map(|root| root.row.id.clone())
-        .collect()
+    roots_held_by(
+        state.root.row.kind,
+        device,
+        &state.recovery_roots,
+        state.approvals.iter(),
+        None,
+    )
+    .map(|root| root.row.id.clone())
+    .collect()
 }
 
 /// A removal request for `device` itself (§2.8, stage `account-rotation`):

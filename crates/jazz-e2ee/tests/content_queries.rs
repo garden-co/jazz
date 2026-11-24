@@ -55,7 +55,7 @@ fn plan(world: &World, held: &HeldKeys, target: &TableTarget<'_>, text: &str) ->
         held,
         target,
         &title(),
-        &EqualityValue::Text(text),
+        &EqualityValue::Text(text.to_owned()),
         true,
     )
     .unwrap()
@@ -143,7 +143,7 @@ fn cold_offline_and_refused_queries() {
         .unwrap()
         .equality;
     let held = held_of(&world, ALICE, ROW);
-    let value = EqualityValue::Text("x");
+    let value = EqualityValue::Text("x".into());
     // Offline: no tokens, every candidate is decrypted and compared.
     assert_eq!(
         plan_equality(tagger, &held, &target, &title(), &value, false),

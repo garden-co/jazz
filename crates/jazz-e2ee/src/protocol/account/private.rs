@@ -279,14 +279,14 @@ pub fn verify_private(
             .epochs
             .iter()
             .filter_map(|epoch| epoch.successor.as_ref())
-            .find(|public| public.row.id == successor.row.id)
+            .find(|public| public.row.columns.id == successor.row.columns.id)
         else {
             continue;
         };
         if public.position != position || !successor.row.matches_public(&public.row) {
             continue;
         }
-        let Some(signer) = requests.matching(&successor.row.signer_id, position) else {
+        let Some(signer) = requests.matching(&successor.row.columns.signer_id, position) else {
             continue;
         };
         if successor.row.validate().is_err() {
@@ -301,7 +301,7 @@ pub fn verify_private(
         let complete = revision.iter().all(|id| {
             approvals.iter().any(|verified| {
                 verified.approval.row.id == *id
-                    && verified.challenge.epoch_id == successor.row.predecessor
+                    && verified.challenge.epoch_id == successor.row.columns.predecessor
                     && verified.approval.position < position
             })
         });

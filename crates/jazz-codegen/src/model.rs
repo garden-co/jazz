@@ -154,6 +154,13 @@ impl Compiled {
         Json::Object(fields)
     }
 
+    /// The current version's encryption entries.
+    pub(crate) fn current_entries(&self) -> Option<&artifact::encryption::Entries> {
+        self.encryption
+            .as_ref()
+            .and_then(|declared| declared.entries(&self.current.to_string()))
+    }
+
     /// The current schema.
     pub fn current_schema(&self) -> &Schema {
         &self
@@ -197,9 +204,13 @@ impl App {
     fn from_definition(source: String, definition: &AppDefinition) -> App {
         let codegen = definition.codegen();
         let current = definition.current_schema();
-        let encryption = definition
-            .encryption()
-            .entries(&definition.current_hash().to_string());
+        let compiled = Compiled {
+            current: definition.current_hash(),
+            schemas: definition.schemas().to_vec(),
+            migrations: definition.migrations().to_vec(),
+            encryption: codegen.encryption.clone(),
+        };
+        let encryption = compiled.current_entries();
         // The members table is the only system table apps use directly.
         let tables = current
             .iter()
@@ -223,12 +234,7 @@ impl App {
                     view: decl.view.clone(),
                 })
                 .collect(),
-            compiled: Compiled {
-                current: definition.current_hash(),
-                schemas: definition.schemas().to_vec(),
-                migrations: definition.migrations().to_vec(),
-                encryption: codegen.encryption.clone(),
-            },
+            compiled,
             warnings: definition.warnings().to_vec(),
             stranded: definition.stranded().to_vec(),
         }
@@ -261,27 +267,31 @@ fn table(
                     .name_str()
                     .starts_with(artifact::encryption::EQUALITY_PREFIX)
         })
-        .map(|c| Column {
-            name: c.name_str().to_string(),
-            ty: match encryption.and_then(|e| e.columns.get(c.name_str())) {
-                Some(encrypted) => FieldType {
-                    ty: encrypted.plain.column_type.clone(),
-                    nullable: encrypted.plain.nullable,
+        .map(|c| {
+            let encrypted = encryption.and_then(|entry| entry.columns.get(c.name_str()));
+            Column {
+                name: c.name_str().to_string(),
+                ty: match encrypted {
+                    Some(encrypted) => FieldType {
+                        ty: encrypted.plain.column_type.clone(),
+                        nullable: encrypted.plain.nullable,
+                    },
+                    None => FieldType {
+                        ty: c.column_type.clone(),
+                        nullable: c.nullable,
+                    },
                 },
-                None => FieldType {
-                    ty: c.column_type.clone(),
-                    nullable: c.nullable,
-                },
-            },
-            default: match encryption.and_then(|e| e.columns.get(c.name_str())) {
                 // A stored ciphertext default isn't a plaintext value.
-                Some(_) => None,
-                None => c.default.clone(),
-            },
-            merge: c.merge_strategy,
-            references: c.references.map(|t| t.as_str().to_string()),
-            transform: info.and_then(|i| i.transforms.get(c.name_str()).cloned()),
-            encrypted: encryption.is_some_and(|e| e.columns.contains_key(c.name_str())),
+                default: if encrypted.is_none() {
+                    c.default.clone()
+                } else {
+                    None
+                },
+                merge: c.merge_strategy,
+                references: c.references.map(|t| t.as_str().to_string()),
+                transform: info.and_then(|i| i.transforms.get(c.name_str()).cloned()),
+                encrypted: encrypted.is_some(),
+            }
         })
         .collect();
     let relations = info

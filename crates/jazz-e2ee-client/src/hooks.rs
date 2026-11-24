@@ -12,9 +12,9 @@ use std::rc::Rc;
 
 use jazz::db::{CurrentRow, Error, ErrorCode};
 use jazz::e2ee::{
-    E2eeDeclarations, E2eeHooks, EpochSetId, OpenOutcome, QueryPlan, ReadSite, Residual,
-    ResidualPred, SealError, StreamSealer, StreamTarget, Unreadable, UnreadableCode, WriteCells,
-    WriteKind,
+    E2eeDeclarations, E2eeHooks, E2eeRefusal, EpochSetId, OpenOutcome, QueryPlan, ReadSite,
+    Residual, ResidualPred, SealError, StreamSealer, StreamTarget, Unreadable, UnreadableCode,
+    WriteCells, WriteKind,
 };
 use jazz::ids::RowUuid;
 use jazz::query::{Operand, Predicate, Query};
@@ -28,11 +28,10 @@ use jazz_e2ee::protocol::content::equality::{
     QueryPlan as EqualityPlan, TableTarget, plan_equality,
 };
 use jazz_e2ee::protocol::content::{
-    ContentError, DataError, EncryptedColumn, EqualityValueBuf, KeyMark, RowTarget, WriteChoice,
-    WriteKey,
+    ContentError, DataError, EncryptedColumn, KeyMark, RowTarget, WriteChoice, WriteKey,
 };
 use jazz_e2ee::protocol::records::space::SpaceAddress;
-use jazz_e2ee::records::{RecordKind, read_stored_record};
+use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 
 use crate::account::rows::{Row, SPACE_ROOTS};
 use crate::state::{
@@ -213,9 +212,9 @@ impl Hooks {
             && !tried
             && (keys.rotation_pending.contains(address) || removal || unevaluated)
         {
-            return Err(SealError::NeedsKey {
+            return Err(SealError::Pending(E2eeRefusal::NeedsKey {
                 space: db_address(address),
-            });
+            }));
         }
         Ok(())
     }
@@ -249,15 +248,21 @@ pub(crate) fn write_key<'k>(
             if matches!(key.mark(), KeyMark::Unpublished { .. })
                 && dropped.contains(key.root_id()) =>
         {
-            Err(SealError::NeedsKey { space: space() })
+            Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() }))
         }
         WriteChoice::Key(key) => Ok(key),
-        WriteChoice::NeedsKey => Err(SealError::NeedsKey { space: space() }),
-        WriteChoice::SpacePending => Err(SealError::SpacePending { space: space() }),
+        WriteChoice::NeedsKey => Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() })),
+        WriteChoice::SpacePending => Err(SealError::Pending(E2eeRefusal::SpacePending {
+            space: space(),
+        })),
         // Competing roots: the runtime reads the chain and tries again;
         // offline it cannot, and the write waits (protocol §3.2).
-        WriteChoice::NeedsChainRead if keys.online => Err(SealError::NeedsKey { space: space() }),
-        WriteChoice::NeedsChainRead => Err(SealError::SpacePending { space: space() }),
+        WriteChoice::NeedsChainRead if keys.online => {
+            Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() }))
+        }
+        WriteChoice::NeedsChainRead => Err(SealError::Pending(E2eeRefusal::SpacePending {
+            space: space(),
+        })),
     }
 }
 
@@ -278,16 +283,12 @@ fn lens_supplied(site: &ReadSite<'_>, column: &str, cell: &Value) -> bool {
 /// source bytes, then the final record.
 struct Sealer {
     writer: Box<dyn StreamWriter>,
-    prefix: Option<Vec<u8>>,
+    prefix: Vec<u8>,
 }
 
 impl StreamSealer for Sealer {
-    fn header(&mut self) -> Result<Vec<u8>, Error> {
-        Ok(self.prefix.take().unwrap_or_default())
-    }
-
     fn push(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut self.prefix);
         self.writer
             .update(plaintext, &mut out)
             .map_err(|error| failed(error.into()))?;
@@ -295,7 +296,7 @@ impl StreamSealer for Sealer {
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
-        let mut out = Vec::new();
+        let mut out = self.prefix;
         self.writer
             .finish(&mut out)
             .map_err(|error| failed(error.into()))?;
@@ -430,7 +431,7 @@ impl E2eeHooks for Hooks {
             .ok_or(SealError::Refused(not_observed()))?;
         let table_id = catalogue.table(write.table).map_err(SealError::Refused)?;
         let mut plaintexts = Vec::with_capacity(encrypted.len());
-        let mut equalities: Vec<Option<EqualityValueBuf>> = Vec::with_capacity(encrypted.len());
+        let mut equalities: Vec<Option<EqualityValue>> = Vec::with_capacity(encrypted.len());
         let mut columns = Vec::with_capacity(encrypted.len());
         for name in &encrypted {
             let codec = &plan.columns[name];
@@ -450,7 +451,7 @@ impl E2eeHooks for Hooks {
             .map(|((column, value), equality)| CellInput {
                 column: *column,
                 value,
-                equality: equality.as_ref().map(EqualityValueBuf::as_value),
+                equality: equality.as_ref(),
             })
             .collect();
         let suite = self
@@ -844,15 +845,8 @@ impl E2eeHooks for Hooks {
                 )
             })?;
             let column = column(catalogue, table, &name, codec)?;
-            match plan_equality(
-                tagger,
-                &keys.held,
-                &target,
-                &column,
-                &equality.as_value(),
-                keys.online,
-            )
-            .map_err(failed)?
+            match plan_equality(tagger, &keys.held, &target, &column, &equality, keys.online)
+                .map_err(failed)?
             {
                 EqualityPlan::Tokens(tokens) => {
                     physical.filters[index] = Predicate::In(
@@ -970,10 +964,7 @@ impl E2eeHooks for Hooks {
             ContentError::NotStreamable => refused("only unindexed bytes columns stream"),
             error => SealError::Refused(failed(error)),
         })?;
-        Ok(Box::new(Sealer {
-            writer,
-            prefix: Some(prefix),
-        }))
+        Ok(Box::new(Sealer { writer, prefix }))
     }
 }
 

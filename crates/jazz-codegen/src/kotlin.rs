@@ -586,21 +586,20 @@ impl<'a> Writer<'a> {
             "/** Table `{}`: its columns, and queries with `query()`. */",
             doc(&table.name)
         );
-        if table.updatable {
-            let _ = writeln!(
-                out,
-                "public object {object} : tools.jazz.Table<{row}, {insert}, {patch}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n    ::{patch},\n) {{",
-                string_literal(&table.name)
-            );
+        let table_type = if table.updatable {
+            format!("Table<{row}, {insert}, {patch}>")
         } else {
-            // Read, inserted and deleted only: no update, upsert or
-            // update advice takes it.
-            let _ = writeln!(
-                out,
-                "public object {object} : tools.jazz.BaseTable<{row}, {insert}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n) {{",
-                string_literal(&table.name)
-            );
+            format!("BaseTable<{row}, {insert}>")
+        };
+        let _ = writeln!(
+            out,
+            "public object {object} : tools.jazz.{table_type}(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),",
+            string_literal(&table.name)
+        );
+        if table.updatable {
+            let _ = writeln!(out, "    ::{patch},");
         }
+        out.push_str(") {\n");
         out.push_str("    /** The row's id. */\n    public val id: tools.jazz.Column<kotlin.String> =\n        tools.jazz.Column(\"id\", kotlinx.serialization.serializer<kotlin.String>())\n");
         // The public members of `tools.jazz.Table` (and `Any`): a column of
         // that name gets `Column` after it.
