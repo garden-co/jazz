@@ -1844,13 +1844,27 @@ impl RelayWorker {
 /// The response for a failed foreground operation: a core error keeps its
 /// display text and adds its stable code and reason name.
 fn operation_error(error: HostError) -> ForegroundDbCommandResponse {
-    match error {
-        HostError::Engine(error) => ForegroundDbCommandResponse::CodedOperationError {
-            code: error.code.as_str().to_owned(),
-            reason_name: error.reason.map(|reason| reason.as_str().to_owned()),
-            reason: error.to_string(),
-        },
-        HostError::Argument(reason) => ForegroundDbCommandResponse::OperationError { reason },
+    let core = match error {
+        HostError::Engine(core) => core,
+        HostError::Argument(reason) => {
+            return ForegroundDbCommandResponse::OperationError { reason };
+        }
+    };
+    let code = core.code.as_str().to_owned();
+    let reason = core.to_string();
+    if let (Some(space), Some(name)) = (core.space, core.reason) {
+        return ForegroundDbCommandResponse::KeyRefusal {
+            code,
+            reason_name: name.as_str().to_owned(),
+            reason,
+            scope_id: space.scope_id,
+            identifier: space.identifier,
+        };
+    }
+    ForegroundDbCommandResponse::CodedOperationError {
+        code,
+        reason_name: core.reason.map(|name| name.as_str().to_owned()),
+        reason,
     }
 }
 

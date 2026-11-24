@@ -58,10 +58,9 @@ export function nativeCoreErrorCode(error: unknown): NativeCoreErrorCode | undef
 /**
  * The stable reason a core Jazz error carries across the native boundary,
  * finer than its code: the Rust `Reason::as_str` name, set as `error.reason`
- * by WASM, by NAPI promise rejections and by React Native. A NAPI synchronous
- * throw carries only its code, since napi-rs creates it from a code and a
- * message alone; that includes a pollable NAPI read or `waitForPendingWrites`
- * whose `poll()` throws.
+ * by WASM, by NAPI promise rejections and by React Native. Synchronous
+ * NAPI key refusals also carry their reason and space. Other synchronous
+ * NAPI exceptions carry their core code.
  */
 export type NativeCoreErrorReason =
   | "authorization_denied"

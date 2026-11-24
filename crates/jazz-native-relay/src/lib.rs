@@ -808,6 +808,14 @@ pub enum ForegroundDbCommandResponse {
         rows: Vec<u8>,
         unreadable_json: String,
     },
+    /// An encryption hook refused this operation for want of the named space's key.
+    KeyRefusal {
+        code: String,
+        reason_name: String,
+        reason: String,
+        scope_id: String,
+        identifier: String,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately

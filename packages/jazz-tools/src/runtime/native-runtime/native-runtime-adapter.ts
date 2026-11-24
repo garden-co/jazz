@@ -6,7 +6,7 @@ import {
   type PrivateStore,
   type StoreTarget,
 } from "../../encryption/private-store.js";
-import { KEY_WAIT_MS, retryAfterKey } from "../../encryption/key-retry.js";
+import { pendingSpace, retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
 import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
@@ -1252,17 +1252,10 @@ export class NativeRuntimeAdapter implements Runtime {
   retryAfterKey<T>(operation: () => T): T | Promise<T> {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return operation();
-    return retryAfterKey(
-      operation,
-      async (space, deadline) =>
-        JSON.parse(
-          await state.native.encryptionCall("prepareSpace", { ...space, deadline }),
-        ) as boolean,
-      undefined,
-      async (space, failure) =>
-        JSON.parse(
-          await state.native.encryptionCall("retryWithCurrentKey", { ...space, failure }),
-        ) as boolean,
+    return retryAfterKey(operation, async (space, startedAt, repeated) =>
+      JSON.parse(
+        await state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated }),
+      ),
     );
   }
 
@@ -2427,7 +2420,7 @@ export class NativeRuntimeAdapter implements Runtime {
           const error = new Error("Streaming write timed out before publication started");
           error.name = "TimeoutError";
           reject(error);
-        }, KEY_WAIT_MS);
+        }, 10_000);
       });
       const publish = async (): Promise<StreamingInsertResult> => {
         try {
@@ -6358,8 +6351,10 @@ function writeOrNormalizeRejection<T>(
       const coreReason =
         nativeCoreErrorReason(error) ??
         (reason.startsWith("authorization_denied:") ? "authorization_denied" : undefined);
+      const space = pendingSpace(error);
       throw Object.assign(new Error(`${operation} failed: WriteError("${reason}")`), {
         code: rejectionCode(coreReason),
+        ...(space && { reason: coreReason, space }),
       });
     }
     throw error;

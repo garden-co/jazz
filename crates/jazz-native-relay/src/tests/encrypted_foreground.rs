@@ -813,4 +813,15 @@ fn encrypted_foreground_postcard_bytes() {
         postcard::to_allocvec(&Response::EncryptionReports { reports: vec![] }).unwrap(),
         [37, 0]
     );
+    assert_eq!(
+        postcard::to_allocvec(&Response::KeyRefusal {
+            code: "not_observed".into(),
+            reason_name: "key-pending".into(),
+            reason: "waiting".into(),
+            scope_id: "a".into(),
+            identifier: "b".into()
+        })
+        .unwrap(),
+        b"\x27\x0cnot_observed\x0bkey-pending\x07waiting\x01a\x01b"
+    );
 }

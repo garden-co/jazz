@@ -249,6 +249,14 @@ enum Verification {
     Failed(ClientError),
 }
 
+/// Whether the host can repeat a refused write, and whether this is its final attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteRetry {
+    Retry,
+    Last,
+    Stop,
+}
+
 /// The runtime and what the host keeps beside it.
 pub struct Encryption {
     pub client: Rc<E2eeClient>,
@@ -280,6 +288,7 @@ pub struct Encryption {
     stage: Cell<&'static str>,
     /// The send batch for which a wake was last requested.
     woken_batch: Cell<Option<u64>>,
+    preparations: super::PromiseQueue,
     gate: Gate,
     /// The loop, polled by the host.
     main: RefCell<Option<LocalBoxFuture<'static, ()>>>,
@@ -476,6 +485,7 @@ impl Encryption {
             last_error: RefCell::default(),
             stage: Cell::new("starting"),
             woken_batch: Cell::new(None),
+            preparations: Default::default(),
             gate: Gate::default(),
             main: RefCell::default(),
         });
@@ -511,6 +521,7 @@ impl Encryption {
         // The host gets reports through its listener. Discard the raw polling
         // queue even when the app never asks for the listener's reports.
         self.client.shared.reports.borrow_mut().clear();
+        self.preparations.settle();
         let mut main = self.main.borrow_mut();
         let Some(future) = main.as_mut() else {
             return;
@@ -527,6 +538,7 @@ impl Encryption {
     /// must be dropped for the runtime to be.
     pub fn stop(&self) {
         *self.main.borrow_mut() = None;
+        self.preparations.0.borrow_mut().clear();
         self.client.close();
         self.approvals.borrow_mut().clear();
         self.commands.borrow_mut().clear();
@@ -663,6 +675,60 @@ impl Encryption {
         }
     }
 
+    /// The same window covers every key a single host write asks for.
+    pub fn write_deadline(elapsed: Duration) -> web_time::Instant {
+        web_time::Instant::now() + Duration::from_secs(10).saturating_sub(elapsed)
+    }
+
+    /// Decide when the host should repeat its refused write. Preparation can
+    /// hold a transaction across a store call, so the runtime finishes it
+    /// even if this particular write exhausts its deadline.
+    pub async fn retry_write(
+        self: &Rc<Self>,
+        space: &SpaceAddress,
+        deadline: web_time::Instant,
+        mut repeated: bool,
+    ) -> Result<WriteRetry, String> {
+        let remaining = || deadline.saturating_duration_since(web_time::Instant::now());
+        let fallback = |reason: &str| {
+            self.client
+                .retry_with_current_key(space, reason)
+                .map_err(describe)
+        };
+        loop {
+            if repeated {
+                within(
+                    std::future::pending::<()>(),
+                    remaining().min(Duration::from_millis(200)),
+                )
+                .await;
+            }
+            if remaining().is_zero() {
+                break;
+            }
+            let runtime = self.clone();
+            let address = space.clone();
+            let (send, answer) = futures::channel::oneshot::channel();
+            self.preparations.submit(async move {
+                let result = runtime.prepare_host_write(&address, Some(deadline)).await;
+                let _ = send.send(result);
+            });
+            match within(answer, remaining()).await {
+                Some(Ok(Ok(true))) => return Ok(WriteRetry::Retry),
+                Some(Ok(Ok(false))) => repeated = true,
+                Some(Ok(Err(reason))) if fallback(&reason)? => return Ok(WriteRetry::Last),
+                Some(Ok(Err(reason))) => return Err(reason),
+                Some(Err(_)) => return Err(describe(ClientError::Closed)),
+                None => break,
+            }
+        }
+        Ok(if fallback("rotation undecided at the write deadline")? {
+            WriteRetry::Last
+        } else {
+            WriteRetry::Stop
+        })
+    }
+
     /// Prepares a native write for which the device is still missing a key.
     pub async fn prepare_host_write(
         &self,
@@ -774,7 +840,12 @@ impl Encryption {
         })
     }
 
-    async fn run(&self, op: &str, args: &Value, secret: Option<&str>) -> Result<Value, String> {
+    async fn run(
+        self: &Rc<Self>,
+        op: &str,
+        args: &Value,
+        secret: Option<&str>,
+    ) -> Result<Value, String> {
         if op == "shutdown" {
             // The loop can be holding the store lock while waiting for its
             // save to settle. Keep driving it until the client is closed.
@@ -788,6 +859,7 @@ impl Encryption {
         // loop's work.
         let _turn = match op {
             "keysDeliver"
+            | "retryWrite"
             | "prepareSpace"
             | "retryWithCurrentKey"
             | "spaceRow"
@@ -995,6 +1067,28 @@ impl Encryption {
                         }));
                     }
                 }
+            }
+            "retryWrite" => {
+                let space = SpaceAddress {
+                    scope_id: text("scopeId")?,
+                    identifier: text("identifier")?,
+                };
+                let started = args["startedAt"]
+                    .as_f64()
+                    .ok_or("expected write start in milliseconds")?;
+                let now = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let elapsed = now.saturating_sub(Duration::from_millis(started as u64));
+                let repeated = args["repeated"].as_bool().ok_or("expected repeated flag")?;
+                json!(match self
+                    .retry_write(&space, Self::write_deadline(elapsed), repeated)
+                    .await?
+                {
+                    WriteRetry::Retry => "retry",
+                    WriteRetry::Last => "last",
+                    WriteRetry::Stop => "stop",
+                })
             }
             "prepareSpace" | "retryWithCurrentKey" => {
                 let space = SpaceAddress {
@@ -1715,6 +1809,31 @@ mod tests {
                 .as_str()
                 .is_some_and(|scope| !scope.is_empty())
         );
+    }
+
+    /// Alice's write must return its refusal at the deadline even if preparation
+    /// still holds a transaction. Hold the runtime gate to keep it pending
+    /// deterministically, then check that a late preparation can finish.
+    #[test]
+    fn a_write_deadline_bounds_a_stalled_key_preparation() {
+        let runtime = native_runtime_with_catalogue(true);
+        let busy = run(runtime.gate.enter());
+        let space = SpaceAddress {
+            scope_id: uuid::Uuid::new_v4().to_string(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let deadline = web_time::Instant::now() + Duration::from_millis(30);
+        let result = run(within(
+            Box::pin(runtime.retry_write(&space, deadline, false)),
+            Duration::from_secs(1),
+        ));
+        assert_eq!(result, Some(Ok(WriteRetry::Stop)));
+        assert!(web_time::Instant::now() >= deadline);
+        assert_eq!(runtime.preparations.0.borrow().len(), 1);
+        drop(busy);
+        runtime.drive();
+        assert!(runtime.preparations.0.borrow().is_empty());
+        runtime.stop();
     }
 
     /// A confirmed catalogue that lacks an encrypted table stops

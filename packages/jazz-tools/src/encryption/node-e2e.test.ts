@@ -681,7 +681,8 @@ describe("encryption on Node, end to end", () => {
     const shared = structuredClone(permissions);
     shared.tables.tasks.read = "true";
     const host = await serve(undefined, shared);
-    const alice = await device(host);
+    const store = memoryPrivateStore();
+    const alice = await device(host, { privateStore: store });
     const bob = await device(host);
     const projectId = await makeProject(alice, "plans");
     await addMember(alice, projectId, bob.account);
@@ -703,8 +704,6 @@ describe("encryption on Node, end to end", () => {
     await alice.db.delete(app.__e2ee_members, member.id).wait({ tier: "global" });
     const reports: unknown[] = [];
     const unsubscribe = alice.db.encryption.onReport((report) => reports.push(report));
-    const native = alice.db.encryption["native"];
-    const call = native.encryptionCall.bind(native);
     function signal() {
       let resolve!: () => void;
       const promise = new Promise<void>((done) => {
@@ -713,17 +712,18 @@ describe("encryption on Node, end to end", () => {
       return { promise, resolve };
     }
     const resume = signal();
-    const finished = signal();
-    const delayed = vi.spyOn(native, "encryptionCall").mockImplementation(async (op, args) => {
-      if (op !== "prepareSpace") return call(op, args);
+    const saving = signal();
+    const save = store.save.bind(store);
+    const delayed = vi.spyOn(store, "save").mockImplementationOnce(async (...args) => {
+      saving.resolve();
       await resume.promise;
-      try {
-        return await call(op, args);
-      } finally {
-        finished.resolve();
-      }
+      return save(...args);
     });
+    // Hold the runtime gate before preparation starts by blocking the store
+    // write made by account verification. The waiting write has its own deadline.
+    const verifying = alice.db.encryption["native"].encryptionCall("ready");
     try {
+      await saving.promise;
       await insert("while undecided");
       await until(
         async () =>
@@ -737,7 +737,7 @@ describe("encryption on Node, end to end", () => {
       delayed.mockRestore();
       unsubscribe();
     }
-    await finished.promise;
+    await verifying;
     const successors = (app as unknown as Record<string, never>)["__e2ee_space_successors"];
     expect(await host.jazz.db.all(successors)).toHaveLength(0);
     await insert("after rotation");

@@ -36,5 +36,15 @@ test("encrypted foreground commands and replies use the Rust ABI 7 bytes", () =>
     reports: [],
   });
   expect(() => decodeNativeForegroundResponse(bytes(34, 2, 0))).toThrow();
+  const refusal = Uint8Array.from("\x27\x0cnot_observed\x0bkey-pending\x07waiting\x01a\x01b", (c) =>
+    c.charCodeAt(0),
+  );
+  expect(decodeNativeForegroundResponse(refusal)).toEqual({
+    type: "operationError",
+    code: "not_observed",
+    reasonName: "key-pending",
+    reason: "waiting",
+    space: { scopeId: "a", identifier: "b" },
+  });
   expect(() => decodeNativeForegroundResponse(bytes(35, 2))).toThrow();
 });

@@ -338,11 +338,14 @@ it("returns the committed row id when a transaction insert waits for its space k
       () => {
         if (keyPending) {
           keyPending = false;
-          throw new Error("key-pending: space 0a/0b");
+          throw Object.assign(new Error("key needed"), {
+            reason: "key-pending",
+            space: { scopeId: "0a", identifier: "0b" },
+          });
         }
         return operation();
       },
-      async () => true,
+      async () => "retry",
     ),
   );
   const tx = db.beginTransaction();

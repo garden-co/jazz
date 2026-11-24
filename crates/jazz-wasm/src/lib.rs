@@ -2511,6 +2511,16 @@ fn core_error_to_js(error: &Error) -> JsValue {
             &JsValue::from_str(reason.as_str()),
         );
     }
+    if let Some(space) = &error.space {
+        let address = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&address, &"scopeId".into(), &space.scope_id.as_str().into());
+        let _ = js_sys::Reflect::set(
+            &address,
+            &"identifier".into(),
+            &space.identifier.as_str().into(),
+        );
+        let _ = js_sys::Reflect::set(&js_error, &"space".into(), &address);
+    }
     js_error.into()
 }
 

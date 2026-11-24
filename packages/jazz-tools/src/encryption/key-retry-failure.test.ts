@@ -2,7 +2,10 @@ import { expect, it, vi } from "vitest";
 import { retryAfterKey } from "./key-retry.js";
 
 it("preserves the private store failure after an encrypted write asks for its key", async () => {
-  const keyPending = new Error("key-pending: space aaaa-1/bbbb-2 has no held key");
+  const keyPending = Object.assign(new Error("waiting"), {
+    reason: "key-pending",
+    space: { scopeId: "aaaa-1", identifier: "bbbb-2" },
+  });
   const storeFailure = new Error("store: keychain unavailable");
   const write = vi.fn(() => {
     throw keyPending;
@@ -11,7 +14,11 @@ it("preserves the private store failure after an encrypted write asks for its ke
     throw storeFailure;
   });
 
-  await expect(retryAfterKey(write, prepare, 200)).rejects.toBe(storeFailure);
+  await expect(retryAfterKey(write, prepare)).rejects.toBe(storeFailure);
   expect(write).toHaveBeenCalledTimes(1);
-  expect(prepare).toHaveBeenCalledExactlyOnceWith({ scopeId: "aaaa-1", identifier: "bbbb-2" });
+  expect(prepare).toHaveBeenCalledExactlyOnceWith(
+    { scopeId: "aaaa-1", identifier: "bbbb-2" },
+    expect.any(Number),
+    false,
+  );
 });

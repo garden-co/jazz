@@ -3033,6 +3033,17 @@ impl Deref for JazzTransaction {
 /// id, a local transaction conflict) carries TS's code, as TS's
 /// synchronous writes do, with the core's detail as its reason.
 fn write_error(error: CoreError) -> JazzError {
+    #[cfg(feature = "e2ee-client")]
+    if let Some(refusal) = crate::e2ee::E2eeRefusal::of(&error) {
+        return JazzError::KeyRefusal {
+            refusal,
+            original: Box::new(write_failure(error)),
+        };
+    }
+    write_failure(error)
+}
+
+fn write_failure(error: CoreError) -> JazzError {
     let Some((code, _)) = super::rejection_code_and_reason(&error) else {
         return JazzError::Write(error.to_string());
     };

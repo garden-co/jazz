@@ -529,6 +529,12 @@ answers response 2, Rows, as before. Its bytes are pinned by
 `reported_rows_answer_has_pinned_bytes`, and the Rust response corpus carries
 it and event 4 to the TypeScript decoder.
 
+The unreleased ABI 7 also appends response 39, KeyRefusal, for operations
+that need an encrypted space's key or root. Its five postcard strings are
+the core error code, reason name, display text, scope ID and space identifier,
+in that order. The JavaScript decoder exposes the last two as `error.space`.
+All preceding response ordinals retain their encodings.
+
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
 configured, explicitly_offline, connected. All fields use postcard 1's existing
