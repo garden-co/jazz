@@ -178,6 +178,31 @@ const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_queued (asked INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, part BLOB NOT NULL, UNIQUE (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_shard_queued_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL);";
 
+/// Create the durable record of holds (see [`HOLDS_DDL`]). A store that
+/// held a part before holds kept their part's data (jazz#4546) has
+/// `_jazz_shard_holds` without its `part` column: it gains it, empty for
+/// the holds it had. Only a store driven as a shard directly (a sharding
+/// simulation) could have one: the gateway resends such a part.
+async fn create_holds(conn: &crate::storage::Storage) -> Result<(), Error> {
+    conn.execute_batch(HOLDS_DDL).await.map_err(storage)?;
+    let has_part: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('_jazz_shard_holds') WHERE name = 'part'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .map_err(storage)?;
+    if !has_part {
+        conn.execute_batch(
+            "ALTER TABLE _jazz_shard_holds ADD COLUMN part BLOB NOT NULL DEFAULT x''",
+        )
+        .await
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
 impl ShardState {
     /// The lowest position held for a part still to land.
     pub(crate) fn lowest_hold(&self) -> Option<u64> {
@@ -417,7 +442,7 @@ impl Store {
         }
         // Queued holds wait on, in the order they were asked; one whose
         // commit was decided meanwhile is dropped.
-        self.conn.execute_batch(HOLDS_DDL).await.map_err(storage)?;
+        create_holds(&self.conn).await?;
         let queued: Vec<(CommitRef, Vec<u8>)> = {
             let mut statement = self
                 .conn
@@ -479,7 +504,7 @@ impl Store {
     /// Queue a hold for `commit`, durably: it is granted in the order
     /// asked, after a restart too.
     async fn queue(&self, commit: CommitRef, rows: &[HeldRow], part: &[u8]) -> Result<(), Error> {
-        self.conn.execute_batch(HOLDS_DDL).await.map_err(storage)?;
+        create_holds(&self.conn).await?;
         let node = commit.node.to_vec();
         self.exec(
             "INSERT INTO _jazz_shard_queued (node, tx, part) VALUES (?1, ?2, ?3)",
@@ -528,7 +553,7 @@ impl Store {
         part: &[u8],
     ) -> Result<u64, Error> {
         let at = self.next_seq();
-        self.conn.execute_batch(HOLDS_DDL).await.map_err(storage)?;
+        create_holds(&self.conn).await?;
         let node = commit.node.to_vec();
         self.exec(
             "INSERT INTO _jazz_shard_holds (at, node, tx, part) VALUES (?1, ?2, ?3, ?4)",
