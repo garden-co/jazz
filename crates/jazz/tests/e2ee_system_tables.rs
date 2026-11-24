@@ -1199,9 +1199,9 @@ fn deploy(
     )
 }
 
-/// A deployment accepts Jazz's system tables only as Jazz defines them, in
-/// exactly the versions that declare encryption, and never the app's own
-/// policies for them; it derives those itself.
+/// A deployment accepts Jazz's system tables in versions that declare
+/// encryption or inherit the fragment from a predecessor. Jazz defines
+/// the tables and derives their policies.
 #[test]
 fn deployment_accepts_only_jazzs_own_system_tables() {
     let structural = |mut schema: Schema| {
@@ -2135,9 +2135,9 @@ fn removal_requests_recovery_and_account_keys_are_the_accounts_own() {
         .unwrap();
 }
 
-/// R12: one member-row delete per transaction: a member leaves, an
-/// updater removes another member, and a member who may not update the
-/// project removes nobody else.
+/// A member can leave and an updater can remove other members. Grouped
+/// deletes use the transaction's pre-state to check every row, so an
+/// updater can remove themselves and other members in the same transaction.
 #[test]
 fn members_leave_and_updaters_remove_members() {
     let world = World::new();
