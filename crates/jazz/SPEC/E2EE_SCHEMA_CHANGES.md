@@ -302,85 +302,17 @@ with another read rule therefore moves in two deploys:
    transaction, by the creator clause (spec §1.5, R12), and the space table's
    insert rule must not need a member row of the new row.
 
-## 5. Recipe: encrypting data the app already stores
+## 5. Encrypting existing data
 
-Jazz does not turn a plaintext column into an encrypted one. An app copies
-the data into a new encrypted table instead (the developer guide is
-`docs/content/docs/e2ee/encrypting-existing-data.mdx`):
+Jazz does not convert a plaintext column into an encrypted one. Follow the
+[migration guide](../../../docs/content/docs/e2ee/encrypting-existing-data.mdx)
+to copy it into a new encrypted table. The old table and every old reference
+must remain unwritable throughout the final copy and check; stop every writer,
+including sessions pinned to older bundles and backend jobs. A reference
+cannot be retargeted in place, and a required reference cannot be made
+optional by a migration, so add new reference columns and drop the old ones
+only after switching.
 
-One rule governs it: nothing writes the old data (the old table and every
-old reference column) during the final copy and its check. The writers are
-stopped and known to be stopped, then the copy is made, checked from a
-backend, and the app switches. An app that cannot pause those writes, or
-cannot stop every writer as step 2 describes, is not covered.
-
-1. Add the new table to `jazz.app.json` with its `encryption` entry, its
-   encrypted columns and its `equality`, and `createTables` it in the
-   migration (after §4 if its space table needs it). In the same migration,
-   every table with a reference to the old table gains a new reference
-   column to the new table: a reference column names its target table, and
-   the deploy refuses a migration that retargets an existing one ("Add a new
-   column referencing … and drop this one in a later release"). A reference
-   inside the old table is declared in the new table against the new table.
-   Deploy and ship.
-2. Stop every writer. A permissions revision refuses insert, update and
-   delete on the old table and on every table holding an old reference, with
-   their read rules unchanged. It reaches a session only through its pin:
-   the backend that opens a session pins it to the bundle that backend
-   publishes, whatever the client's app version, and a client cannot pick
-   its own ([topology](9_topology.md) §9.7). Publishing a new bundle ends the
-   sessions pinned to others, which reconnect through whichever backend
-   serves them now; a deployment still serving an earlier bundle pins its
-   sessions to it, and they can still write. The writers have stopped once
-   every such deployment is retired; writes made offline are then checked
-   on reconnection under the new pin. The backend's system writes are
-   unchecked, so its jobs that write these tables stop too.
-3. Copy, once every writer has stopped. Clients that hold a space's key copy
-   each old row of the space into the new table under the same row ID, with
-   an upsert, so a second run overwrites rather than duplicates. When the space has no root yet, the
-   first copy creates it (spec §3.2), which needs a session that may read
-   and update the space row; the first encrypted rows and the space are
-   accepted together. A space whose key holders are all offline waits. A
-   backend fills each new reference column with its row's old reference
-   (the copies keep the IDs, so the value is the same); the column is plain,
-   so the write needs no key (§1).
-4. Check from a backend. A client's reads, remote ones included, apply its
-   read permissions, so two lists it reads can agree while a row it cannot
-   see has no copy. A backend's own database reads every row whatever the
-   permissions, and needs no keys here: IDs, space columns and references are
-   plain. It reads accepted rows (the `remote` tier), after every reference
-   fill has reached the server (a `global` write wait). The check passes when, for every space: the old and new tables
-   hold the same set of IDs; each copy has its old row's space; and each
-   row's new reference equals its old one, null equal to null. Missing
-   copies name the spaces whose key holders have not copied yet; those are
-   copied and the references filled again. With every writer stopped before
-   the copy, a copy without an old row, or in another space than its old
-   row's, means a writer was still running. The app switches only once the
-   check passes with every writer stopped.
-5. Switch: ship the app version whose code, relations and permissions use
-   the new table and the new reference columns. Its permissions keep the
-   old table frozen, and give the referencing tables their write rules back
-   for every column but the old reference, which stays frozen until it is
-   dropped: otherwise an older client still running could change it alone
-   and leave the new reference stale. An insert must leave it null, and an
-   update must keep it (`updateTo` comparing with the old row, which
-   compiles to `exists <table>(id = this.id, <column> = this.<column>)`;
-   null equals null there, so a row without the reference keeps its other
-   columns writable: [the test](../tests/frozen_reference_column.rs)).
-   That needs the old reference to be optional. A required one can't take
-   `<column> = null` as an insert rule (its permissions don't compile), and
-   no migration makes a kept column optional (the lens check refuses it:
-   `a_migration_cannot_make_a_kept_required_reference_optional`). Its table
-   then refuses every insert (`"insert": "false"`) until the old column is
-   dropped, with the same update rule, so its other columns stay writable.
-   IDs kept outside Jazz's relations, such as in URLs, still resolve,
-   because the copies keep their IDs.
-6. Drop the old table in a later migration, with the old reference columns
-   in the same migration: a schema whose column references a table it does
-   not have is refused.
-
-**The old plaintext stays.** Copying protects the values from then on. The
-old values remain in the old table's history, which no new version reads, on
-replicas that synced them and in backups; dropping the table removes none of
-these. The server operator removes the server's copy, with its backups,
-outside Jazz. An app should treat that data as already disclosed.
+**The old plaintext stays.** Dropping the old table does not erase its history,
+replica copies or backups. The server operator must remove those outside Jazz;
+treat the old data as already disclosed.

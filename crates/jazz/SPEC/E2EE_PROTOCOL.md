@@ -641,9 +641,8 @@ read policy).
   the state before the transaction's own writes (its pre-state), so several
   deletes in one transaction pass or fail independently of their order: an
   updater may delete its own member row and other members' rows together.
-  Jazz's authorization rules already say this of `USING` clauses; the code
-  does not yet do it for a delete whose policy reads the deleted row's own
-  table ([core hooks](E2EE_CORE_HOOKS.md) H7, to be built). A row the
+  Jazz's authorization rules and core's delete check use this pre-state
+  ([core hooks](E2EE_CORE_HOOKS.md) H7; [implementation](../layers/db/src/db.rs)). A row the
   transaction deletes still counts as evidence for its other writes (Jazz's
   existing rule, [authorization](7_authorization.md)), so a transaction that
   removes a member and also delivers to it, or an updater that removes itself
@@ -1479,10 +1478,8 @@ the 32 secret bytes, created and read with user verification required
   the user and kept outside the application. Generating material is not
   evidence that recovery is active. **Decode / inspect:** at most 2,000,000
   characters; exactly those eleven keys; matching scope and mechanisms; byte
-  arrays 1–65,536. Both keypairs are checked by seal/open and sign/verify over
-  `UTF8("jazz.e2ee.recovery-material-check.v1\0" ‖ scope ‖ "\0" ‖ rootId)`.
-  Inspect is read-only and reports the current epoch, active devices,
-  recovery roots and the validated root ID. Its root is registered exactly as
+  arrays 1–65,536. Inspect is read-only and reports the current epoch, active
+  devices and recovery roots. Its root is registered exactly as
   above. (The recovery phrase of the recovery secret is the preferred export
   where passkeys are missing; material is for roots not derived from a
   secret.)
@@ -1655,11 +1652,10 @@ is one of two kinds:
 A record for an epoch that is not in the account's chain, or accepted before
 its epoch's creation, is not valid. A sender seals to the first valid record (position, then ID) of
 the account's current epoch and the selected mechanism; with none, sealing
-fails with "recipient unsupported" and the sender waits. A device of the
-account also checks that the record derives from `K`, for each mechanism it
-supports. One that does not is reported (`conflicting-account-key`, §7) and
-ignored by that device; it never stops the device acquiring its account
-key. Only an active device of the account can sign a valid record; a row
+fails with "recipient unsupported" and the sender waits. A record that does
+not derive from `K` is reported as `conflicting-account-key` (§7); this does
+not stop the device acquiring its account key. Only an active device of the
+account can sign a valid record; a row
 the server writes without that is not valid and is ignored. Senders cannot
 check derivation, so until the record is replaced they may seal to it. The
 account's devices know which of their records do not derive, so a delivery
@@ -2882,7 +2878,7 @@ state the device already verified.
 | Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`, `account-key-envelope`                                                                                                                 | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
 | Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                                         | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
-| Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
+| Recovery failures           | `recovery-cancelled`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                                                   | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
 | Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
 | Timeout / cancellation      | Timeout, cancellation                                                                                                                                                                            | Erase owned secrets; stop unsubmitted work                                                          | Claim a submitted operation failed                                                             |
 

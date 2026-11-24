@@ -71,7 +71,7 @@ pub trait E2eeHooks {
 
     /// Whether a keyless relay accepts this top-level filter on a reserved
     /// equality-token column from a keyed tab. Application queries cannot
-    /// name reserved columns, so client and backend hooks keep the default.
+    /// name reserved columns, so client hooks keep the default.
     fn relays_token_filter(&self, _table: &str, _filter: &Predicate) -> bool {
         false
     }
