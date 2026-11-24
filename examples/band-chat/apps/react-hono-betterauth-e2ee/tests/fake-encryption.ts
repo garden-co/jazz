@@ -80,7 +80,6 @@ export function fakeEncryption(
           device.id === state.deviceId ? { ...device, removalRequested: true } : device,
         );
       }),
-      completeRemovals: vi.fn(async () => []),
     },
     recovery: {
       list: vi.fn(async () => state.recoveryRoots),

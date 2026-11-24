@@ -4,7 +4,7 @@
 // read markers.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { fakeApp, reactMock, resetWorld, sameFilter, world, type Q } from "./support/fake-jazz";
+import { resetWorld, sameFilter, world, type Q } from "./support/fake-jazz";
 
 vi.mock("../jazz.generated", async () => ({ app: (await import("./support/fake-jazz")).fakeApp }));
 vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).reactMock);
@@ -12,8 +12,6 @@ vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).re
 import { BandChat } from "../src/BandChat";
 import { summariseRooms } from "../src/lib/room-summaries";
 
-void fakeApp;
-void reactMock;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const me = { id: "p-alice", author: "alice-account", displayName: "Alice" };

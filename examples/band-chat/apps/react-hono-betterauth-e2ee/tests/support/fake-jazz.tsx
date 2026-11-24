@@ -76,7 +76,6 @@ export function resetWorld() {
   world.account = "alice-account";
   for (const fn of Object.values(db) as unknown[]) if (vi.isMockFunction(fn)) fn.mockClear();
   db.all.mockReset().mockResolvedValue([{ id: "m" }]);
-  db.one.mockReset().mockResolvedValue(null);
   db.encryption.onReport.mockClear();
   db.encryption.keys.deliver.mockReset().mockResolvedValue({ delivered: 1, failed: 0 });
   db.encryption.keys.rotate.mockReset().mockResolvedValue(1);
@@ -102,9 +101,8 @@ export const db = {
   delete: vi.fn((..._args: unknown[]) => written()),
   transaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
   serializableTransaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
-  /** The plain read of a room's first message: the room has one unless a test empties it. */
+  /** Read results can be configured by component tests that exercise downloads. */
   all: vi.fn(async (..._args: unknown[]) => [{ id: "m" }] as unknown[]),
-  one: vi.fn(async (..._args: unknown[]) => null),
   subscribe: vi.fn(
     (
       query: Q,

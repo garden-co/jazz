@@ -206,33 +206,30 @@ describe("locked messages", () => {
     expect(screen.getByText(/1 message is locked on this browser/)).toBeTruthy();
   });
 
-  it("says messages are locked on this browser while it waits for approval", async () => {
-    deviceStatus.current = "awaiting-approval";
-    show({ messages: { data: [], unreadable: [pending] } });
-    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
+  it.each([
+    {
+      scenario: "approval pending",
+      status: "awaiting-approval",
+      unreadable: [pending],
+      notice: /1 message is locked on this browser/,
+    },
+    {
+      scenario: "one message with no available key",
+      status: "active",
+      unreadable: [{ table: "messages", id: "m3", code: "key-unavailable" }],
+      notice: /1 message is locked on this browser/,
+    },
+    {
+      scenario: "one of several messages with no available key",
+      status: "active",
+      unreadable: [pending, { table: "messages", id: "m2", code: "key-unavailable" }],
+      notice: /2 messages are locked on this browser/,
+    },
+  ])("shows the locked notice for $scenario", async ({ status, unreadable, notice }) => {
+    deviceStatus.current = status;
+    show({ messages: { data: [], unreadable } });
+    expect(await screen.findByText(notice)).toBeTruthy();
     expect(screen.queryByText(/Decrypting/)).toBeNull();
-  });
-
-  it("says messages are locked when any of them is locked for another reason", async () => {
-    deviceStatus.current = "active";
-    show({
-      messages: {
-        data: [],
-        unreadable: [pending, { table: "messages", id: "m2", code: "key-unavailable" }],
-      },
-    });
-    expect(await screen.findByText(/2 messages are locked on this browser/)).toBeTruthy();
-    expect(screen.queryByText(/Decrypting/)).toBeNull();
-  });
-
-  it("says messages are locked on this browser when it has no access to the key", async () => {
-    show({
-      messages: {
-        data: [],
-        unreadable: [{ table: "messages", id: "m3", code: "key-unavailable" }],
-      },
-    });
-    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
     expect(screen.queryByText("No messages yet")).toBeNull();
   });
 

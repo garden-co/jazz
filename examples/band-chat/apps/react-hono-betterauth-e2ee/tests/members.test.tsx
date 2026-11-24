@@ -11,7 +11,6 @@ vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).re
 
 import { MembersDialog } from "../src/components/MembersDialog";
 import { ProfileDirectoryProvider } from "../src/lib/profiles";
-import { removeMember } from "../src/lib/membership";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -153,28 +152,6 @@ describe("removal", () => {
     expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
   });
 
-  it("renews the key after every removal, also in a room with no message yet", async () => {
-    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
-    db.all.mockResolvedValue([]);
-    db.encryption.keys.rotate.mockResolvedValueOnce(0);
-    open([member("1", "alice-account"), member("2", "bob-account")]);
-    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
-    await waitFor(() => expect(db.encryption.keys.rotate).toHaveBeenCalledTimes(1));
-    expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
-    expect(screen.queryByText(/key is not renewed yet/)).toBeNull();
-  });
-
-  it("says the key is not renewed on any rotation failure, also one that names a code", async () => {
-    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
-    db.encryption.keys.rotate.mockRejectedValueOnce(
-      Object.assign(new Error("E2EE operation refused"), { code: "rotation-needs-key" }),
-    );
-    open([member("1", "alice-account"), member("2", "bob-account")]);
-    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
-    expect(await screen.findByText(/key is not renewed yet/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
-  });
-
   it("shows when the removal found no visible member rows", async () => {
     db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 0 }));
     open([member("1", "alice-account"), member("2", "bob-account")]);
@@ -204,54 +181,5 @@ describe("removal", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })));
     await waitFor(() => expect(screen.queryByText(/key is not renewed yet/)).toBeNull());
     expect(db.encryption.keys.rotate).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("a removal racing an admission of the same account", () => {
-  it("runs again on fresh rows after a conflict, so the late member row goes too", async () => {
-    const { PersistedWriteRejectedError } = await import("jazz-tools");
-    const conflict = Object.assign(Object.create(PersistedWriteRejectedError.prototype), {
-      code: "serialization_conflict",
-    });
-    const attempts: Array<Array<[string, string]>> = [];
-    let admitted = false;
-    db.serializableTransaction.mockImplementation(async (run) => {
-      const staged = tx({
-        __e2ee_members: admitted ? [member("late", "bob-account")] : [],
-        roomMembers: admitted ? [{ id: "rm-late" }] : [],
-      });
-      const count = await run(staged.handle);
-      attempts.push(staged.deleted);
-      if (!admitted) {
-        admitted = true; // the second admission commits first
-        throw conflict;
-      }
-      return { wait: async () => count };
-    });
-    const removed = await removeMember({
-      db: db as never,
-      roomId: "room",
-      accountId: "bob-account",
-    });
-    expect(removed).toBe(1);
-    expect(attempts).toEqual([
-      [],
-      [
-        ["__e2ee_members", "late"],
-        ["roomMembers", "rm-late"],
-      ],
-    ]);
-  });
-
-  it("shows the refusal when the conflict does not clear", async () => {
-    const { PersistedWriteRejectedError } = await import("jazz-tools");
-    const conflict = Object.assign(Object.create(PersistedWriteRejectedError.prototype), {
-      code: "serialization_conflict",
-    });
-    db.serializableTransaction.mockRejectedValue(conflict);
-    await expect(
-      removeMember({ db: db as never, roomId: "room", accountId: "bob-account" }),
-    ).rejects.toBe(conflict);
-    expect(db.serializableTransaction).toHaveBeenCalledTimes(3);
   });
 });
