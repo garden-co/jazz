@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzClient, memoryPrivateStore } from "jazz-tools/backend";
+import { createJazzClient, keyless, memoryPrivateStore } from "jazz-tools/backend";
 import permissions from "../jazz.permissions.json" with { type: "json" };
 import { app, cleanUp, createRoom, device, serve, storedBytes, until } from "./harness";
 
@@ -228,4 +228,58 @@ describe("the server holds no plaintext of an encrypted column", () => {
     expect(stored.includes(Buffer.from("SECRET-MESSAGE-TEXT-7f3a"))).toBe(false);
     expect(stored.includes(Buffer.from("SECRET-ATTACHMENT-NAME-7f3a"))).toBe(false);
   }, 90_000);
+
+  it("its backend reads messages and read markers without the encrypted columns", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const roomId = await createRoom(alice, "Rehearsal");
+    await alice.db
+      .insert(app.messages, {
+        roomId,
+        senderId: alice.profile.id,
+        text: "set list",
+        attachmentName: "set-list.pdf",
+        attachmentType: "application/pdf",
+        attachmentSize: 3,
+      })
+      .wait({ tier: "global" });
+    await alice.db
+      .insert(app.readMarkers, { roomId, reader: alice.account, lastReadAt: new Date() })
+      .wait({ tier: "global" });
+
+    const backendApp = keyless(app);
+    const messages = await until(async () => {
+      const rows = await host.jazz.db.all(backendApp.messages);
+      return rows.length > 0 ? rows : undefined;
+    }, "the backend to see the message");
+    expect(messages[0]!.attachmentType).toBe("application/pdf");
+    expect(messages[0]).not.toHaveProperty("text");
+    expect(messages[0]).not.toHaveProperty("attachmentName");
+    const markers = await until(async () => {
+      const rows = await host.jazz.db.all(backendApp.readMarkers);
+      return rows.length > 0 ? rows : undefined;
+    }, "the backend to see the marker");
+    expect(markers[0]!.reader).toBe(alice.account);
+    expect(markers[0]).not.toHaveProperty("lastReadAt");
+  }, 90_000);
+
+  it("the generated app file stores the encrypted columns as bytes", () => {
+    const file = JSON.parse(readFileSync(join(APP_DIR, "jazz.app.json"), "utf8")) as {
+      tables: Record<string, { columns: Record<string, unknown>; encryption?: unknown }>;
+    };
+    const { messages, readMarkers } = file.tables;
+    expect(messages!.columns.text).toBe("bytes");
+    expect(messages!.columns.attachmentName).toBe("bytes");
+    expect(readMarkers!.columns.lastReadAt).toBe("bytes");
+    expect(messages!.encryption).toMatchObject({
+      space: "roomId",
+      scope: "rooms",
+      columns: { text: "string", attachmentName: "string?" },
+    });
+    expect(readMarkers!.encryption).toMatchObject({
+      space: "roomId",
+      scope: "rooms",
+      columns: { lastReadAt: "timestamp" },
+    });
+  });
 });

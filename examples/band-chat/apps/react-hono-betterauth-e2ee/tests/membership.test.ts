@@ -143,6 +143,13 @@ describe("membership writes", () => {
     });
   }, 90_000);
 
+  it("renews the key of a room with no message yet without failing: there is nothing to renew", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const roomId = await createRoom(alice, "Empty");
+    expect(await renewRoomKey(alice.db, roomId)).toBe(0);
+  }, 60_000);
+
   it("lets a member leave, taking the member row, profile membership and markers with them", async () => {
     const host = await serve();
     const alice = await device(host);

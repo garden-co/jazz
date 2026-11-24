@@ -164,6 +164,17 @@ describe("removal", () => {
     expect(db.encryption.keys.rotate).not.toHaveBeenCalled();
   });
 
+  it("renews the key after removal in a room with no message yet", async () => {
+    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
+    db.all.mockResolvedValue([]);
+    db.encryption.keys.rotate.mockResolvedValueOnce(0);
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    await waitFor(() => expect(db.encryption.keys.rotate).toHaveBeenCalledTimes(1));
+    expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
+    expect(screen.queryByText(/key is not renewed yet/)).toBeNull();
+  });
+
   it("does not renew the key when the removal is refused", async () => {
     db.serializableTransaction.mockRejectedValue(new Error("not allowed"));
     open([member("1", "alice-account"), member("2", "bob-account")]);
@@ -181,5 +192,28 @@ describe("removal", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })));
     await waitFor(() => expect(screen.queryByText(/key is not renewed yet/)).toBeNull());
     expect(db.encryption.keys.rotate).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a key-code rotation failure and offers a retry", async () => {
+    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
+    db.encryption.keys.rotate.mockRejectedValueOnce(
+      Object.assign(new Error("E2EE operation refused"), { code: "rotation-needs-key" }),
+    );
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    expect(await screen.findByText(/key is not renewed yet/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("stops retrying a removal after three persistent conflicts", async () => {
+    const { PersistedWriteRejectedError } = await import("jazz-tools");
+    const conflict = Object.assign(Object.create(PersistedWriteRejectedError.prototype), {
+      code: "serialization_conflict",
+    });
+    db.serializableTransaction.mockRejectedValue(conflict);
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    expect(await screen.findByText(/Could not remove them:/)).toBeTruthy();
+    expect(db.serializableTransaction).toHaveBeenCalledTimes(3);
   });
 });
