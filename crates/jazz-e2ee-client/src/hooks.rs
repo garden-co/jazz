@@ -36,7 +36,7 @@ use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 use crate::account::rows::{Row, SPACE_ROOTS, unwrap_optional};
 use crate::state::{
     Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
-    unchecked_address,
+    push_bounded, unchecked_address,
 };
 use crate::values::ColumnCodec;
 
@@ -318,17 +318,18 @@ impl E2eeHooks for Hooks {
                 (write.cells.get("scopeId"), write.cells.get("identifier"))
         {
             let mut changes = self.shared.member_changes.borrow_mut();
-            if changes.len() == crate::state::MAX_REPORTS {
-                changes.pop_front();
-            }
-            changes.push_back((
-                write.row,
-                SpaceAddress {
-                    scope_id: scope.to_string(),
-                    identifier: id.to_string(),
-                },
-                self.shared.now(),
-            ));
+            push_bounded(
+                &mut changes,
+                (
+                    write.row,
+                    SpaceAddress {
+                        scope_id: scope.to_string(),
+                        identifier: id.to_string(),
+                    },
+                    self.shared.now(),
+                ),
+                crate::state::MAX_REPORTS,
+            );
         }
         // A member row this client deletes, a removal: the space is served
         // before the next encrypted write, so the pass sets the
@@ -339,10 +340,11 @@ impl E2eeHooks for Hooks {
             && matches!(write.kind, WriteKind::Delete)
         {
             let mut removals = self.shared.member_removals.borrow_mut();
-            if removals.len() == crate::state::MAX_REPORTS {
-                removals.pop_front();
-            }
-            removals.push_back((write.row, self.shared.now()));
+            push_bounded(
+                &mut removals,
+                (write.row, self.shared.now()),
+                crate::state::MAX_REPORTS,
+            );
         }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());

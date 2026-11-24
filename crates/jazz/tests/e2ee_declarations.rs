@@ -19,6 +19,55 @@ use jazz::tools::deployment::artifact::{
 };
 use jazz::tools::public_schema::{ColumnType, PlainType, TableName};
 
+/// Run the deploy's transition check with the same physical bytes column in
+/// both versions and the column's original type pinned in both.
+fn encryption_transition(
+    original: &PlainType,
+    before: &PlainType,
+    after: &PlainType,
+) -> Result<(), String> {
+    use jazz::tools::deployment::artifact::encryption::{Entries, check_transition};
+    use jazz::tools::deployment::published::PublishMigrationRequest;
+    use jazz::tools::{SchemaBuilder, TableSchemaBuilder};
+
+    let entries = |plain: &PlainType| -> Entries {
+        serde_json::from_value(serde_json::json!({
+            "notes": { "scope": "notes", "space": "id", "columns": {
+                "value": { "type": plain, "sealedType": original }
+            } }
+        }))
+        .unwrap()
+    };
+    let schema = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("notes").column("value", ColumnType::Bytea))
+        .build();
+    check_transition(
+        (&schema, Some(&entries(before))),
+        (&schema, Some(&entries(after))),
+        &PublishMigrationRequest {
+            from_hash: String::new(),
+            to_hash: String::new(),
+            forward: Vec::new(),
+        },
+    )
+}
+
+#[test]
+fn loosening_an_encrypted_json_schema_requires_a_new_column() {
+    let restricted = PlainType::new(
+        ColumnType::Json {
+            schema: Some(serde_json::json!({"type": "object"})),
+        },
+        false,
+    );
+    let loose = PlainType::new(ColumnType::Json { schema: None }, false);
+    let error = encryption_transition(&restricted, &restricted, &loose).unwrap_err();
+    assert!(
+        error.contains("docs/e2ee/encrypting-existing-data"),
+        "{error}"
+    );
+}
+
 /// A project-management app: projects are spaces, a task's title and notes
 /// are encrypted in its project's space.
 fn app(tasks_encryption: &str) -> String {

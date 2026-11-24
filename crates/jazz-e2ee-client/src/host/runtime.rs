@@ -572,14 +572,30 @@ impl Encryption {
 
     /// The address of the space `id` of the space table `table`.
     async fn space_address(&self, table: &str, id: &str) -> Result<SpaceAddress, String> {
-        let identity = self
-            .db
-            .table_identity(table)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("the schema has no table `{table}`"))?;
+        let cached = self
+            .client
+            .shared
+            .keys
+            .borrow()
+            .catalogue
+            .as_ref()
+            .map(|catalogue| catalogue.table(table).ok().map(str::to_owned));
+        let identity = match cached {
+            Some(Some(identity)) => identity
+                .parse::<uuid::Uuid>()
+                .map_err(|error| error.to_string())?,
+            Some(None) => return Err(format!("the schema has no table `{table}`")),
+            None => {
+                self.db
+                    .table_identity(table)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("the schema has no table `{table}`"))?
+                    .0
+            }
+        };
         Ok(SpaceAddress {
-            scope_id: identity.0.to_string(),
+            scope_id: identity.to_string(),
             identifier: id.to_owned(),
         })
     }
@@ -1811,6 +1827,10 @@ mod tests {
     }
 
     fn native_runtime_with_catalogue(include_notes: bool) -> Rc<Encryption> {
+        native_runtime(include_notes, true)
+    }
+
+    fn native_runtime(include_notes: bool, observed: bool) -> Rc<Encryption> {
         use jazz::db::{DbConfig, DbIdentity};
         use jazz::ids::{AuthorSubject, NodeUuid};
         use jazz::schema::JazzSchema;
@@ -1861,7 +1881,9 @@ mod tests {
             )))
             .unwrap(),
         );
-        jazz::db::block_on(db.set_authority()).unwrap();
+        if observed {
+            jazz::db::block_on(db.set_authority()).unwrap();
+        }
         Encryption::new_native(built, None, db, Rc::new(|| {}))
     }
 
@@ -1870,6 +1892,13 @@ mod tests {
     #[test]
     fn a_space_row_answers_while_the_loop_is_busy() {
         let runtime = native_runtime_with_catalogue(true);
+        assert!(run(runtime.client.prepare(&runtime.db)).unwrap());
+        let expected_scope = run(runtime.db.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0
+            .to_string();
+        assert_ne!(expected_scope, uuid::Uuid::nil().to_string());
         let busy = run(runtime.gate.enter());
         let answer = run(within(
             runtime.call(
@@ -1881,10 +1910,17 @@ mod tests {
         drop(busy);
         let row = answer.expect("the space row waited for the loop").unwrap();
         assert_eq!(row["identifier"], "room");
-        assert!(
-            row["scopeId"]
-                .as_str()
-                .is_some_and(|scope| !scope.is_empty())
+        assert_eq!(row["scopeId"], expected_scope);
+    }
+
+    #[test]
+    fn a_space_address_preserves_not_observed_before_the_first_sync() {
+        let runtime = native_runtime(true, false);
+        let expected = run(runtime.db.table_identity("projects")).unwrap_err();
+        assert_eq!(expected.code, ErrorCode::NotObserved);
+        assert_eq!(
+            run(runtime.space_address("projects", "room")).unwrap_err(),
+            expected.to_string()
         );
     }
 
