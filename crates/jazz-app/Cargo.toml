@@ -84,6 +84,7 @@ name = "test_relay_bin"
 required-features = ["test-relay"]
 
 [dev-dependencies]
+jazz-e2ee-client = { workspace = true, features = ["testing"] }
 hmac = "0.12"
 sha2 = "0.10"
 jazz-codegen = { path = "../jazz-codegen" }

@@ -2554,6 +2554,7 @@ dependencies = [
  "futures-executor",
  "futures-util",
  "jazz-app-support",
+ "jazz-e2ee-client",
  "jazz-server",
  "reqwest",
  "serde_json",

@@ -513,7 +513,7 @@ fn a_failed_reenrolment_closes_the_runtime() {
     let alice = account(0xa5);
     let server = secure_authority_with(&settings, None);
     let first_store = FaultyStore::default();
-    let first = open_account(Rc::new(first_store.clone()), alice, settings.clone(), None);
+    let first = open_account(first_store.store(), alice, settings.clone(), None);
     let (first_db, _first_link) = session(&first, &server, alice, &settings, 1, None);
     assert_eq!(
         drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),

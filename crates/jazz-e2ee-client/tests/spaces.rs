@@ -80,12 +80,7 @@ fn device_with_wire(
 fn bob_with_failing_store(server: &Db) -> (Device, FaultyStore) {
     let settings = EncryptionSettings::default();
     let store = FaultyStore::default();
-    let client = open_account(
-        Rc::new(store.clone()),
-        account(0xb0),
-        settings.clone(),
-        None,
-    );
+    let client = open_account(store.store(), account(0xb0), settings.clone(), None);
     let (db, link) = session(&client, server, account(0xb0), &settings, 2, None);
     let bob = Device {
         who: account(0xb0),
