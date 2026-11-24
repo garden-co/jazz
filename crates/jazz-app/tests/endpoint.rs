@@ -142,21 +142,34 @@ impl App {
     }
 
     async fn start_with(configure: impl FnOnce(Endpoint) -> Endpoint) -> Self {
+        Self::start_with_files(
+            AppFiles::new(bindings::APP, Some(PERMISSIONS.as_bytes().to_vec())),
+            "todo-service",
+            configure,
+        )
+        .await
+    }
+
+    async fn start_with_files(
+        files: AppFiles,
+        service: &str,
+        configure: impl FnOnce(Endpoint) -> Endpoint,
+    ) -> Self {
         let app_id = AppId::random();
         let server = JazzServer::builder()
             .with_app_id(app_id)
             .start()
             .await
             .expect("start a Jazz server");
-        let backend = bindings::open(
-            Config::new(app_id).server(server.base_url()).backend(
-                Backend::new(
+        let backend = Jazz::open(
+            files,
+            Config::new(app_id)
+                .server(server.base_url())
+                .backend(Backend::new(
                     server.backend_secret(),
                     server.admin_secret(),
-                    "todo-service",
-                )
-                .permissions(PERMISSIONS.as_bytes().to_vec()),
-            ),
+                    service,
+                )),
         )
         .await
         .expect("open the app's backend");
@@ -1902,38 +1915,7 @@ async fn a_thin_socket_whose_answer_never_comes_is_closed() {
 #[cfg(feature = "e2ee-client")]
 async fn start_encrypted() -> App {
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/encrypted");
-    let app_id = AppId::random();
-    let server = JazzServer::builder()
-        .with_app_id(app_id)
-        .start()
-        .await
-        .expect("start a Jazz server");
-    let backend = Jazz::open(
-        AppFiles::read(DIR).unwrap(),
-        Config::new(app_id)
-            .server(server.base_url())
-            .backend(Backend::new(
-                server.backend_secret(),
-                server.admin_secret(),
-                "service",
-            )),
-    )
-    .await
-    .expect("an encrypted app opens as a backend, which holds no keys");
-    let endpoint = Endpoint::new(&backend, authenticate).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/jazz", listener.local_addr().unwrap());
-    let admitted = Arc::new(Mutex::new(Vec::new()));
-    let host = tokio::spawn(host(listener, endpoint.clone(), admitted.clone()));
-    App {
-        app_id,
-        server,
-        backend,
-        endpoint,
-        url,
-        admitted,
-        host,
-    }
+    App::start_with_files(AppFiles::read(DIR).unwrap(), "service", |endpoint| endpoint).await
 }
 
 /// The rows of `table` the core holds, read by the thin client outside a

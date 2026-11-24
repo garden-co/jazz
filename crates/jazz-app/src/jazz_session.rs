@@ -22,7 +22,6 @@ use futures_core::Stream;
 use futures_util::StreamExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::AppId;
-use jazz::tools::deployment::artifact;
 use serde::Serialize;
 use tokio::sync::watch;
 
@@ -340,9 +339,7 @@ impl JazzSession {
             ));
         }
         // Leave other app-file errors to the client open, as with sign-in errors.
-        if artifact::load_client_encrypted(files.app_bytes(), config.app_id, "dev")
-            .is_ok_and(|(_, _, declarations)| declarations.is_some())
-        {
+        if files.declares_encryption(config.app_id, "dev") {
             return Err(Error::EncryptedSessionUnsupported);
         }
 
