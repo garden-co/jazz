@@ -59,6 +59,18 @@ pub struct TablePolicies {
 }
 
 impl TablePolicies {
+    /// The declared clauses an inheritance check reads, in evaluation order.
+    /// For updates the slots are USING and WITH CHECK. Other operations
+    /// have one clause and leave the second slot empty.
+    pub fn inherited_clauses(&self, operation: Operation) -> [Option<&PolicyExpr>; 2] {
+        match operation {
+            Operation::Select => [self.select.using.as_ref(), None],
+            Operation::Insert => [self.insert.with_check.as_ref(), None],
+            Operation::Update => [self.update.using.as_ref(), self.update.with_check.as_ref()],
+            Operation::Delete => [self.delete.using.as_ref(), None],
+        }
+    }
+
     /// Create empty policies.
     ///
     /// Permissive-local mode accepts missing clauses; enforcing mode treats
