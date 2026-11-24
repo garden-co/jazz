@@ -183,6 +183,8 @@ impl LocalDevice {
 #[derive(Clone, Copy)]
 pub struct AccountWriter<'a> {
     /// The recovery root derived from the account secret, if available.
+    /// The standard client derives this ID. The writer trusts raw callers to
+    /// supply it and does not verify its derivation (§2.9).
     pub account_secret_root_id: Option<&'a str>,
     pub suite: Suite<'a>,
     pub registry: &'a Registry,
