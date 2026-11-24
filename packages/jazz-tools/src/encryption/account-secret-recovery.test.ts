@@ -120,6 +120,46 @@ it("keeps a startup failure for a listener that subscribes later", async () => {
   }
 });
 
+it("replays active unreadable reports to a new listener until withdrawn", async () => {
+  vi.useFakeTimers();
+  const report = {
+    type: "unreadable",
+    table: "tasks",
+    id: null,
+    column: null,
+    code: "key-pending",
+    space: { scopeId: "projects", id: "project" },
+  };
+  const pending = [JSON.stringify(report)];
+  const encryption = new Encryption({
+    encryptionCall: vi.fn(),
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => pending.splice(0),
+  });
+  try {
+    const first = vi.fn();
+    encryption.onReport(first);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(first).toHaveBeenCalledExactlyOnceWith(report);
+
+    const second = vi.fn();
+    encryption.onReport(second);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(second).toHaveBeenCalledExactlyOnceWith(report);
+    expect(first).toHaveBeenCalledTimes(1);
+
+    pending.push(JSON.stringify({ ...report, type: "withdrawn" }));
+    await vi.advanceTimersByTimeAsync(25);
+    const third = vi.fn();
+    encryption.onReport(third);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(third).not.toHaveBeenCalled();
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
 it.each([true, false])(
   "honours each caller's deadline during shared verification (startup first: %s)",
   async (startupFirst) => {

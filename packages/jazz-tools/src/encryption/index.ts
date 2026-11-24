@@ -170,6 +170,8 @@ function verificationTimeout(state: { error?: string | null; stage?: string }): 
   );
 }
 
+const MAX_ACTIVE_REPORTS = 10_000;
+
 /** The handle an app uses; see the docs. */
 export class Encryption {
   readonly devices: Devices;
@@ -178,6 +180,7 @@ export class Encryption {
   readonly members: Members;
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
   private readonly pendingReports: EncryptionReport[] = [];
+  private readonly activeReports = new Map<string, EncryptionReport>();
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
@@ -369,14 +372,40 @@ export class Encryption {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.listeners.clear();
+    this.activeReports.clear();
   }
 
   private emit(report: EncryptionReport) {
+    if (report.type === "unreadable" || report.type === "withdrawn") {
+      const space = report.space as ReportSpace | null;
+      const key = JSON.stringify([
+        report.table,
+        report.id,
+        report.column,
+        report.code,
+        space?.scopeId,
+        space?.id,
+      ]);
+      this.activeReports.delete(key);
+      if (report.type === "unreadable") {
+        this.activeReports.set(key, report);
+        if (this.activeReports.size > MAX_ACTIVE_REPORTS)
+          this.activeReports.delete(this.activeReports.keys().next().value!);
+      }
+    }
     for (const listener of this.listeners) listener(report);
   }
 
   /** Listens to reports; returns the function that stops it. */
   onReport(listener: (report: EncryptionReport) => void): () => void {
+    if (!this.listeners.has(listener) && this.activeReports.size > 0) {
+      queueMicrotask(() => {
+        for (const report of this.activeReports.values()) {
+          if (!this.listeners.has(listener)) break;
+          listener(report);
+        }
+      });
+    }
     this.listeners.add(listener);
     this.timer ??= setInterval(() => this.deliver(), this.options.reportIntervalMs ?? 25);
     (this.timer as { unref?: () => void }).unref?.();

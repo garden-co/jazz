@@ -43,7 +43,8 @@ import {
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
 import { importNativeRelay } from "./native-relay.js";
-import { compiledBindings, declaresEncryption } from "../encryption/build.js";
+import { compiledBindings } from "../encryption/build.js";
+import { declaresEncryption } from "../encryption/plain-schema.js";
 import { Encryption, EncryptionStoreRequiredError } from "../encryption/index.js";
 import { servePrivateStore } from "../encryption/private-store.js";
 

@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { testApp } from "../testing/index.js";
@@ -9,6 +10,8 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { openBrowserSessionCore as createJazzClient } from "../session/create-jazz-session.js";
+import { browserPrivateStore } from "./browser-store.js";
+import { encryptionStoreScope } from "./store-scope.js";
 import {
   EncryptionNotDeclaredError,
   memoryPrivateStore,
@@ -26,6 +29,7 @@ import {
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
+  vi.unstubAllGlobals();
 });
 
 /** The app's own sign-in: `Authorization: Bearer token-<user>`. */
@@ -134,6 +138,26 @@ async function firstDevice(host: { serverUrl: string }, user: string) {
 }
 
 describe("encryption on the browser-style client, end to end", () => {
+  it("wipes the device account's IndexedDB keys on sign-out with a memory replica", async () => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    const scope = "memory-encrypted-sign-out";
+    const session = await createJazzClient({
+      scope,
+      serverUrl: null,
+      store: memoryStore(),
+      driver: { type: "memory" },
+      clearOnSignOut: true,
+      client: async () => ({ createClient: createLocalFirstDb }),
+      encryption: { app },
+    });
+    cleanups.push(() => session.close());
+    const keyScope = encryptionStoreScope(scope, "dev", session.getSnapshot().account!.id);
+    const keys = browserPrivateStore();
+    expect(await keys.list(keyScope)).not.toEqual([]);
+    await session.signOut();
+    expect(await keys.list(keyScope)).toEqual([]);
+  });
+
   it("lists and removes a member through a handle taken while the session is thin", async () => {
     const host = await serve();
     const alice = await client(host, "alice");

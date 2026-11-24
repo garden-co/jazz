@@ -51,6 +51,7 @@ import {
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import { relayWorkerLink } from "../default-runtime-source.js";
 import { CONNECTED } from "../sync-status.js";
+import { memoryPrivateStore, servePrivateStore } from "../../encryption/private-store.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -8779,6 +8780,47 @@ describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
   });
 });
 
+it("closes an encrypted database when its private store never answers", async () => {
+  vi.useFakeTimers();
+  const close = vi.fn();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, close }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const requests: string[] = [];
+  const native = {
+    encryptionCall: vi.fn((op: string) => {
+      expect(op).toBe("shutdown");
+      requests.push(JSON.stringify({ id: "1", op: "load", scope: "device", doc: "keys" }));
+      return new Promise<string>(() => {});
+    }),
+    takeStoreRequests: () => requests.splice(0),
+    replyStore: vi.fn(() => true),
+    encryptionSetOnline: vi.fn(),
+  };
+  const load = vi.fn(() => new Promise<never>(() => {}));
+  const serving = servePrivateStore(native, { ...memoryPrivateStore(), load });
+  const stop = vi.spyOn(serving, "stop");
+  runtime.attachEncryption(native as never, serving, () => ({}) as never);
+  try {
+    const closing = runtime.close();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(load).toHaveBeenCalledWith("device", "keys");
+    expect(close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(close).toHaveBeenCalledOnce();
+    await closing;
+    expect(stop).toHaveBeenCalledWith({ cancelPending: true });
+  } finally {
+    serving.stop({ cancelPending: true });
+    vi.useRealTimers();
+  }
+});
+
 describe("a tab's encryption follows its worker's server link", () => {
   it("goes offline when the connection that replaced the worker's fails before relaying a link", async () => {
     const runtime = NativeRuntimeAdapter.fromDb(
@@ -8791,7 +8833,11 @@ describe("a tab's encryption follows its worker's server link", () => {
     );
     const encryptionSetOnline = vi.fn();
     runtime.attachEncryption(
-      { encryptionSetOnline, encryptionSpaces: () => "{}" } as never,
+      {
+        encryptionSetOnline,
+        encryptionSpaces: () => "{}",
+        encryptionCall: async () => "null",
+      } as never,
       { stop: () => undefined },
       () => ({}) as never,
     );
