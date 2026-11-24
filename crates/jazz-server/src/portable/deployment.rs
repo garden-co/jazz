@@ -21,6 +21,8 @@ use crate::runtime::CatalogueApplyError;
 
 /// Per-physical-schema declarations in [`encryption::STORED_DECLARATIONS_V1`] form.
 pub(crate) const DECLARATIONS: HostTable = HostTable::new("e2ee_declarations");
+pub(crate) type KeptValue = (HostTable, Vec<u8>, Vec<u8>);
+pub(crate) type KeptValues = Vec<KeptValue>;
 
 type Names = BTreeMap<String, (String, BTreeMap<String, String>)>;
 
@@ -126,10 +128,7 @@ impl DeclaredVersion {
 
 /// Check every new declaration inside the catalogue transaction, after
 /// admission assigns stored identities and before the schema becomes live.
-pub(crate) async fn check_stored_columns(
-    db: &Db,
-    kept: &[(HostTable, Vec<u8>, Vec<u8>)],
-) -> Result<(), Error> {
+pub(crate) async fn check_stored_columns(db: &Db, kept: &[KeptValue]) -> Result<(), Error> {
     let invalid = |message: String| Error::new(ErrorCode::Schema, message);
     let mut new = Vec::new();
     for (table, key, bytes) in kept {
@@ -348,6 +347,15 @@ pub struct Deployment {
     /// commits, in [`encryption::STORED_DECLARATIONS_V1`] form. An empty set
     /// records a version with system tables that declared no encryption.
     pub first_declared: Vec<(SchemaHash, Vec<u8>)>,
+}
+
+impl Deployment {
+    pub fn kept_values(&self) -> KeptValues {
+        self.first_declared
+            .iter()
+            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
+            .collect()
+    }
 }
 
 /// Validate `request` against `index` and stage what it publishes at

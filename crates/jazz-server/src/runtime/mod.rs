@@ -1048,10 +1048,11 @@ impl Owner {
     }
 }
 
-type InitialCatalogue = (
-    CatalogueChange,
-    Vec<(jazz::host::HostTable, Vec<u8>, Vec<u8>)>,
-);
+type InitialCatalogue = (CatalogueChange, crate::portable::deployment::KeptValues);
+
+fn schema_encrypts<'a>(mut table_names: impl Iterator<Item = &'a str>) -> bool {
+    table_names.any(|name| name == jazz::tools::deployment::artifact::system_tables::MEMBERS)
+}
 
 impl Owner {
     /// Open the runtime on `file` with the native host's chunk store (see
@@ -1076,9 +1077,7 @@ impl Owner {
             && std::iter::once(&schema)
                 .chain(change.admit.iter().map(|(schema, _)| schema))
                 .any(|schema| {
-                    schema.tables().iter().any(|table| {
-                        table.name == jazz::tools::deployment::artifact::system_tables::MEMBERS
-                    })
+                    schema_encrypts(schema.tables().iter().map(|table| table.name.as_str()))
                 })
         {
             return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
@@ -1118,7 +1117,7 @@ impl Owner {
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
         owner.registry_installed = installed;
-        if !installed && owner.encrypts()? {
+        if !installed && owner.encrypts() {
             return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
         }
         Ok(owner)
@@ -1202,12 +1201,11 @@ impl Owner {
 
     /// Whether the app's schema has Jazz's E2EE system tables.
     #[cfg(feature = "native")]
-    fn encrypts(&self) -> Result<bool, String> {
+    fn encrypts(&self) -> bool {
         // The admitted versions, not the owner's schema: a running server
         // keeps its first schema while deployments admit later ones.
-        Ok(self
-            .db
-            .admits_table(jazz::tools::deployment::artifact::system_tables::MEMBERS))
+        self.db
+            .admits_table(jazz::tools::deployment::artifact::system_tables::MEMBERS)
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
@@ -1235,7 +1233,7 @@ impl Owner {
         &mut self,
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
-        kept: &[(jazz::host::HostTable, Vec<u8>, Vec<u8>)],
+        kept: &[crate::portable::deployment::KeptValue],
     ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
@@ -3553,12 +3551,37 @@ mod tests {
                 .build(),
         );
         let schema = || JazzSchema::new(&tables).unwrap();
+        assert!(schema_encrypts(
+            schema().tables().iter().map(|table| table.name.as_str())
+        ));
         let store = AppStore::memory().unwrap();
         let Err(error) = store.start_runtime(schema(), NodeRole::Core, false) else {
             panic!("no app named, so no registry");
         };
         assert!(error.contains("account registry"), "{error}");
         store.close().unwrap();
+
+        // An encrypted schema admitted through an initial catalogue needs the
+        // registry before the runtime can open.
+        let change = CatalogueChange {
+            admit: vec![(schema(), Vec::new())],
+            ..Default::default()
+        };
+        let (wake, _receiver) = std_mpsc::channel();
+        let result = Owner::open(
+            schema(),
+            block_on(StoreFile::memory()).unwrap(),
+            None,
+            wake,
+            false,
+            None,
+            false,
+            Some((change, Vec::new())),
+        );
+        assert!(matches!(
+            result,
+            Err(CatalogueApplyError::Rejected(message)) if message.contains("account registry")
+        ));
 
         // Nor from a runtime started through the public API, which owns its
         // store and has no registry.

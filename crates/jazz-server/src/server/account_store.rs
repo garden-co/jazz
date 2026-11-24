@@ -162,26 +162,6 @@ async fn identities_of(
         .map_err(registry::storage_error)
 }
 
-/// How many identities of `account` are not device-account identities.
-async fn external_identities_of(
-    conn: &jazz::storage::Storage,
-    account: AccountId,
-) -> Result<i64, jazz::db::Error> {
-    let mut statement = conn
-        .prepare_cached(
-            "SELECT COUNT(*) FROM _jazz_host_account_identities \
-             WHERE account = ?1 AND issuer <> ?2",
-        )
-        .map_err(registry::storage_error)?;
-    statement
-        .query_row(
-            jazz::storage::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
-            |row| row.get::<_, i64>(0),
-        )
-        .await
-        .map_err(registry::storage_error)
-}
-
 impl RegistryFounders {
     pub(crate) fn new(app: Uuid) -> Self {
         Self { app }
@@ -232,16 +212,22 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         account: AccountId,
     ) -> LocalBoxFuture<'a, Result<bool, String>> {
         Box::pin(async move {
-            let Some(founded) = self.founded_by_device_account(store, account).await? else {
+            let identities = identities_of(store, account)
+                .await
+                .map_err(|error| format!("the account registry cannot be read: {error}"))?;
+            if identities.is_empty() {
                 return Ok(false);
-            };
+            }
+            let founded = identities.iter().any(|(issuer, subject)| {
+                issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
+                    && jazz::account_registry::device_account_id(self.app, subject) == account
+            });
             if founded {
                 return Ok(false);
             }
-            external_identities_of(store, account)
-                .await
-                .map(|external| external == 0)
-                .map_err(|error| error.to_string())
+            Ok(!identities
+                .iter()
+                .any(|(issuer, _)| issuer != jazz::identity::DEVICE_ACCOUNT_ISSUER))
         })
     }
 }
@@ -474,70 +460,33 @@ mod tests {
         else {
             panic!("an assignment");
         };
+        let AccountCommandResult::Assignment(other) = registry
+            .execute(&AccountCommand::FoundDeviceAccount {
+                principal: Principal {
+                    issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
+                    subject: Uuid::from_bytes([8; 16]).to_string(),
+                },
+                app: Uuid::from_bytes([8; 16]),
+            })
+            .unwrap()
+        else {
+            panic!("an assignment");
+        };
         let view = RegistryFounders::new(app);
         check_registry_on_both_backends(dir.path(), async |conn| {
-            for (account, expected) in [
-                (founded.account, Some(true)),
-                (external, Some(false)),
-                (AccountId(Uuid::from_bytes([3; 16])), None),
+            for (account, founded_here, another_audience) in [
+                (founded.account, Some(true), false),
+                (other.account, Some(false), true),
+                (external, Some(false), false),
+                (AccountId(Uuid::from_bytes([3; 16])), None, false),
             ] {
                 assert_eq!(
                     view.founded_by_device_account(conn, account).await,
-                    Ok(expected)
+                    Ok(founded_here)
                 );
-            }
-        });
-    }
-
-    /// Core distinguishes a device account founded for another audience from
-    /// accounts founded for this app, external accounts and unknown accounts.
-    /// A view-level test is needed to observe it yielding during SQL reads.
-    #[test]
-    fn an_account_founded_for_another_audience_is_told_apart() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = Uuid::from_bytes([7; 16]);
-        let store =
-            crate::runtime::AppStore::open(&crate::runtime::StorageConfig::data_dir(dir.path()))
-                .unwrap();
-        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
-        let device = |subject: &str| Principal {
-            issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
-            subject: subject.into(),
-        };
-        let found = |registry: &mut StoredAccountRegistry, subject: &str, app: Uuid| {
-            let AccountCommandResult::Assignment(assignment) = registry
-                .execute(&AccountCommand::FoundDeviceAccount {
-                    principal: device(subject),
-                    app,
-                })
-                .unwrap()
-            else {
-                panic!("an assignment");
-            };
-            assignment.account
-        };
-        let own = found(&mut registry, &Uuid::from_bytes([1; 16]).to_string(), app);
-        let other = found(
-            &mut registry,
-            &Uuid::from_bytes([2; 16]).to_string(),
-            Uuid::from_bytes([8; 16]),
-        );
-        let external = registry
-            .login_or_register(&principal("alice"))
-            .unwrap()
-            .assignment
-            .account;
-        let view = RegistryFounders::new(app);
-        check_registry_on_both_backends(dir.path(), async |conn| {
-            for (account, expected) in [
-                (own, false),
-                (other, true),
-                (external, false),
-                (AccountId(Uuid::from_bytes([3; 16])), false),
-            ] {
                 assert_eq!(
                     view.founded_for_another_audience(conn, account).await,
-                    Ok(expected)
+                    Ok(another_audience)
                 );
             }
         });
