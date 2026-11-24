@@ -6,7 +6,7 @@ import { storedBytes } from "../../tests/stored-bytes.js";
 
 vi.mock(import("node:fs/promises"), async (importOriginal) => {
   const fs = await importOriginal();
-  return { ...fs, readFile: vi.fn(fs.readFile) };
+  return { ...fs, readFile: vi.fn(fs.readFile) as typeof fs.readFile };
 });
 
 it("fails a storage scan when a file cannot be read", async () => {

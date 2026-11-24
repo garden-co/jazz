@@ -86,6 +86,22 @@ export const permissions = definePermissions({
     expect(withoutMarker(files.app)).toEqual(JSON.parse(handWritten));
   });
 
+  it("preserves account reset through generation and printing", async () => {
+    const root = await project(`
+import { schema as s } from "jazz-tools";
+export const schema = s.defineSchema({
+  rooms: s.table({ name: s.string().encrypted() }, {}, { space: "id" }),
+}, { encryption: { allowAccountReset: true } });
+export const permissions = schema.definePermissions({
+  rooms: { read: (room) => schema.isMember("rooms", room.id) },
+});
+`);
+    const files = await generated(root);
+    expect(JSON.parse(files.app).encryption).toEqual({ allowAccountReset: true });
+    await printTs({ dir: root, force: true });
+    expect((await generated(root)).app).toBe(files.app);
+  });
+
   it("stores every type the example app encrypts as bytes, its plaintext type in the entry", async () => {
     const root = await project(`
 import { schema as s } from "jazz-tools";
