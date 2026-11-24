@@ -149,7 +149,10 @@ impl E2eeClient {
     /// This device as an active device of its account at `read`'s cut, with
     /// the authenticated account key. A read that shows less than the
     /// device's floor is refused first (protocol §2.4).
-    async fn view(&self, read: &AccountRead) -> Result<View, ClientError> {
+    pub(super) async fn account_state_and_device<'a>(
+        &'a self,
+        read: &'a AccountRead,
+    ) -> Result<(AccountReplay<'a>, AccountState, LocalDevice), ClientError> {
         let device = self.shared.device()?.clone();
         if self.check_floor_first(read, &device.id).await? == FloorCheck::NoLongerActive {
             return Err(ProtocolError::DeviceNoLongerActive.into());
@@ -158,6 +161,11 @@ impl E2eeClient {
         let state = replay
             .current()?
             .ok_or(ProtocolError::InconsistentEvidence)?;
+        Ok((replay, state, device))
+    }
+
+    async fn view(&self, read: &AccountRead) -> Result<View, ClientError> {
+        let (replay, state, device) = self.account_state_and_device(read).await?;
         if !state.is_active(&device.id) {
             return Err(ProtocolError::Refused(RefusalCode::DeviceNotActive).into());
         }
@@ -270,15 +278,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let device = self.shared.device()?.clone();
-                if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
-                    return Err(ProtocolError::DeviceNoLongerActive.into());
-                }
-                let replay =
-                    AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
-                let state = replay
-                    .current()?
-                    .ok_or(ProtocolError::InconsistentEvidence)?;
+                let (_, state, device) = self.account_state_and_device(&read).await?;
                 let mine: Vec<_> = read
                     .private
                     .challenges
@@ -543,12 +543,7 @@ impl E2eeClient {
                 &target,
                 &mut SharedRandom(&self.shared.random),
             )?;
-            self.stage(db, tx, &records.private).await?;
-            self.stage(db, tx, &records.public).await?;
-            for delivery in &records.recovery_deliveries {
-                self.stage(db, tx, delivery).await?;
-            }
-            self.stage(db, tx, &records.account_key).await?;
+            self.stage_rotation(db, tx, &records).await?;
             self.publish(db, tx).await?;
             Ok(())
         })
@@ -615,12 +610,7 @@ impl E2eeClient {
                             &RotationTarget::RemoveDevice(device.clone()),
                             &mut SharedRandom(&self.shared.random),
                         )?;
-                        self.stage(db, tx, &records.private).await?;
-                        self.stage(db, tx, &records.public).await?;
-                        for delivery in &records.recovery_deliveries {
-                            self.stage(db, tx, delivery).await?;
-                        }
-                        self.stage(db, tx, &records.account_key).await?;
+                        self.stage_rotation(db, tx, &records).await?;
                         self.publish(db, tx).await?;
                         Ok::<(), ClientError>(())
                     }
@@ -845,15 +835,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let mut device = self.shared.device()?.clone();
-                if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
-                    return Err(ProtocolError::DeviceNoLongerActive.into());
-                }
-                let replay =
-                    AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
-                let state = replay
-                    .current()?
-                    .ok_or(ProtocolError::InconsistentEvidence)?;
+                let (replay, state, mut device) = self.account_state_and_device(&read).await?;
                 if device.approval_nonce.is_none() {
                     // Spent: a device that is active, or whose proof the
                     // authority shows, recovered already; any other never

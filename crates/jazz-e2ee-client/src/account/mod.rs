@@ -22,7 +22,8 @@ use jazz::records::Value;
 use jazz::tools::OpenTransactionId;
 use jazz::tx::DurabilityTier;
 use jazz_e2ee::protocol::account::build::{
-    ResetPolicy, RootAuthority, account_root, check_bootstrap, check_reset,
+    ResetPolicy, RootAuthority, RootRecords, RotationRecords, account_root, check_bootstrap,
+    check_reset,
 };
 use jazz_e2ee::protocol::account::{
     AccountEpochKeys, AccountKey, AccountKeyEvidence, AccountReplay, AccountState,
@@ -53,6 +54,85 @@ const PUBLIC_ACCOUNT_TABLES: [&str; 6] = [
     AccountSealingKey::TABLE,
     DeviceRemovalRequest::TABLE,
 ];
+
+trait PublicAccountRow: Sized {
+    fn account_id(&self) -> &str;
+    fn named_devices(&self) -> Vec<String>;
+    fn add_to(row: Accepted<Self>, ledger: &mut PublicAccountLedger);
+}
+
+macro_rules! public_account_row {
+    ($record:ty, $field:ident, $($account:ident).+, $devices:expr) => {
+        impl PublicAccountRow for $record {
+            fn account_id(&self) -> &str {
+                &self.$($account).+
+            }
+
+            fn named_devices(&self) -> Vec<String> {
+                ($devices)(self)
+            }
+
+            fn add_to(row: Accepted<Self>, ledger: &mut PublicAccountLedger) {
+                ledger.$field.push(row);
+            }
+        }
+    };
+}
+
+public_account_row!(AccountRoot, roots, account_id, |row: &AccountRoot| vec![
+    row.device_id.clone()
+]);
+public_account_row!(
+    PublicDeviceApproval,
+    approvals,
+    account_id,
+    |row: &PublicDeviceApproval| vec![row.device_id.clone(), row.signer_id.clone()]
+);
+public_account_row!(
+    PublicAccountSuccessor,
+    successors,
+    columns.account_id,
+    |row: &PublicAccountSuccessor| {
+        let mut devices = vec![row.columns.signer_id.clone()];
+        devices.extend(row.columns.removed_device_id.clone());
+        devices
+    }
+);
+public_account_row!(
+    RecoveryRoot,
+    recovery_roots,
+    account_id,
+    |row: &RecoveryRoot| vec![row.signer_id.clone()]
+);
+public_account_row!(
+    AccountSealingKey,
+    account_keys,
+    account_id,
+    |_: &AccountSealingKey| Vec::new()
+);
+public_account_row!(
+    DeviceRemovalRequest,
+    removal_requests,
+    account_id,
+    |row: &DeviceRemovalRequest| vec![row.device_id.clone()]
+);
+
+fn group_public_rows<T: PublicAccountRow>(
+    rows: Vec<Accepted<T>>,
+    by_account: &mut std::collections::BTreeMap<String, PublicAccountLedger>,
+    devices: &mut std::collections::BTreeMap<String, BTreeSet<String>>,
+) {
+    for row in rows {
+        let account = row.row.account_id().to_owned();
+        if let Some(ledger) = by_account.get_mut(&account) {
+            devices
+                .entry(account)
+                .or_default()
+                .extend(row.row.named_devices());
+            T::add_to(row, ledger);
+        }
+    }
+}
 
 /// Where this device stands in its account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,47 +304,12 @@ impl E2eeClient {
             .iter()
             .map(|id| (id.clone(), extra_devices.clone()))
             .collect();
-        macro_rules! group {
-            ($rows:expr, $field:ident $(.$columns:ident)?, $devices:expr) => {
-                for row in $rows {
-                    let account = row.row$(.$columns)?.account_id.clone();
-                    if let Some(ledger) = by_account.get_mut(&account) {
-                        let named: Vec<String> = $devices(&row);
-                        devices.entry(account).or_default().extend(named);
-                        ledger.$field.push(row);
-                    }
-                }
-            };
-        }
-        group!(roots, roots, |r: &Accepted<AccountRoot>| vec![
-            r.row.device_id.clone()
-        ]);
-        group!(approvals, approvals, |a: &Accepted<
-            PublicDeviceApproval,
-        >| vec![
-            a.row.device_id.clone(),
-            a.row.signer_id.clone()
-        ]);
-        group!(successors, successors.columns, |x: &Accepted<
-            PublicAccountSuccessor,
-        >| {
-            let mut named = vec![x.row.columns.signer_id.clone()];
-            named.extend(x.row.columns.removed_device_id.clone());
-            named
-        });
-        group!(recovery_roots, recovery_roots, |r: &Accepted<
-            RecoveryRoot,
-        >| vec![
-            r.row.signer_id.clone()
-        ]);
-        group!(account_keys, account_keys, |_: &Accepted<
-            jazz_e2ee::protocol::records::account::AccountSealingKey,
-        >| Vec::new());
-        group!(removal_requests, removal_requests, |r: &Accepted<
-            DeviceRemovalRequest,
-        >| vec![
-            r.row.device_id.clone()
-        ]);
+        group_public_rows(roots, &mut by_account, &mut devices);
+        group_public_rows(approvals, &mut by_account, &mut devices);
+        group_public_rows(successors, &mut by_account, &mut devices);
+        group_public_rows(recovery_roots, &mut by_account, &mut devices);
+        group_public_rows(account_keys, &mut by_account, &mut devices);
+        group_public_rows(removal_requests, &mut by_account, &mut devices);
 
         let wanted: BTreeSet<&String> = devices.values().flatten().collect();
         if !wanted.is_empty() {
@@ -386,6 +431,31 @@ impl E2eeClient {
         Ok(())
     }
 
+    async fn stage_root(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        records: &RootRecords,
+    ) -> Result<(), ClientError> {
+        self.stage(db, tx, &records.identity).await?;
+        self.stage(db, tx, &records.root).await?;
+        self.stage(db, tx, &records.account_key).await
+    }
+
+    pub(super) async fn stage_rotation(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        records: &RotationRecords,
+    ) -> Result<(), ClientError> {
+        self.stage(db, tx, &records.private).await?;
+        self.stage(db, tx, &records.public).await?;
+        for delivery in &records.recovery_deliveries {
+            self.stage(db, tx, delivery).await?;
+        }
+        self.stage(db, tx, &records.account_key).await
+    }
+
     /// Commits `tx` and waits until the authority accepts it.
     pub(crate) async fn publish(
         &self,
@@ -486,9 +556,7 @@ impl E2eeClient {
                     .map_or(RootAuthority::App, RootAuthority::DeviceAccount),
                 &mut **self.shared.random.borrow_mut(),
             )?;
-            self.stage(db, tx, &records.identity).await?;
-            self.stage(db, tx, &records.root).await?;
-            self.stage(db, tx, &records.account_key).await?;
+            self.stage_root(db, tx, &records).await?;
             self.publish(db, tx).await?;
             return Ok(Step::Again);
         }
@@ -569,15 +637,8 @@ impl E2eeClient {
 
     async fn reset_step(&self, db: &Db, tx: OpenTransactionId) -> Result<(), ClientError> {
         let read = self.read_account(db, tx).await?;
-        let device = self.shared.device()?.clone();
-        if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
-            return Err(ProtocolError::DeviceNoLongerActive.into());
-        }
+        let (_, state, device) = self.account_state_and_device(&read).await?;
         let writer = self.writer()?;
-        let replay = AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
-        let state = replay
-            .current()?
-            .ok_or(ProtocolError::InconsistentEvidence)?;
         let policy = ResetPolicy {
             device_account: self.device_account.borrow().is_some(),
             allow_account_reset: self.allow_account_reset(),
@@ -606,13 +667,9 @@ impl E2eeClient {
             refused,
             source: Box::new(source),
         };
-        async {
-            self.stage(db, tx, &records.identity).await?;
-            self.stage(db, tx, &records.root).await?;
-            self.stage(db, tx, &records.account_key).await
-        }
-        .await
-        .map_err(|error| publication_error(error, true))?;
+        async { self.stage_root(db, tx, &records).await }
+            .await
+            .map_err(|error| publication_error(error, true))?;
         self.publish(db, tx).await.map_err(|error| {
             let refused = error.code == ErrorCode::WriteRejected || error.is_conflict();
             publication_error(error.into(), refused)
