@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { unreadableRows } from "../../encryption/unreadable.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
@@ -26,6 +27,7 @@ import {
   isCoreTickFailedError,
 } from "../core-tick-failed-error.js";
 import {
+  createOpenTransactionId,
   JazzClient,
   PersistedWriteRejectedError,
   type TxId,
@@ -61,6 +63,45 @@ function deferred<T>() {
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
+  });
+
+  it("keeps unreadable rows from a native transaction relation snapshot", async () => {
+    const omission = { table: "todos", id: "missing", column: "title", code: "key-pending" };
+    const all = vi.fn((..._args: unknown[]) => ({
+      poll: () => new Uint8Array([0, 0]), // Empty relation snapshot: root count and row batches.
+      cancel: () => undefined,
+      unreadable: () => JSON.stringify([omission]),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ all, tick: () => undefined }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const openTransactionId = runtime.beginTransaction("mergeable", createOpenTransactionId());
+      const query = JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+        ],
+      });
+      const rows = await runtime.query(
+        query,
+        null,
+        "local-first",
+        JSON.stringify({ transaction_id: openTransactionId }),
+      );
+      expect(rows).toEqual([]);
+      expect(all.mock.calls[0]?.[2]).toBe(openTransactionId);
+      expect(unreadableRows(rows as unknown[])).toEqual([omission]);
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {

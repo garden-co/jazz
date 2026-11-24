@@ -152,6 +152,7 @@ import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.j
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { encryptionForDb, notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import { declaresEncryption } from "../encryption/build.js";
 import { pendingEncryption } from "../encryption/pending-handle.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { declaredEntries } from "../encryption/plain-schema.js";
@@ -1414,8 +1415,8 @@ function prepareTransformRead<T>(
   };
 }
 
-/** Retry only computations that discovered a missing field, preserving the caller's read scope. */
-async function finishComputedRead<T>(
+/** Keep omissions with the typed rows and retry missing computed dependencies in the same read scope. */
+async function finishRead<T>(
   query: QueryBuilder<T>,
   built: NormalizedBuiltQuery,
   outputTable: string,
@@ -1423,6 +1424,8 @@ async function finishComputedRead<T>(
   rows: WasmRow[],
   read: (physical: NormalizedBuiltQuery) => Promise<WasmRow[]>,
 ): Promise<T[]> {
+  const unreadable = unreadableRows(rows);
+  if (!prepared.computedState) return withUnreadable(rows.map(prepared.transform), unreadable);
   for (;;) {
     const results: T[] = [];
     let missing: MissingComputedDependency | undefined;
@@ -1435,7 +1438,7 @@ async function finishComputedRead<T>(
         missing = error;
       }
     }
-    if (!missing) return results;
+    if (!missing) return withUnreadable(results, unreadable);
     if (!prepared.computedState || prepared.computedState.version === prepared.version)
       throw missing;
     prepared = prepareTransformRead(query, built, outputTable, prepared.computedState);
@@ -2380,8 +2383,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       },
       this.context?.readSession,
     );
-    if (!prepared.computedState) return rows.map(prepared.transform);
-    return finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+    return finishRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
       client.queryInternal(
         translateQuery(builderJson, planningSchema, physical),
         { ...queryOptions, openTransactionId },
@@ -2589,12 +2591,12 @@ export class Db {
   private thinEncryption(): Encryption | undefined {
     if (this.pendingEncryption) return this.pendingEncryption;
     const app = this.config?.encryption?.app;
-    if (!app || !isThinDb(this)) return undefined;
-    const declared = declaredEntries(resolveSchemaSource(app));
-    const table = Object.keys(declared ?? {}).find(
-      (name) => Object.keys(declared![name]!.columns).length > 0,
-    );
-    if (table === undefined) return undefined;
+    if (!app || !isThinDb(this) || !declaresEncryption(app)) return undefined;
+    const entries = Object.entries(declaredEntries(resolveSchemaSource(app)) ?? {});
+    const table =
+      entries.find(([, entry]) => Object.keys(entry.columns).length > 0)?.[0] ??
+      entries[0]?.[0] ??
+      "__e2ee_members";
     const refusal = (operation: string, reason: "no-loader" | "direct-thin") =>
       new EncryptionNeedsLocalFirstError({ reason, operation, table });
     const upgradable = () => hasLocalFirstUpgrader(this);
@@ -4568,18 +4570,12 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    // Rows left out as undecryptable stay with the typed result.
-    const unreadable = unreadableRows(rows);
-    if (!prepared.computedState) return withUnreadable(rows.map(prepared.transform), unreadable);
-    return withUnreadable(
-      await finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
-        client.queryInternal(
-          translateQuery(builderJson, planningSchema, physical),
-          queryOptions,
-          context?.readSession,
-        ),
+    return finishRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+      client.queryInternal(
+        translateQuery(builderJson, planningSchema, physical),
+        queryOptions,
+        context?.readSession,
       ),
-      unreadable,
     );
   }
 
