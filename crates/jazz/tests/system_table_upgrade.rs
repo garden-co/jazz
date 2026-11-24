@@ -3,7 +3,9 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::deployment::artifact::{load_app, system_tables::MEMBERS};
-use jazz::tools::deployment::{DeploymentRequest, check_system_tables};
+use jazz::tools::deployment::{
+    DeploymentCatalogue, DeploymentRequest, prepare_encrypted_deployment,
+};
 use jazz::tools::{SchemaHash, TableName};
 use serde_json::json;
 
@@ -137,13 +139,17 @@ fn an_unknown_fragment_requires_a_server_upgrade() {
         .columns
         .pop();
     let hash = SchemaHash::compute(&schema);
-    let error = check_system_tables(&DeploymentRequest {
-        schemas: vec![(hash, schema)],
-        target_schema_hash: hash,
-        migrations: Vec::new(),
-        permissions: Default::default(),
-        allow_dropping_history: false,
-    })
+    let error = prepare_encrypted_deployment(
+        &DeploymentCatalogue::default(),
+        DeploymentRequest {
+            schemas: vec![(hash, schema)],
+            target_schema_hash: hash,
+            migrations: Vec::new(),
+            permissions: Default::default(),
+            allow_dropping_history: false,
+        },
+        &Default::default(),
+    )
     .unwrap_err();
     assert!(error.to_string().contains("upgrade the server"), "{error}");
 }

@@ -305,13 +305,7 @@ fn check_system_tables_carried<'a>(
     schemas: &BTreeMap<Hash, Schema>,
     migrations: impl Iterator<Item = &'a Lens>,
 ) -> Result<BTreeMap<Hash, Vec<Hash>>, DeploymentError> {
-    let has = |hash: &SchemaHash| {
-        schemas.get(&hash.0).map(|schema| {
-            schema
-                .keys()
-                .any(|name| artifact::system_tables::is_system_table(name.as_str()))
-        })
-    };
+    let has = |hash: &SchemaHash| schemas.get(&hash.0).map(artifact::has_system_tables);
     let mut follows: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
     for lens in migrations {
         if has(&lens.source_hash) != Some(true) {
@@ -394,20 +388,7 @@ fn check_deployment_keeps_system_tables(
     Ok(())
 }
 
-/// The deploy's rules for Jazz's system tables, which a server checks
-/// before [`prepare_deployment`]: each submitted schema has all of them,
-/// exactly as Jazz defines them, or none, and no app table references
-/// one; and the app's permissions name none of them, since Jazz derives
-/// their policies.
-pub fn check_system_tables(request: &DeploymentRequest) -> Result<(), DeploymentError> {
-    for (hash, schema) in &request.schemas {
-        artifact::system_tables::check_e2ee_fragment(schema).map_err(|reason| {
-            DeploymentError::InvalidSchema {
-                schema: *hash,
-                reason,
-            }
-        })?;
-    }
+fn check_system_table_permissions(request: &DeploymentRequest) -> Result<(), DeploymentError> {
     if let Some(table) = request
         .permissions
         .keys()
@@ -438,15 +419,14 @@ pub fn prepare_deployment(
 /// entries that fit it, and the target's space tables take their read
 /// rule from the members table. The target's permissions gain the
 /// policies Jazz derives for its system tables. Also gives the deploy's
-/// warnings about what it can see. The server deploys through it, with
-/// [`check_system_tables`] first, whether or not the app declares
-/// encryption.
+/// warnings about what it can see. The server deploys through it whether
+/// or not the app declares encryption.
 pub fn prepare_encrypted_deployment(
     stored: &DeploymentCatalogue,
     request: DeploymentRequest,
     encryption: &artifact::DeclaredEncryption,
 ) -> Result<(PreparedDeployment, Vec<String>), DeploymentError> {
-    check_system_tables(&request)?;
+    check_system_table_permissions(&request)?;
     prepare(stored, request, Some(encryption))
 }
 
@@ -497,9 +477,14 @@ fn prepare(
         request.target_schema_hash,
     )?;
     let warnings = match encryption {
-        Some(encryption) => {
-            check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?
-        }
+        Some(encryption) => check_encryption(
+            &schemas,
+            &submitted,
+            &mut request,
+            encryption,
+            &follows,
+            &versions,
+        )?,
         None => Vec::new(),
     };
     if !request.allow_dropping_history {
@@ -621,8 +606,9 @@ fn check_encryption(
     request: &mut DeploymentRequest,
     encryption: &artifact::DeclaredEncryption,
     follows: &BTreeMap<Hash, Vec<Hash>>,
+    fragments: &BTreeMap<Hash, Option<FragmentVersion>>,
 ) -> Result<Vec<String>, DeploymentError> {
-    use artifact::{encryption as declared, system_tables};
+    use artifact::encryption as declared;
     let target = request.target_schema_hash;
     let invalid = |schema: SchemaHash, reason: String| DeploymentError::InvalidSchema {
         schema,
@@ -657,28 +643,23 @@ fn check_encryption(
         let schema = schemas
             .get(&hash.0)
             .ok_or(DeploymentError::MissingSchema { schema: *hash })?;
-        let entries = encryption.entries(&hash.to_string());
-        let fragment =
-            system_tables::check_e2ee_fragment(schema).map_err(|reason| invalid(*hash, reason))?;
-        // A version that follows one with the system tables keeps them
-        // whether or not it declares encryption (an app that stops
-        // encrypting keeps them, harmlessly).
-        let required = entries.is_some() || follows.contains_key(&hash.0);
-        if fragment != required {
-            return Err(invalid(
-                *hash,
-                if fragment {
+        let has_fragment = fragments[&hash.0].is_some();
+        artifact::check_declared_version(
+            schema,
+            *hash,
+            target,
+            encryption,
+            has_fragment,
+            follows.contains_key(&hash.0),
+            || {
+                if has_fragment {
                     "the schema has Jazz's system tables but declares no encryption".to_owned()
                 } else {
                     "the schema declares encryption but lacks Jazz's system tables".to_owned()
-                },
-            ));
-        }
-        for (table, entry) in entries.into_iter().flatten() {
-            declared::check_version_entry(table, entry, schema, *hash == target).map_err(
-                |(at, message)| invalid(*hash, format!("tables.{table}.encryption{at}: {message}")),
-            )?;
-        }
+                }
+            },
+        )
+        .map_err(|reason| invalid(*hash, reason))?;
     }
     let permissions: crate::catalogue::Permissions = request
         .permissions
@@ -690,12 +671,7 @@ fn check_encryption(
         reason,
     };
     for (table, policies) in &permissions {
-        for clause in [
-            &policies.select,
-            &policies.insert,
-            &policies.update,
-            &policies.delete,
-        ] {
+        for (_, clause) in artifact::policy_clauses(policies) {
             if let Some(system) = [&clause.using, &clause.with_check]
                 .into_iter()
                 .flatten()
@@ -711,49 +687,8 @@ fn check_encryption(
     // A target that keeps the system tables without declaring encryption
     // still gets their derived policies, from the declarations of the
     // nearest version before it that has them: its spaces are still there.
-    let entries = match encryption.entries(&target.to_string()) {
-        Some(entries) => Some(entries),
-        None => {
-            // Breadth first, nearest versions first. Versions at the same
-            // distance that declare differently leave no nearest: refused.
-            let mut level = vec![target.0];
-            let mut seen = BTreeSet::from([target.0]);
-            let mut found = None;
-            while found.is_none() && !level.is_empty() {
-                let declared: Vec<(Hash, _)> = level
-                    .iter()
-                    .filter_map(|hash| {
-                        encryption
-                            .entries(&SchemaHash(*hash).to_string())
-                            .map(|entries| (*hash, entries))
-                    })
-                    .collect();
-                if let Some((_, first)) = declared.first() {
-                    if let Some((other, _)) = declared.iter().find(|(_, entries)| entries != first)
-                    {
-                        return Err(invalid(
-                            target,
-                            format!(
-                                "the schema keeps Jazz's system tables without declaring \
-                                 encryption, and the versions it follows nearest declare \
-                                 differently ({} and {}): declare encryption in it",
-                                SchemaHash(declared[0].0),
-                                SchemaHash(*other)
-                            ),
-                        ));
-                    }
-                    found = Some(*first);
-                    break;
-                }
-                level = level
-                    .iter()
-                    .flat_map(|hash| follows.get(hash).into_iter().flatten().copied())
-                    .filter(|hash| seen.insert(*hash))
-                    .collect();
-            }
-            found
-        }
-    };
+    let entries = artifact::nearest_entries(encryption, follows, target)
+        .map_err(|reason| invalid(target, reason))?;
     let Some(entries) = entries else {
         if follows.contains_key(&target.0) {
             return Err(invalid(
@@ -766,19 +701,19 @@ fn check_encryption(
         }
         return Ok(Vec::new());
     };
-    let target_schema = &schemas[&target.0];
-    declared::check_space_tables(target_schema, entries)
-        .map_err(|reason| invalid(target, reason))?;
-    declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
-    // Only the columns the target itself declares encrypted: one that is
-    // plaintext in it (decrypted, say) may be read by a policy.
-    if let Some(own) = encryption.entries(&target.to_string()) {
-        declared::check_encrypted_reads(&permissions, own).map_err(refused)?;
-    }
-    let derived = system_tables::derive_e2ee_policies(target_schema, entries, &encryption.settings)
-        .map_err(|reason| invalid(target, reason))?;
-    request.permissions.extend(derived);
-    Ok(declared::warnings(&permissions, entries))
+    artifact::add_system_policies(
+        &schemas[&target.0],
+        &permissions,
+        &mut request.permissions,
+        entries,
+        encryption,
+        target,
+    )
+    .map_err(|error| match error {
+        artifact::SystemPolicyError::Space(reason)
+        | artifact::SystemPolicyError::Fragment(reason) => invalid(target, reason),
+        artifact::SystemPolicyError::Permissions(reason) => refused(reason),
+    })
 }
 
 /// Each migration's own checks, apart from where it sits in the history:

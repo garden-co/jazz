@@ -23,7 +23,7 @@ mod permissions_file;
 pub mod relations;
 pub mod system_tables;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -423,29 +423,53 @@ fn with_system_policies(
     else {
         return Ok((permissions.clone(), Vec::new()));
     };
-    encryption::check_space_tables(history.current_schema(), entries)
-        .map_err(ArtifactError::new)?;
-    encryption::check_space_read_rules(permissions, entries)
-        .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
-    // A policy may read a column that is plaintext in this version: only the
-    // columns this version itself declares encrypted are checked.
-    if let Some(own) = history.encryption.entries(&history.current.to_string()) {
-        encryption::check_encrypted_reads(permissions, own)
-            .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
-    }
-    let derived = system_tables::derive_e2ee_policies(
-        history.current_schema(),
-        entries,
-        &history.encryption.settings,
-    )
-    .map_err(|error| ArtifactError::new(format!("encryption: {error}")))?;
     let mut bundled = permissions.clone();
-    bundled.extend(derived);
-    let warnings = encryption::warnings(permissions, entries)
-        .into_iter()
-        .map(|w| format!("{PERMISSIONS_FILE}: {w}"))
-        .collect();
+    let warnings = add_system_policies(
+        history.current_schema(),
+        permissions,
+        &mut bundled,
+        entries,
+        &history.encryption,
+        history.current,
+    )
+    .map_err(|error| match error {
+        SystemPolicyError::Space(reason) => ArtifactError::new(reason),
+        SystemPolicyError::Permissions(reason) => ArtifactError::in_file(PERMISSIONS_FILE, reason),
+        SystemPolicyError::Fragment(reason) => ArtifactError::new(format!("encryption: {reason}")),
+    })?
+    .into_iter()
+    .map(|w| format!("{PERMISSIONS_FILE}: {w}"))
+    .collect();
     Ok((bundled, warnings))
+}
+
+pub(super) enum SystemPolicyError {
+    Space(String),
+    Permissions(String),
+    Fragment(String),
+}
+
+pub(super) fn add_system_policies(
+    schema: &Schema,
+    permissions: &Permissions,
+    bundled: &mut impl Extend<(TableName, TablePolicies)>,
+    entries: &encryption::Entries,
+    declarations: &DeclaredEncryption,
+    version: SchemaHash,
+) -> Result<Vec<String>, SystemPolicyError> {
+    encryption::check_space_tables(schema, entries).map_err(SystemPolicyError::Space)?;
+    encryption::check_space_read_rules(permissions, entries)
+        .map_err(SystemPolicyError::Permissions)?;
+    // A policy may read a column that is plaintext in this version.
+    if let Some(own) = declarations.entries(&version.to_string()) {
+        encryption::check_encrypted_reads(permissions, own)
+            .map_err(SystemPolicyError::Permissions)?;
+    }
+    bundled.extend(
+        system_tables::derive_e2ee_policies(schema, entries, &declarations.settings)
+            .map_err(SystemPolicyError::Fragment)?,
+    );
+    Ok(encryption::warnings(permissions, entries))
 }
 
 /// The compiled app generated bindings embed (`{ schema, relations }`, the
@@ -527,24 +551,27 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
         })
         .collect();
     for (hash, schema) in &schemas {
-        let entries = encryption.entries(&hash.to_string());
         let has_fragment = system_tables::check_e2ee_fragment(schema).map_err(&refuse)?;
-        if has_fragment != (entries.is_some() || follows_carrier.contains(hash)) {
-            return Err(refuse(format!(
-                "schema {hash} {} Jazz's system tables but {} encryption",
-                if has_fragment { "has" } else { "lacks" },
-                if has_fragment {
-                    "declares no"
-                } else {
-                    "declares"
-                },
-            )));
-        }
-        for (table, entry) in entries.into_iter().flatten() {
-            encryption::check_version_entry(table, entry, schema, *hash == current).map_err(
-                |(at, message)| refuse(format!("tables.{table}.encryption{at}: {message}")),
-            )?;
-        }
+        check_declared_version(
+            schema,
+            *hash,
+            current,
+            &encryption,
+            has_fragment,
+            follows_carrier.contains(hash),
+            || {
+                format!(
+                    "schema {hash} {} Jazz's system tables but {} encryption",
+                    if has_fragment { "has" } else { "lacks" },
+                    if has_fragment {
+                        "declares no"
+                    } else {
+                        "declares"
+                    },
+                )
+            },
+        )
+        .map_err(&refuse)?;
     }
     let history = History {
         current,
@@ -614,6 +641,26 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
         codegen,
         warnings,
     })
+}
+
+pub(super) fn check_declared_version(
+    schema: &Schema,
+    hash: SchemaHash,
+    current: SchemaHash,
+    encryption: &DeclaredEncryption,
+    has_fragment: bool,
+    follows_carrier: bool,
+    fragment_refusal: impl FnOnce() -> String,
+) -> Result<(), String> {
+    let entries = encryption.entries(&hash.to_string());
+    if has_fragment != (entries.is_some() || follows_carrier) {
+        return Err(fragment_refusal());
+    }
+    for (table, entry) in entries.into_iter().flatten() {
+        encryption::check_version_entry(table, entry, schema, hash == current)
+            .map_err(|(at, message)| format!("tables.{table}.encryption{at}: {message}"))?;
+    }
+    Ok(())
 }
 
 /// `jazz.app.json` checked as [`load`] checks it, without permissions: what
@@ -906,8 +953,10 @@ pub fn schemas_are_compatible(left_json: &[u8], right_json: &[u8]) -> Result<boo
 /// writer's and every backend's, and the codegen metadata a code
 /// generator's.
 pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> {
-    let app_file = read_app(json)?;
-    let history = check_history(&app_file)?;
+    client_migrations(&check_history(&read_app(json)?)?)
+}
+
+fn client_migrations(history: &History) -> Result<crate::db::Migrations, ArtifactError> {
     let (schemas, lenses) = lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
     Ok(crate::db::Migrations { schemas, lenses })
@@ -920,18 +969,15 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
 /// version declares encryption ([`load_client_encrypted`] reads one for a
 /// client that installs them).
 pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
-    let app_file = read_app(json)?;
-    let history = check_history(&app_file)?;
+    let history = check_history(&read_app(json)?)?;
     if has_system_tables(history.current_schema()) {
         return Err(ArtifactError::new(
             crate::binding_host::ENCRYPTED_APP_REFUSAL,
         ));
     }
-    let (schemas, lenses) = lower_client_migrations(history.bundle())
-        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
     Ok((
         history.current_schema().clone(),
-        crate::db::Migrations { schemas, lenses },
+        client_migrations(&history)?,
     ))
 }
 
@@ -954,27 +1000,18 @@ pub fn load_client_encrypted(
     ),
     ArtifactError,
 > {
-    let app_file = read_app(json)?;
-    let history = check_history(&app_file)?;
-    let (schemas, lenses) = lower_client_migrations(history.bundle())
-        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    // The version's own declarations: a version that keeps the system tables
-    // without declaring encryption declares no encrypted column (those of an
-    // earlier version are not its own: it may have dropped or decrypted
-    // them), but it is still an encrypted app, with its system tables.
-    let own = history.encryption.entries(&history.current.to_string());
-    let declarations = (own.is_some() || has_system_tables(history.current_schema())).then(|| {
-        crate::tools::public_schema::E2eeDeclarations {
-            app_id,
-            environment: environment.to_owned(),
-            settings: history.encryption.settings.clone(),
-            tables: own.cloned().unwrap_or_default(),
-        }
-    });
+    let history = check_history(&read_app(json)?)?;
+    let migrations = client_migrations(&history)?;
     Ok((
         history.current_schema().clone(),
-        crate::db::Migrations { schemas, lenses },
-        declarations,
+        migrations,
+        client_declarations(
+            history.current_schema(),
+            history.encryption.entries(&history.current.to_string()),
+            &history.encryption.settings,
+            app_id,
+            environment,
+        ),
     ))
 }
 
@@ -1007,23 +1044,36 @@ pub fn bound_declarations(
         .map(|entry| structural(entry.schema))
         .ok_or_else(|| refuse(format!("no schema {current}, the current one")))?;
     let encryption = bound.schema.encryption.unwrap_or_default();
-    // The version's own declarations: a version that keeps Jazz's system
-    // tables without declaring encryption is still an encrypted app, with no
-    // declared table (as `load_client_encrypted` returns it).
     let own = encryption.entries(&current.to_string());
-    if own.is_none() && !has_system_tables(&schema) {
-        return Ok(None);
-    }
     for (table, entry) in own.into_iter().flatten() {
-        encryption::check_entry(table, entry, &schema)
+        encryption::check_version_entry(table, entry, &schema, true)
             .map_err(|(at, message)| refuse(format!("tables.{table}.encryption{at}: {message}")))?;
     }
-    Ok(Some(crate::tools::public_schema::E2eeDeclarations {
+    Ok(client_declarations(
+        &schema,
+        own,
+        &encryption.settings,
         app_id,
-        environment: environment.to_owned(),
-        settings: encryption.settings.clone(),
-        tables: own.cloned().unwrap_or_default(),
-    }))
+        environment,
+    ))
+}
+
+fn client_declarations(
+    schema: &Schema,
+    own: Option<&encryption::Entries>,
+    settings: &crate::tools::public_schema::EncryptionSettings,
+    app_id: crate::tools::AppId,
+    environment: &str,
+) -> Option<crate::tools::public_schema::E2eeDeclarations> {
+    // Versions with inherited system tables still use only their own declarations.
+    (own.is_some() || has_system_tables(schema)).then(|| {
+        crate::tools::public_schema::E2eeDeclarations {
+            app_id,
+            environment: environment.to_owned(),
+            settings: settings.clone(),
+            tables: own.cloned().unwrap_or_default(),
+        }
+    })
 }
 
 /// The relations `jazz.app.json` declares, resolved against its current
@@ -1071,23 +1121,32 @@ pub fn read_declared_versions(
 ) -> Result<(Vec<SchemaHash>, DeclaredEncryption), ArtifactError> {
     let file = read_app(json)?;
     let (history, current) = version_schemas(&file);
-    let mut declared = DeclaredEncryption {
-        settings: file.settings.clone().unwrap_or_default(),
-        versions: BTreeMap::new(),
-    };
-    let mut versions = Vec::new();
-    for (schema, entries) in history.iter().chain(std::iter::once(&current)).zip(
-        file.history_encryption
-            .iter()
-            .chain([&file.current_encryption]),
-    ) {
-        let hash = SchemaHash::compute(schema);
-        if !entries.is_empty() {
-            declared.versions.insert(hash.to_string(), entries.clone());
-        }
-        versions.push(hash);
-    }
+    let versions: Vec<_> = history
+        .iter()
+        .chain([&current])
+        .map(SchemaHash::compute)
+        .collect();
+    let declared = declarations_for_versions(&file, versions.iter().copied());
     Ok((versions, declared))
+}
+
+fn declarations_for_versions(
+    file: &app_file::AppFile,
+    hashes: impl Iterator<Item = SchemaHash>,
+) -> DeclaredEncryption {
+    let versions = hashes
+        .zip(
+            file.history_encryption
+                .iter()
+                .chain([&file.current_encryption]),
+        )
+        .filter(|(_, entries)| !entries.is_empty())
+        .map(|(hash, entries)| (hash.to_string(), entries.clone()))
+        .collect();
+    DeclaredEncryption {
+        settings: file.settings.clone().unwrap_or_default(),
+        versions,
+    }
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
@@ -1400,29 +1459,14 @@ fn version_schemas(file: &app_file::AppFile) -> (Vec<Schema>, Schema) {
 fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     let (history_schemas, current_schema) = version_schemas(file);
     let current = SchemaHash::compute(&current_schema);
-    let mut encryption = DeclaredEncryption {
-        settings: file.settings.clone().unwrap_or_default(),
-        versions: BTreeMap::new(),
-    };
-    if !file.current_encryption.is_empty() {
-        encryption
-            .versions
-            .insert(current.to_string(), file.current_encryption.clone());
-    }
     let mut schemas: Vec<(SchemaHash, Schema)> = Vec::new();
     let mut by_name = BTreeMap::new();
-    for (((name, _), entries), (schema, version)) in file
+    for ((name, _), (schema, version)) in file
         .history
         .iter()
-        .zip(&file.history_encryption)
         .zip(history_schemas.iter().zip(&file.history_fragments))
     {
         let hash = SchemaHash::compute(schema);
-        if !entries.is_empty() {
-            encryption
-                .versions
-                .insert(hash.to_string(), entries.clone());
-        }
         if hash == current {
             return Err(ArtifactError::new(format!(
                 "history.{name} is the current schema; a version appears once"
@@ -1441,6 +1485,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     }
     let current_fragment = has_system_tables(&current_schema).then_some(file.current_fragment);
     schemas.push((current, current_schema));
+    let encryption = declarations_for_versions(file, schemas.iter().map(|(hash, _)| *hash));
     let migrations = file
         .migrations
         .iter()
@@ -1574,6 +1619,15 @@ pub fn has_system_tables(schema: &Schema) -> bool {
         .any(|name| system_tables::is_system_table(name.as_str()))
 }
 
+pub(super) fn policy_clauses(policies: &TablePolicies) -> [(&'static str, &OperationPolicy); 4] {
+    [
+        ("read", &policies.select),
+        ("insert", &policies.insert),
+        ("update", &policies.update),
+        ("delete", &policies.delete),
+    ]
+}
+
 /// The declarations the system tables of `version` follow: its own if it
 /// declares encryption, else those of the nearest version before it (by the
 /// migrations, breadth first) that does, since a version that keeps the
@@ -1585,8 +1639,29 @@ fn governing_entries<'a>(
     migrations: &[PublishMigrationRequest],
     version: SchemaHash,
 ) -> Result<Option<&'a encryption::Entries>, ArtifactError> {
+    if let Some(own) = encryption.entries(&version.to_string()) {
+        return Ok(Some(own));
+    }
+    let mut parents: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for migration in migrations {
+        if let (Ok(from), Ok(to)) = (
+            parse_schema_hash(&migration.from_hash),
+            parse_schema_hash(&migration.to_hash),
+        ) && to.to_string() == migration.to_hash
+        {
+            parents.entry(to.0).or_default().push(from.0);
+        }
+    }
+    nearest_entries(encryption, &parents, version).map_err(ArtifactError::new)
+}
+
+pub(super) fn nearest_entries<'a>(
+    encryption: &'a DeclaredEncryption,
+    parents: &BTreeMap<[u8; 32], Vec<[u8; 32]>>,
+    version: SchemaHash,
+) -> Result<Option<&'a encryption::Entries>, String> {
     let mut level = vec![version];
-    let mut seen = vec![version];
+    let mut seen = BTreeSet::from([version.0]);
     while !level.is_empty() {
         let declared: Vec<(SchemaHash, &encryption::Entries)> = level
             .iter()
@@ -1598,29 +1673,19 @@ fn governing_entries<'a>(
             .collect();
         if let Some((first_hash, first)) = declared.first() {
             if let Some((other, _)) = declared.iter().find(|(_, entries)| entries != first) {
-                return Err(ArtifactError::new(format!(
+                return Err(format!(
                     "the schema keeps Jazz's system tables without declaring encryption, and \
                      the versions it follows nearest declare differently ({first_hash} and \
                      {other}): declare encryption in it"
-                )));
+                ));
             }
             return Ok(Some(first));
         }
         level = level
             .iter()
-            .flat_map(|hash| {
-                migrations
-                    .iter()
-                    .filter(move |migration| migration.to_hash == hash.to_string())
-                    .filter_map(|migration| parse_schema_hash(&migration.from_hash).ok())
-            })
-            .filter(|hash| {
-                let fresh = !seen.contains(hash);
-                if fresh {
-                    seen.push(*hash);
-                }
-                fresh
-            })
+            .flat_map(|hash| parents.get(&hash.0).into_iter().flatten().copied())
+            .filter(|hash| seen.insert(*hash))
+            .map(SchemaHash)
             .collect();
     }
     Ok(None)
@@ -1930,7 +1995,8 @@ pub fn declared_version_tables(
     schema: &Schema,
     entries: &encryption::Entries,
 ) -> Result<Json, ArtifactError> {
-    app_file::write_version_tables(schema, entries)
+    app_file::write_tables(schema, None, entries)
+        .map(|(tables, _)| tables)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
 }
 
@@ -2044,12 +2110,12 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
             .cloned()
             .unwrap_or_default()
     };
-    let history: Vec<(String, &Schema, app_file::Entries)> = schemas
+    let history: Vec<(String, &Schema, encryption::Entries)> = schemas
         .iter()
         .filter(|(hash, _)| *hash != current_hash)
         .map(|(hash, schema)| (app_file::version_name(hash), schema, entries_of(hash)))
         .collect();
-    let history: Vec<(String, &Schema, &app_file::Entries)> = history
+    let history: Vec<(String, &Schema, &encryption::Entries)> = history
         .iter()
         .map(|(name, schema, entries)| (name.clone(), *schema, entries))
         .collect();
