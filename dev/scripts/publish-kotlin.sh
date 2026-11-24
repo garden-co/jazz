@@ -101,7 +101,11 @@ for artifact in "${artifacts[@]}"; do
       fail "$file's signature ($file.asc) doesn't verify"
   done
   pom="$dir/$artifact-$version.pom"
-  for field in "<name>$artifact</name>" "<description>" "<url>https://jazz.tools</url>" "<name>MIT License</name>" \
+  # Kotlin Multiplatform names every publication's POM after the project.
+  name="$artifact"
+  [ "$kmp" = true ] && name=jazz-kotlin
+  grep -qF "<name>$artifact</name>" "$pom" || grep -qF "<name>$name</name>" "$pom" || fail "$artifact's POM lacks <name>$artifact</name>"
+  for field in "<description>" "<url>https://jazz.tools</url>" "<name>MIT License</name>" \
     "<developer>" "<url>https://github.com/garden-co/jazz</url>" "<connection>scm:git:"; do
     grep -qF "$field" "$pom" || fail "$artifact's POM lacks $field"
   done
