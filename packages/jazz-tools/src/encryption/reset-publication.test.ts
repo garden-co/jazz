@@ -13,12 +13,14 @@ it("exposes the records from a failed reset publication on the rejected promise"
       "00000000-0000-4000-8000-000000000003",
     ],
   };
-  const native = {
+  const native: EncryptionNative = {
     encryptionCall: async (op: string) => {
       expect(op).toBe("resetAccount");
       throw new Error(`publication: ${JSON.stringify(publication)}`);
     },
-  } as EncryptionNative;
+    takeEncryptionReports: () => [],
+    encryptionState: () => "{}",
+  };
   const encryption = new Encryption(native);
 
   const error = await encryption.resetAccount().catch((error: unknown) => error);
