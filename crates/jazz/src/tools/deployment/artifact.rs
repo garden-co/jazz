@@ -1504,12 +1504,12 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
         let bridge = schemas[index + 1..]
             .iter()
             .find(|(later, other)| reached.contains(later) && rows_pass_unchanged(schema, other));
+        let name = by_name
+            .iter()
+            .find(|(_, h)| *h == hash)
+            .map(|(n, _)| n.clone())
+            .expect("a history version");
         let Some((later, other)) = bridge else {
-            let name = by_name
-                .iter()
-                .find(|(_, h)| *h == hash)
-                .map(|(n, _)| n.clone())
-                .expect("a history version");
             stranded.push(format!(
                 "{APP_FILE}: history.{name}: no migration leads from it to the current `tables`, \
                  directly or through other versions, so clients holding its rows couldn't open; \
@@ -1518,11 +1518,19 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             stranded_hashes.push(*hash);
             continue;
         };
-        migrations.push(PublishMigrationRequest {
+        let migration = PublishMigrationRequest {
             from_hash: hash.to_string(),
             to_hash: later.to_string(),
             forward: identity_lenses(schema, other),
-        });
+        };
+        // The deploy checks this implied step as it checks the explicit ones.
+        encryption::check_transition(
+            (schema, encryption.entries(&migration.from_hash)),
+            (other, encryption.entries(&migration.to_hash)),
+            &migration,
+        )
+        .map_err(|refusal| ArtifactError::new(format!("history.{name}: {refusal}")))?;
+        migrations.push(migration);
     }
     Ok(History {
         current,

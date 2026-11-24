@@ -470,6 +470,186 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// `notes` with its encrypted column `column` declared as `declaration`.
+    fn notes_tables(
+        column: &str,
+        declaration: serde_json::Value,
+        indexes: &[&str],
+    ) -> serde_json::Value {
+        serde_json::json!({ "notes": {
+            "columns": { "title": "string", "rank": "int", column: "bytes" },
+            "indexes": indexes,
+            "encryption": { "space": "id", "scope": "notes", "columns": { column: declaration } }
+        } })
+    }
+
+    fn sealed(variants: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "type": { "enum": variants }, "sealedType": { "enum": ["a"] } })
+    }
+
+    fn write_app(path: &Path, app: serde_json::Value) {
+        std::fs::write(path, app.to_string()).unwrap();
+    }
+
+    /// Both commands refuse the app file as it is, naming `column`, and
+    /// leave the bindings as they were.
+    fn assert_refused(dir: &Path, langs: &[Selected], column: &str, bindings: &[u8]) {
+        for error in [
+            migrations_create(dir, langs, "edit").unwrap_err(),
+            generate(dir, langs, false).unwrap_err(),
+            generate(dir, langs, true).unwrap_err(),
+        ] {
+            assert!(error.contains(column), "{error}");
+        }
+        assert_eq!(
+            std::fs::read(dir.join(Lang::Rust.file())).unwrap(),
+            bindings
+        );
+    }
+
+    /// Both commands accept the app file as it is and regenerate the bindings.
+    fn assert_accepted(dir: &Path, langs: &[Selected]) {
+        assert!(!migrations_create(dir, langs, "edit").unwrap().changed);
+        assert_eq!(
+            generate(dir, langs, false).unwrap().written,
+            [Lang::Rust.file()]
+        );
+        generate(dir, langs, true).unwrap();
+    }
+
+    /// Alice's bindings shipped `[a,b]`. Her index edit declares `[a]` again,
+    /// which the deploy reads as a sibling, since no migration leads to it.
+    #[test]
+    fn an_index_edit_can_declare_a_sibling_enum_prefix() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        write_app(
+            &path,
+            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "b"]), &[]) }),
+        );
+        generate(&dir, &langs, false).unwrap();
+        write_app(
+            &path,
+            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a"]), &["title"]) }),
+        );
+        assert_accepted(&dir, &langs);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice's index edit replaces the shipped `[a,b]` with `[a,c]`.
+    #[test]
+    fn an_index_edit_cannot_declare_a_divergent_sibling_enum() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        write_app(
+            &path,
+            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "b"]), &[]) }),
+        );
+        generate(&dir, &langs, false).unwrap();
+        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
+        write_app(
+            &path,
+            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "c"]), &["title"]) }),
+        );
+        assert_refused(&dir, &langs, "notes.detail", &original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice ships `[a,b]` from the root's `[a]`, under `column` when her
+    /// migration renames `detail`. Then her file leads from the root to
+    /// `current` on another branch and keeps the shipped version in history.
+    fn branch_from_the_root(column: &str, current: serde_json::Value) -> (PathBuf, Vec<u8>) {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let root = notes_tables("detail", serde_json::json!({ "enum": ["a"] }), &[]);
+        let shipped = notes_tables(column, sealed(&["a", "b"]), &["title"]);
+        let mut to_shipped = serde_json::json!({ "from": "root" });
+        if column != "detail" {
+            to_shipped["migrate"] =
+                serde_json::json!({ "notes": { column: { "renameFrom": "detail" } } });
+        }
+        write_app(
+            &path,
+            serde_json::json!({
+                "format": 1,
+                "tables": shipped,
+                "history": { "root": { "tables": root } },
+                "migrations": [to_shipped],
+            }),
+        );
+        generate(&dir, &langs, false).unwrap();
+        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
+        to_shipped["to"] = "shipped".into();
+        write_app(
+            &path,
+            serde_json::json!({
+                "format": 1,
+                "tables": current,
+                "history": { "root": { "tables": root }, "shipped": { "tables": shipped } },
+                "migrations": [to_shipped, { "from": "root" }],
+            }),
+        );
+        (dir, original)
+    }
+
+    /// The current version is a sibling of the shipped one: it may extend
+    /// `[a,b]` but not diverge from it.
+    #[test]
+    fn a_parallel_branch_is_checked_against_the_shipped_version() {
+        let langs = [Lang::Rust.into()];
+        let (dir, _) = branch_from_the_root(
+            "detail",
+            notes_tables("detail", sealed(&["a", "b", "c"]), &["rank"]),
+        );
+        assert_accepted(&dir, &langs);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (dir, original) = branch_from_the_root(
+            "detail",
+            notes_tables("detail", sealed(&["a", "c"]), &["rank"]),
+        );
+        assert_refused(&dir, &langs, "notes.detail", &original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The shipped branch renamed `detail` to `body`: they are one stored column.
+    #[test]
+    fn a_parallel_branch_follows_a_rename_on_the_other_branch() {
+        let langs = [Lang::Rust.into()];
+        let (dir, original) = branch_from_the_root(
+            "body",
+            notes_tables("detail", sealed(&["a", "c"]), &["rank"]),
+        );
+        assert_refused(&dir, &langs, "notes.detail", &original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice keeps the shipped tables in history with no migration, so the
+    /// file implies one, and retypes an encrypted column beside a new index.
+    #[test]
+    fn an_implied_step_from_history_cannot_retype_an_encrypted_column() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let shipped = notes_tables("detail", "string?".into(), &[]);
+        write_app(&path, serde_json::json!({ "format": 1, "tables": shipped }));
+        generate(&dir, &langs, false).unwrap();
+        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
+        write_app(
+            &path,
+            serde_json::json!({
+                "format": 1,
+                "tables": notes_tables("detail", "int?".into(), &["title"]),
+                "history": { "shipped": { "tables": shipped } },
+            }),
+        );
+        assert_refused(&dir, &langs, "notes.detail", &original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Bindings headed as before alpha.66 still read: `--check` passes on
     /// them, and plain `generate` rewrites them with today's header.
     #[test]

@@ -453,6 +453,68 @@ impl TableMap<'_> {
     }
 }
 
+/// How a migration names the tables and columns on either side of it.
+pub struct MigrationNames<'a> {
+    pub migration: &'a PublishMigrationRequest,
+    /// The schema it leads to.
+    pub to: &'a Schema,
+}
+
+impl MigrationNames<'_> {
+    fn lens_of(&self, table: &str) -> Option<&PublishTableLens> {
+        self.migration.forward.iter().find(|l| l.table == table)
+    }
+
+    /// The old name of new table `table`, or `None` when the migration adds it.
+    pub fn old_table(&self, table: &str) -> Option<String> {
+        match self.lens_of(table) {
+            Some(lens) if lens.added => None,
+            Some(lens) => Some(
+                lens.renamed_from
+                    .clone()
+                    .unwrap_or_else(|| table.to_owned()),
+            ),
+            None => Some(table.to_owned()),
+        }
+    }
+
+    /// The new name of old table `table`, or `None` when the new schema
+    /// leaves it out.
+    pub fn new_table(&self, table: &str) -> Option<String> {
+        if let Some(lens) = self
+            .migration
+            .forward
+            .iter()
+            .find(|l| l.renamed_from.as_deref() == Some(table))
+        {
+            return Some(lens.table.clone());
+        }
+        match self.lens_of(table) {
+            Some(lens) if lens.removed => None,
+            _ => self
+                .to
+                .contains_key(&TableName::from(table))
+                .then(|| table.to_owned()),
+        }
+    }
+
+    /// The old name of `column` in new table `table`.
+    pub fn old_name(&self, table: &str, column: &str) -> Option<String> {
+        TableMap {
+            lens: self.lens_of(table),
+        }
+        .old_name(column)
+    }
+
+    /// The new name of `column` in old table `table`.
+    pub fn new_name(&self, table: &str, column: &str) -> Option<String> {
+        TableMap {
+            lens: self.lens_of(&self.new_table(table)?),
+        }
+        .new_name(column)
+    }
+}
+
 /// Refuse a migration that changes an encrypted column's type, scope or
 /// space, or renames an equality column apart from
 /// its column (E2EE_SCHEMA_CHANGES.md §3.2). `from`/`to` are the two
@@ -465,37 +527,9 @@ pub fn check_transition(
     let empty = Entries::new();
     let (old_schema, old_entries) = (from.0, from.1.unwrap_or(&empty));
     let (new_schema, new_entries) = (to.0, to.1.unwrap_or(&empty));
-    let lens_of = |table: &str| migration.forward.iter().find(|l| l.table == table);
-    // The old name of each new table, and the new name of each old one.
-    let old_table = |table: &str| -> Option<String> {
-        match lens_of(table) {
-            Some(lens) if lens.added => None,
-            Some(lens) => Some(
-                lens.renamed_from
-                    .clone()
-                    .unwrap_or_else(|| table.to_owned()),
-            ),
-            None => Some(table.to_owned()),
-        }
-    };
-    let new_table = |table: &str| -> Option<String> {
-        if let Some(lens) = migration
-            .forward
-            .iter()
-            .find(|l| l.renamed_from.as_deref() == Some(table))
-        {
-            return Some(lens.table.clone());
-        }
-        match lens_of(table) {
-            Some(lens) if lens.removed => None,
-            _ => new_schema
-                .contains_key(&TableName::from(table))
-                .then(|| table.to_owned()),
-        }
-    };
-
-    let columns = |table: &str| TableMap {
-        lens: lens_of(table),
+    let names = MigrationNames {
+        migration,
+        to: new_schema,
     };
     for lens in &migration.forward {
         let was = lens.renamed_from.as_deref().unwrap_or(&lens.table);
@@ -529,10 +563,10 @@ pub fn check_transition(
     check_mapped_transition(
         (old_schema, old_entries),
         (new_schema, new_entries),
-        old_table,
-        new_table,
-        |table, name| columns(table).old_name(name),
-        |table, name| columns(&new_table(table)?).new_name(name),
+        |table| names.old_table(table),
+        |table| names.new_table(table),
+        |table, name| names.old_name(table, name),
+        |table, name| names.new_name(table, name),
     )
 }
 

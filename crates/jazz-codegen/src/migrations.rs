@@ -77,6 +77,7 @@ pub fn create(
             .iter()
             .any(|(h, _)| *h == recorded.current)
     {
+        bindings::check_recorded_transition(&recorded, &app.compiled)?;
         return Ok(unchanged());
     }
     let from = &recorded.current_schema;
