@@ -2,45 +2,14 @@
 // types mark `encrypted: true` from rows (`?: undefined`), inserts and
 // filters; the client's `app` keeps the plaintext types.
 import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+  app as generated,
+  type Task,
+} from "../../../../crates/jazz-codegen/tests/apps/encrypted/jazz.generated.js";
 import { keyless, type KeylessApp, type KeylessRow } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/test-app.js";
-import type { AppTypes, InsertOf, RowOf } from "../../src/typed-app.js";
+import type { InsertOf, RowOf } from "../../src/typed-app.js";
 
-// The type map of crates/jazz-codegen/tests/apps/encrypted/jazz.generated.ts.
-type Task = {
-  readonly id: string;
-  projectId: string;
-  title: string;
-  notes: string | null;
-  done: boolean;
-};
-type TaskInsert = { projectId: string; title: string; notes?: string | null; done: boolean };
-interface Types extends AppTypes {
-  tasks: {
-    row: Task;
-    insert: TaskInsert;
-    columns: {
-      projectId: { kind: "uuid"; nullable: false; value: string };
-      title: { kind: "string"; nullable: false; value: string; encrypted: true };
-      notes: { kind: "string"; nullable: true; value: string; encrypted: true };
-      done: { kind: "boolean"; nullable: false; value: boolean };
-    };
-    relations: { project: { one: "projects"; nullable: false } };
-  };
-  projects: {
-    row: { readonly id: string; name: string };
-    insert: { name: string };
-    columns: { name: { kind: "string"; nullable: false; value: string } };
-    relations: {};
-  };
-  notes: {
-    row: { readonly id: string; body: string };
-    insert: { body: string };
-    columns: { body: { kind: "string"; nullable: false; value: string } };
-    relations: {};
-  };
-}
-// The same app inline, as a test defines one.
 const file = {
   tables: {
     projects: { columns: { name: "string" } },
@@ -63,8 +32,6 @@ const file = {
     notes: { columns: { body: "string" } },
   },
 } as const;
-// Bound as the app is, typed as its generated bindings type it.
-const generated = testApp<Types>(file);
 
 describe("keyless backend types", () => {
   it("drop a generated app's encrypted columns from rows, inserts and filters", () => {
@@ -95,8 +62,8 @@ describe("keyless backend types", () => {
   });
 
   it("leave tables without encrypted columns, and apps without encryption, as they are", () => {
-    expectTypeOf<RowOf<KeylessApp<typeof generated>["notes"]>>().toEqualTypeOf<
-      RowOf<typeof generated.notes>
+    expectTypeOf<RowOf<KeylessApp<typeof generated>["__e2ee_members"]>>().toEqualTypeOf<
+      RowOf<typeof generated.__e2ee_members>
     >();
     const plain = testApp({ tables: { notes: { columns: { body: "string" } } } } as const);
     expectTypeOf<KeylessApp<typeof plain>>().toEqualTypeOf<typeof plain>();
