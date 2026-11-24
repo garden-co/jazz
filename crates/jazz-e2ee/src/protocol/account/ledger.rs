@@ -15,7 +15,7 @@ use super::super::records::account::{
 /// naming other accounts, which replay ignores or, for roots, rejects.
 /// `account_keys` are the account's sealing key records; which are valid
 /// (§2.12) is decided by [`super::AccountReplay::sealing_keys`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PublicAccountLedger {
     pub account_id: String,
     pub through: Position,
@@ -35,13 +35,7 @@ impl PublicAccountLedger {
         Self {
             account_id: account_id.to_owned(),
             through,
-            roots: Vec::new(),
-            keys: Vec::new(),
-            approvals: Vec::new(),
-            successors: Vec::new(),
-            recovery_roots: Vec::new(),
-            account_keys: Vec::new(),
-            removal_requests: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -88,7 +82,7 @@ impl PublicAccountLedger {
 
 /// The private rows of one account, read at the same cut as its public
 /// ledger (§2.4, "Private verification").
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrivateAccountLedger {
     pub through: Position,
     pub identities: Vec<Accepted<AccountIdentity>>,
@@ -105,14 +99,7 @@ impl PrivateAccountLedger {
     pub fn new(through: Position) -> Self {
         Self {
             through,
-            identities: Vec::new(),
-            requests: Vec::new(),
-            challenges: Vec::new(),
-            proofs: Vec::new(),
-            approvals: Vec::new(),
-            deliveries: Vec::new(),
-            successors: Vec::new(),
-            recovery_deliveries: Vec::new(),
+            ..Self::default()
         }
     }
 
