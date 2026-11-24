@@ -771,7 +771,9 @@ impl E2eeClient {
             } else {
                 SpaceKeyState::NoRoot
             };
-            self.withdraw_stale(space, state, member);
+            if self.record_space_read(space, address, state, member) {
+                self.update_unreadable_reasons(db, space, address).await;
+            }
             return Ok(Acquired {
                 state,
                 chain: None,
@@ -818,12 +820,14 @@ impl E2eeClient {
             }
             other => other,
         };
-        self.withdraw_stale(space, state, member);
+        let reason_changed = self.record_space_read(space, address, state, member);
         if known(self) != before {
             self.shared.forget_missing_keys(space);
             let tables = self.tables_of(space);
             let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
             db.refresh_reads_of(&tables).await?;
+        } else if reason_changed {
+            self.update_unreadable_reasons(db, space, address).await;
         }
         Ok(Acquired {
             state,
@@ -832,12 +836,29 @@ impl E2eeClient {
         })
     }
 
+    /// Records the read's reason for missing keys and whether it changed.
     /// Withdraws the waiting reports of `space` that the acquisition's
     /// `state` no longer gives (protocol §4.3): a space with a root is no
     /// longer `space-pending`, one whose key arrived is neither
     /// `key-pending` nor `key-unavailable`, a member is no longer
     /// `key-unavailable`.
-    fn withdraw_stale(&self, space: &SpaceAddress, state: SpaceKeyState, member: bool) {
+    fn record_space_read(
+        &self,
+        space: &SpaceAddress,
+        address: &ProtocolAddress,
+        state: SpaceKeyState,
+        member: bool,
+    ) -> bool {
+        let (incomplete, reason_changed) = {
+            let mut keys = self.shared.keys.borrow_mut();
+            let previous = keys.missing_key_code(space);
+            keys.space_reads.insert(space.clone(), (state, member));
+            let incomplete = keys
+                .held
+                .incomplete(address)
+                .then(|| keys.incomplete_query_code(space));
+            (incomplete, previous != keys.missing_key_code(space))
+        };
         let current = match state {
             SpaceKeyState::KeyPending => Some(UnreadableCode::KeyPending),
             SpaceKeyState::KeyUnavailable => Some(UnreadableCode::KeyUnavailable),
@@ -853,7 +874,29 @@ impl E2eeClient {
         .into_iter()
         .filter(|code| Some(*code) != current)
         .collect();
-        self.shared.withdraw(space, &gone);
+        self.shared.withdraw(space, &gone, incomplete);
+        reason_changed
+    }
+
+    async fn update_unreadable_reasons(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        address: &ProtocolAddress,
+    ) {
+        db.update_unreadable_reasons(space, |epoch| {
+            let keys = self.shared.keys.borrow();
+            if keys
+                .held
+                .known(address)
+                .is_some_and(|known| known.is_absent(epoch))
+            {
+                UnreadableCode::InvalidCiphertext
+            } else {
+                keys.missing_key_code(space)
+            }
+        })
+        .await;
     }
 
     /// The encrypted tables whose rows `space` holds the keys of.
@@ -973,6 +1016,7 @@ impl E2eeClient {
             }
             return Ok((reports, held));
         }
+        let mut invalid_epoch = false;
         for entry in entries {
             let settled = self.shared.keys.borrow_mut().held.settle_missing(
                 &address,
@@ -993,6 +1037,7 @@ impl E2eeClient {
                 MissingKey::Held => held = true,
                 MissingKey::Report(error) => {
                     let code = code(error);
+                    invalid_epoch |= code == UnreadableCode::InvalidCiphertext;
                     let per_space = matches!(
                         code,
                         UnreadableCode::KeyPending | UnreadableCode::SpacePending
@@ -1003,6 +1048,9 @@ impl E2eeClient {
                 // its own (protocol §4.2).
                 MissingKey::Unresolved(_) => {}
             }
+        }
+        if invalid_epoch {
+            self.update_unreadable_reasons(db, space, &address).await;
         }
         Ok((reports, held))
     }

@@ -18,6 +18,7 @@ use jazz_e2ee::protocol::records::space::SpaceRoot;
 use jazz_e2ee::registry::Registry;
 
 use crate::error::ClientError;
+use crate::spaces::SpaceKeyState;
 use crate::values::ColumnCodec;
 
 /// At most this many reports wait for the runtime; older ones are dropped
@@ -267,12 +268,21 @@ impl Published {
     }
 
     /// Forgets the reports of `space`, per space and per row, with one of
-    /// `codes`, returning their withdrawals.
-    fn withdraw(&mut self, space: &SpaceAddress, codes: &[UnreadableCode]) -> Vec<Report> {
+    /// `codes`, keeping the space report for an incomplete equality query.
+    fn withdraw(
+        &mut self,
+        space: &SpaceAddress,
+        codes: &[UnreadableCode],
+        incomplete: Option<UnreadableCode>,
+    ) -> Vec<Report> {
         let gone: Vec<ReportKey> = self
             .seen
             .keys()
-            .filter(|key| key.space.as_ref() == Some(space) && codes.contains(&key.code))
+            .filter(|key| {
+                key.space.as_ref() == Some(space)
+                    && codes.contains(&key.code)
+                    && (key.id.is_some() || Some(key.code) != incomplete)
+            })
             .cloned()
             .collect();
         let mut out = Vec::new();
@@ -417,6 +427,9 @@ impl Catalogue {
 #[derive(Debug, Default)]
 pub(crate) struct KeyState {
     pub(crate) held: HeldKeys,
+    /// The last successful acquisition's state and membership, for reads
+    /// that still lack a key.
+    pub(crate) space_reads: BTreeMap<SpaceAddress, (SpaceKeyState, bool)>,
     pub(crate) catalogue: Option<Catalogue>,
     /// Whether the client is online: offline, equality queries compute no
     /// tokens (protocol §4.5).
@@ -468,6 +481,22 @@ pub(crate) struct KeyState {
 }
 
 impl KeyState {
+    pub(crate) fn missing_key_code(&self, space: &SpaceAddress) -> UnreadableCode {
+        match self.space_reads.get(space) {
+            Some((SpaceKeyState::Incomplete, _)) => UnreadableCode::UnsupportedFormat,
+            Some((_, false)) => UnreadableCode::KeyUnavailable,
+            Some((SpaceKeyState::NoRoot, true)) => UnreadableCode::SpacePending,
+            _ => UnreadableCode::KeyPending,
+        }
+    }
+
+    pub(crate) fn incomplete_query_code(&self, space: &SpaceAddress) -> UnreadableCode {
+        match self.space_reads.get(space) {
+            Some((_, false)) => UnreadableCode::KeyUnavailable,
+            _ => UnreadableCode::KeyPending,
+        }
+    }
+
     /// Missing evidence about this space requires a read, including on a
     /// device that first encountered another member during this run.
     pub(crate) fn needs_evaluation(
@@ -929,8 +958,16 @@ impl Shared {
     }
 
     /// Withdraws the reports of `space` with one of `codes`.
-    pub(crate) fn withdraw(&self, space: &SpaceAddress, codes: &[UnreadableCode]) {
-        let withdrawn = self.published.borrow_mut().withdraw(space, codes);
+    pub(crate) fn withdraw(
+        &self,
+        space: &SpaceAddress,
+        codes: &[UnreadableCode],
+        incomplete: Option<UnreadableCode>,
+    ) {
+        let withdrawn = self
+            .published
+            .borrow_mut()
+            .withdraw(space, codes, incomplete);
         self.flush(withdrawn);
     }
 

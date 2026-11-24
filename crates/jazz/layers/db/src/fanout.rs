@@ -34,7 +34,11 @@
 //! an update or delete stamp, a recursive `INHERITS` chain) watches every
 //! table it reads whole, as do branch views.
 
+#[cfg(feature = "e2ee-client")]
+use super::e2ee_read::MissingReadKeys;
 use super::*;
+#[cfg(feature = "e2ee-client")]
+use crate::e2ee::{SpaceAddress, UnreadableCode};
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -509,6 +513,8 @@ pub(super) struct Group {
     /// hooks could not open them, as of `rows` (protocol §4.3). Replaced
     /// only when it changes, so a pointer comparison tells a change.
     pub(super) unreadable: Arc<[UnreadableRow]>,
+    #[cfg(feature = "e2ee-client")]
+    missing_read_keys: MissingReadKeys,
     /// The list the members were last told ([`Group::push`]).
     told_unreadable: Arc<[UnreadableRow]>,
     members: Vec<Member>,
@@ -1140,6 +1146,8 @@ impl Store {
             members: Vec::new(),
             told_unreadable: Arc::clone(&unreadable),
             unreadable,
+            #[cfg(feature = "e2ee-client")]
+            missing_read_keys: MissingReadKeys::new(),
             watches,
             evidence,
             recheck,
@@ -1199,7 +1207,13 @@ impl Store {
             let mut rows = run?;
             #[cfg(feature = "e2ee-client")]
             {
-                unreadable = self.open_read(prepared, &visible, false, &mut rows)?;
+                unreadable = self.open_read(
+                    prepared,
+                    &visible,
+                    false,
+                    &mut rows,
+                    Some(&mut group.missing_read_keys),
+                )?;
             }
             self.nest_relations(prepared, identity, &visible, rows)
                 .await
@@ -2111,6 +2125,42 @@ impl Store {
         .await;
     }
 
+    #[cfg(feature = "e2ee-client")]
+    pub(super) fn update_unreadable(
+        &self,
+        space: &SpaceAddress,
+        reason: impl Fn(&str) -> UnreadableCode,
+    ) {
+        let groups: Vec<_> = self
+            .fan
+            .borrow()
+            .groups
+            .values()
+            .filter(|group| group.borrow().missing_read_keys.contains_key(space))
+            .cloned()
+            .collect();
+        for group in groups {
+            let mut group = group.edit();
+            let missing = &group.missing_read_keys[space];
+            let changes: Vec<_> = group
+                .unreadable
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| {
+                    let code = reason(missing.get(&row.id)?).as_str();
+                    (code != row.code).then_some((index, code))
+                })
+                .collect();
+            if !changes.is_empty() {
+                let unreadable = Arc::make_mut(&mut group.unreadable);
+                for (index, code) in changes {
+                    unreadable[index].code = code;
+                }
+                group.flush_unreadable();
+            }
+        }
+    }
+
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
     /// claims from this node's own author. Only request claims matching
@@ -2496,7 +2546,14 @@ impl Store {
         // as a full run's are.
         #[cfg(feature = "e2ee-client")]
         {
-            let left_out = match self.open_read(&group.prepared, &read, false, &mut fresh) {
+            let mut missing_read_keys = MissingReadKeys::new();
+            let left_out = match self.open_read(
+                &group.prepared,
+                &read,
+                false,
+                &mut fresh,
+                Some(&mut missing_read_keys),
+            ) {
                 Ok(left_out) => left_out,
                 Err(error) => return Some(Err(error)),
             };
@@ -2517,6 +2574,17 @@ impl Store {
                     .collect();
                 unreadable.extend(left_out);
                 replace_unreadable(&mut group.unreadable, unreadable);
+                group.missing_read_keys.retain(|_, missing| {
+                    missing.retain(|id, _| !ids.contains(id));
+                    !missing.is_empty()
+                });
+                for (space, missing) in missing_read_keys {
+                    group
+                        .missing_read_keys
+                        .entry(space)
+                        .or_default()
+                        .extend(missing);
+                }
             }
         }
         // Relations of the changed roots only; the others' are unchanged.
@@ -2838,9 +2906,20 @@ impl Store {
     ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        let (rows, unreadable) = self
-            .run_for_reader_reporting(&group.prepared, group.identity, &read, false)
-            .await?;
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut rows = self.run(&group.prepared, group.identity, &read).await?;
+        #[cfg(feature = "e2ee-client")]
+        let mut missing_read_keys = MissingReadKeys::new();
+        #[cfg(feature = "e2ee-client")]
+        let unreadable = self.open_read(
+            &group.prepared,
+            &read,
+            false,
+            &mut rows,
+            Some(&mut missing_read_keys),
+        )?;
+        #[cfg(not(feature = "e2ee-client"))]
+        let unreadable = Vec::new();
         let rows = self
             .nest_relations_kept(
                 &group.prepared,
@@ -2850,6 +2929,10 @@ impl Store {
                 &mut group.plans,
             )
             .await?;
+        #[cfg(feature = "e2ee-client")]
+        {
+            group.missing_read_keys = missing_read_keys;
+        }
         Ok((rows, unreadable))
     }
 

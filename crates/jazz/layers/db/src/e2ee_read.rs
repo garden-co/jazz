@@ -4,12 +4,28 @@
 use std::collections::BTreeMap;
 
 use super::{Db, PreparedQuery, ReadSpec, Store, UnreadableRow};
-use crate::e2ee::{E2eeRefusal, OpenOutcome, ReadSite};
+use crate::e2ee::{E2eeRefusal, EpochId, OpenOutcome, ReadSite, SpaceAddress, UnreadableCode};
+use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
 use crate::values::{CurrentRow, Schema};
 
+/// The missing keys behind a subscription's unreadable rows, by space and row.
+pub(super) type MissingReadKeys = BTreeMap<SpaceAddress, BTreeMap<RowUuid, EpochId>>;
+
 impl Db {
+    /// Update the reasons already reported for `space` in live results.
+    pub async fn update_unreadable_reasons(
+        &self,
+        space: &SpaceAddress,
+        reason: impl Fn(&str) -> UnreadableCode,
+    ) {
+        let _operation = self.write_operation().await;
+        self.inner
+            .without_overlay()
+            .update_unreadable(space, reason);
+    }
+
     /// Re-run every live result that reads one of `tables`, so rows the
     /// encryption hooks can open now (a key arrived) reach their
     /// subscribers as additions, and rows they no longer can leave.
@@ -58,6 +74,7 @@ impl Store {
         read: &ReadSpec,
         strict: bool,
         rows: &mut Vec<CurrentRow>,
+        missing: Option<&mut MissingReadKeys>,
     ) -> Result<Vec<UnreadableRow>, Error> {
         let Some(hooks) = self.e2ee.clone() else {
             return Ok(Vec::new());
@@ -96,7 +113,10 @@ impl Store {
         if let Some(planned) = &prepared.planned {
             planned.residual.apply(rows)?;
         }
-        Ok(left_out(&outcome))
+        if let Some(space) = prepared.e2ee_incomplete() {
+            hooks.report_incomplete_query(table, space);
+        }
+        Ok(left_out(&outcome, missing))
     }
 
     /// The columns of `table` that a migration added to rows already
@@ -137,15 +157,31 @@ impl Store {
 /// The rows `outcome` left out, once each, in the order first reported: a
 /// row's reports that still return it (an empty cell with its default, a
 /// stale space) are notices, not omissions.
-fn left_out(outcome: &OpenOutcome) -> Vec<UnreadableRow> {
+fn left_out(
+    outcome: &OpenOutcome,
+    mut missing: Option<&mut MissingReadKeys>,
+) -> Vec<UnreadableRow> {
     let mut seen = std::collections::BTreeSet::new();
     outcome
         .unreadable
         .iter()
-        .filter(|report| !report.code.returns_row())
-        .filter_map(|report| {
+        .enumerate()
+        .filter(|(_, report)| !report.code.returns_row())
+        .filter_map(|(index, report)| {
             let id = report.id?;
-            seen.insert(id).then(|| UnreadableRow {
+            if !seen.insert(id) {
+                return None;
+            }
+            if let Some(missing) = missing.as_deref_mut()
+                && let Some(space) = &report.space
+                && let Some(epoch) = outcome.missing_reports.get(&index)
+            {
+                missing
+                    .entry(space.clone())
+                    .or_default()
+                    .insert(id, epoch.clone());
+            }
+            Some(UnreadableRow {
                 table: report.table.clone(),
                 id,
                 column: report.column.clone(),

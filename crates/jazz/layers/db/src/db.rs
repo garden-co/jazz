@@ -5786,7 +5786,7 @@ impl Store {
         #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut rows = self.run(prepared, identity, read).await?;
         #[cfg(feature = "e2ee-client")]
-        let unreadable = self.open_read(prepared, read, strict, &mut rows)?;
+        let unreadable = self.open_read(prepared, read, strict, &mut rows, None)?;
         #[cfg(not(feature = "e2ee-client"))]
         let (unreadable, _) = (Vec::new(), strict);
         Ok((rows, unreadable))
