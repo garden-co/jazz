@@ -17,6 +17,9 @@ name: Release publish
 #     Go              push packages/jazz-go/v<version>
 #     Swift           push and tag garden-co/jazz-swift
 #     Inspector       stage and promote the prebuilt deployment (after npm)
+#   The language files include, once jazz-kotlin is Kotlin Multiplatform,
+#   jazz-kotlin-maven-<version>.zip (a local Maven repository), next to the
+#   jar and AAR, which are unchanged.
 #   finalize: tag v<version> and publish the draft release, as Latest, last.
 #
 # Every leg skips what is already published, so "Re-run failed jobs" resumes
@@ -369,6 +372,7 @@ jobs:
           sparse-checkout: |
             dev/release-publish
             dev/artifacts
+            dev/scripts
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
@@ -413,6 +417,19 @@ jobs:
           built_tree=$(gh api "repos/${GH_REPO}/git/commits/${built}" --jq .tree.sha)
           [ "${built_tree}" = "${TREE}" ] ||
             { echo "::error::libjazz_ffi was built from ${built} (tree ${built_tree}), not tree ${TREE}"; exit 1; }
+
+      # Attached with the other language files (draft copies release-languages
+      # whole); built once jazz-kotlin is Kotlin Multiplatform.
+      - name: Kotlin Multiplatform Maven repository zip
+        working-directory: art/release-languages
+        run: |
+          set -euo pipefail
+          zip="jazz-kotlin-maven-${VERSION}.zip"
+          if ! grep -q " ${zip}\$" SHA256SUMS-languages; then
+            echo "::notice::No ${zip} (jazz-kotlin wasn't Kotlin Multiplatform at this commit); the jar and AAR ship as before."
+            exit 0
+          fi
+          bash "${GITHUB_WORKSPACE}/dev/scripts/check-kotlin-maven-zip.sh" "${zip}" "${VERSION}"
 
       - name: Maven tree (bundled with a throwaway key)
         run: |
