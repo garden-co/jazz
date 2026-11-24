@@ -1387,7 +1387,7 @@ mod tests {
         };
         let account = uuid::Uuid::new_v4().to_string();
         let store = Rc::new(JsStore::default());
-        assert!(run(build(options(plain), account.clone(), store.clone())).is_err());
+        assert!(run(build(&options(plain), account.clone(), store.clone())).is_err());
         let encrypted = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": {
                 "projects": { "columns": { "name": "string" } },
@@ -1400,7 +1400,7 @@ mod tests {
                 }
             } }"#;
         let memory = crate::MemoryStore::new();
-        let mut building = Box::pin(build(options(encrypted), account.clone(), store.clone()));
+        let mut building = Box::pin(build(&options(encrypted), account.clone(), store.clone()));
         let mut context = std::task::Context::from_waker(Waker::noop());
         let built = loop {
             if let Poll::Ready(built) = building.as_mut().poll(&mut context) {
