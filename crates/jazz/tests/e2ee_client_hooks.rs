@@ -628,12 +628,16 @@ struct Recorded {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     wire: Rc<RefCell<Vec<u8>>>,
+    reads: Option<Rc<RefCell<Vec<Query>>>>,
 }
 
 impl Transport for Recorded {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message.clone())? {
             self.wire.borrow_mut().extend(frame);
+        }
+        if let (Some(reads), SyncMessage::Read { query, .. }) = (&self.reads, &message) {
+            reads.borrow_mut().push((**query).clone());
         }
         self.out.borrow_mut().push_back(message);
         Ok(())
@@ -646,7 +650,7 @@ impl Transport for Recorded {
 
 /// `client` connected to `server` as SYSTEM; every frame either sends.
 fn link(client: &Db, server: &Db) -> (jazz::db::Upstream, Rc<RefCell<Vec<u8>>>) {
-    link_as(client, server, AuthorSubject::SYSTEM)
+    link_as(client, server, AuthorSubject::SYSTEM, None)
 }
 
 /// `client` connected to `server`, which serves it as `author`.
@@ -654,6 +658,7 @@ fn link_as(
     client: &Db,
     server: &Db,
     author: AuthorSubject,
+    reads: Option<Rc<RefCell<Vec<Query>>>>,
 ) -> (jazz::db::Upstream, Rc<RefCell<Vec<u8>>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
@@ -662,12 +667,14 @@ fn link_as(
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
+        reads,
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
             out: down,
             inbound: up,
             wire: wire.clone(),
+            reads: None,
         }),
         author,
     ))
@@ -749,7 +756,8 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
     let alice = client_at(&hooks, &path);
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
     jazz::db::block_on(server.set_authority()).unwrap();
-    let (_link, wire) = link(&alice, &server);
+    let reads = Rc::new(RefCell::new(Vec::new()));
+    let (_link, wire) = link_as(&alice, &server, AuthorSubject::SYSTEM, Some(reads.clone()));
     let space = uuid::Uuid::new_v4();
     hooks.hold(space);
 
@@ -828,8 +836,18 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
         assert!(matches!(*token, Value::Bytes(_)));
     }
     assert_eq!(all(&server, "space_roots").len(), 1);
+    let token_filter = Predicate::In(
+        Operand::Column("__e2ee_eq_body".to_owned()),
+        vec![lit(Value::Bytes(token(&format!("{SECRET}-handle"))))],
+    );
+    assert!(
+        reads
+            .borrow()
+            .iter()
+            .any(|query| query.table == "notes" && query.filters.contains(&token_filter)),
+        "alice sent a read with the equality token predicate"
+    );
     let wire = wire.borrow();
-    assert!(contains(&wire, b"__e2ee_eq_body"), "the query went up");
     assert!(!contains(&wire, SECRET.as_bytes()), "plaintext on the wire");
     drop(alice);
     assert!(
@@ -1466,12 +1484,14 @@ fn a_creating_upserts_large_sealed_default_travels_as_chunks() {
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
+        reads: None,
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
             out: down,
             inbound: up.clone(),
             wire,
+            reads: None,
         }),
         AuthorSubject::SYSTEM,
     ))
@@ -1772,7 +1792,7 @@ fn transaction_fates_survive_a_restart() {
     let (accepted, refused, kept) = {
         let alice = client_as(&hooks, &path, author);
         alice.track_upstream_rejections();
-        let _link = link_as(&alice, &server, author);
+        let _link = link_as(&alice, &server, author, None);
         let accepted = block_on(alice.insert(
             "space_roots",
             root(uuid::Uuid::new_v4()),
