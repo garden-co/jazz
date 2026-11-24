@@ -1566,7 +1566,8 @@ bootstrap (§2.3) refuses an account with history.
 
 **Availability.** Reset exists only for accounts authenticated by the
 application's own sign-in (for example WorkOS or Better Auth), and only when
-the application opts in with `"allowAccountReset": true` in the top-level
+the application opts in with `encryption: { allowAccountReset: true }` in
+`schema.ts`. Generation writes `"allowAccountReset": true` in the top-level
 `encryption` object of `jazz.app.json` (§1.5; off by default; carried in the
 deploy request). A device account has no reset without its secret:
 there the account secret is the account, and losing it is losing the
@@ -1579,6 +1580,9 @@ when the deployed configuration does not allow reset. Clients enforce the
 device-account part themselves: replay accepts a later generation of a
 device account only if the account's device-account key signed its root
 (§2.4 step 1), so nobody without the secret can reset it.
+
+The SDK exposes `db.encryption.resetAccount()`. See the
+[account reset test](../../../packages/jazz-tools/src/encryption/node-e2e.test.ts#L175).
 
 Stage `account-reset`. Preconditions, read at one cut: the account has a
 canonical root of generation `g`; this device has a request whose keys match
@@ -2633,8 +2637,11 @@ A rowless upload rejects named encrypted cells at begin and checks the mutation 
 
 ### 5.6 Atomicity
 
-- One public mutation or transaction callback is one Jazz transaction;
-  callbacks are never replayed.
+- Core runs a transaction callback once. If a thin browser client refuses an
+  operation that requires local-first, Jazz aborts that transaction before
+  anything commits. After the local-first client loads, Jazz runs the callback
+  once more on it. Keep external side effects out of transaction callbacks.
+  See the [thin transaction test](../../../packages/jazz-tools/src/session/create-jazz-session.thin-encrypted.test.ts#L625-L644).
 - Space creation commits with the first encrypted rows that need it, or
   alone for `createSpace` (§3.2).
 - **Keys inside a callback transaction.** A staging call that needs a key
@@ -2826,16 +2833,27 @@ before it, the device has nothing to compare with (§8).
 
 ### 6.4 Wipe rules
 
-- Normal sign-out retains device and held-key records, so a later offline
-  sign-in can read.
+- Sign-out releases the departing runtime’s held keys in memory after draining
+  pending private-store writes. Saved device and held-key records survive a
+  normal sign-out, so a later offline sign-in can read. See the
+  [shutdown test](../../jazz-e2ee-client/tests/signout_memory.rs#L23).
 - With `clearOnSignOut`, the **last tab out** removes the account's device
   record and every held key bound to it (for a device-account store, together with
   the store's deletion). A tab that signs out while another holds the store
   keeps them. The wipe deletes the client's core storage first and the
   private E2EE records second; if the second step fails, sign-out reports an
-  unfinished wipe.
-- `deleteClientStorage` removes the namespace's storage and the registered
-  private records, and invalidates live handles. It revokes nothing remotely.
+  unfinished wipe. This sign-out wipe requires the persistent browser driver.
+  The memory driver closes the runtime and skips the private-store wipe. See
+  the [driver check](../../../packages/jazz-tools/src/session/create-jazz-session.ts#L318)
+  and [browser sign-out tests](../../../packages/jazz-tools/tests/browser/encryption.server.test.ts#L647).
+- Browser `deleteClientStorage` deletes the active namespace’s database and
+  invalidates its live handles. The session’s opted-in sign-out path separately
+  wipes the private store. On native, `deleteClientStorage`
+  (`Jazz::delete_client_storage` in Rust) closes the client and deletes the
+  local database if it is persistent. The private records survive, so the
+  client can decrypt after reopening and syncing. Storage deletion is local.
+  See the [browser reset](../../../packages/jazz-tools/src/runtime/connection-manager/browser-connection-manager.ts#L684)
+  and the [native deletion test](../../jazz-app/tests/encryption.rs#L411-L428).
 - Access changes never remove held keys. Records are removed only by
   sign-out wipe, account change wipe, device removal, re-enrolment after
   `device-no-longer-active` (§2.4, "Floors": the account's device record,
@@ -2893,7 +2911,9 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 
 `conflicting-account-key` is a report, not a contradiction: a valid sealing
 key record of the device's own account that does not derive from the
-account key is ignored by that device and reported (§2.12).
+account key is ignored by that device and reported (§2.12). The app event
+includes `recordId`, `signerId` and `epochId` and is deduplicated by record.
+See the [account verification test](../../jazz-e2ee-client/tests/accounts.rs#L110).
 
 The missing-key contradictions: `missing-root-key` (an accepted account
 root names a device with no published device keys, §1.2),
@@ -2907,9 +2927,9 @@ operations that are safe to repeat because they re-read their evidence and
 stage fresh rows: the runtime's own publications (space creation outside an
 application transaction, rotation, deliveries and the repair of refused or
 lost creations, §3.2), and a staging call retried after "needs key" before submission
-(§5.6). A public mutation or transaction callback is never retried or
-replayed: its conflict is returned to the caller, and an unknown outcome is
-reconciled by its transaction identity.
+(§5.6). Application transaction conflicts go back to the caller. Unknown
+publication outcomes are reconciled by transaction identity. The thin
+browser callback rerun in §5.6 applies only to a refusal before commit.
 
 Refusal codes:
 

@@ -747,9 +747,8 @@ async fn shutdown_with_open_mergeable_transaction() {
     jazz.shutdown().await.unwrap();
 }
 
-/// A client has no encryption hooks yet, so it refuses to open an app
-/// whose files declare encryption, whether it holds the permissions or not:
-/// it would store plaintext in the encrypted columns.
+/// A client opened without encryption configured refuses an app that declares
+/// encryption before it can write any encrypted columns.
 ///
 /// ```text
 /// app files declare encryption ──open (no hooks)──► ✗ refused

@@ -86,6 +86,14 @@ app encrypts data it already stores. References: the
 - Every schema version records its tables' `encryption` entries: each
   `history` version in `jazz.app.json` carries them, as the current `tables`
   do, and the writer keeps them when it moves a version into `history`.
+- `systemTablesVersion` in `jazz.app.json` identifies the system tables for the
+  current schema and independently for each schema in `history`. Omission
+  means version 1. The loader restores each schema’s own system tables
+  before hashing it, preserving the hashes and bytes of existing version-1
+  files. Jazz supplies the additive system-table migration steps. The server
+  accepts known versions and refuses downgrades or unknown versions. An
+  unknown version requires a server upgrade. See the
+  [versioned system table tests](../tests/system_table_upgrade.rs#L39-L152).
 - What each loader returns:
   - `load` (the app files) and `load_backend` (generated bindings), which
     deploy or serve the app: the declarations of every shipped version.

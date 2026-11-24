@@ -129,7 +129,7 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         page_size: Some(65536),
         ..FileOptions::default()
     };
-    // A client has no encryption hooks yet: an encrypted app is refused.
+    // This browser open path lacks encryption hooks, so it refuses encrypted apps.
     jazz::binding_host::refuse_encrypted_app(&config)
         .map_err(|error| crate::core_error_to_js(&error))?;
     let db = Db::open_at(config, Path::new(&spec.path), options)

@@ -61,16 +61,16 @@ column. Until the upgrade has finished:
 - **A transaction callback may run twice.** `db.transaction(...)` and `db.serializableTransaction(...)`
   start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
   transaction back (even if your callback catches the error), waits for the local-first client and runs
-  the callback once more on it. Before the full client has loaded, therefore, a callback may run twice,
-  so keep side effects (network calls, analytics, counters outside the database) outside it. While
-  such a transaction waits, the writes you make after its callback has finished wait with it, and run
+  the callback once more on it. The first attempt commits nothing. Keep external side effects such
+  as network calls, analytics and counters out of the callback. While such a transaction waits, the writes you make after its callback has finished wait with it, and run
   in the order you made them when the wait ends (on the local-first client, once it has loaded).
   Nothing is held while the callback runs again: writes then behave as beside any pending transaction
   on the local-first client. A
   transaction that begins with `beginTransaction()` is not rerun: it fails with reason
   `"transaction"` and starts the load, and you begin it again once `db.upgradeToLocalFirst(loader)` has
   resolved. Such a transaction is also not held behind a callback transaction that is waiting for the
-  local-first client, so it can begin and fail before it; begin it again after the load.
+  local-first client, so it can begin and fail before it; begin it again after the load. See the
+  [thin transaction test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/session/create-jazz-session.thin-encrypted.test.ts#L625-L644).
 - **Live queries wait.** A live query on encrypted columns emits nothing until the local-first client
   has loaded, then opens. If that takes 30 seconds, Jazz logs one warning naming the table and the query
   stays loading; it opens if the client loads later. A failed load, a sign-out or closing the `Db`
@@ -79,13 +79,19 @@ column. Until the upgrade has finished:
   (reason `"no-loader"`) that says to pass `client`, and Jazz also logs it to the console once per page.
   A thin `Db` opened directly, outside a Jazz session, fails with reason `"direct-thin"`.
 
+If a streaming write times out after publication begins, Jazz throws
+`StreamingPublicationTimeoutError` (exported from `jazz-tools`). The error has a `rowId` and
+a `settled` promise. Publication may still succeed. Await `settled` to get the write receipt or
+the publication error before deciding whether to retry. See the
+[streaming publication timeout test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/runtime/native-runtime/native-runtime-transaction-lifecycle.test.ts#L398-L412).
+
 ### `db.encryption` before the client has loaded
 
 In an app that declares encryption, `db.encryption` on a thin `Db` is a stand-in for the real handle,
 which only the local-first client has:
 
 - **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
-  `keys.*`, `members.row`, `members.where` and `members.remove` wait up to 30 seconds for the local-first client, start loading it if it
+  `keys.*`, `resetAccount()`, `members.row`, `members.where` and `members.remove` wait up to 30 seconds for the local-first client, start loading it if it
   has not started, then run on the real handle. The 30 seconds cover the load and the new client
   verifying the account. While the `Db` is thin, `ready({ timeoutMs })` waits for the shorter of
   your `timeoutMs` and those 30 seconds, then rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
@@ -114,10 +120,12 @@ the keys; the device then enrols again as a new device, like any other new devic
 
 ### Signing out
 
-By default a sign-out keeps the device's keys, as it keeps the account's local data and, for a device
-account, its key: the user's next sign-in on this browser reads at once, with no new approval. While
-they are kept, a later user of the same browser profile, or any script on your origin, can still ask
-the browser to unprotect them (see [limits](/docs/e2ee/limits)).
+Signing out releases the keys held in memory by that tab. By default the browser keeps the saved
+keys and the account's local data, along with the account secret for a device account. The next
+sign-in on this browser can read at once, with no new approval. While the saved keys remain, a
+later user of the same browser profile, or any script on your origin, can still ask the browser to
+unprotect them. See [limits](/docs/e2ee/limits) and the
+[key shutdown test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/signout_memory.rs#L23).
 
 On a shared computer, open the client with `clearOnSignOut: true`. A sign-out then wipes the account's
 keys from the private store (yours, if you passed `store`) together with its local data, once no other
@@ -125,7 +133,9 @@ tab of the app holds that account open, and a sign-out the page did not see (on 
 that closed) is wiped on the next page load. The device can no longer read the account's encrypted
 rows: when the user signs in again it is a new device, approved by another device or recovered (see
 [Devices and recovery](/docs/e2ee/devices-and-recovery)). Wiping takes the persistent storage (the
-default); with `driver: { type: "memory" }`, `clearOnSignOut` wipes nothing, keys included.
+default). With `driver: { type: "memory" }`, sign-out releases the in-memory client and skips
+the private-store wipe. See the [persistent-driver check](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/session/create-jazz-session.ts#L318) and the
+[two-tab sign-out test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/tests/browser/encryption.server.test.ts#L710).
 
 ## Tabs
 
