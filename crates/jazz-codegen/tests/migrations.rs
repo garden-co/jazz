@@ -755,3 +755,50 @@ fn an_invalid_authored_migration_keeps_the_app_file_and_bindings() {
     assert_eq!(app_after, edited);
     assert_eq!(bindings_after, bindings);
 }
+
+/// Alice tries to replace a required encrypted string with a required
+/// encrypted boolean. Neither a rename nor an add and drop works.
+#[test]
+fn an_impossible_encrypted_rename_leaves_the_project_unchanged() {
+    let shipped = file(
+        r#"{ "messages": {
+            "columns": { "text": "bytes" },
+            "encryption": { "space": "id", "scope": "messages", "columns": { "text": "string" } }
+        } }"#,
+    );
+    let edited = shipped
+        .replace(r#""text""#, r#""subject""#)
+        .replace(r#""string""#, r#""boolean""#);
+    let lang = Lang::Rust;
+    let bindings = generate(lang, shipped.as_bytes()).unwrap();
+    let dir = std::env::temp_dir().join(format!("jazz-impossible-rename-{}", std::process::id()));
+    let migrations_dir = dir.join("migrations");
+    std::fs::create_dir_all(&migrations_dir).unwrap();
+    let files = || {
+        std::fs::read_dir(&migrations_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    };
+    let before = files();
+    let app_path = dir.join(artifact::APP_FILE);
+    let bindings_path = dir.join(lang.file());
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, &edited).unwrap();
+    std::fs::write(&bindings_path, &bindings).unwrap();
+
+    let result = jazz_codegen::project::migrations_create(&dir, &[lang.into()], "replace-text");
+    let after = files();
+    let app_after = std::fs::read_to_string(app_path).unwrap();
+    let bindings_after = std::fs::read_to_string(bindings_path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    let error = result.expect_err("neither interpretation is valid");
+    assert!(
+        error.contains("messages.subject: the migration adds a required encrypted column"),
+        "{error}"
+    );
+    assert_eq!(after, before);
+    assert_eq!(app_after, edited);
+    assert_eq!(bindings_after, bindings);
+}
