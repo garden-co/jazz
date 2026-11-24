@@ -16,7 +16,10 @@
 // serves its app whatever `{x}` is. Routes are checked, with the request's
 // secrets, before a body (at most 8 MiB) is read.
 //
-// Bindings: JAZZ (this class's namespace), JAZZ_CORE_SECRET, and optionally
+// Bindings: JAZZ (this class's namespace), and optionally JAZZ_CORE_SECRET
+// (without it, the object makes a secret on its first open, keeps it in its
+// SQL and hands it only to callers holding its binding: `coreCredential`,
+// an RPC method, which no request from the internet can reach),
 // JAZZ_SCHEMA (a public schema's JSON, served until one is published),
 // JAZZ_BLOBS (an R2 bucket for large values, recommended) and
 // JAZZ_BLOBS_PREFIX (where in it, default `jazz/<app id>/`).
@@ -290,6 +293,14 @@ async function readBody(request, limit) {
   return body;
 }
 
+/** Whether the object's SQL has table `name`. */
+function hasTable(sql, name) {
+  return (
+    sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name).toArray()
+      .length > 0
+  );
+}
+
 function close(ws, code, reason) {
   try {
     ws.close(code, String(reason).slice(0, 120));
@@ -342,14 +353,24 @@ export function jazzCoreClass(wasm) {
 
     open() {
       if (this.current() === null) {
+        const secret = this.env.JAZZ_CORE_SECRET || undefined;
+        const makesSecret =
+          secret === undefined && !hasTable(this.ctx.storage.sql, "_jazz_host_secret");
         this.core = this.guard(() =>
           wasm.DurableObjectCore.open(
             this.ctx.storage,
-            this.env.JAZZ_CORE_SECRET,
+            secret,
             this.env.JAZZ_SCHEMA,
             this.env.JAZZ_BLOBS !== undefined,
           ),
         );
+        if (makesSecret) {
+          // Once per object: a backend elsewhere (`durableObjects({ url })`)
+          // only knows a configured secret, and is refused with this one.
+          console.warn(
+            "Jazz core: no JAZZ_CORE_SECRET set, so this object made its own secret; only a backend in this Worker (durableObjects({ binding })) can use it",
+          );
+        }
         this.instance = instance;
         this.chunkIo.out = false;
         this.chunkFetches.out = false;
@@ -534,6 +555,16 @@ export function jazzCoreClass(wasm) {
         }
         throw error;
       }
+    }
+
+    /**
+     * The secret that admits the app's backend, for a backend in the same
+     * Worker (`durableObjects({ binding: env.JAZZ })`): an RPC method, so
+     * only code holding this object's binding can call it.
+     */
+    coreCredential() {
+      const core = this.open();
+      return this.guard(() => core.coreSecret());
     }
 
     async fetch(request) {
