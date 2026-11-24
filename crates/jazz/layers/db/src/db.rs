@@ -270,7 +270,6 @@ fn row_local_policy(policy: &PolicyExpr) -> bool {
         | PolicyExpr::False => true,
         // False outside a write check, so it reads nothing here.
         PolicyExpr::InsertedByThisTransaction => true,
-        PolicyExpr::InheritsFrom { .. } => false,
         _ => false,
     }
 }
@@ -5276,8 +5275,6 @@ fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
         | PolicyExpr::InheritsFrom { .. } => true,
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_other_rows),
         PolicyExpr::Not(inner) => policy_reads_other_rows(inner),
-        // Its value depends on the unit's inserts, not on rows read.
-        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -10352,8 +10349,6 @@ fn policy_is_monotone(
         // (a member row removed, the row itself updated): keep the full
         // post-state pass.
         PolicyExpr::InheritsFrom { .. } => false,
-        // Holds for the unit's fresh inserts, a set no added row shrinks.
-        PolicyExpr::InsertedByThisTransaction => true,
         _ => true,
     }
 }

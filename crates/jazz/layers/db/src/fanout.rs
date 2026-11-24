@@ -4571,8 +4571,6 @@ pub(super) fn policy_pins(
                     | PolicyExpr::Or(_) => {
                         return false;
                     }
-                    // Narrows which rows hold, reading none.
-                    PolicyExpr::InsertedByThisTransaction => {}
                     _ => {}
                 }
             }
@@ -4591,8 +4589,6 @@ pub(super) fn policy_pins(
         | PolicyExpr::Inherits { .. }
         | PolicyExpr::InheritsReferencing { .. }
         | PolicyExpr::InheritsFrom { .. } => false,
-        // False outside a write check: it reads no row.
-        PolicyExpr::InsertedByThisTransaction => true,
         // Everything else reads only the protected row (and the session).
         _ => true,
     }
@@ -4696,8 +4692,6 @@ impl EvidenceWalk<'_> {
                     None => false,
                 }
             }
-            // A table identity is fixed: it reads no row.
-            PolicyValue::TableIdentity { .. } => true,
             _ => true,
         };
         let column = |column: &str, own: &mut BTreeSet<String>| {
@@ -4812,19 +4806,7 @@ impl EvidenceWalk<'_> {
                     let Ok(target) = self.policies.table(name) else {
                         return false;
                     };
-                    let clauses = match operation {
-                        Operation::Update => {
-                            let update = &target.policies.update;
-                            [
-                                update.using.as_ref(),
-                                update.with_check.as_ref().or(update.using.as_ref()),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .collect()
-                        }
-                        operation => target.policy(*operation).into_iter().collect(),
-                    };
+                    let clauses = target.inherited_clauses(*operation).flatten().collect();
                     // No link: the address names the target row from this
                     // row, as an `INHERITS` reference does.
                     if !self.inherit_clauses(target, *operation, clauses, BTreeSet::new(), None) {

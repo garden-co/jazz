@@ -4835,7 +4835,6 @@ impl Store {
                 // refuses one in a read policy, directly or inherited (Jazz
                 // derives it for write policies only), so no read policy
                 // reaches one.
-                PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }
         }
@@ -4936,8 +4935,6 @@ impl Store {
                 PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
                     parts.iter().for_each(|part| hops(part, out))
                 }
-                // Not a hop through a reference column (see `clauses`).
-                PolicyExpr::InheritsFrom { .. } => {}
                 _ => {}
             }
         }

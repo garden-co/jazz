@@ -2751,19 +2751,9 @@ impl<'a> Ctx<'a> {
             let right = self.table_identity(name)?;
             let named = self.cmp(CmpOp::Eq, left, right)?;
             let p = self.alias("p");
-            let clauses: Vec<Option<&PolicyExpr>> = match operation {
-                Operation::Update => {
-                    let update = &target.policies.update;
-                    vec![
-                        update.using.as_ref(),
-                        update.with_check.as_ref().or(update.using.as_ref()),
-                    ]
-                }
-                operation => vec![target.policy(operation)],
-            };
             self.in_inherits_from = true;
-            let compiled = clauses
-                .into_iter()
+            let compiled = target
+                .inherited_clauses(operation)
                 .map(|clause| match clause {
                     None => Ok("0".to_owned()),
                     Some(policy) => {
@@ -4884,7 +4874,6 @@ fn inherits(policy: &PolicyExpr) -> bool {
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
         PolicyExpr::Not(inner) => inherits(inner),
         PolicyExpr::Exists { condition, .. } => inherits(condition),
-        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
