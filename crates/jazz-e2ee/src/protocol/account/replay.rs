@@ -16,7 +16,7 @@ use super::super::error::{
     IntrinsicContradiction, ProtocolError, ProtocolResult, RootRejection, UnsupportedCapability,
 };
 use super::super::json;
-use super::super::position::{Accepted, Position};
+use super::super::position::{Accepted, Position, by_position_then_id, sort_by_position_then_id};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountKind, AccountRoot, DeviceKeysRow, LEDGER_VERSION, PublicAccountSuccessor,
@@ -247,14 +247,6 @@ pub struct AccountReplay<'a> {
     root_checks: RefCell<BTreeMap<String, Option<RootRejection>>>,
     device_account_key: RefCell<Option<Option<Vec<u8>>>>,
     states: RefCell<BTreeMap<Position, Option<AccountState>>>,
-}
-
-fn by_position_then_id<T: super::super::position::RowId>(rows: &mut [&Accepted<T>]) {
-    rows.sort_by(|a, b| {
-        a.position
-            .cmp(&b.position)
-            .then_with(|| json::utf16_cmp(a.row.row_id(), b.row.row_id()))
-    });
 }
 
 /// A successor that passed every check but the same-transaction rule.
@@ -510,11 +502,7 @@ impl<'a> AccountReplay<'a> {
                 });
             }
         }
-        rejected.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then_with(|| json::utf16_cmp(&a.root_id, &b.root_id))
-        });
+        sort_by_position_then_id(&mut rejected, |row| (row.position, &row.root_id));
         Ok(RootSelection { chain, rejected })
     }
 
@@ -712,11 +700,7 @@ impl<'a> AccountReplay<'a> {
 
         let current = run.members(epochs.last().expect("root epoch"), None)?;
         approvals.extend(current.accepted);
-        approvals.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then_with(|| json::utf16_cmp(&a.row.id, &b.row.id))
-        });
+        sort_by_position_then_id(&mut approvals, Accepted::position_and_id);
 
         let mut recovery: Vec<_> = view.recovery_roots.iter().collect();
         by_position_then_id(&mut recovery);

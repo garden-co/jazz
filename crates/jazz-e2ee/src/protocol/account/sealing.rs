@@ -27,8 +27,7 @@ use crate::registry::Registry;
 
 use super::super::derive;
 use super::super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
-use super::super::json;
-use super::super::position::{Accepted, Position};
+use super::super::position::{Accepted, Position, by_position_then_id};
 use super::super::records::account::AccountSealingKey;
 use super::super::signing;
 use super::key::AccountEpochKeys;
@@ -220,11 +219,7 @@ impl AccountReplay<'_> {
             return Ok(None);
         };
         let mut records: Vec<_> = self.ledger().account_keys.iter().collect();
-        records.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then_with(|| json::utf16_cmp(&a.row.id, &b.row.id))
-        });
+        by_position_then_id(&mut records);
         let mut valid = Vec::new();
         let mut unsupported = Vec::new();
         for record in records {

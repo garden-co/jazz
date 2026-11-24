@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::json;
-use super::super::position::{Accepted, Position};
+use super::super::position::{Accepted, Position, sort_by_position_then_id};
 use super::super::records::account::{
     AccountIdentity, AccountSuccessor, DeviceApproval, DeviceChallenge, DeviceDelivery,
     DeviceProof, DeviceRequest, approval_signed_bytes, challenge_signed_bytes, nonce_commitment,
@@ -270,12 +270,7 @@ pub fn verify_private(
             recovery: public.row.is_recovery(),
         });
     }
-    approvals.sort_by(|a, b| {
-        a.approval
-            .position
-            .cmp(&b.approval.position)
-            .then_with(|| json::utf16_cmp(&a.approval.row.id, &b.approval.row.id))
-    });
+    sort_by_position_then_id(&mut approvals, |row| row.approval.position_and_id());
 
     let mut successors = Vec::new();
     for successor in &private.successors {
