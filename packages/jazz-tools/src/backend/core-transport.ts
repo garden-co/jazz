@@ -94,8 +94,11 @@ export async function refuseRedirect(
 
 /** A Durable Object namespace binding, or a stub/service binding (anything with `fetch`). */
 export type CoreBinding =
-  | { idFromName(name: string): unknown; get(id: unknown): { fetch: StubFetch } }
-  | { fetch: StubFetch };
+  | { idFromName(name: string): unknown; get(id: unknown): CoreStub }
+  | CoreStub;
+
+/** The app's core object through its binding: `fetch`, and its RPC methods when it has them. */
+type CoreStub = { fetch: StubFetch; coreCredential?(): Promise<string> };
 
 type StubFetch = (input: string | Request, init?: RequestInit) => Promise<Response>;
 
@@ -106,9 +109,36 @@ const CORE_OBJECT_NAME = "jazz";
 export const BINDING_ORIGIN = "https://jazz-core.internal";
 
 /** A core in a Durable Object of this Worker, through its binding. */
+function coreStub(binding: CoreBinding): CoreStub {
+  return "idFromName" in binding ? binding.get(binding.idFromName(CORE_OBJECT_NAME)) : binding;
+}
+
+/**
+ * The core's secret, from the object itself (`JazzCore.coreCredential`, an
+ * RPC method only a binding reaches): `JAZZ_CORE_SECRET`, or the one it made
+ * on its first start.
+ */
+export async function bindingCredential(binding: CoreBinding): Promise<string> {
+  const stub = coreStub(binding);
+  const missing =
+    "durableObjects(): the binding's object hands out no core secret (a service binding, or a JazzCore from an older jazz-tools): pass secret: env.JAZZ_CORE_SECRET";
+  // A Durable Object stub answers every method name; one the class lacks
+  // rejects when called.
+  if (typeof stub.coreCredential !== "function") throw new Error(missing);
+  let secret: unknown;
+  try {
+    secret = await stub.coreCredential();
+  } catch (error) {
+    throw new Error(missing, { cause: error });
+  }
+  if (typeof secret !== "string" || secret.length < 32) {
+    throw new Error("durableObjects(): the core object handed out no core secret");
+  }
+  return secret;
+}
+
 export function bindingTransport(binding: CoreBinding): CoreTransport {
-  const stub =
-    "idFromName" in binding ? binding.get(binding.idFromName(CORE_OBJECT_NAME)) : binding;
+  const stub = coreStub(binding);
   const stubFetch: StubFetch = (input, init) => stub.fetch(input, init);
   return {
     fetch: (url, init) => stubFetch(url, init),

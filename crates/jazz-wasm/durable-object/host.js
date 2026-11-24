@@ -16,7 +16,10 @@
 // serves its app whatever `{x}` is. Routes are checked, with the request's
 // secrets, before a body (at most 8 MiB) is read.
 //
-// Bindings: JAZZ (this class's namespace), JAZZ_CORE_SECRET, and optionally
+// Bindings: JAZZ (this class's namespace), and optionally JAZZ_CORE_SECRET
+// (without it, the object makes a secret on its first open, keeps it in its
+// SQL and hands it only to callers holding its binding: `coreCredential`,
+// an RPC method, which no request from the internet can reach),
 // JAZZ_SCHEMA (a public schema's JSON, served until one is published),
 // JAZZ_BLOBS (an R2 bucket for large values, recommended) and
 // JAZZ_BLOBS_PREFIX (where in it, default `jazz/<app id>/`).
@@ -345,7 +348,7 @@ export function jazzCoreClass(wasm) {
         this.core = this.guard(() =>
           wasm.DurableObjectCore.open(
             this.ctx.storage,
-            this.env.JAZZ_CORE_SECRET,
+            this.env.JAZZ_CORE_SECRET || undefined,
             this.env.JAZZ_SCHEMA,
             this.env.JAZZ_BLOBS !== undefined,
           ),
@@ -534,6 +537,16 @@ export function jazzCoreClass(wasm) {
         }
         throw error;
       }
+    }
+
+    /**
+     * The secret that admits the app's backend, for a backend in the same
+     * Worker (`durableObjects({ binding: env.JAZZ })`): an RPC method, so
+     * only code holding this object's binding can call it.
+     */
+    coreCredential() {
+      const core = this.open();
+      return this.guard(() => core.coreSecret());
     }
 
     async fetch(request) {
