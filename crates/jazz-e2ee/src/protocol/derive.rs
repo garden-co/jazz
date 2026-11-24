@@ -20,9 +20,8 @@ const RECOVERY_SIGN_LABEL: &[u8] = b"jazz.e2ee.recovery-sign-key.v1\0";
 const RECOVERY_ROOT_ID_LABEL: &[u8] = b"jazz.e2ee.recovery-root-id.v1\0";
 const ACCOUNT_KEM_LABEL: &[u8] = b"jazz.e2ee.account-kem-key.v1\0";
 const LOCAL_DEVICE_CHECK_LABEL: &str = "jazz.e2ee.local-device-check.v1\0";
-const RECOVERY_MATERIAL_CHECK_LABEL: &str = "jazz.e2ee.recovery-material-check.v1\0";
 
-pub use jazz_types::identity::{DeviceAccountSecret as RecoverySecret, SECRET_PREFIX};
+pub use jazz_types::identity::DeviceAccountSecret as RecoverySecret;
 
 /// The recovery root derived from a recovery secret for one account domain:
 /// its version 8 root ID and its sealing and signing key pairs, of the
@@ -111,12 +110,4 @@ pub fn account_sealing_key_pair(
 /// (§2.1): `UTF8("jazz.e2ee.local-device-check.v1\0" ‖ scope)`.
 pub fn local_device_check(scope: &str) -> Vec<u8> {
     [LOCAL_DEVICE_CHECK_LABEL, scope].concat().into_bytes()
-}
-
-/// The bytes recovery material is checked over (§2.9):
-/// `UTF8("jazz.e2ee.recovery-material-check.v1\0" ‖ scope ‖ "\0" ‖ rootId)`.
-pub fn recovery_material_check(scope: &str, root_id: &str) -> Vec<u8> {
-    [RECOVERY_MATERIAL_CHECK_LABEL, scope, "\0", root_id]
-        .concat()
-        .into_bytes()
 }

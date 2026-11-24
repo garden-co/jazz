@@ -67,6 +67,7 @@ export interface ReadableAppFile {
   history?: Record<string, unknown>;
   migrations?: unknown[];
   transforms?: Record<string, unknown>;
+  encryption?: Record<string, unknown>;
 }
 
 /** What `loadTsApp` read: the readable inputs of both files and where they came from. */
@@ -154,6 +155,7 @@ export async function loadTsApp(
   }
 
   const app: ReadableAppFile = { $schema: APP_SCHEMA_URL, tables: readable.tables };
+  if (readable.encryption !== undefined) app.encryption = readable.encryption;
   const migrationsDir = join(dir, MIGRATIONS_DIR);
   if (existsSync(migrationsDir)) {
     const tooling = await migrationsTooling();

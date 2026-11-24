@@ -11,9 +11,8 @@ use jazz_e2ee::agility::{CellCipher, MechanismConfig, MechanismImpl};
 use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::cell;
 use jazz_e2ee::protocol::content::cells::{CellInput, SealedCell, seal_cells};
-use jazz_e2ee::protocol::content::cells::{EqualityValueBuf, PlaintextValues};
 use jazz_e2ee::protocol::content::{
-    ContentResult, EncryptedColumn, HeldKeys, HeldSpace, RowTarget, WriteChoice, WriteKey,
+    EncryptedColumn, HeldKeys, HeldSpace, RowTarget, WriteChoice, WriteKey,
 };
 use jazz_e2ee::protocol::domain::SharedDomain;
 use jazz_e2ee::protocol::records::space::SpaceAddress;
@@ -101,28 +100,6 @@ pub struct Values;
 
 /// A plaintext [`Values`] reports as needing a decoder it lacks.
 pub const UNSUPPORTED_PLAINTEXT: &[u8] = b"\x00needs-a-newer-decoder";
-
-impl PlaintextValues for Values {
-    fn equality_value(
-        &self,
-        column: &EncryptedColumn<'_>,
-        plaintext: &[u8],
-    ) -> ContentResult<EqualityValueBuf> {
-        // A plaintext this stand-in pretends to need a newer decoder for.
-        if plaintext == UNSUPPORTED_PLAINTEXT {
-            return Err(jazz_e2ee::protocol::content::ContentError::Data(
-                jazz_e2ee::protocol::content::DataError::UnsupportedFormat,
-            ));
-        }
-        Ok(if column.is_bytes {
-            EqualityValueBuf::Bytes(plaintext.to_vec())
-        } else {
-            EqualityValueBuf::Text(
-                String::from_utf8(plaintext.to_vec()).map_err(|_| Error::InvalidInput)?,
-            )
-        })
-    }
-}
 
 pub const FLAKY_CELL: Mechanism<'static> = Mechanism::new("com.example.flaky-cell", 1);
 

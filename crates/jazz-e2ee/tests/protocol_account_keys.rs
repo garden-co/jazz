@@ -7,7 +7,7 @@ mod common;
 
 use common::TestRandom;
 use common::mechanisms::{OTHER_SEAL, OTHER_SIGN, UNROUTED_SEAL, custom_registry, sealing_with};
-use common::protocol::{ALICE, Env, Ledger};
+use common::protocol::{ALICE, Env, Ledger, sealing_key_record};
 use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::envelope::Mechanism;
 use jazz_e2ee::mechanisms::key_seal;
@@ -18,7 +18,7 @@ use jazz_e2ee::protocol::account::{
 };
 use jazz_e2ee::protocol::error::UnsupportedCapability;
 use jazz_e2ee::protocol::records::account::AccountSealingKey;
-use jazz_e2ee::protocol::{Accepted, derive, ids, signing};
+use jazz_e2ee::protocol::{Accepted, derive};
 
 const BUILTIN: Mechanism<'static> = key_seal::MECHANISM;
 
@@ -31,35 +31,7 @@ fn crafted(
     public_key: Vec<u8>,
     rng: &mut TestRandom,
 ) -> AccountSealingKey {
-    crafted_with(env, signer, epoch_id, BUILTIN, public_key, rng)
-}
-
-/// [`crafted`], for `mechanism`.
-fn crafted_with(
-    env: &Env,
-    signer: &LocalDevice,
-    epoch_id: &str,
-    mechanism: Mechanism<'_>,
-    public_key: Vec<u8>,
-    rng: &mut TestRandom,
-) -> AccountSealingKey {
-    let mut record = AccountSealingKey {
-        id: ids::random_v4(rng).unwrap(),
-        account_id: env.account.clone(),
-        epoch_id: epoch_id.to_owned(),
-        signer_id: signer.id.clone(),
-        mechanism: mechanism.id.to_owned(),
-        version: mechanism.version,
-        public_key,
-        signature: Vec::new(),
-    };
-    let bytes = record.signed_bytes(&env.application()).unwrap();
-    let signer_impl = env
-        .registry
-        .signer(signer.signing.public.mechanism.as_mechanism())
-        .unwrap();
-    record.signature = signing::sign(signer_impl, &signer.signing, &bytes).unwrap();
-    record
+    sealing_key_record(env, signer, epoch_id, BUILTIN, public_key, rng)
 }
 
 fn derived(key: &[u8; 32]) -> Vec<u8> {
@@ -257,23 +229,17 @@ fn later_publication_by_an_active_device_is_valid() {
 
     let state = ledger.state(&env);
     let key = ledger.acquire(&env, &phone).unwrap();
-    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
-    assert_eq!(
-        build::later_account_sealing_key(&env.writer(), &sealing, &state, &phone, &key, &mut rng)
-            .unwrap(),
-        None,
-        "the epoch already has a valid record of the built-in mechanism"
-    );
-    let record = build::later_account_sealing_key(
-        &migrated.writer(),
-        &sealing,
-        &state,
+    let record = sealing_key_record(
+        &migrated,
         &phone,
-        &key,
+        state.epoch_id(),
+        OTHER_SEAL,
+        derive::account_sealing_key_pair(migrated.writer().suite.key_seal, key.key())
+            .unwrap()
+            .public
+            .bytes,
         &mut rng,
-    )
-    .unwrap()
-    .expect("no record of the new mechanism yet");
+    );
     let at = ledger.next();
     ledger
         .public
@@ -289,19 +255,6 @@ fn later_publication_by_an_active_device_is_valid() {
     assert_eq!(
         sealing.current(BUILTIN).map(|found| &found.row.id),
         Some(&record_id(&ledger, 0))
-    );
-    let state = ledger.state(&env);
-    assert_eq!(
-        build::later_account_sealing_key(
-            &migrated.writer(),
-            &sealing,
-            &state,
-            &phone,
-            &key,
-            &mut rng
-        )
-        .unwrap(),
-        None
     );
 }
 
@@ -572,12 +525,6 @@ fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
             keys.non_derived_sealing_keys(),
             std::slice::from_ref(&expected)
         );
-        assert_eq!(
-            sealing
-                .current_for_own(&env.registry, &keys, BUILTIN)
-                .unwrap(),
-            None
-        );
     }
 
     // Laptop removes phone: the new epoch's co-published record derives.
@@ -593,13 +540,6 @@ fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
     let pair = derive::account_sealing_key_pair(&key_seal::Builtin, &removal.key).unwrap();
     assert_eq!(current.row.public_key, pair.public.bytes);
     let keys = epoch_keys(&env, &ledger, &laptop);
-    assert_eq!(
-        sealing
-            .current_for_own(&env.registry, &keys, BUILTIN)
-            .unwrap()
-            .map(|found| &found.row.id),
-        Some(&removal.account_key.id)
-    );
     // The earlier epoch's record is still reported, but no longer current.
     assert_eq!(keys.non_derived_sealing_keys(), [expected]);
 
@@ -720,7 +660,7 @@ fn a_record_whose_signer_had_no_signing_key_before_it_is_not_valid() {
 fn a_record_of_an_unsupported_sealing_mechanism_is_skipped() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(15);
     let epoch = ledger.state(&env).epoch_id().to_owned();
-    let unknown = crafted_with(&env, &laptop, &epoch, UNROUTED_SEAL, vec![3; 32], &mut rng);
+    let unknown = sealing_key_record(&env, &laptop, &epoch, UNROUTED_SEAL, vec![3; 32], &mut rng);
     let at = ledger.next();
     ledger
         .public
@@ -773,12 +713,9 @@ fn record_at_a_reset_signed_by_another_device_is_not_valid() {
     }
 }
 
-/// A device's own selection checks derivation against the read it is given,
-/// never against an earlier report: keys taken before a non-derived record
-/// of the same epoch is published still refuse it, and a record that does
-/// derive is chosen even when a non-derived one comes first (§2.12).
+/// Alice reports the first non-derived record even with cached epoch keys.
 #[test]
-fn own_selection_checks_derivation_against_the_current_read() {
+fn cached_keys_can_report_conflicts_against_the_current_read() {
     let (registry, _) = custom_registry(OTHER_SEAL);
     let env = Env::with(registry, Default::default(), ALICE);
     let mut rng = TestRandom(41);
@@ -797,7 +734,7 @@ fn own_selection_checks_derivation_against_the_current_read() {
 
     // Phone publishes a later record of the new mechanism that does not
     // derive; senders select it, the cached keys know nothing of it.
-    let poison = crafted_with(
+    let poison = sealing_key_record(
         &env,
         &phone,
         &epoch,
@@ -815,29 +752,16 @@ fn own_selection_checks_derivation_against_the_current_read() {
         sealing.current(OTHER_SEAL).map(|r| &r.row.id),
         Some(&poison.id)
     );
-    assert_eq!(
-        sealing
-            .current_for_own(&env.registry, &cached, OTHER_SEAL)
-            .unwrap(),
-        None
-    );
     let fresh = epoch_keys(&env, &ledger, &laptop);
-    assert_eq!(
-        sealing
-            .current_for_own(&env.registry, &fresh, OTHER_SEAL)
-            .unwrap(),
-        None
-    );
 
-    // A record that derives, published after it, is the one the account's
-    // own devices use, with either set of keys.
+    // A later record that derives is valid and adds no conflict.
     let key = *ledger.acquire(&env, &laptop).unwrap().key();
     let sealer = env.registry.key_sealer(OTHER_SEAL).unwrap();
     let good_public = derive::account_sealing_key_pair(sealer, &key)
         .unwrap()
         .public
         .bytes;
-    let good = crafted_with(&env, &laptop, &epoch, OTHER_SEAL, good_public, &mut rng);
+    let good = sealing_key_record(&env, &laptop, &epoch, OTHER_SEAL, good_public, &mut rng);
     let at = ledger.next();
     ledger
         .public
@@ -848,13 +772,11 @@ fn own_selection_checks_derivation_against_the_current_read() {
         sealing.current(OTHER_SEAL).map(|r| &r.row.id),
         Some(&poison.id)
     );
+    assert!(sealing.is_valid(&good.id));
     for keys in [&cached, &fresh] {
-        assert_eq!(
-            sealing
-                .current_for_own(&env.registry, keys, OTHER_SEAL)
-                .unwrap()
-                .map(|r| &r.row.id),
-            Some(&good.id)
-        );
+        let conflicts = sealing.check_derived(&env.registry, keys).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].record_id, poison.id);
+        assert!(conflicts[0].selected);
     }
 }

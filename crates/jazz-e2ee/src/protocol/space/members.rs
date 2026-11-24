@@ -230,25 +230,6 @@ pub struct LackingMembers {
     pub broken: Vec<BrokenMember>,
 }
 
-/// Every member that lacks a version concerned by delivery (§3.4): the
-/// current version and the skipped versions. A member **lacks** a version
-/// when no accepted envelope of it (a delivery to it, or the
-/// `accountEnvelope` of the version's record that it wrote) names an
-/// account epoch of its current generation. A delivery at or before the
-/// root's position does not count, as in acquiring (§3.3). A reset member
-/// therefore lacks every version until someone delivers again; a
-/// device-removal account rotation changes nothing here. A member whose
-/// account history needs a capability this client lacks is reported in
-/// [`LackingMembers::unsupported`] and the others are still evaluated.
-/// Needs every member and every delivery of the concerned epochs at the same cut.
-pub fn lacking(
-    chain: &SpaceChain,
-    ledger: &SpaceLedger,
-    accounts: &AccountDirectory<'_>,
-) -> ProtocolResult<LackingMembers> {
-    lacking_at(chain, ledger, accounts, chain.concerned()?)
-}
-
 /// Members lacking a version the sender holds and can deliver. A read of
 /// those epochs covers this decision, including after a recovery rotation.
 pub fn lacking_held(

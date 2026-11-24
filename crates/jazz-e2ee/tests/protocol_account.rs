@@ -126,16 +126,10 @@ fn approval_activates_a_device_that_then_obtains_the_key() {
 
     // Approval is complete before its position, not at it.
     let replay = ledger.replay(&env);
-    assert!(
-        !replay
-            .author_active_at(at, &phone.id, state.epoch_id())
-            .unwrap()
-    );
-    assert!(
-        replay
-            .author_active_at(Position(at.0 + 1), &phone.id, state.epoch_id())
-            .unwrap()
-    );
+    assert!(!replay.as_of(at).unwrap().unwrap().is_active(&phone.id));
+    let then = replay.as_of(Position(at.0 + 1)).unwrap().unwrap();
+    assert!(then.is_active(&phone.id));
+    assert_eq!(then.epoch_id(), state.epoch_id());
 }
 
 fn two_approval_deliveries(env: &Env) -> (Ledger, LocalDevice, [u8; 32]) {
@@ -733,16 +727,12 @@ fn reset_starts_a_new_generation() {
     assert_eq!(*ledger.acquire(&env, &phone).unwrap().key(), reset_key);
 
     let replay = ledger.replay(&env);
-    assert_eq!(replay.generation_at(reset_at).unwrap(), Some(0));
-    assert!(
-        replay
-            .author_active_at(reset_at, &laptop.id, gen0.epoch_id())
-            .unwrap()
-    );
-    assert_eq!(
-        replay.generation_at(Position(reset_at.0 + 1)).unwrap(),
-        Some(1)
-    );
+    let before = replay.as_of(reset_at).unwrap().unwrap();
+    assert_eq!(before.generation, 0);
+    assert!(before.is_active(&laptop.id));
+    assert_eq!(before.epoch_id(), gen0.epoch_id());
+    let after = replay.as_of(Position(reset_at.0 + 1)).unwrap().unwrap();
+    assert_eq!(after.generation, 1);
 
     for refused_policy in [
         ResetPolicy {
@@ -1231,14 +1221,6 @@ fn state_beyond_the_cut_is_refused() {
         replay.as_of(Position(through.0 + 2)).unwrap_err(),
         ProtocolError::InconsistentEvidence
     );
-    let device = ledger.public.roots[0].row.device_id.clone();
-    let epoch = ledger.public.roots[0].row.epoch_id.clone();
-    assert_eq!(
-        replay
-            .author_active_at(Position(through.0 + 100), &device, &epoch)
-            .unwrap_err(),
-        ProtocolError::InconsistentEvidence
-    );
 }
 
 /// After a reset, the same recovery secret derives a fresh root for the new
@@ -1623,19 +1605,6 @@ fn every_epoch_publishes_its_sealing_key() {
         &laptop,
         &rotation.public.epoch_id,
         &rotation.key,
-    );
-
-    // The rotation already published this epoch's record, so a later
-    // publication writes nothing; a removed device is refused.
-    let key = ledger.acquire(&env, &laptop).unwrap();
-    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
-    assert_eq!(
-        build::later_account_sealing_key(&env.writer(), &sealing, &state, &laptop, &key, &mut rng),
-        Ok(None)
-    );
-    assert_eq!(
-        build::later_account_sealing_key(&env.writer(), &sealing, &state, &phone, &key, &mut rng),
-        Err(refused(RefusalCode::DeviceNotActive))
     );
 
     let tablet = env.device(&mut rng);

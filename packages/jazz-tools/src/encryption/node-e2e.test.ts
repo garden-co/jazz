@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NapiDb } from "jazz-napi";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
+import appFile from "../../tests/fixtures/encrypted/jazz.app.json";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { storedBytes } from "../../tests/stored-bytes.js";
 import { startTestJazz, testApp } from "../testing/index.js";
@@ -171,6 +172,61 @@ async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 2
 }
 
 describe("encryption on Node, end to end", () => {
+  it.each([false, true])(
+    "enforces the account reset opt-in (%s)",
+    async (allowReset) => {
+      const schema = testApp({
+        ...appFile,
+        ...(allowReset && { encryption: { allowAccountReset: true } }),
+      });
+      const host = await startTestJazz({
+        app: schema,
+        permissions,
+        coreOptions: { appId: crypto.randomUUID() },
+      });
+      cleanups.push(() => host.stop());
+      const alice = await host.as("alice");
+      const open = async (deviceAccount = false) => {
+        const session = await createJazzClient({
+          app: schema,
+          permissions,
+          appId: host.appId,
+          serverUrl: deviceAccount ? host.url : alice.serverUrl,
+          ...(deviceAccount && { initial: "device" as const }),
+          driver: { type: "memory" },
+          store: memoryStore(),
+          encryption: { store: memoryPrivateStore() },
+        });
+        cleanups.push(() => session.close());
+        if (!deviceAccount) await session.refresh();
+        return session.db.encryption;
+      };
+      const first = await open();
+      expect(await first.ready()).toBe("active");
+      const waiting = await open();
+      expect(await waiting.ready()).toBe("awaiting-approval");
+      if (!allowReset) {
+        await expect(waiting.resetAccount()).rejects.toMatchObject({
+          code: "account-reset-not-allowed",
+        });
+        expect(await waiting.ready()).toBe("awaiting-approval");
+        return;
+      }
+      await expect(first.resetAccount()).rejects.toMatchObject({ code: "reset-device-active" });
+      const device = await open(true);
+      expect(await device.ready()).toBe("active");
+      await expect(device.resetAccount()).rejects.toMatchObject({
+        code: "account-reset-not-allowed",
+      });
+      await expect(host.jazz.db.encryption.resetAccount()).rejects.toMatchObject({
+        code: "keyless",
+      });
+      expect(await waiting.resetAccount()).toBe("active");
+      expect(await waiting.ready()).toBe("active");
+    },
+    90_000,
+  );
+
   it.each(["device", "keyless backend"] as const)(
     "keeps an encrypted row in its original space when the %s updates or upserts it",
     async (writer) => {
