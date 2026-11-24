@@ -357,9 +357,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
-    // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
-    command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
+    // jazz-ffi's C ABI test and UniFFI generation (dev/gates/jazz-ffi.sh) run
+    // in the jazz-ffi-bindings partition, whose jazz-ffi-compile-bindings.sh
+    // starts with it: running it here as well only lengthened this job.
     // Runs after the workspace tests with the same feature selection, so its
     // `cargo nextest list` reuses the test binaries that were just built.
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
