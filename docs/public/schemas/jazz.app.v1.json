@@ -315,7 +315,7 @@
               "type": "string"
             }
           },
-          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
         },
         {
           "type": "object",
@@ -388,16 +388,16 @@
               "type": "string"
             }
           },
-          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
         }
       ]
     },
     "encryptedTypeVariant": {
       "oneOf": [
-        {"required": ["type"]},
-        {"required": ["enum"]},
-        {"required": ["json"]},
-        {"required": ["array"]}
+        { "required": ["type"] },
+        { "required": ["enum"] },
+        { "required": ["json"] },
+        { "required": ["array"] }
       ]
     },
     "encryptedTypeExpression": {
@@ -435,7 +435,7 @@
               "type": "string"
             }
           },
-          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
         }
       ]
     },
@@ -497,7 +497,7 @@
               "type": "string"
             }
           },
-          "oneOf": [{"$ref": "#/$defs/encryptedTypeVariant"}]
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
         }
       ]
     },
