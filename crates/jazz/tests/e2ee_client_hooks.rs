@@ -1807,9 +1807,8 @@ fn transaction_fates_survive_a_restart() {
     let hooks = Fake::new();
     let server = authority();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let (accepted, refused, kept) = {
+    let accepted = {
         let alice = client_as(&hooks, &path, author);
-        alice.track_upstream_rejections();
         let _link = link_as(&alice, &server, author, None);
         let accepted = block_on(alice.insert(
             "space_roots",
@@ -1819,20 +1818,35 @@ fn transaction_fates_survive_a_restart() {
         .unwrap()
         .mergeable_tx_id();
         assert!(matches!(
-            jazz::db::block_on(alice.transaction_fate(accepted)).unwrap(),
+            block_on(alice.transaction_fate(accepted)).unwrap(),
             TransactionFate::Pending
         ));
-        pump(&server, &alice);
+        accepted
+    };
+    let (refused, kept) = {
+        let alice = client_as(&hooks, &path, author);
+        assert!(matches!(
+            block_on(alice.transaction_fate(accepted)).unwrap(),
+            TransactionFate::Pending
+        ));
+        alice.track_upstream_rejections();
+        let _link = link_as(&alice, &server, author, None);
+        drive(
+            &server,
+            &alice,
+            alice.wait_for_transaction(accepted, jazz::tx::DurabilityTier::Global),
+        )
+        .unwrap();
         let refused =
             block_on(alice.insert("closed", root(uuid::Uuid::new_v4()), Default::default()))
                 .unwrap()
                 .mergeable_tx_id();
         pump(&server, &alice);
-        let kept = match jazz::db::block_on(alice.transaction_fate(refused)).unwrap() {
+        let kept = match block_on(alice.transaction_fate(refused)).unwrap() {
             TransactionFate::Refused(Some(error)) => error,
             other => panic!("expected a kept refusal, got {other:?}"),
         };
-        (accepted, refused, kept)
+        (refused, kept)
     };
     let alice = client_as(&hooks, &path, author);
     let server_position = all(&server, "space_roots")[0].seq().seq;
