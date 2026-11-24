@@ -191,7 +191,7 @@ export class Encryption {
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
   private readonly pendingReports: EncryptionReport[] = [];
   private readonly waitingListeners = new Set<(report: EncryptionReport) => void>();
-  private replaying = false;
+  private reportsDuringReplay: EncryptionReport[] | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private readonly assertOpen = () => {
@@ -438,19 +438,25 @@ export class Encryption {
   }
 
   private deliver() {
-    if (!this.replaying && this.waitingListeners.size > 0) {
-      this.replaying = true;
+    if (!this.reportsDuringReplay && this.waitingListeners.size > 0) {
       void this.replayReports();
     }
     // With no established listeners, leave the queue for the snapshot.
     if (this.listeners.size === 0) return;
-    for (const report of this.pendingReports.splice(0)) this.emit(report);
+    for (const report of this.pendingReports.splice(0)) {
+      this.reportsDuringReplay?.push(report);
+      this.emit(report);
+    }
     for (const text of this.native.takeEncryptionReports()) {
-      this.emit(JSON.parse(text) as EncryptionReport);
+      const report = JSON.parse(text) as EncryptionReport;
+      this.reportsDuringReplay?.push(report);
+      this.emit(report);
     }
   }
 
   private readonly replayReports = async () => {
+    const reportsDuringReplay: EncryptionReport[] = [];
+    this.reportsDuringReplay = reportsDuringReplay;
     try {
       const snapshot = await this.call<{ active: EncryptionReport[]; queued: string[] }>(
         "reportsForListener",
@@ -476,6 +482,7 @@ export class Encryption {
           ...snapshot.active,
           ...pending,
           ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+          ...reportsDuringReplay,
         ];
       }
       for (const listener of waiting) {
@@ -487,7 +494,7 @@ export class Encryption {
         }
       }
     } finally {
-      this.replaying = false;
+      this.reportsDuringReplay = undefined;
     }
   };
 }

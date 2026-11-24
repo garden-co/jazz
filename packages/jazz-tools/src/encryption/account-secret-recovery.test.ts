@@ -256,6 +256,54 @@ it("reports queue overflow before replaying active unreadable rows", async () =>
   }
 });
 
+it("replays withdrawals polled while a new listener's snapshot is pending", async () => {
+  vi.useFakeTimers();
+  const report = {
+    type: "unreadable",
+    table: "tasks",
+    id: "task",
+    column: "title",
+    code: "key-pending",
+    space: null,
+  };
+  const withdrawn = { ...report, type: "withdrawn" };
+  const queued: string[] = [];
+  const snapshot = Promise.withResolvers<string>();
+  const encryptionCall = vi
+    .fn()
+    .mockResolvedValueOnce(JSON.stringify({ active: [report], queued: [] }))
+    .mockReturnValueOnce(snapshot.promise);
+  const encryption = new Encryption({
+    encryptionCall,
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => queued.splice(0),
+  });
+  try {
+    const established = vi.fn();
+    encryption.onReport(established);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(established).toHaveBeenCalledExactlyOnceWith(report);
+
+    const late = vi.fn();
+    encryption.onReport(late);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(encryptionCall).toHaveBeenCalledTimes(2);
+
+    queued.push(JSON.stringify(withdrawn));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(established.mock.calls).toEqual([[report], [withdrawn]]);
+    expect(late).not.toHaveBeenCalled();
+
+    snapshot.resolve(JSON.stringify({ active: [report], queued: [] }));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(late.mock.calls).toEqual([[report], [withdrawn]]);
+    expect(established.mock.calls).toEqual([[report], [withdrawn]]);
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
 it("keeps polling established listeners while a new listener's snapshot fails", async () => {
   vi.useFakeTimers();
   const challenge = { type: "challenged" };
