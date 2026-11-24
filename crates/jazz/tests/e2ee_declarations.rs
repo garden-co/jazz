@@ -59,6 +59,27 @@ fn refusal(result: Result<impl std::fmt::Debug, ArtifactError>) -> String {
     result.expect_err("refused").to_string()
 }
 
+/// Alice cannot retype a shipped encrypted column through an implied migration.
+#[test]
+fn an_implied_step_from_history_cannot_retype_an_encrypted_column() {
+    let shipped = serde_json::json!({
+        "notes": {
+            "columns": { "title": "string", "detail": "bytes" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "detail": "string?" } }
+        }
+    });
+    let mut current = shipped.clone();
+    current["notes"]["indexes"] = serde_json::json!(["title"]);
+    current["notes"]["encryption"]["columns"]["detail"] = serde_json::json!("int?");
+    let file = serde_json::json!({
+        "format": 1,
+        "tables": current,
+        "history": { "shipped": { "tables": shipped } }
+    });
+    let error = refusal(load_app(file.to_string().as_bytes()));
+    assert!(error.contains("notes.detail"), "{error}");
+}
+
 /// Alice gets the exact location of an overflowing number in either kind of JSON schema.
 #[test]
 fn overflowing_json_schema_numbers_are_refused_on_load() {

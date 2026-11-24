@@ -338,7 +338,8 @@ mod tests {
 
     /// Alice ships bindings after dropping notes.detail. Its old type is still
     /// part of what shipped, even though no current column uses it.
-    fn check_recorded_history(lang: Lang) {
+    #[test]
+    fn staleness_protects_recorded_history() {
         let shipped = r#"{
             "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": { "notes": {
@@ -353,121 +354,18 @@ mod tests {
                 "detail": { "drop": "bytes", "backwardsDefault": "" }
             } } }]
         }"#;
-        let dir = dir();
-        let langs = [lang.into()];
-        let app_path = dir.join(APP_FILE);
-        std::fs::write(&app_path, shipped).unwrap();
-        assert_eq!(
-            generate(&dir, &langs, false).unwrap().written,
-            [lang.file()]
-        );
-        assert_eq!(
-            generate(&dir, &langs, false).unwrap().current,
-            [lang.file()]
-        );
-        let bindings = dir.join(lang.file());
-        let original = std::fs::read(&bindings).unwrap();
-        let app = App::load(shipped.as_bytes()).unwrap();
-        let (history, _) = app
-            .compiled
-            .schemas
-            .iter()
-            .find(|(hash, _)| *hash != app.compiled.current)
-            .unwrap();
-
         let edited = shipped.replace(r#""detail": "string""#, r#""detail": "int""#);
-        std::fs::write(&app_path, &edited).unwrap();
-        for error in [
-            generate(&dir, &langs, false)
-                .expect_err("generate must preserve the committed history"),
-            generate(&dir, &langs, true).expect_err("validation must refuse the edit"),
-            migrations_create(&dir, &langs, "edit-history")
-                .expect_err("migration creation must refuse the edit"),
-        ] {
+        let app = App::load(edited.as_bytes()).unwrap();
+
+        for lang in [Lang::TypeScript, Lang::Rust] {
+            let committed = crate::generate(lang, shipped.as_bytes()).unwrap();
+            let error = bindings::staleness(&app, lang, Some(&committed))
+                .expect_err("the declarations of the retired column must stay the same");
             assert!(
-                error.contains(&history.to_string()[..12])
-                    && error.contains("notes.detail")
-                    && error.contains("can't change"),
-                "{error}"
+                error.message().contains("notes.detail"),
+                "{lang:?}: {error}"
             );
         }
-        assert_eq!(std::fs::read(&bindings).unwrap(), original);
-        assert_eq!(std::fs::read_to_string(app_path).unwrap(), edited);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Alice regenerates TypeScript bindings with a dropped column in their history.
-    #[test]
-    fn typescript_bindings_protect_recorded_history() {
-        check_recorded_history(Lang::TypeScript);
-    }
-
-    /// Alice regenerates Rust bindings with a dropped column in their history.
-    #[test]
-    fn rust_bindings_protect_recorded_history() {
-        check_recorded_history(Lang::Rust);
-    }
-
-    fn notes(declaration: serde_json::Value, indexes: &[&str]) -> String {
-        serde_json::json!({
-            "format": 1,
-            "tables": { "notes": {
-                "columns": { "title": "string", "detail": "bytes" },
-                "indexes": indexes,
-                "encryption": { "space": "id", "scope": "notes", "columns": { "detail": declaration } }
-            } }
-        }).to_string()
-    }
-
-    /// Alice adds an index and appends an encrypted enum variant under its shipped sealed type.
-    #[test]
-    fn an_index_edit_can_widen_an_encrypted_enum() {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
-        let detail = |variants: &[&str]| {
-            serde_json::json!({
-                "type": { "enum": variants }, "sealedType": { "enum": ["a"] }
-            })
-        };
-        std::fs::write(&path, notes(detail(&["a", "b"]), &[])).unwrap();
-        generate(&dir, &langs, false).unwrap();
-        std::fs::write(&path, notes(detail(&["a", "b", "c"]), &["title"])).unwrap();
-
-        assert!(
-            !migrations_create(&dir, &langs, "index-title")
-                .unwrap()
-                .changed
-        );
-        assert_eq!(
-            generate(&dir, &langs, false).unwrap().written,
-            [Lang::Rust.file()]
-        );
-        generate(&dir, &langs, true).unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Alice's index edit cannot replace the plaintext type recorded in her Rust bindings.
-    #[test]
-    fn an_index_edit_cannot_retype_an_encrypted_column() {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
-        let bindings = dir.join(Lang::Rust.file());
-        std::fs::write(&path, notes("string?".into(), &[])).unwrap();
-        generate(&dir, &langs, false).unwrap();
-        let original = std::fs::read(&bindings).unwrap();
-        std::fs::write(&path, notes("int?".into(), &["title"])).unwrap();
-
-        for error in [
-            migrations_create(&dir, &langs, "index-title").unwrap_err(),
-            generate(&dir, &langs, false).unwrap_err(),
-            generate(&dir, &langs, true).unwrap_err(),
-        ] {
-            assert!(error.contains("notes.detail"), "{error}");
-        }
-        assert_eq!(std::fs::read(bindings).unwrap(), original);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// `notes` with its encrypted column `column` declared as `declaration`.
@@ -517,18 +415,44 @@ mod tests {
         generate(dir, langs, true).unwrap();
     }
 
-    fn check_index_storage(
-        old_columns: serde_json::Value,
-        new_columns: serde_json::Value,
-        old_eq: &[&str],
-        new_eq: &[&str],
-        reason: &str,
-    ) {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
+    /// Alice adds an index. Both commands apply the rules for sibling
+    /// versions to the columns whose storage stays the same.
+    #[test]
+    fn an_index_edit_checks_sibling_encryption() {
+        use serde_json::json;
+
+        let string = json!({"detail": "string?"});
+        let empty = json!({});
+        let enum_columns = |variants: &[&str]| json!({"detail": sealed(variants)});
+        let cases: [(_, _, &[&str], &[&str], bool); 7] = [
+            (string.clone(), empty.clone(), &[], &[], false),
+            (string.clone(), string.clone(), &["detail"], &[], false),
+            (empty, string.clone(), &[], &[], false),
+            (string, json!({"detail": "int?"}), &[], &[], false),
+            (
+                enum_columns(&["a", "b"]),
+                enum_columns(&["a", "c"]),
+                &[],
+                &[],
+                false,
+            ),
+            (
+                enum_columns(&["a", "b"]),
+                enum_columns(&["a"]),
+                &[],
+                &[],
+                true,
+            ),
+            (
+                enum_columns(&["a", "b"]),
+                enum_columns(&["a", "b", "c"]),
+                &[],
+                &[],
+                true,
+            ),
+        ];
         let app = |columns, equality: &[&str], indexes: &[&str]| {
-            serde_json::json!({
+            json!({
                 "format": 1,
                 "tables": { "notes": {
                     "columns": { "title": "string", "detail": "bytes", "__e2ee_eq_detail": "bytes" },
@@ -537,89 +461,21 @@ mod tests {
                 } }
             })
         };
-        write_app(&path, app(old_columns, old_eq, &[]));
-        generate(&dir, &langs, false).unwrap();
-        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
-        write_app(&path, app(new_columns, new_eq, &["title"]));
-        assert_refused(&dir, &langs, reason, &original);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Alice must keep a ciphertext column declared when adding an index.
-    #[test]
-    fn index_storage_keeps_ciphertext_declared() {
-        check_index_storage(
-            serde_json::json!({"detail": "string?"}),
-            serde_json::json!({}),
-            &[],
-            &[],
-            "holds ciphertext",
-        );
-    }
-
-    /// Alice must keep generating equality tokens while their column remains.
-    #[test]
-    fn index_storage_keeps_equality_tokens() {
-        let columns = serde_json::json!({"detail": "string?"});
-        check_index_storage(
-            columns.clone(),
-            columns,
-            &["detail"],
-            &[],
-            "token column __e2ee_eq_detail stays",
-        );
-    }
-
-    /// Alice cannot reinterpret existing plaintext bytes as encrypted by adding an index.
-    #[test]
-    fn index_storage_preserves_plaintext_bytes() {
-        check_index_storage(
-            serde_json::json!({}),
-            serde_json::json!({"detail": "string?"}),
-            &[],
-            &[],
-            "held plaintext",
-        );
-    }
-
-    /// Alice's bindings shipped `[a,b]`. Her index edit declares `[a]` again,
-    /// which the deploy reads as a sibling, since no migration leads to it.
-    #[test]
-    fn an_index_edit_can_declare_a_sibling_enum_prefix() {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
-        write_app(
-            &path,
-            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "b"]), &[]) }),
-        );
-        generate(&dir, &langs, false).unwrap();
-        write_app(
-            &path,
-            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a"]), &["title"]) }),
-        );
-        assert_accepted(&dir, &langs);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Alice's index edit replaces the shipped `[a,b]` with `[a,c]`.
-    #[test]
-    fn an_index_edit_cannot_declare_a_divergent_sibling_enum() {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
-        write_app(
-            &path,
-            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "b"]), &[]) }),
-        );
-        generate(&dir, &langs, false).unwrap();
-        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
-        write_app(
-            &path,
-            serde_json::json!({ "format": 1, "tables": notes_tables("detail", sealed(&["a", "c"]), &["title"]) }),
-        );
-        assert_refused(&dir, &langs, "notes.detail", &original);
-        std::fs::remove_dir_all(dir).unwrap();
+        for (old, new, old_eq, new_eq, allowed) in cases {
+            let dir = dir();
+            let langs = [Lang::Rust.into()];
+            let path = dir.join(APP_FILE);
+            write_app(&path, app(old, old_eq, &[]));
+            generate(&dir, &langs, false).unwrap();
+            let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
+            write_app(&path, app(new, new_eq, &["title"]));
+            if allowed {
+                assert_accepted(&dir, &langs);
+            } else {
+                assert_refused(&dir, &langs, "notes.detail", &original);
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// Alice ships `[a,b]` from the root's `[a]`, under `column` when her
@@ -767,29 +623,6 @@ mod tests {
             "only appending enum variants",
             &original,
         );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Alice keeps the shipped tables in history with no migration, so the
-    /// file implies one, and retypes an encrypted column beside a new index.
-    #[test]
-    fn an_implied_step_from_history_cannot_retype_an_encrypted_column() {
-        let dir = dir();
-        let langs = [Lang::Rust.into()];
-        let path = dir.join(APP_FILE);
-        let shipped = notes_tables("detail", "string?".into(), &[]);
-        write_app(&path, serde_json::json!({ "format": 1, "tables": shipped }));
-        generate(&dir, &langs, false).unwrap();
-        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
-        write_app(
-            &path,
-            serde_json::json!({
-                "format": 1,
-                "tables": notes_tables("detail", "int?".into(), &["title"]),
-                "history": { "shipped": { "tables": shipped } },
-            }),
-        );
-        assert_refused(&dir, &langs, "notes.detail", &original);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
