@@ -93,14 +93,12 @@ impl RootRejection {
 #[non_exhaustive]
 pub enum RefusalCode {
     AccountHasHistory,
-    DeviceIdentityConflict,
     DeviceKeysMismatch,
     NoDeviceRequest,
     ResetDeviceActive,
     DeviceNotActive,
     DeviceRemoved,
     StaleChallenge,
-    ApprovalClosed,
     InvalidPossessionProof,
     /// A challenge not signed, over this device's own keys, by an active
     /// device of the account (§2.5).
@@ -113,7 +111,6 @@ pub enum RefusalCode {
     NoOtherDevice,
     UnsupportedRecipient,
     AccountResetNotAllowed,
-    SpacePending,
     SpaceCreateRefused,
     RotationNeedsKey,
     RotationKeyStateUnconfirmed,
@@ -125,14 +122,12 @@ impl RefusalCode {
     pub const fn code(self) -> &'static str {
         match self {
             Self::AccountHasHistory => "account-has-history",
-            Self::DeviceIdentityConflict => "device-identity-conflict",
             Self::DeviceKeysMismatch => "device-keys-mismatch",
             Self::NoDeviceRequest => "no-device-request",
             Self::ResetDeviceActive => "reset-device-active",
             Self::DeviceNotActive => "device-not-active",
             Self::DeviceRemoved => "device-removed",
             Self::StaleChallenge => "stale-challenge",
-            Self::ApprovalClosed => "approval-closed",
             Self::InvalidPossessionProof => "invalid-possession-proof",
             Self::InvalidChallenge => "invalid-challenge",
             Self::TargetNotActive => "target-not-active",
@@ -140,7 +135,6 @@ impl RefusalCode {
             Self::NoOtherDevice => "no-other-device",
             Self::UnsupportedRecipient => "unsupported-recipient",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
-            Self::SpacePending => "space-pending",
             Self::SpaceCreateRefused => "space-create-refused",
             Self::RotationNeedsKey | Self::RotationKeyStateUnconfirmed => "rotation-needs-key",
             Self::NotAMember => "not-a-member",
@@ -153,8 +147,6 @@ impl RefusalCode {
 /// another delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecoveryFailure {
-    Cancelled,
-    MaterialUnusable,
     RootMismatch,
     DeliveryMissing,
     DeliveryUnusable,
@@ -163,8 +155,6 @@ pub enum RecoveryFailure {
 impl RecoveryFailure {
     pub const fn code(self) -> &'static str {
         match self {
-            Self::Cancelled => "recovery-cancelled",
-            Self::MaterialUnusable => "recovery-material-unusable",
             Self::RootMismatch => "recovery-root-mismatch",
             Self::DeliveryMissing => "recovery-delivery-missing",
             Self::DeliveryUnusable => "recovery-delivery-unusable",

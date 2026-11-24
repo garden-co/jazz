@@ -273,16 +273,12 @@ fn account_sealing_key_derivation() {
     assert_ne!(other.public, pair.public);
 }
 
-/// The local device check and recovery material check bytes.
+/// The local device check bytes.
 #[test]
 fn check_bytes() {
     assert_eq!(
         derive::local_device_check("scope"),
         b"jazz.e2ee.local-device-check.v1\0scope"
-    );
-    assert_eq!(
-        derive::recovery_material_check("scope", R1),
-        format!("jazz.e2ee.recovery-material-check.v1\0scope\0{R1}").into_bytes()
     );
 }
 
