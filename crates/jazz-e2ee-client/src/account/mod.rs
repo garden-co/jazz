@@ -80,6 +80,10 @@ impl std::fmt::Debug for OwnAccount {
     }
 }
 
+pub(crate) fn has_removed_devices(state: &AccountState) -> bool {
+    !state.removed.is_empty() || state.generation > 0
+}
+
 /// The account's rows of one read.
 struct AccountRead {
     public: PublicAccountLedger,
@@ -521,7 +525,7 @@ impl E2eeClient {
             // sealed to: each space's mark is evaluated again before this
             // runtime's next write to it.
             let mut keys = self.shared.keys.borrow_mut();
-            let removals = !state.removed.is_empty() || state.generation > 0;
+            let removals = has_removed_devices(&state);
             if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
                 keys.rotation_evaluated.clear();
                 keys.evaluated_epoch = Some(state.epoch_id().to_owned());

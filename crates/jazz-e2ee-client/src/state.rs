@@ -505,6 +505,23 @@ pub(crate) struct KeyState {
 }
 
 impl KeyState {
+    pub(crate) fn mark_rotation(
+        &mut self,
+        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
+        marked: bool,
+        removals: Option<bool>,
+    ) {
+        if let Some(removals) = removals {
+            self.rotation_evaluated.insert(address.clone());
+            self.space_removals.insert(address.clone(), removals);
+        }
+        if marked {
+            self.rotation_pending.insert(address.clone());
+        } else {
+            self.rotation_pending.remove(address);
+        }
+    }
+
     pub(crate) fn missing_key_code(&self, space: &SpaceAddress) -> UnreadableCode {
         match self.space_reads.get(space) {
             Some((SpaceKeyState::Incomplete, _)) => UnreadableCode::UnsupportedFormat,

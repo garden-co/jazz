@@ -26,6 +26,7 @@ use jazz_e2ee::protocol::space::members::{
 };
 
 use super::{ATTEMPTS, Replayed, SpaceReadPurpose, offline, protocol_address};
+use crate::account::has_removed_devices;
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
 use crate::state::{Report, db_address};
@@ -144,23 +145,19 @@ impl E2eeClient {
                 .holders
                 .iter()
                 .any(|account| match directory.current(account) {
-                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(Some(state)) => has_removed_devices(&state),
                     Ok(None) => false,
                     Err(_) => true,
                 });
-            let mut keys = self.shared.keys.borrow_mut();
             // Only a watched space keeps this answer, since only its watch
             // reports later removals; the first-write and 60 s re-checks in
             // `note_write` also make an unwatched space's write re-read it.
-            if self.shared.member_watch.borrow().spaces.contains_key(space) {
-                keys.rotation_evaluated.insert(address.clone());
-                keys.space_removals.insert(address.clone(), removals);
-            }
-            if marked {
-                keys.rotation_pending.insert(address.clone());
-            } else {
-                keys.rotation_pending.remove(address);
-            }
+            let watched = self.shared.member_watch.borrow().spaces.contains_key(space);
+            self.shared.keys.borrow_mut().mark_rotation(
+                address,
+                marked,
+                watched.then_some(removals),
+            );
         } else {
             self.shared
                 .keys

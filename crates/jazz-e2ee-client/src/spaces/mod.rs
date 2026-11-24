@@ -26,6 +26,7 @@ use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
 use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
 
+use crate::account::has_removed_devices;
 use crate::account::rows::{self, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
@@ -530,7 +531,7 @@ impl E2eeClient {
             let removals = holders
                 .iter()
                 .any(|account| match directory.current(account) {
-                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(Some(state)) => has_removed_devices(&state),
                     Ok(None) => false,
                     Err(_) => true,
                 });
@@ -541,14 +542,10 @@ impl E2eeClient {
                 deps.members = members;
                 deps.holders = holders;
             }
-            let mut keys = self.shared.keys.borrow_mut();
-            keys.rotation_evaluated.insert(address.clone());
-            keys.space_removals.insert(address.clone(), removals);
-            if marked {
-                keys.rotation_pending.insert(address.clone());
-            } else {
-                keys.rotation_pending.remove(address);
-            }
+            self.shared
+                .keys
+                .borrow_mut()
+                .mark_rotation(address, marked, Some(removals));
             Ok(true)
         })
         .await
