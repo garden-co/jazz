@@ -93,42 +93,22 @@ impl DeclaredVersion {
         Ok(())
     }
 
-    // Migration descendants can only append. Siblings may use either prefix of the same enum.
     async fn check_stored_types_and_spaces(
         &self,
         next: &Self,
-        mut precedes: impl AsyncFnMut() -> Result<bool, Error>,
+        precedes: impl AsyncFnMut() -> Result<bool, Error>,
     ) -> Result<(), Error> {
-        let invalid = |message: String| Error::new(ErrorCode::Schema, message);
-        for (table, new) in &next.entries {
-            let Some(was) = next.table_in(self, table) else {
-                continue;
-            };
-            let Some(old) = self.entries.get(&was) else {
-                continue;
-            };
-            encryption::check_stored_space(
-                table,
-                old,
-                new,
-                self.table_in(next, &old.scope),
-                self.column_in(next, &was, &old.space),
-            )
-            .map_err(invalid)?;
-            for (name, declared) in &new.columns {
-                let Some(previous) = next
-                    .column_in(self, table, name)
-                    .and_then(|column| old.columns.get(&column))
-                else {
-                    continue;
-                };
-                let path = format!("{table}.{name}");
-                let siblings = !previous.plain.same_type(&declared.plain) && !precedes().await?;
-                encryption::check_stored_column_type(&path, previous, declared, siblings)
-                    .map_err(invalid)?;
-            }
-        }
-        Ok(())
+        encryption::check_unlinked_transition(
+            &self.entries,
+            &next.entries,
+            |table| next.table_in(self, table),
+            |table| self.table_in(next, table),
+            |table, name| next.column_in(self, table, name),
+            |table, name| self.column_in(next, table, name),
+            precedes,
+        )
+        .await?
+        .map_err(|message| Error::new(ErrorCode::Schema, message))
     }
 
     fn check_transition_to(&self, next: &Self) -> Result<(), String> {

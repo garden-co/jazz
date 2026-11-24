@@ -652,6 +652,53 @@ pub fn check_mapped_transition(
     Ok(())
 }
 
+/// Check a version against an earlier one that no single migration leads
+/// from, after mapping the stored identities of both. Migration descendants
+/// can only append. Siblings may use either prefix of the same enum.
+/// `precedes` says whether the new version descends from the old one; it
+/// runs only for a column whose plaintext type differs, and its error is
+/// returned as the outer one. Each mapping is as in
+/// [`check_mapped_transition`].
+pub async fn check_unlinked_transition<E>(
+    old_entries: &Entries,
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+    mut precedes: impl AsyncFnMut() -> Result<bool, E>,
+) -> Result<Result<(), String>, E> {
+    for (table, new) in new_entries {
+        let Some(was) = old_table(table) else {
+            continue;
+        };
+        let Some(old) = old_entries.get(&was) else {
+            continue;
+        };
+        if let Err(refusal) = check_stored_space(
+            table,
+            old,
+            new,
+            new_table(&old.scope),
+            new_name(&was, &old.space),
+        ) {
+            return Ok(Err(refusal));
+        }
+        for (name, declared) in &new.columns {
+            let Some(previous) = old_name(table, name).and_then(|column| old.columns.get(&column))
+            else {
+                continue;
+            };
+            let path = format!("{table}.{name}");
+            let siblings = !previous.plain.same_type(&declared.plain) && !precedes().await?;
+            if let Err(refusal) = check_stored_column_type(&path, previous, declared, siblings) {
+                return Ok(Err(refusal));
+            }
+        }
+    }
+    Ok(Ok(()))
+}
+
 /// Check the scope table and space column after mapping their stored identities into the new version.
 pub fn check_stored_space(
     table: &str,
