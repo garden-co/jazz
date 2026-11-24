@@ -356,7 +356,7 @@ impl Jazz {
     /// [`JazzClient::table_identity`]).
     pub async fn table_identity(&self, table: &str) -> Result<ObjectId> {
         let table = table.to_owned();
-        self.with_client(move |client| async move { Ok(client.table_identity(&table)?) })
+        self.with_client(move |client| async move { Ok(client.table_identity(&table).await?) })
             .await
     }
 

@@ -148,6 +148,10 @@ pub enum JazzError {
     #[error("Query error: {0}")]
     Query(String),
 
+    /// A query failure that carries the database's error code.
+    #[error("Query error: {0}")]
+    QueryFailed(#[source] crate::db::Error),
+
     #[error("Write error: {0}")]
     Write(String),
 

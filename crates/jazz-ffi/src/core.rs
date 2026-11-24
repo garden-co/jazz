@@ -172,7 +172,7 @@ struct Uploads(HashMap<u64, Upload>);
 struct Upload {
     upload: jazz_app_support::jazz::tools::StreamingUpload,
     kind: jazz_app_support::jazz::db::StreamingMutationKind,
-    id: Option<jazz_app_support::ObjectId>,
+    id: jazz_app_support::ObjectId,
     table: TableSchema,
     name: String,
 }
@@ -1135,8 +1135,10 @@ impl Core {
         let open = self.open.clone();
         self.wait(self.open_jazz()?.with_client(move |client| async move {
             open.check()?;
-            let upload =
-                client.begin_streaming_upload(&name, cells.into_iter().collect(), &column)?;
+            let (id, upload) = client
+                .begin_streaming_upload_for(kind, &name, id, cells.into_iter().collect(), &column)
+                .await?;
+            open.check()?;
             clean_up_before_stop();
             UPLOADS.with(|u| {
                 u.borrow_mut().0.insert(
@@ -1195,7 +1197,7 @@ impl Core {
                     jazz_app_support::Error::Config(format!("upload {upload} is not open"))
                 })?;
             let (id, committed) = client
-                .finish_streaming_upload(entry.upload, entry.kind, entry.id)
+                .finish_streaming_upload(entry.upload, entry.kind, Some(entry.id))
                 .await?;
             settle(&client, committed, tier).await?;
             read_back(&client, &entry.table, &entry.name, id).await
@@ -2362,6 +2364,33 @@ mod tests {
         .unwrap()
     }
 
+    /// Alice's backend must refuse a plain-column insert upload into an
+    /// encrypted table when its required siblings are missing, before she
+    /// can send bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_encrypted_table_refuses_an_incomplete_upload_at_begin() {
+        let server = jazz_server::JazzServer::start().await.unwrap();
+        let config = serde_json::json!({
+            "app": include_str!("../../jazz-app/tests/fixtures/encrypted/jazz.app.json"),
+            "permissions": include_str!("../../jazz-app/tests/fixtures/encrypted/jazz.permissions.json"),
+            "appId": server.app_id().to_string(),
+            "serverUrl": server.base_url(),
+            "backendSecret": server.backend_secret(),
+            "adminSecret": server.admin_secret(),
+            "session": { "subject": "alice" },
+        });
+        let alice = Core::open(&config.to_string()).expect("open the encrypted backend");
+        let error = alice
+            .upload_begin("tasks", "label", "insert", None, None)
+            .expect_err("refuse before the upload can accept bytes");
+        assert!(
+            matches!(error, FfiError::Refused(ref reason) if reason.contains("missing required field")),
+            "{error:?}"
+        );
+        assert_eq!(open_uploads(&alice), 0);
+        alice.close().unwrap();
+    }
+
     /// Holds the client's thread until the returned sender is used.
     fn hold_client(core: &Core) -> (mpsc::Sender<()>, JoinHandle<()>) {
         let (release, released) = mpsc::channel::<()>();
@@ -2591,10 +2620,8 @@ mod tests {
             FfiError::Refused(_)
         ));
     }
-    /// A client has no encryption hooks yet: an app whose files declare
-    /// encryption is refused at open, before a Go, Swift or Kotlin program
-    /// can write a string into its bytes columns, where the binding would
-    /// store it as plain bytes.
+    /// An encrypted app opened without encryption hooks is refused at open,
+    /// before a caller can write plaintext into its encrypted columns.
     #[test]
     fn an_app_that_declares_encryption_is_refused_at_open() {
         let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",

@@ -144,7 +144,7 @@ async fn make_project(owner: &Jazz, name: &str) -> String {
                     ),
                 ]),
             )?;
-            let at = client.table_identity("projects")?;
+            let at = client.table_identity("projects").await?;
             tx.insert(
                 "__e2ee_members",
                 HashMap::from([

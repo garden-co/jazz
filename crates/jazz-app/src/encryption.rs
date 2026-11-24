@@ -300,14 +300,18 @@ mod plan {
 
         fn begin_streaming_upload<'a>(
             &self,
-            begin: &'a mut dyn FnMut() -> jazz::tools::Result<jazz::db::StreamingValueUpload>,
+            begin: &'a mut dyn FnMut() -> futures_util::future::LocalBoxFuture<
+                'a,
+                jazz::tools::Result<jazz::db::StreamingValueUpload>,
+            >,
         ) -> futures_util::future::LocalBoxFuture<
             'a,
             jazz::tools::Result<jazz::db::StreamingValueUpload>,
         > {
-            Box::pin(retry_after_key(begin, |error| {
-                jazz::tools::JazzError::Write(error.to_string())
-            }))
+            Box::pin(retry_after_key(
+                async || begin().await,
+                |error| jazz::tools::JazzError::Write(error.to_string()),
+            ))
         }
 
         fn stop(&self) {
@@ -442,10 +446,10 @@ mod plan {
     /// again within [`KEY_WAIT`]. The failed write stored nothing, so trying
     /// again repeats nothing.
     pub(crate) async fn retry_after_key<T, E: From<jazz::tools::JazzError>>(
-        mut operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,
+        mut operation: impl AsyncFnMut() -> std::result::Result<T, jazz::tools::JazzError>,
         preparation_error: impl Fn(Error) -> E,
     ) -> Result<T, E> {
-        let first = match operation() {
+        let first = match operation().await {
             Err(error) => error,
             Ok(value) => return Ok(value),
         };
@@ -486,13 +490,13 @@ mod plan {
                         .retry_with_current_key(&space, &reason)
                         .map_err(|err| preparation_error(failure(err.to_string())))?
                     {
-                        return operation().map_err(Into::into);
+                        return operation().await.map_err(Into::into);
                     }
                     return Err(preparation_error(failure(reason)));
                 }
             };
             if ready {
-                match operation() {
+                match operation().await {
                     Ok(value) => return Ok(value),
                     Err(next) => {
                         let Some((scope_id, identifier)) = pending_space(&next.to_string()) else {
@@ -519,7 +523,7 @@ mod plan {
             .retry_with_current_key(&space, "rotation undecided at the write deadline")
             .map_err(|err| preparation_error(failure(err.to_string())))?
         {
-            return operation().map_err(Into::into);
+            return operation().await.map_err(Into::into);
         }
         Err(error.into())
     }
@@ -706,15 +710,14 @@ pub(crate) fn spawn_start() {
 /// binding's equivalent): a no-op without a device runtime.
 #[doc(hidden)]
 pub async fn with_key_wait<T>(
-    operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,
+    mut operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,
 ) -> Result<T> {
     #[cfg(feature = "e2ee-client")]
     {
-        plan::retry_after_key(operation, std::convert::identity).await
+        plan::retry_after_key(async || operation(), std::convert::identity).await
     }
     #[cfg(not(feature = "e2ee-client"))]
     {
-        let mut operation = operation;
         operation().map_err(Error::from)
     }
 }
