@@ -15,7 +15,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, Error, ErrorCode};
-use jazz::e2ee::{E2eeRefusal, SpaceAddress, Unreadable, UnreadableCode};
+use jazz::e2ee::{SpaceAddress, Unreadable, UnreadableCode};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
@@ -32,7 +32,6 @@ use crate::error::ClientError;
 use crate::hooks::code;
 use crate::state::{Missing, Report, SettleBackoff, Shared};
 
-pub use creation::SpaceCreation;
 pub use delivery::MEMBER_LIMIT;
 pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
 
@@ -1058,8 +1057,7 @@ impl E2eeClient {
         Ok((reports, held))
     }
 
-    /// What a binding whose reads it cannot wrap in [`E2eeClient::read`]
-    /// does after reads that left rows out for want of a key: acquires the
+    /// After host reads that left rows out for want of a key, acquires the
     /// keys of the spaces they named (once per space) and settles the
     /// reports to `key-pending`, `key-unavailable` or `space-pending`.
     /// Whether any key was obtained, so the reads are worth repeating.
@@ -1071,136 +1069,6 @@ impl E2eeClient {
             return Ok(false);
         }
         self.settle_missing(db, missing).await
-    }
-
-    /// Runs the read `op`, the way a binding wraps it (core hooks note
-    /// H3, H4): rows whose key this device lacks are left out and
-    /// reported by the hooks; this acquires the keys once, settles the
-    /// reports to `key-pending`, `key-unavailable` or `space-pending`, and
-    /// runs `op` again if a key was obtained. An encrypted equality
-    /// query on a space with no held key (a cold query) is acquired the
-    /// same way; when the account is a member that lacks the key, `op`'s
-    /// own `key-pending` error is returned and the space is reported. A
-    /// client that is offline acquires nothing.
-    pub async fn read<T>(
-        &self,
-        db: &Db,
-        mut op: impl AsyncFnMut() -> Result<T, Error>,
-    ) -> Result<T, ClientError> {
-        self.ensure_open()?;
-        self.reconcile_once(db).await?;
-        for round in 0..2 {
-            // What `op` leaves out is settled here; what earlier reads left
-            // (kept for a later settle) stays queued.
-            let kept: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
-            let outcome = op().await;
-            let missing: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
-            for entry in kept {
-                self.shared.missing(entry);
-            }
-            let online = self.shared.keys.borrow().online;
-            match outcome {
-                Err(error) => {
-                    let Some(E2eeRefusal::NeedsKey { space }) = E2eeRefusal::of(&error) else {
-                        self.shared.flush(Vec::new());
-                        return Err(error.into());
-                    };
-                    if round == 1 || !online {
-                        self.shared.flush(Vec::new());
-                        return Err(error.into());
-                    }
-                    let acquired = self.acquire_full(db, &space).await?;
-                    if acquired.state == SpaceKeyState::Held {
-                        continue;
-                    }
-                    let code = match acquired.state {
-                        SpaceKeyState::Incomplete => UnreadableCode::UnsupportedFormat,
-                        SpaceKeyState::KeyPending => UnreadableCode::KeyPending,
-                        SpaceKeyState::NoRoot if acquired.member => UnreadableCode::SpacePending,
-                        _ => UnreadableCode::KeyUnavailable,
-                    };
-                    let per_space = code != UnreadableCode::KeyUnavailable;
-                    let reports = self
-                        .tables_of(&space)
-                        .into_iter()
-                        .filter(|_| per_space)
-                        .map(|table| {
-                            Report::Unreadable(Unreadable {
-                                table,
-                                id: None,
-                                column: None,
-                                code,
-                                space: Some(space.clone()),
-                            })
-                        })
-                        .collect();
-                    self.shared.flush(reports);
-                    return Err(error.into());
-                }
-                Ok(value) => {
-                    if missing.is_empty() || round == 1 || !online {
-                        self.shared.flush(Vec::new());
-                        return Ok(value);
-                    }
-                    if !self.settle_missing(db, missing).await? {
-                        return Ok(value);
-                    }
-                }
-            }
-        }
-        unreachable!("the second round returns")
-    }
-
-    /// Runs the write or staging call `op`, the way a binding wraps it
-    /// (core hooks note H2): when the hooks need a key, this acquires it,
-    /// or prepares the space's root (online, after reading the address's
-    /// roots; offline without), and runs `op` again, which stages the root
-    /// in the same transaction as the write. A space whose creation this
-    /// device was refused while the client runs fails `space-pending`
-    /// without a root; a member that lacks the key fails with the call's
-    /// own `key-pending` error. When the call fails after it staged a
-    /// root, that creation did not happen: its key is marked `refused` and
-    /// the next write prepares a new root.
-    pub async fn write<T>(
-        &self,
-        db: &Db,
-        mut op: impl AsyncFnMut() -> Result<T, Error>,
-    ) -> Result<T, ClientError> {
-        self.ensure_open()?;
-        self.reconcile_once(db).await?;
-        let call = WrappedWrite::enter(&self.shared);
-        for round in 0..ATTEMPTS {
-            self.begin_attempt(db).await?;
-            let outcome = call.run(op()).await;
-            let staged = std::mem::take(&mut self.shared.creations.borrow_mut().attempt);
-            let error = match outcome {
-                Ok(value) => return Ok(value),
-                Err(error) => error,
-            };
-            for (_, root_id) in &staged {
-                self.abandon_creation(root_id).await?;
-            }
-            let Some(E2eeRefusal::NeedsKey { space }) = E2eeRefusal::of(&error) else {
-                return Err(error.into());
-            };
-            if round + 1 == ATTEMPTS || !self.make_ready(db, &space, Some(call.id), None).await? {
-                return Err(error.into());
-            }
-        }
-        unreachable!("the last round returns")
-    }
-
-    /// What a binding whose writes it cannot wrap in [`E2eeClient::write`]
-    /// (a synchronous write call of a host language) does after such a
-    /// write failed `key-pending` or `space-pending` for `space`: the
-    /// steps `write` takes between its rounds. `true` when the write can be
-    /// tried again; `false` when it cannot yet (a member waits for a
-    /// delivery, or the creation was refused), so the caller waits and
-    /// calls again, or gives up. The write tried again after a rotation
-    /// this prepared seals under whatever version that left; the write after
-    /// it gets its own rotation, as each call of `write` does.
-    pub async fn prepare_space(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
-        self.prepare_host_write(db, space, None).await
     }
 
     /// Keep rotation marks private while preparing. Grant the host its
@@ -1216,7 +1084,7 @@ impl E2eeClient {
         if expired() {
             return Ok(false);
         }
-        let call = WrappedWrite::enter(&self.shared);
+        let call = WritePreparation::enter(&self.shared);
         self.reconcile_once(db).await?;
         self.begin_attempt(db).await?;
         if !self.make_ready(db, space, Some(call.id), deadline).await? || expired() {
@@ -1266,9 +1134,8 @@ impl E2eeClient {
         Ok(true)
     }
 
-    /// What each attempt of a write starts with, wrapped or not: the
-    /// creations whose staged root the database dropped since are
-    /// abandoned, as `write` abandons what a failed call staged.
+    /// Abandons creations whose staged root the database dropped before
+    /// preparing the next host retry.
     async fn begin_attempt(&self, db: &Db) -> Result<(), ClientError> {
         let dropped: Vec<String> = self
             .shared
@@ -1288,7 +1155,6 @@ impl E2eeClient {
         // sealed: its pass marks the space for rotation, so the write that
         // follows rotates first (protocol §3.5).
         self.serve_removals(db).await?;
-        self.shared.creations.borrow_mut().attempt.clear();
         Ok(())
     }
 
@@ -1321,10 +1187,8 @@ impl E2eeClient {
             .any(|row| row.is_deleted()))
     }
 
-    /// Gets a key ready for a write to `space`: whether the write can be
-    /// tried again. `call` is the [`E2eeClient::write`] call the write runs
-    /// in (`None` for a write no call wraps), whose mark a rotation tried
-    /// here sets.
+    /// Gets a key ready for the host to retry a write to `space`. Rotation
+    /// attempts use the preparation's mark.
     async fn make_ready(
         &self,
         db: &Db,
@@ -1486,34 +1350,20 @@ pub(crate) fn has_unpublished(space: &HeldSpace) -> bool {
         .any(|(_, mark)| matches!(mark, KeyMark::Unpublished { .. }))
 }
 
-/// A running [`E2eeClient::write`] call, with its own number: the marks of
-/// `rotation_tried` it sets last for its rounds and are removed when it
-/// returns. Another call to the same space, running at the same time, has
-/// its own marks, so it gets its own rotation chance.
-struct WrappedWrite<'a> {
+/// Keeps rotation marks private to one host write preparation.
+struct WritePreparation<'a> {
     shared: &'a Shared,
     id: u64,
 }
 
-impl<'a> WrappedWrite<'a> {
+impl<'a> WritePreparation<'a> {
     fn enter(shared: &'a Shared) -> Self {
         let id = shared.next_write.get();
         shared.next_write.set(id.wrapping_add(1));
         Self { shared, id }
     }
-
-    /// `op` run as this call's: while it is polled, what the hooks seal
-    /// belongs to this call.
-    fn run<F: Future>(&self, op: F) -> InCall<'a, F> {
-        InCall {
-            shared: self.shared,
-            id: self.id,
-            op: Box::pin(op),
-        }
-    }
 }
-
-impl Drop for WrappedWrite<'_> {
+impl Drop for WritePreparation<'_> {
     fn drop(&mut self) {
         let id = self.id;
         self.shared
@@ -1521,27 +1371,5 @@ impl Drop for WrappedWrite<'_> {
             .borrow_mut()
             .rotation_tried
             .retain(|(call, _)| *call != Some(id));
-    }
-}
-
-/// An operation of a [`WrappedWrite`] call, which names the call as the
-/// current one while it is polled, and restores the one before after.
-struct InCall<'a, F> {
-    shared: &'a Shared,
-    id: u64,
-    op: std::pin::Pin<Box<F>>,
-}
-
-impl<F: Future> Future for InCall<'_, F> {
-    type Output = F::Output;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<F::Output> {
-        let before = self.shared.current_write.replace(Some(self.id));
-        let polled = self.op.as_mut().poll(cx);
-        self.shared.current_write.set(before);
-        polled
     }
 }

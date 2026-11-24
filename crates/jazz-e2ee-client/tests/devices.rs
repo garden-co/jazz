@@ -84,7 +84,7 @@ fn notes_of(server: &Db, device: &Device, space: uuid::Uuid) -> Vec<jazz::db::Cu
     drive(
         server,
         &[&device.db],
-        device.client.read(&device.db, async || {
+        host_read(&device.client, &device.db, async || {
             let prepared = device.db.prepare_query(&query)?;
             device.db.all(&prepared, local()).await
         }),
@@ -119,7 +119,7 @@ fn space_with_a_note(server: &Db, first: &Device, who: &str) -> uuid::Uuid {
     drive(
         server,
         &[&first.db],
-        first.client.write(&first.db, async || {
+        host_write(&first.client, &first.db, async || {
             first
                 .db
                 .insert("notes", note(space, SECRET), Default::default())
@@ -230,7 +230,7 @@ fn a_device_awaiting_approval_is_not_told_to_write_again() {
         let prepared = drive(
             &server,
             &[&second.db],
-            second.client.prepare_space(&second.db, &address),
+            second.client.prepare_host_write(&second.db, &address, None),
         );
         assert!(
             !matches!(prepared, Ok(true)),
@@ -292,7 +292,7 @@ fn a_removed_device_cannot_read_rows_written_after_the_rotation() {
         drive(
             &server,
             &[&first.db],
-            first.client.write(&first.db, async || {
+            host_write(&first.client, &first.db, async || {
                 first
                     .db
                     .insert("notes", note(space, "after"), Default::default())
@@ -432,7 +432,7 @@ fn a_runtime_opened_after_a_removal_rotates_before_its_first_write() {
         drive(
             &server,
             &[&again.db],
-            again.client.write(&again.db, async || {
+            host_write(&again.client, &again.db, async || {
                 again
                     .db
                     .insert("notes", note(space, "after"), Default::default())
@@ -484,7 +484,7 @@ fn another_device_of_the_account_rotates_after_a_removal_it_did_not_make() {
         drive(
             &server,
             &[&first.db],
-            first.client.write(&first.db, async || {
+            host_write(&first.client, &first.db, async || {
                 first
                     .db
                     .insert("notes", note(space, "after"), Default::default())
@@ -566,7 +566,7 @@ impl SharedSpace {
         drive(
             &server,
             &[&alice.db],
-            alice.client.deliver_space(&alice.db, &address),
+            deliver_for(&alice.client, &alice.db, &address),
         )
         .unwrap();
         bob_second.follow_notes(&server);
@@ -615,7 +615,7 @@ impl SharedSpace {
         drive(
             &self.server,
             &[&self.alice.db],
-            self.alice.client.write(&self.alice.db, async || {
+            host_write(&self.alice.client, &self.alice.db, async || {
                 self.alice
                     .db
                     .insert("notes", note(self.space, body), Default::default())
@@ -794,10 +794,7 @@ fn reopen_and_write(first: BeforeWrite) {
             drive(
                 &shared.server,
                 &[&shared.alice.db],
-                shared
-                    .alice
-                    .client
-                    .deliver_space(&shared.alice.db, &address),
+                deliver_for(&shared.alice.client, &shared.alice.db, &address),
             )
             .unwrap();
         }
@@ -982,7 +979,7 @@ fn cold_writes_and_watch_passes_read_only_the_deliveries_they_need() {
             drive(
                 &shared.server,
                 &[&bob.db],
-                bob.client.write(&bob.db, async || {
+                host_write(&bob.client, &bob.db, async || {
                     bob.db
                         .insert("notes", note(shared.space, "resumed"), Default::default())
                         .await
@@ -1101,7 +1098,7 @@ fn a_first_session_checks_a_newly_shared_room_before_writing() {
         drive(
             &shared.server,
             &[&writer.db],
-            writer.client.write(&writer.db, async || {
+            host_write(&writer.client, &writer.db, async || {
                 writer
                     .db
                     .insert(
@@ -1162,7 +1159,7 @@ fn a_competing_successor_of_an_earlier_version_requires_a_fresh_chain_read() {
         drive(
             &server,
             &[&alice.db],
-            alice.client.deliver_space(&alice.db, &address),
+            deliver_for(&alice.client, &alice.db, &address),
         )
         .unwrap();
         let before = alice.client.write_check_reads().1;
@@ -1186,7 +1183,7 @@ fn a_competing_successor_of_an_earlier_version_requires_a_fresh_chain_read() {
         drive(
             &server,
             &[&alice.db],
-            alice.client.write(&alice.db, async || {
+            host_write(&alice.client, &alice.db, async || {
                 alice
                     .db
                     .insert("notes", note(space, "after the fork"), Default::default())
@@ -1217,7 +1214,7 @@ fn an_unrelated_account_update_does_not_invalidate_another_room() {
         drive(
             &shared.server,
             &[&shared.alice.db],
-            shared.alice.client.write(&shared.alice.db, async || {
+            host_write(&shared.alice.client, &shared.alice.db, async || {
                 shared
                     .alice
                     .db
@@ -1303,7 +1300,7 @@ fn a_space_whose_members_never_removed_a_device_skips_the_read() {
         drive(
             &server,
             &[&alice.db],
-            alice.client.deliver_space(&alice.db, &address),
+            deliver_for(&alice.client, &alice.db, &address),
         )
         .unwrap();
 
@@ -3096,9 +3093,7 @@ fn stale_delivery_after_restore(writes: usize) {
             let delivered = drive(
                 &server,
                 &[&alice_device.db],
-                alice_device
-                    .client
-                    .deliver_space(&alice_device.db, &address),
+                deliver_for(&alice_device.client, &alice_device.db, &address),
             )
             .unwrap();
             assert_eq!(delivered, 1, "bob is served at his new epoch");
@@ -3123,9 +3118,7 @@ fn stale_delivery_after_restore(writes: usize) {
         let refused = drive(
             &restored,
             &[&alice_device.db],
-            alice_device
-                .client
-                .deliver_space(&alice_device.db, &address),
+            deliver_for(&alice_device.client, &alice_device.db, &address),
         );
         assert!(
             matches!(
@@ -3195,13 +3188,14 @@ fn an_open_space_stays_ready_to_write_between_messages() {
         shared.alice_writes("warm");
         shared.turns();
         let alice = &shared.alice;
-        alice.client.take_reports();
+        alice.client.flush_reports();
+        let reports = observe_reports(&alice.client);
         for message in ["still online", "disconnected"] {
             alice
                 .client
                 .advance_settle_clock(std::time::Duration::from_secs(61));
             // No server pump: preparation that needs a round trip cannot finish.
-            let write = alice.client.write(&alice.db, async || {
+            let write = host_write(&alice.client, &alice.db, async || {
                 alice
                     .db
                     .insert("notes", note(shared.space, message), Default::default())
@@ -3216,6 +3210,7 @@ fn an_open_space_stays_ready_to_write_between_messages() {
                 pump(&shared.server, &alice.db);
             }
         }
-        assert!(alice.client.take_reports().is_empty());
+        alice.client.flush_reports();
+        assert!(reports.borrow().is_empty());
     });
 }

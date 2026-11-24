@@ -1,4 +1,4 @@
-//! End-to-end encryption on Node: the runtime installed on a database whose
+//! End-to-end encryption shared by the hosts: the runtime for a database whose
 //! app declares encryption, its private store, and what it does between JS
 //! calls (`E2EE_PROTOCOL.md` §4, §6; core hooks note H6, H9).
 //!
@@ -516,9 +516,6 @@ impl Encryption {
 
     /// Lets the loop run as far as it can without waiting.
     pub fn drive(&self) {
-        // The host gets reports through its listener. Discard the raw polling
-        // queue even when the app never asks for the listener's reports.
-        self.client.shared.reports.borrow_mut().clear();
         self.preparations.settle();
         let mut main = self.main.borrow_mut();
         let Some(future) = main.as_mut() else {
@@ -1983,17 +1980,15 @@ mod tests {
         );
     }
 
-    /// Alice's host delivers each report once and drains the client's raw copy
-    /// on its next drive. Only the client can expose whether that copy survived.
+    /// Alice's host delivers the client's report on its next drive.
     #[test]
-    fn driving_the_host_drains_the_clients_report_queue() {
+    fn driving_the_host_delivers_the_clients_report() {
         let runtime = native_runtime_with_catalogue(true);
         runtime.client.shared.report(Report::SkippedRecord {
             document: "device".into(),
             reason: "invalid".into(),
         });
         runtime.drive();
-        assert!(runtime.client.take_reports().is_empty());
         let reports = runtime.take_reports();
         assert!(
             reports.contains(

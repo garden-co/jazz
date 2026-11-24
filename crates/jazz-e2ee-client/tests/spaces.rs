@@ -21,7 +21,7 @@ use jazz_e2ee::protocol::content::KeyMark;
 use jazz_e2ee::protocol::error::RefusalCode;
 use jazz_e2ee_client::{
     AccountStatus, ClientError, E2eeClient, MEMBER_LIMIT, MemoryStore, PrivateStore, Report,
-    SpaceCreation, SpaceKeyState,
+    SpaceKeyState,
 };
 
 const SPACES: &str = "__e2ee_spaces";
@@ -167,7 +167,7 @@ fn add_member(server: &Db, by: &Device, space: uuid::Uuid, account: &str) {
     pump(server, &by.db);
 }
 
-/// A note written through the runtime's write wrapper.
+/// A note written through the host write path.
 fn write_note(
     server: &Db,
     device: &Device,
@@ -177,7 +177,7 @@ fn write_note(
     drive(
         server,
         &[&device.db],
-        device.client.write(&device.db, async || {
+        host_write(&device.client, &device.db, async || {
             device
                 .db
                 .insert("notes", note(space, body), Default::default())
@@ -186,7 +186,7 @@ fn write_note(
     )
 }
 
-/// The notes of `space`, read through the runtime's read wrapper.
+/// The notes of `space`, read through the host read path.
 fn read_notes(
     server: &Db,
     device: &Device,
@@ -196,7 +196,7 @@ fn read_notes(
     drive(
         server,
         &[&device.db],
-        device.client.read(&device.db, async || {
+        host_read(&device.client, &device.db, async || {
             let prepared = device.db.prepare_query(&query)?;
             device.db.all(&prepared, local()).await
         }),
@@ -419,10 +419,15 @@ fn a_lost_key_is_acquired_from_the_roots_own_envelope() {
         let query = Query::from("notes")
             .filter(eq(col("projectId"), lit(Value::Uuid(space))))
             .filter(eq(col("body"), lit(text(SECRET))));
+        let address = space_address(&alice, space);
+        assert_eq!(
+            alice.acquire(&server, &address).unwrap(),
+            SpaceKeyState::Held
+        );
         let found = drive(
             &server,
             &[&alice.db],
-            alice.client.read(&alice.db, async || {
+            host_read(&alice.client, &alice.db, async || {
                 let prepared = alice.db.prepare_query(&query)?;
                 alice.db.all(&prepared, local()).await
             }),
@@ -441,12 +446,7 @@ fn a_lost_key_is_acquired_from_the_roots_own_envelope() {
 }
 
 fn reports_of(device: &Device) -> Rc<RefCell<Vec<Report>>> {
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let sink = seen.clone();
-    device
-        .client
-        .on_report(move |report| sink.borrow_mut().push(report.clone()));
-    seen
+    observe_reports(&device.client)
 }
 
 fn codes(seen: &Rc<RefCell<Vec<Report>>>) -> Vec<(UnreadableCode, bool)> {
@@ -731,7 +731,7 @@ fn a_failing_space_is_not_read_at_every_settle() {
 }
 
 /// Contract: while a space waits out its back-off, its rows are unresolved,
-/// not absent: a wrapped read of them leaves them out and reports them
+/// not absent: a host read of them leaves them out and reports them
 /// missing without failing, their entries are kept, and a read of another
 /// space neither drops them nor ends the wait.
 ///
@@ -762,20 +762,21 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         bob.follow_notes(&server);
 
         bob.client.advance_settle_clock(std::time::Duration::ZERO);
+        let events = reports_of(&bob);
         store.failing.set(true);
         for _ in 0..2 {
             let failed = read_notes(&server, &bob, first);
             assert!(matches!(failed, Err(ClientError::Store(_))), "{failed:?}");
         }
         let saves = store.saves.get();
-        bob.client.take_reports();
+
         let waiting = read_notes(&server, &bob, first);
         assert!(
             waiting.as_ref().is_ok_and(Vec::is_empty),
             "a backed-off space fails no read: {waiting:?}"
         );
         assert!(
-            missing_key_of(&bob, first),
+            missing_key_of(&events.borrow(), &bob, first),
             "a backed-off space's rows are not silently left out"
         );
 
@@ -801,16 +802,14 @@ fn a_backed_off_space_is_unresolved_not_absent() {
 
 /// Whether the reports since the last look include a row of `space` left
 /// out for want of a key.
-fn missing_key_of(device: &Device, space: uuid::Uuid) -> bool {
+fn missing_key_of(reports: &[Report], device: &Device, space: uuid::Uuid) -> bool {
     let address = space_address(device, space);
-    device
-        .client
-        .take_reports()
+    reports
         .iter()
         .any(|report| matches!(report, Report::MissingKey { space, .. } if *space == address))
 }
 
-/// Contract: one backed-off space does not fail a wrapped read of several:
+/// Contract: one backed-off space does not fail a host read of several:
 /// the read returns the healthy spaces' rows and leaves the backed-off
 /// space's rows out, reported missing and kept for a later settle, and no
 /// read during the wait (of all spaces or of the other one) ends it.
@@ -842,23 +841,27 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
             add_member(&server, &alice, space, &bob.id());
             assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
         }
+        let events = reports_of(&bob);
         bob.follow_notes(&server);
 
+        let healthy = space_address(&bob, second);
+        assert_eq!(bob.acquire(&server, &healthy).unwrap(), SpaceKeyState::Held);
+        let first_notes =
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(first))));
+        assert!(all(&bob.db, first_notes).unwrap().is_empty());
         bob.client.advance_settle_clock(std::time::Duration::ZERO);
-        assert_eq!(read_notes(&server, &bob, second).unwrap().len(), 1);
         store.failing.set(true);
         for _ in 0..2 {
-            let failed = read_notes(&server, &bob, first);
+            let failed = drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
             assert!(matches!(failed, Err(ClientError::Store(_))), "{failed:?}");
         }
         let saves = store.saves.get();
-        bob.client.take_reports();
 
         let read_all = || {
             drive(
                 &server,
                 &[&bob.db],
-                bob.client.read(&bob.db, async || {
+                host_read(&bob.client, &bob.db, async || {
                     let prepared = bob.db.prepare_query(&Query::from("notes"))?;
                     bob.db.all(&prepared, local()).await
                 }),
@@ -871,7 +874,7 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
             "the healthy space's row is returned: {all:?}"
         );
         assert!(
-            missing_key_of(&bob, first),
+            missing_key_of(&events.borrow(), &bob, first),
             "the backed-off space's row is reported missing"
         );
         assert_eq!(read_notes(&server, &bob, second).unwrap().len(), 1);
@@ -972,7 +975,6 @@ fn reenrolment_forgets_the_old_devices_reports() {
             seen.borrow()
         );
         assert!(reports_of(&first).borrow().is_empty());
-        assert!(first.client.take_reports().is_empty());
         let synced = first.sync_spaces(&server, &mut watch).unwrap();
         assert!(synced.is_empty(), "{synced:?}");
     });
@@ -994,14 +996,12 @@ fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::pat
 }
 
 /// Contract: a creation whose outcome is unknown when the device restarts
-/// is reconciled by its root, never by staging another: the key stays
-/// `unpublished`, `createSpace` reports the creation pending and stages
-/// no second root, and once the authority accepts the root the mark is
-/// cleared.
+/// is reconciled by its root, never by staging another. The key stays
+/// `unpublished` until the authority accepts the root.
 ///
 /// ```text
 /// alice ──note + root (not uploaded)──► her store      (restart)
-/// alice ──reconcile: root pending──► key unpublished; create_space: Pending
+/// alice ──reconcile: root pending──► key unpublished; no second root
 /// alice ──upload──► server accepts ──reconcile──► key published, one root
 /// ```
 #[test]
@@ -1028,7 +1028,7 @@ fn an_unknown_outcome_is_reconciled_after_a_restart() {
             // Written offline, with no turn of the connection: the root is
             // staged, not uploaded.
             alice.client.set_online(false);
-            block_on(alice.client.write(&alice.db, async || {
+            block_on(host_write(&alice.client, &alice.db, async || {
                 alice
                     .db
                     .insert("notes", note(space, SECRET), Default::default())
@@ -1056,7 +1056,7 @@ fn an_unknown_outcome_is_reconciled_after_a_restart() {
         // A write while the creation is pending seals under its key and
         // stages no second root.
         alice.client.set_online(false);
-        block_on(alice.client.write(&alice.db, async || {
+        block_on(host_write(&alice.client, &alice.db, async || {
             alice
                 .db
                 .insert("notes", note(space, "again"), Default::default())
@@ -1064,14 +1064,6 @@ fn an_unknown_outcome_is_reconciled_after_a_restart() {
         }))
         .unwrap();
         alice.client.set_online(true);
-        let created = block_on(alice.client.create_space(
-            &alice.db,
-            "projects",
-            jazz::ids::RowUuid(space),
-        ))
-        .unwrap();
-        assert_eq!(created, SpaceCreation::Pending);
-
         let _link = link_as(&alice.db, &server, who);
         pump(&server, &alice.db);
         alice.activate(&server);
@@ -1205,7 +1197,8 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         sync(&mut watch);
         assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
         let before = bob.client.delivery_mark_checks();
-        deliver(&server, &bob, &[], space);
+        let deliveries = drive(&server, &[&bob.db], bob.client.deliver_keys(&bob.db)).unwrap();
+        assert!(deliveries.is_empty());
         sync(&mut watch);
         assert_eq!(bob.client.delivery_mark_checks(), before, "Bob has no key");
         assert!(!watched().contains(&successors));
@@ -1266,106 +1259,6 @@ fn rotation_refusal_members() -> (Db, Device, Device, Device, uuid::Uuid) {
     (server, alice, bob, carol, space)
 }
 
-/// Contract: a member who may not update the space row is refused when
-/// she creates the space: `space-create-refused`, no root and no key
-/// that writes, and, while the client runs, her encrypted writes fail
-/// `space-pending` without staging a root. A write the authority refuses
-/// as a whole (root and note together) leaves neither. An explicit
-/// `createSpace` attempts again, and creates the space once she may
-/// update the row.
-///
-/// ```text
-/// bob (member, not owner) ──create_space──► server ✗ refused
-/// bob ──write──✗ space-pending (no root staged)
-/// alice ──ownerId = bob──► server; bob ──create_space──► Created
-/// ```
-#[test]
-fn a_refused_root_stops_automatic_creation_while_the_client_runs() {
-    within(|| {
-        let authority = block_on(Db::open(jazz::db::DbConfig::new(
-            owned_schema(),
-            identity(0),
-        )))
-        .unwrap();
-        jazz::db::block_on(authority.set_authority()).unwrap();
-        let server = authority;
-        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
-        alice.activate(&server);
-        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
-        bob.activate(&server);
-        let owner = |who: &Device| Value::Uuid(uuid::Uuid::parse_str(&who.id()).unwrap());
-        let space = block_on(alice.db.insert(
-            "projects",
-            BTreeMap::from([
-                ("name".to_owned(), text("plans")),
-                ("ownerId".to_owned(), owner(&alice)),
-            ]),
-            Default::default(),
-        ))
-        .unwrap()
-        .row_uuid()
-        .0;
-        pump(&server, &alice.db);
-        add_member(&server, &alice, space, &alice.id());
-        add_member(&server, &alice, space, &bob.id());
-        bob.follow_notes(&server);
-        pump(&server, &bob.db);
-
-        let refused = drive(
-            &server,
-            &[&bob.db, &alice.db],
-            bob.client
-                .create_space(&bob.db, "projects", jazz::ids::RowUuid(space)),
-        );
-        assert!(
-            matches!(
-                refused,
-                Err(ClientError::Protocol(ProtocolError::Refused(
-                    RefusalCode::SpaceCreateRefused
-                )))
-            ),
-            "{refused:?}"
-        );
-        assert_eq!(count(&server, SPACES), 0);
-        assert_eq!(marks(&bob, space), [KeyMark::Refused]);
-
-        let error = match write_note(&server, &bob, space, SECRET) {
-            Err(ClientError::Database(error)) => error,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(error.reason, Some(jazz::db::Reason::SpacePending));
-        assert!(all(&bob.db, Query::from(SPACES)).unwrap().is_empty());
-
-        // Her client restarts: the next automatic path may try once, and
-        // the authority refuses the root and the note together.
-        let store = MemoryStore::new();
-        let _ = store;
-        let owned = |who: &Device, to: &Device| {
-            block_on(who.db.update(
-                "projects",
-                jazz::ids::RowUuid(space),
-                BTreeMap::from([("ownerId".to_owned(), owner(to))]),
-                Default::default(),
-            ))
-            .unwrap();
-        };
-        owned(&alice, &bob);
-        pump(&server, &alice.db);
-        pump(&server, &bob.db);
-        let created = drive(
-            &server,
-            &[&bob.db, &alice.db],
-            bob.client
-                .create_space(&bob.db, "projects", jazz::ids::RowUuid(space)),
-        );
-        assert_eq!(created.unwrap(), SpaceCreation::Created);
-        assert_eq!(count(&server, SPACES), 1);
-        let mut now = marks(&bob, space);
-        now.sort_by_key(|mark| format!("{mark:?}"));
-        assert_eq!(now, [KeyMark::Published, KeyMark::Refused]);
-    });
-}
-
 /// Alice and bob, both members of one new project, both active, each
 /// following the notes.
 fn two_members(server: &Db) -> (Device, Device, uuid::Uuid) {
@@ -1404,7 +1297,7 @@ fn a_lost_creation_is_refused_and_never_written_under() {
 
         // Alice, offline, does not know bob's root: she stages her own.
         alice.client.set_online(false);
-        block_on(alice.client.write(&alice.db, async || {
+        block_on(host_write(&alice.client, &alice.db, async || {
             alice
                 .db
                 .insert("notes", note(space, "alice"), Default::default())
@@ -1619,60 +1512,36 @@ fn acquiring_with_a_rolled_back_author_is_stale_state() {
     });
 }
 
-/// Contract: a device acquires without waiting for a read when the rows
-/// it watches change, and the reports that waited for it are withdrawn:
-/// bob, a member of a space with no root, is told `space-pending` by a
-/// query; when alice creates the space, his watch sees the root and
-/// withdraws it (he now waits for a delivery: `key-pending`).
-///
-/// ```text
-/// bob ──eq query──► space-pending     alice ──note + root──► server
-/// bob ──sync_spaces (roots watched)──► withdrawn; key-pending
-/// ```
+/// Bob's space watch picks up Alice's delivery and withdraws the report
+/// left by his earlier read.
 #[test]
 fn watched_rows_acquire_and_withdraw_reports() {
     within(|| {
         let server = secure_authority_with(&EncryptionSettings::default(), None);
-        let (alice, bob, space) = two_members(&server);
+        let (alice, bob, space) = shared_space(&server);
         let events = reports_of(&bob);
-        let query = Query::from("notes")
-            .filter(eq(col("projectId"), lit(Value::Uuid(space))))
-            .filter(eq(col("body"), lit(text(SECRET))));
-        let refused = drive(
-            &server,
-            &[&bob.db],
-            bob.client.read(&bob.db, async || {
-                let prepared = bob.db.prepare_query(&query)?;
-                bob.db.all(&prepared, local()).await
-            }),
-        );
-        assert!(refused.is_err());
-        assert_eq!(codes(&events), [(UnreadableCode::SpacePending, false)]);
+        assert!(read_notes(&server, &bob, space).unwrap().is_empty());
+        assert_eq!(codes(&events), [(UnreadableCode::KeyPending, false)]);
 
         let mut watch = block_on(bob.client.watch_spaces(&bob.db)).unwrap();
         bob.sync_spaces(&server, &mut watch).unwrap();
-        write_note(&server, &alice, space, SECRET).unwrap();
-        pump(&server, &alice.db);
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
         pump(&server, &bob.db);
-        let results = drive(
-            &server,
-            &[&bob.db, &alice.db],
-            bob.client.sync_spaces(&bob.db, &mut watch),
-        )
-        .unwrap();
+        let results = bob.sync_spaces(&server, &mut watch).unwrap();
         assert!(
             results
                 .iter()
-                .any(|(_, state)| matches!(state, Ok(SpaceKeyState::KeyPending))),
+                .any(|(_, state)| matches!(state, Ok(SpaceKeyState::Held))),
             "{results:?}"
         );
         assert!(events.borrow().iter().any(|report| matches!(
             report,
             Report::Withdrawn {
-                code: UnreadableCode::SpacePending,
+                code: UnreadableCode::KeyPending,
                 ..
             }
         )));
+        assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
     });
 }
 
@@ -1728,6 +1597,15 @@ fn a_refused_creation_is_found_after_a_restart() {
         ));
         // The refusal of the transaction that carried her root stops the
         // automatic path while the client runs: no second root is staged.
+        let address = space_address(&bob, space);
+        assert!(
+            !drive(
+                &server,
+                &[&bob.db],
+                bob.client.prepare_host_write(&bob.db, &address, None),
+            )
+            .unwrap()
+        );
         let stopped = match write_note(&server, &bob, space, "again") {
             Err(ClientError::Database(error)) => error,
             other => panic!("{other:?}"),
@@ -1751,12 +1629,21 @@ fn a_refused_creation_is_found_after_a_restart() {
         // The authority refuses it too, and the automatic paths stop again.
         pump(&server, &bob.db);
         pump(&server, &bob.db);
+        let address = space_address(&bob, space);
+        assert!(
+            !drive(
+                &server,
+                &[&bob.db],
+                bob.client.prepare_host_write(&bob.db, &address, None),
+            )
+            .unwrap()
+        );
         let stopped = match write_note(&server, &bob, space, "third") {
             Err(ClientError::Database(error)) => error,
             other => panic!("{other:?}"),
         };
         assert_eq!(stopped.reason, Some(jazz::db::Reason::SpacePending));
-        assert_eq!(count(&server, SPACES), 0);
+        assert_eq!((count(&server, SPACES), count(&server, "notes")), (0, 0));
     });
 }
 
@@ -1822,18 +1709,6 @@ fn rows_this_client_cannot_read_are_not_an_absent_root() {
         )
         .unwrap();
         assert_eq!(state, SpaceKeyState::Incomplete);
-        let created = drive(
-            &server,
-            &[&alice.db],
-            alice
-                .client
-                .create_space(&alice.db, "projects", jazz::ids::RowUuid(space)),
-        );
-        assert!(
-            matches!(created, Err(ClientError::Unsupported(_))),
-            "{created:?}"
-        );
-        assert_eq!(count(&server, SPACES), 2);
         assert!(
             codes(&events)
                 .iter()
@@ -1843,11 +1718,11 @@ fn rows_this_client_cannot_read_are_not_an_absent_root() {
 }
 
 /// Contract: a read that shows no root of a space whose key this device
-/// holds (the server hides the root rows) never gets a second root: an
-/// explicit `createSpace` returns the existing space and stages nothing.
+/// holds (the server hides the root rows) never gets a second root when
+/// alice attempts another encrypted write.
 ///
 /// ```text
-/// alice (holds K₀) ──create_space──► server has hidden the root ✗ no root staged
+/// alice (holds K₀) ──write──► server has hidden the root ✗ no root staged
 /// ```
 #[test]
 fn a_hidden_root_does_not_get_a_second_root() {
@@ -1881,15 +1756,15 @@ fn a_hidden_root_does_not_get_a_second_root() {
         assert_eq!(count(&hiding, SPACES), 0);
         let alice = device(&hiding, account(0xa1), store, 2);
         alice.activate(&hiding);
-        let created = drive(
-            &hiding,
-            &[&alice.db],
-            alice
-                .client
-                .create_space(&alice.db, "projects", jazz::ids::RowUuid(space)),
-        )
-        .unwrap();
-        assert_eq!(created, SpaceCreation::Existing);
+        let address = space_address(&alice, space);
+        assert!(
+            !drive(
+                &hiding,
+                &[&alice.db],
+                alice.client.prepare_host_write(&alice.db, &address, None),
+            )
+            .unwrap()
+        );
         pump(&hiding, &alice.db);
         assert_eq!(count(&hiding, SPACES), 0, "no second root");
         assert_eq!(marks(&alice, space), [KeyMark::Published]);
@@ -1935,7 +1810,7 @@ fn a_creation_is_settled_from_the_authority_not_the_local_store() {
         // A second space whose creation never reached the authority.
         let other = new_project(&server, &alice, "later");
         alice.client.set_online(false);
-        block_on(alice.client.write(&alice.db, async || {
+        block_on(host_write(&alice.client, &alice.db, async || {
             alice
                 .db
                 .insert("notes", note(other, "lost"), Default::default())
@@ -1996,45 +1871,15 @@ fn per_row_reports_are_withdrawn_when_they_no_longer_hold() {
     });
 }
 
-/// Contract: a write that fails after it staged the space's root leaves no
-/// creation: its key is `refused`, and the next write prepares a new root
-/// and creates the space.
-#[test]
-fn a_write_that_fails_after_staging_its_root_abandons_the_creation() {
-    within(|| {
-        let server = secure_authority_with(&EncryptionSettings::default(), None);
-        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
-        alice.activate(&server);
-        let space = new_project(&server, &alice, "plans");
-        let mut bad = note(space, SECRET);
-        bad.insert("title".to_owned(), Value::I32(1));
-        let failed = drive(
-            &server,
-            &[&alice.db],
-            alice.client.write(&alice.db, async || {
-                alice
-                    .db
-                    .insert("notes", bad.clone(), Default::default())
-                    .await
-            }),
-        );
-        assert!(failed.is_err());
-        assert_eq!(marks(&alice, space), [KeyMark::Refused]);
-        write_note(&server, &alice, space, SECRET).unwrap();
-        pump(&server, &alice.db);
-        assert_eq!((count(&server, SPACES), count(&server, "notes")), (1, 1));
-    });
-}
-
-/// Contract: through the host path too (the database call alone, then
-/// `prepare_space` after a key failure), a write the database fails after
+/// Contract: through the host path (the database call alone, then
+/// `prepare_host_write` after a key failure), a write the database fails after
 /// it staged the space's root leaves no creation: the next write does not
 /// seal under that root's key, but stages a fresh root with itself.
 ///
 /// ```text
-/// host insert ──NeedsKey──► prepare_space: root R prepared
+/// host insert ──NeedsKey──► prepare_host_write: root R prepared
 /// host insert (bad cell) ──stages R, core fails──► R dropped
-/// host insert ──NeedsKey (R's key held back)──► prepare_space: R refused, root R' ──► note + R'
+/// host insert ──NeedsKey (R's key held back)──► prepare_host_write: R refused, root R' ──► note + R'
 /// ```
 #[test]
 fn a_host_write_that_fails_after_staging_its_root_gets_a_fresh_root() {
@@ -2057,7 +1902,7 @@ fn a_host_write_that_fails_after_staging_its_root_gets_a_fresh_root() {
             drive(
                 &server,
                 &[&alice.db],
-                alice.client.prepare_space(&alice.db, &at)
+                alice.client.prepare_host_write(&alice.db, &at, None)
             )
             .unwrap()
         );
@@ -2069,7 +1914,7 @@ fn a_host_write_that_fails_after_staging_its_root_gets_a_fresh_root() {
             "the database refused the write itself: {failed:?}"
         );
 
-        host_write_note(&server, &alice, space, SECRET);
+        write_note(&server, &alice, space, SECRET).unwrap();
         pump(&server, &alice.db);
         assert_eq!(
             (count(&server, SPACES), count(&server, "notes")),
@@ -2139,9 +1984,7 @@ fn deliver(server: &Db, holder: &Device, other: &[&Device], space: uuid::Uuid) -
     drive(
         server,
         &dbs,
-        holder
-            .client
-            .deliver_space(&holder.db, &space_address(holder, space)),
+        deliver_for(&holder.client, &holder.db, &space_address(holder, space)),
     )
     .unwrap()
 }
@@ -2163,7 +2006,7 @@ fn stream_metadata_keeps_the_epoch_chosen_before_pulling() {
         let mut upload = drive(
             &server,
             &[db],
-            alice.client.write(db, async || {
+            host_write(&alice.client, db, async || {
                 db.begin_streaming_value_upload_for(
                     jazz::db::StreamingMutationKind::Insert,
                     "notes",
@@ -2493,11 +2336,8 @@ fn two_holders_racing_write_exactly_one_delivery() {
             &server,
             &[&alice.db, &bob.db],
             futures::future::join(
-                alice
-                    .client
-                    .deliver_space(&alice.db, &space_address(&alice, space)),
-                bob.client
-                    .deliver_space(&bob.db, &space_address(&bob, space)),
+                deliver_for(&alice.client, &alice.db, &space_address(&alice, space)),
+                deliver_for(&bob.client, &bob.db, &space_address(&bob, space)),
             ),
         );
         assert_eq!(a.unwrap() + b.unwrap(), 1);
@@ -2621,73 +2461,38 @@ fn removing_a_member_rotates_the_space_before_the_next_write() {
 #[test]
 fn a_removal_alone_rotates_the_space_before_the_next_write() {
     within(|| {
-        for host in [false, true] {
-            let server = secure_authority_with(&EncryptionSettings::default(), None);
-            let (alice, bob, space) = shared_space(&server);
-            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
-            pump(&server, &bob.db);
-            assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        pump(&server, &bob.db);
+        assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
 
-            let member = member_row(&server, &bob.id());
-            block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
-            assert_eq!(alice.client.pending_member_removals(), 1);
+        let member = member_row(&server, &bob.id());
+        block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+        assert_eq!(alice.client.pending_member_removals(), 1);
 
-            if host {
-                host_write_note(&server, &alice, space, "after");
-            } else {
-                write_note(&server, &alice, space, "after").unwrap();
-            }
-            pump(&server, &alice.db);
-            assert_eq!(
-                count(&server, "__e2ee_space_successors"),
-                1,
-                "the write rotated first (host: {host})"
-            );
-            assert_eq!(alice.client.pending_member_removals(), 0);
-            assert!(
-                !alice
-                    .client
-                    .needs_rotation(&space_address(&alice, space))
-                    .unwrap()
-            );
+        write_note(&server, &alice, space, "after").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(
+            count(&server, "__e2ee_space_successors"),
+            1,
+            "the write rotated first"
+        );
+        assert_eq!(alice.client.pending_member_removals(), 0);
+        assert!(
+            !alice
+                .client
+                .needs_rotation(&space_address(&alice, space))
+                .unwrap()
+        );
 
-            pump(&server, &bob.db);
-            assert_eq!(
-                read_notes(&server, &bob, space).unwrap().len(),
-                1,
-                "the note after the removal is not under bob's version (host: {host})"
-            );
-        }
+        pump(&server, &bob.db);
+        assert_eq!(
+            read_notes(&server, &bob, space).unwrap().len(),
+            1,
+            "the note after the removal is not under bob's version"
+        );
     });
-}
-
-/// A note written the way a host binding writes: the database call alone,
-/// and after a failure for want of a key, `prepare_space` and the call
-/// again.
-fn host_write_note(server: &Db, device: &Device, space: uuid::Uuid, body: &str) {
-    for _ in 0..3 {
-        let error = match block_on(
-            device
-                .db
-                .insert("notes", note(space, body), Default::default()),
-        ) {
-            Ok(_) => return,
-            Err(error) => error,
-        };
-        let Some(jazz::e2ee::E2eeRefusal::NeedsKey { space: at }) =
-            jazz::e2ee::E2eeRefusal::of(&error)
-        else {
-            panic!("the host write failed: {error:?}");
-        };
-        let ready = drive(
-            server,
-            &[&device.db],
-            device.client.prepare_space(&device.db, &at),
-        )
-        .unwrap();
-        assert!(ready, "the space is ready for the write");
-    }
-    panic!("the host write never went through");
 }
 
 /// The member row of `account` in the server's members table.
@@ -2829,8 +2634,8 @@ fn a_write_whose_rotation_is_undecided_uses_the_current_key_once() {
 /// first removal's rotation does not keep the second one's from happening.
 ///
 /// ```text
-/// alice removes bob ──host write──► NeedsKey ─ prepare_space: rotate ─► note
-/// alice removes carol ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+/// alice removes bob ──host write──► NeedsKey ─ prepare_host_write: rotate ─► note
+/// alice removes carol ──host write──► NeedsKey ─ prepare_host_write: rotate ─► note
 /// ```
 #[test]
 fn a_host_write_rotates_after_each_removal_of_the_run() {
@@ -2851,7 +2656,7 @@ fn a_host_write_rotates_after_each_removal_of_the_run() {
             deliver(&server, &alice, &[], space);
             assert!(alice.client.needs_rotation(&at).unwrap());
 
-            host_write_note(&server, &alice, space, "after");
+            write_note(&server, &alice, space, "after").unwrap();
             pump(&server, &alice.db);
             assert_eq!(
                 count(&server, "__e2ee_space_successors"),
@@ -3566,7 +3371,7 @@ fn deliveries_of_earlier_versions_are_not_watched() {
     });
 }
 
-/// Contract: an explicit `deliver_space` serves a member added to a space
+/// Contract: a delivery pass serves a member added to a space
 /// nothing watches, after a quiet pass: the pass reads the authority.
 #[test]
 fn an_explicit_pass_serves_a_member_the_store_has_not_seen() {
@@ -3723,19 +3528,9 @@ fn a_lazy_rotation_that_could_not_be_made_is_retried_on_the_next_write() {
     });
 }
 
-/// Contract: the rotation a write tried is that write's own: while a
-/// `write` call runs, host writes it does not wrap still each get their own
-/// rotation chance after each removal, instead of sealing under the version
-/// a removed member holds because an earlier write's mark was still there.
-///
-/// ```text
-/// write call A runs:
-///   alice removes bob ──host write──► NeedsKey ─ prepare_space: rotate ─► note
-///   alice removes carol ──host write──► NeedsKey ─ prepare_space: rotate ─► note
-/// carol reads neither note
-/// ```
+/// Consecutive host writes each get their own rotation after a removal.
 #[test]
-fn host_writes_inside_a_write_call_each_get_their_own_rotation() {
+fn consecutive_host_writes_each_get_their_own_rotation() {
     within(|| {
         let server = secure_authority_with(&EncryptionSettings::default(), None);
         let (alice, bob, space) = shared_space(&server);
@@ -3747,19 +3542,11 @@ fn host_writes_inside_a_write_call_each_get_their_own_rotation() {
         pump(&server, &carol.db);
         assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 1);
 
-        drive(
-            &server,
-            &[&alice.db],
-            alice.client.write(&alice.db, async || {
-                for (removed, body) in [(&bob, "after bob"), (&carol, "after carol")] {
-                    let member = member_row(&server, &removed.id());
-                    block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
-                    host_write_note(&server, &alice, space, body);
-                }
-                Ok(())
-            }),
-        )
-        .unwrap();
+        for (removed, body) in [(&bob, "after bob"), (&carol, "after carol")] {
+            let member = member_row(&server, &removed.id());
+            block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+            write_note(&server, &alice, space, body).unwrap();
+        }
         pump(&server, &alice.db);
         assert_eq!(
             count(&server, "__e2ee_space_successors"),
@@ -3850,7 +3637,7 @@ fn a_member_added_to_an_unwatched_space_is_served_at_the_next_natural_moment() {
 }
 
 /// Contract: a member whose first sealing key appears after a quiet pass is
-/// served by an explicit `deliver_space`.
+/// served by a delivery pass.
 #[test]
 fn deliver_space_sees_a_sealing_key_that_appeared_after_a_quiet_pass() {
     within(|| {
@@ -4038,7 +3825,7 @@ fn offline_creators(
     let mut alices = None;
     for (device, body) in [(alice, "alice's note"), (bob, "bob's note")] {
         device.client.set_online(false);
-        let handle = block_on(device.client.write(&device.db, async || {
+        let handle = block_on(host_write(&device.client, &device.db, async || {
             device
                 .db
                 .insert("notes", note(space, body), Default::default())
@@ -4236,7 +4023,7 @@ fn a_repair_interrupted_between_batches_finishes_after_a_restart() {
         for (device, rows) in [(&alice, ROWS), (&bob, 1)] {
             device.client.set_online(false);
             for n in 0..rows {
-                block_on(device.client.write(&device.db, async || {
+                block_on(host_write(&device.client, &device.db, async || {
                     device
                         .db
                         .insert(
@@ -4312,12 +4099,12 @@ fn a_repair_interrupted_between_batches_finishes_after_a_restart() {
     });
 }
 
-/// An update of a note's body through the runtime's write wrapper.
+/// An update of a note's body through the host write path.
 fn write_update(server: &Db, device: &Device, row: jazz::ids::RowUuid, body: &str) {
     drive(
         server,
         &[&device.db],
-        device.client.write(&device.db, async || {
+        host_write(&device.client, &device.db, async || {
             device
                 .db
                 .update(

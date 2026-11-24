@@ -53,7 +53,7 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     drive(
         &server,
         &[&db],
-        client.write(&db, async || {
+        host_write(&client, &db, async || {
             db.insert("notes", note(space, SECRET), Default::default())
                 .await
         }),

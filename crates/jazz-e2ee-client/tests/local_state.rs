@@ -45,8 +45,9 @@ fn try_open(
 }
 
 fn skipped(client: &E2eeClient) -> Vec<String> {
-    client
-        .take_reports()
+    let reports = observe_reports(client);
+    client.flush_reports();
+    std::mem::take(&mut *reports.borrow_mut())
         .into_iter()
         .filter_map(|report| match report {
             Report::SkippedRecord { document, .. } => Some(document),
@@ -182,6 +183,7 @@ fn held_keys_and_rows_survive_a_restart_offline() {
     };
 
     let client = open_client(store());
+    let reports = observe_reports(&client);
     let db = client_db(&client, Some(&path));
     client.set_online(false);
     assert!(
@@ -199,7 +201,8 @@ fn held_keys_and_rows_survive_a_restart_offline() {
     .collect();
     bodies.sort_by_key(|value| format!("{value:?}"));
     assert_eq!(bodies, [text("PLAINTEXT-SECRET"), text("offline")]);
-    assert!(client.take_reports().is_empty());
+    client.flush_reports();
+    assert!(reports.borrow().is_empty());
 }
 
 /// Contract: a held-key record that fails its load checks is skipped and
@@ -240,7 +243,6 @@ fn a_damaged_held_key_record_is_skipped_and_reported() {
     });
     client.flush_reports();
     assert_eq!(*heard.borrow(), std::slice::from_ref(&name));
-    assert_eq!(skipped(&client), std::slice::from_ref(&name));
     let (db, _link, _) = online(&client, &server, None);
     client.record_fixture_rotation_check(&address(&db, intact));
     block_on(db.insert("notes", note(intact, "fine"), Default::default())).unwrap();

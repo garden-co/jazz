@@ -18,17 +18,13 @@
 //!   path.
 //!
 //! - Spaces: [`E2eeClient::acquire`] reads a space's rows at one cut and
-//!   keeps the keys they give; [`E2eeClient::write`] and
-//!   [`E2eeClient::read`] wrap a call so that a key the hooks lack is
-//!   acquired, or a space's root prepared and staged with the write, and
-//!   reports settle to `key-pending`, `key-unavailable` or `space-pending`
-//!   ([`E2eeClient::on_report`]); [`E2eeClient::create_space`] and
-//!   [`E2eeClient::reconcile`] create a space and settle creations by their
-//!   root's fate; [`E2eeClient::watch_spaces`] and
-//!   [`E2eeClient::sync_spaces`] acquire when watched rows change.
+//!   keeps the keys they give. Hosts retry writes that need a key through
+//!   [`host::Encryption::retry_write`] and settle missing keys after reads
+//!   with [`E2eeClient::settle_reads`]. The first encrypted write stages
+//!   the root with itself. [`E2eeClient::reconcile`] settles creations by
+//!   their root's fate.
 //!
-//! - Deliveries and rotation: [`E2eeClient::deliver_space`] and
-//!   [`E2eeClient::deliver_keys`] run a holder's pass (the first holder to
+//! - Deliveries and rotation: [`E2eeClient::deliver_keys`] run a holder's pass (the first holder to
 //!   commit wins); [`E2eeClient::rotate`] and
 //!   [`E2eeClient::recover_rotation`] rotate a space, and a space that needs
 //!   it (a member was removed) is rotated before the next encrypted write
@@ -65,9 +61,7 @@ pub use account::{
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
 pub use keyless::KeylessHooks;
-pub use spaces::{
-    MEMBER_LIMIT, SpaceCreation, SpaceKeyState, SpaceWatch, account_watch_queries, watch_queries,
-};
+pub use spaces::{MEMBER_LIMIT, SpaceKeyState, SpaceWatch, account_watch_queries, watch_queries};
 #[cfg(any(test, feature = "testing"))]
 pub use spaces::{epoch_deliveries_query, successor_probe};
 pub use state::{MAX_REPORTS, Report};

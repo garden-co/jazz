@@ -165,7 +165,7 @@ impl E2eeClient {
     /// Opens the runtime: checks the declarations and settings, loads the
     /// device (generating and storing one on first use, §2.1), the held
     /// keys and the floors of the account's scope. A record that fails its
-    /// checks is skipped and reported ([`E2eeClient::take_reports`]); a
+    /// checks is skipped and reported ([`E2eeClient::on_report`]); a
     /// document of a format this runtime does not read fails the open if
     /// it is the device document, and is otherwise reported and never
     /// overwritten. A store or provider failure fails the open.
@@ -243,7 +243,6 @@ impl E2eeClient {
             }
             .into(),
             random,
-            reports: Default::default(),
             outbox: Default::default(),
             published: Default::default(),
             creations: Default::default(),
@@ -254,7 +253,6 @@ impl E2eeClient {
             held_clock: Default::default(),
             member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
-            current_write: Default::default(),
             next_write: Default::default(),
             member_watch: Default::default(),
             written: Default::default(),
@@ -525,9 +523,9 @@ impl E2eeClient {
         keys.online = online;
     }
 
-    /// How many staged member rows are still waited for, and how long to wait
-    /// for one. Only for tests of that queue.
+    /// How many staged member rows are still waited for.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn pending_member_changes(&self) -> usize {
         self.shared.member_changes.borrow().len()
     }
@@ -535,6 +533,7 @@ impl E2eeClient {
     /// How many member removals this client wrote whose space's pass has not
     /// run yet. Only for tests of that queue.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn pending_member_removals(&self) -> usize {
         self.shared.member_removals.borrow().len()
     }
@@ -608,7 +607,9 @@ impl E2eeClient {
         self.shared.held_clock.set(Some(now + by));
     }
 
+    /// Changes how long tests wait for a staged member row.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn set_member_change_wait(&self, wait: std::time::Duration) {
         self.shared.member_change_wait.set(wait);
     }
@@ -623,12 +624,6 @@ impl E2eeClient {
     /// The account this runtime is for.
     pub fn account_id(&self) -> &str {
         &self.shared.account_id
-    }
-
-    /// Takes the reports reads and loads left since the last call, oldest
-    /// first.
-    pub fn take_reports(&self) -> Vec<Report> {
-        self.shared.reports.borrow_mut().drain(..).collect()
     }
 
     /// Marks this device's approval nonce spent in the private store, and
@@ -699,6 +694,7 @@ impl E2eeClient {
     }
 
     /// Calls `f` with the keys this device holds.
+    #[cfg(any(test, feature = "testing"))]
     pub fn with_held<T>(&self, f: impl FnOnce(&jazz_e2ee::protocol::content::HeldKeys) -> T) -> T {
         f(&self.shared.keys.borrow().held)
     }

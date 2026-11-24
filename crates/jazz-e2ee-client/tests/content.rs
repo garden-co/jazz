@@ -390,13 +390,7 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
 
     let alice = open_client(Rc::new(MemoryStore::new()));
     let (db, _link, _) = online(&alice, &server, None);
-    let heard = Rc::new(std::cell::RefCell::new(0));
-    let sink = heard.clone();
-    alice.on_report(move |report| {
-        if matches!(report, Report::MissingKey { .. }) {
-            *sink.borrow_mut() += 1;
-        }
-    });
+    let seen = observe_reports(&alice);
     let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
@@ -405,18 +399,17 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
     assert!(all(&db, query.clone()).unwrap().is_empty());
     assert!(all(&db, query.clone()).unwrap().is_empty());
     alice.flush_reports();
+    let reports = seen.borrow();
     assert_eq!(
-        *heard.borrow(),
+        reports
+            .iter()
+            .filter(|report| matches!(
+                report,
+                Report::MissingKey { table, space: missing, .. }
+                    if table == "notes" && missing.identifier == space.to_string()
+            ))
+            .count(),
         1,
-        "a missing version reaches the listener once"
-    );
-    let reports = alice.take_reports();
-    assert!(
-        reports.iter().any(|report| matches!(
-            report,
-            Report::MissingKey { table, space: missing, .. }
-                if table == "notes" && missing.identifier == space.to_string()
-        )),
         "{reports:?}"
     );
 
@@ -459,18 +452,18 @@ fn cells_that_do_not_authenticate_are_reported_not_returned() {
         .unwrap()
         .row_uuid();
     let query = Query::from("notes");
+    let seen = observe_reports(&client);
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
-    client.take_reports();
 
     let rows = all(&db, query).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         [good]
     );
-    let invalid: Vec<_> = client
-        .take_reports()
+    client.flush_reports();
+    let invalid: Vec<_> = std::mem::take(&mut *seen.borrow_mut())
         .into_iter()
         .filter_map(|report| match report {
             Report::Unreadable(unreadable) => Some(unreadable),
@@ -497,10 +490,9 @@ fn cells_that_do_not_authenticate_are_reported_not_returned() {
 /// Unreadable reports alice's runtime left since its last call, as
 /// `(row, column, code, space)`, sorted and without repeats.
 fn unreadable(
-    client: &jazz_e2ee_client::E2eeClient,
+    reports: Vec<Report>,
 ) -> Vec<(jazz::ids::RowUuid, Option<String>, UnreadableCode, String)> {
-    let mut out: Vec<_> = client
-        .take_reports()
+    let mut out: Vec<_> = reports
         .into_iter()
         .filter_map(|report| match report {
             Report::Unreadable(unreadable) => Some((
@@ -550,18 +542,19 @@ fn a_cell_copied_into_another_column_does_not_open() {
     let cells = BTreeMap::from([("note".to_owned(), body)]);
     block_on(server.update("notes", copied, cells, Default::default())).unwrap();
     let query = Query::from("notes");
+    let seen = observe_reports(&client);
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
-    client.take_reports();
 
     let rows = all(&db, query).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         [untouched]
     );
+    client.flush_reports();
     assert_eq!(
-        unreadable(&client),
+        unreadable(std::mem::take(&mut *seen.borrow_mut())),
         [(
             copied,
             Some("note".to_owned()),
@@ -598,10 +591,10 @@ fn a_row_moved_to_another_space_opens_only_under_the_space_it_was_sealed_for() {
     let cells = BTreeMap::from([("projectId".to_owned(), Value::Uuid(other))]);
     block_on(server.update("notes", moved, cells, Default::default())).unwrap();
     let query = Query::from("notes");
+    let seen = observe_reports(&client);
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
-    client.take_reports();
 
     let rows = all(&db, query).unwrap();
     assert_eq!(
@@ -609,7 +602,8 @@ fn a_row_moved_to_another_space_opens_only_under_the_space_it_was_sealed_for() {
         [moved]
     );
     assert_eq!(cell(&rows[0], "body"), text(SECRET));
-    let reports = unreadable(&client);
+    client.flush_reports();
+    let reports = unreadable(std::mem::take(&mut *seen.borrow_mut()));
     let columns: Vec<_> = reports
         .iter()
         .map(|(_, column, ..)| column.clone())
@@ -791,11 +785,14 @@ fn a_plaintext_only_select_returns_every_row() {
     let _live =
         block_on(db.subscribe(&db.prepare_query(&titles).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
-    alice.take_reports();
+    alice.flush_reports();
+    let seen = observe_reports(&alice);
+    seen.borrow_mut().clear();
     let rows = all(&db, titles).unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| cell(row, "title") == text("title")));
-    assert_eq!(alice.take_reports(), Vec::new());
+    alice.flush_reports();
+    assert!(seen.borrow().is_empty());
 }
 
 /// Alice's store with a row written before a migration added `notes`'
@@ -878,7 +875,9 @@ fn optional_columns_a_migration_added_read_as_null() {
     let mut cells = note(space, "new");
     cells.insert("rank".to_owned(), Value::I32(3));
     block_on(db.insert("notes", cells, Default::default())).unwrap();
-    client.take_reports();
+    client.flush_reports();
+    let seen = observe_reports(&client);
+    seen.borrow_mut().clear();
 
     let read = Query::from("notes").select(["projectId", "title", "note", "rank"]);
     let mut rows = all(&db, read).unwrap();
@@ -891,7 +890,8 @@ fn optional_columns_a_migration_added_read_as_null() {
         cell(&rows[1], "rank"),
         Value::Nullable(Some(Box::new(Value::I32(3))))
     );
-    assert_eq!(client.take_reports(), Vec::new());
+    client.flush_reports();
+    assert!(seen.borrow().is_empty());
 }
 
 fn with_body_default() -> jazz::e2ee::E2eeDeclarations {
@@ -1114,12 +1114,15 @@ fn a_creating_upsert_syncs_its_large_encrypted_default_and_token() {
 #[test]
 fn rows_older_than_a_required_column_read_its_default() {
     let Migrated { client, db, .. } = migrated_with_an_old_row(with_body_default());
-    client.take_reports();
+    client.flush_reports();
+    let seen = observe_reports(&client);
+    seen.borrow_mut().clear();
     let rows = all(&db, Query::from("notes")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(cell(&rows[0], "title"), text("old"));
     assert_eq!(cell(&rows[0], "body"), text("untitled"));
-    assert_eq!(client.take_reports(), Vec::new());
+    client.flush_reports();
+    assert!(seen.borrow().is_empty());
 }
 
 /// Contract: an empty value a writer stored in a required encrypted column
@@ -1141,17 +1144,17 @@ fn a_stored_empty_value_reads_the_default_and_is_reported() {
         .unwrap()
         .row_uuid();
     let everything = Query::from("notes");
+    let seen = observe_reports(&client);
     let _live = block_on(db.subscribe(&db.prepare_query(&everything).unwrap(), Default::default()))
         .unwrap();
     pump(&server, &db);
-    client.take_reports();
 
     let rows = all(&db, everything).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(cell(&rows[0], "body"), text("untitled"));
     assert_eq!(cell(&rows[0], "note"), Value::Nullable(None));
-    let reports: Vec<_> = client
-        .take_reports()
+    client.flush_reports();
+    let reports: Vec<_> = std::mem::take(&mut *seen.borrow_mut())
         .into_iter()
         .filter_map(|report| match report {
             Report::Unreadable(unreadable) => Some(unreadable),
@@ -1207,7 +1210,9 @@ fn omitted_encrypted_columns_are_sealed_when_a_row_is_created() {
     ))
     .unwrap();
     pump(&server, &db);
-    client.take_reports();
+    client.flush_reports();
+    let seen = observe_reports(&client);
+    seen.borrow_mut().clear();
 
     let rows = all(&db, Query::from("notes")).unwrap();
     let row = |id| rows.iter().find(|row| row.row_uuid() == id).unwrap();
@@ -1221,7 +1226,8 @@ fn omitted_encrypted_columns_are_sealed_when_a_row_is_created() {
         Value::Nullable(Some(Box::new(text("keep me"))))
     );
     assert_eq!(cell(row(updated), "body"), text("edited"));
-    assert_eq!(client.take_reports(), Vec::new());
+    client.flush_reports();
+    assert!(seen.borrow().is_empty());
     // The cells are sealed, not empty: the server stores no empty value.
     for stored in all(&server, Query::from("notes")).unwrap() {
         assert_ne!(cell(&stored, "note"), Value::Bytes(Vec::new()));
@@ -1234,9 +1240,7 @@ fn omitted_encrypted_columns_are_sealed_when_a_row_is_created() {
 /// for any other value is answered.
 #[test]
 fn searching_for_a_column_s_default_is_refused() {
-    let Migrated {
-        client, db, space, ..
-    } = migrated_with_an_old_row(with_body_default());
+    let Migrated { db, space, .. } = migrated_with_an_old_row(with_body_default());
     let searched = |body: &str| {
         Query::from("notes")
             .filter(eq(col("projectId"), lit(Value::Uuid(space))))
@@ -1248,7 +1252,6 @@ fn searching_for_a_column_s_default_is_refused() {
     let found = all(&db, searched("written")).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(cell(&found[0], "body"), text("written"));
-    client.take_reports();
 }
 
 /// Contract: on columns the table had from its first version, every row
@@ -1282,6 +1285,7 @@ fn searching_for_a_default_finds_rows_where_every_row_has_a_token() {
     let mut written = note(space, "written");
     written.insert("note".to_owned(), text("noted"));
     block_on(db.insert("notes", written, Default::default())).unwrap();
+    let seen = observe_reports(&client);
     let ids = |filter: jazz::query::Predicate| {
         let query = Query::from("notes")
             .filter(eq(col("projectId"), lit(Value::Uuid(space))))
@@ -1294,7 +1298,8 @@ fn searching_for_a_default_finds_rows_where_every_row_has_a_token() {
     };
     assert_eq!(ids(eq(col("body"), lit(text("untitled")))), [omitted]);
     assert_eq!(ids(eq(col("note"), lit(Value::Nullable(None)))), [omitted]);
-    assert_eq!(client.take_reports(), Vec::new());
+    client.flush_reports();
+    assert!(seen.borrow().is_empty());
 }
 
 /// Contract: an upsert of a row that is its own space seals the encrypted
@@ -1312,6 +1317,7 @@ fn a_self_space_upsert_that_creates_its_row_seals_what_it_omits() {
     let label = |text_value: &str| BTreeMap::from([("label".to_owned(), text(text_value))]);
     let row = jazz::ids::RowUuid(vault);
     block_on(db.upsert("vaults", row, label("created"), Default::default())).unwrap();
+    let seen = observe_reports(&client);
     let read = || all(&db, Query::from("vaults")).unwrap();
     assert_eq!(cell(&read()[0], "secret"), Value::Nullable(None));
 
@@ -1325,5 +1331,6 @@ fn a_self_space_upsert_that_creates_its_row_seals_what_it_omits() {
         cell(&rows[0], "secret"),
         Value::Nullable(Some(Box::new(text(SECRET))))
     );
-    assert_eq!(client.take_reports(), Vec::new());
+    client.flush_reports();
+    assert!(seen.borrow().is_empty());
 }
