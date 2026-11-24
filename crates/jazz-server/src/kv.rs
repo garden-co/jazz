@@ -8,8 +8,8 @@
 //! rows use too, and wait for it (at most the one runtime job or tick slice
 //! in progress). The store commits with `synchronous = FULL`, so a returned
 //! write is durable and `flush` has nothing left to do. Reads see what was
-//! committed when they begin, on a connection of their own: they never wait
-//! for the runtime.
+//! committed when they begin. Reads on a separate connection do not wait
+//! for the runtime. Reads on the store thread wait for preceding work.
 
 use std::sync::{Arc, mpsc};
 
@@ -61,7 +61,7 @@ impl HostKv {
     /// has committed, without waiting for the store's thread (a held runtime
     /// job does not delay it). On a shared in-memory database that
     /// connection is locked out while the store's connection holds a write;
-    /// use [`Self::get_on_store`] where that can matter.
+    /// use [`Self::all_on_store`] where that can matter.
     #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
@@ -69,26 +69,16 @@ impl HostKv {
             .map_err(|error| error.to_string())
     }
 
-    /// The value at `key`, read on the store's own thread and connection,
-    /// after the work it is doing. A second connection to a shared in-memory
-    /// database is locked out while the store's connection holds a write and
-    /// waits out its busy timeout before it fails, so a read that may
-    /// arrive during one (the deploy's read of kept declarations) goes here.
-    #[cfg(test)]
-    pub(crate) fn get_on_store(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        let key = key.to_vec();
-        self.call(move |tables, table| jazz::db::block_on(tables.host_get(table, &key)))
-    }
-
-    /// Every pair of the table, read on the store's own thread in one job
-    /// (see [`Self::get_on_store`]): a single read, so what a caller then
-    /// checks against it is one moment of the table.
+    /// Every pair of the table, read on the store's own connection in one
+    /// job. This waits for an open write rather than reading through a
+    /// second connection, which can be locked out on a memory store.
     pub(crate) fn all_on_store(&self) -> KvResult<Vec<HostPair>> {
         self.call(move |tables, table| jazz::db::block_on(tables.host_prefix(table, &[])))
     }
 
     /// Write `value` at `key` unless a value is there already: the value
     /// in force afterwards, `None` when it is `value`.
+    #[cfg(test)]
     pub(crate) fn put_if_absent(&self, key: &[u8], value: &[u8]) -> KvResult<Option<Vec<u8>>> {
         let (key, value) = (key.to_vec(), value.to_vec());
         self.call(move |tables, table| {

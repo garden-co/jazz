@@ -88,22 +88,7 @@ pub(crate) async fn deploy_body(
              the server's runtime has none",
         ));
     }
-    if !staged.response.changed {
-        // Nothing to commit, but the runtime's view of the catalogue may be
-        // behind the store's: a deployment that committed and then failed
-        // before reloading it is retried here. Reloading is cheap, and a
-        // backend publishes its bundle once per boot.
-        if let Some(runtime) = state.runtime() {
-            runtime
-                .reload_catalogue()
-                .await
-                .map_err(DeployError::internal)?;
-        }
-        keep_declarations(kept.as_ref(), &deployment.first_declared)?;
-        return Ok(deployment.staged.response);
-    }
-    let new_bundle = staged.new_bundle();
-    let kept_values = match &kept {
+    let kept_values: Vec<_> = match &kept {
         Some(_) => deployment
             .first_declared
             .iter()
@@ -111,6 +96,18 @@ pub(crate) async fn deploy_body(
             .collect(),
         None => Vec::new(),
     };
+    if !staged.response.changed && kept_values.is_empty() {
+        // A deployment may have committed before its runtime reloaded the
+        // catalogue. Reload on retry even when there is nothing to keep.
+        if let Some(runtime) = state.runtime() {
+            runtime
+                .reload_catalogue()
+                .await
+                .map_err(DeployError::internal)?;
+        }
+        return Ok(deployment.staged.response);
+    }
+    let new_bundle = staged.new_bundle();
     let genesis = deployment.genesis()?;
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
@@ -146,7 +143,13 @@ pub(crate) async fn deploy_body(
         .catalogue_store
         .check_unchanged(staged)
         .map_err(DeployError::invalid)?;
-    let change = change(&runtime, &deployment).await?;
+    let change = if staged.response.changed {
+        change(&runtime, &deployment).await?
+    } else {
+        // Declarations for an already admitted version need the same
+        // stored-column check as those kept during admission.
+        Default::default()
+    };
     // The deployment's rows and admissions commit together on the store's
     // thread, or not at all. New permissions reach every session at once:
     // with a bundle new to this store, the same job ends the sessions pinned
@@ -167,35 +170,6 @@ pub(crate) async fn deploy_body(
         .map_err(DeployError::internal)?;
     applied?;
     Ok(deployment.staged.response)
-}
-
-/// Keep the declarations of each version deployed with them for the first
-/// time when the deployment changes no catalogue row. A deployment that does
-/// change the catalogue keeps them in the transaction that commits it
-/// (`deploy_body`), so a conflicting kept value refuses it before anything is
-/// live. A version whose declarations are kept already keeps them, and a
-/// deployment that names different ones for it is refused rather than
-/// ignored.
-fn keep_declarations(
-    kept: Option<&crate::kv::HostKv>,
-    first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
-) -> Result<(), DeployError> {
-    let Some(kept) = kept else {
-        return Ok(());
-    };
-    for (version, stored) in first {
-        if let Some(existing) = kept
-            .put_if_absent(&version.0, stored)
-            .map_err(DeployError::internal)?
-            && existing != *stored
-        {
-            return Err(DeployError::invalid(format!(
-                "schema version {version} was deployed with other encryption declarations, \
-                 which its cells are sealed under; the deployment names different ones"
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)
