@@ -4,8 +4,6 @@
 //! provisional reads over this store's own pending writes, and the durable
 //! fate of one of its commits.
 
-use std::collections::BTreeMap;
-
 use super::{BatchKind, Db, Error, ErrorCode, PreparedQuery, ReadOpts, ReadSpec, ReadTier, TxRef};
 use crate::ids::NodeUuid;
 use crate::values::CurrentRow;
@@ -201,15 +199,7 @@ impl Db {
         let me = *inner.identity.node.as_bytes();
         match inner.settled(me, tx).await? {
             Some(Some(at)) => return Ok(TransactionFate::Accepted(at.seq)),
-            Some(None) => {
-                let kept: BTreeMap<u64, Error> = inner
-                    .rejected_transactions()
-                    .await?
-                    .into_iter()
-                    .map(|rejected| (rejected.seq, rejected.error))
-                    .collect();
-                return Ok(TransactionFate::Refused(kept.get(&tx).cloned()));
-            }
+            Some(None) => return Ok(TransactionFate::Refused(inner.rejected_error(tx).await?)),
             None => {}
         }
         Ok(if inner.unsettled_own().contains(&tx) {

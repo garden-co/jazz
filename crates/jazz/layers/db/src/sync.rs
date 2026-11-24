@@ -7749,6 +7749,27 @@ impl Store {
         Ok(())
     }
 
+    /// The kept error for one refused commit.
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) async fn rejected_error(&self, tx: u64) -> Result<Option<Error>, Error> {
+        if !self.has_rejected_store().await? {
+            return Ok(None);
+        }
+        let error = self
+            .conn
+            .cached_row(
+                "SELECT error FROM _jazz_rejected WHERE tx = ?1",
+                [tx as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .await
+            .optional()
+            .map_err(storage)?;
+        error
+            .map(|error| decode_stored(&error).map(from_wire_error))
+            .transpose()
+    }
+
     /// The refused commits in the retry store, oldest first.
     pub(crate) async fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
         if !self.has_rejected_store().await? {

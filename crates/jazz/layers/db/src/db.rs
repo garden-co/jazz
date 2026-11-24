@@ -7994,20 +7994,7 @@ impl Store {
         key: &[u8],
         seq: u64,
     ) -> Result<bool, Error> {
-        let before = self.own_pos(seq.saturating_sub(1));
-        let cut = Cut {
-            unsettled: false,
-            seq: before,
-            own: self.own_rank(seq.saturating_sub(1)),
-            extra: Vec::new(),
-            overlay: None,
-            inserted: Arc::default(),
-        };
-        Ok(matches!(
-            self.existing_at(&table.stored, row, key, Some(&cut))
-                .await?,
-            Some((_, false))
-        ))
+        Ok(self.deleted_before(table, row, key, seq).await? == Some(false))
     }
 
     /// Whether the row had any version, live or deleted, in the state a
@@ -8019,10 +8006,21 @@ impl Store {
         key: &[u8],
         seq: u64,
     ) -> Result<bool, Error> {
+        Ok(self.deleted_before(table, row, key, seq).await?.is_some())
+    }
+
+    async fn deleted_before(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<bool>, Error> {
+        let before = seq.saturating_sub(1);
         let cut = Cut {
             unsettled: false,
-            seq: self.own_pos(seq.saturating_sub(1)),
-            own: self.own_rank(seq.saturating_sub(1)),
+            seq: self.own_pos(before),
+            own: self.own_rank(before),
             extra: Vec::new(),
             overlay: None,
             inserted: Arc::default(),
@@ -8030,7 +8028,7 @@ impl Store {
         Ok(self
             .existing_at(&table.stored, row, key, Some(&cut))
             .await?
-            .is_some())
+            .map(|(_, deleted)| deleted))
     }
 
     /// A USING or read-for-write check of the row a write acts on
