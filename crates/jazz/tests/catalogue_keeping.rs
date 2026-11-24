@@ -27,13 +27,13 @@ fn open() -> Db {
     .unwrap()
 }
 
-fn change() -> CatalogueChange {
+fn change(table: &str, version: u64) -> CatalogueChange {
     let schema = SchemaBuilder::new()
-        .table(TableSchemaBuilder::new("notes").column("title", ColumnType::Text))
+        .table(TableSchemaBuilder::new(table).column("title", ColumnType::Text))
         .build();
     CatalogueChange {
         put: CataloguePut {
-            schemas: vec![(schema, 1)],
+            schemas: vec![(schema, version)],
             ..Default::default()
         },
         ..Default::default()
@@ -48,27 +48,18 @@ fn change() -> CatalogueChange {
 fn a_change_keeps_host_values_with_it_or_not_at_all() {
     let db = open();
     let kept = |value: &[u8]| vec![(KEPT, b"k".to_vec(), value.to_vec())];
-    block_on(db.apply_catalogue_checked(change(), &kept(b"a"), async |_| Ok(()))).unwrap();
+    block_on(db.apply_catalogue_checked(change("notes", 1), &kept(b"a"), async |_| Ok(())))
+        .unwrap();
     assert_eq!(
         jazz::db::block_on(db.host_get(KEPT, b"k")).unwrap(),
         Some(b"a".to_vec())
     );
     assert_eq!(jazz::db::block_on(db.catalogue()).unwrap().schemas.len(), 1);
     // The same value again is not a conflict.
-    block_on(db.apply_catalogue_checked(change(), &kept(b"a"), async |_| Ok(()))).unwrap();
+    block_on(db.apply_catalogue_checked(change("notes", 1), &kept(b"a"), async |_| Ok(())))
+        .unwrap();
 
-    let other = {
-        let schema = SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("other").column("title", ColumnType::Text))
-            .build();
-        CatalogueChange {
-            put: CataloguePut {
-                schemas: vec![(schema, 2)],
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    };
+    let other = change("other", 2);
     let error = block_on(db.apply_catalogue_checked(other, &kept(b"b"), async |_| Ok(())))
         .expect_err("a different value for a kept key");
     assert_eq!(error.code, jazz::db::ErrorCode::Schema, "{error}");
@@ -100,18 +91,7 @@ fn a_failed_change_leaves_no_earlier_kept_value_behind() {
     ))
     .unwrap();
     let before = jazz::db::block_on(db.catalogue()).unwrap().schemas.len();
-    let other = {
-        let schema = SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("other").column("title", ColumnType::Text))
-            .build();
-        CatalogueChange {
-            put: CataloguePut {
-                schemas: vec![(schema, 2)],
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    };
+    let other = change("other", 2);
     let kept = [
         (KEPT, b"first".to_vec(), b"1".to_vec()),
         (KEPT, b"k".to_vec(), b"conflicting".to_vec()),

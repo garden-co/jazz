@@ -55,6 +55,16 @@ fn permissions(project_read: &str) -> String {
     )
 }
 
+const KEEPS_FRAGMENT_APP: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+    "tables": { "notes": { "columns": { "done": "boolean" } } },
+    "history": { "v1": { "tables": { "notes": {
+        "columns": { "title": "bytes", "done": "boolean" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+    "migrations": [{ "from": "v1", "migrate": { "notes": {
+        "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+const KEEPS_FRAGMENT_PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+    "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+
 fn refusal(result: Result<impl std::fmt::Debug, ArtifactError>) -> String {
     result.expect_err("refused").to_string()
 }
@@ -295,6 +305,11 @@ fn unknown_encryption_keys_are_refused_in_the_app_file() {
             && error.contains("unknown key `from`"),
         "{error}"
     );
+    let mut entry: serde_json::Value = serde_json::from_str(tasks_entry()).unwrap();
+    entry["columns"]["notes"] =
+        serde_json::json!({"type": "int", "from": "legacy", "convert": "parse"});
+    let error = refusal(load_app(app(&entry.to_string()).as_bytes()));
+    assert!(error.contains("unknown key `convert`"), "{error}");
 }
 
 /// Alice receives the nested location when an array element names an unknown field.
@@ -762,6 +777,10 @@ fn an_app_table_with_the_reserved_prefix_is_refused_in_every_version() {
             "__e2ee_notes": { "columns": { "x": "string" } }
         } } },
         "migrations": [{ "from": "v1", "migrate": { "notes": { "done": { "add": "boolean", "default": false } } } }] }"#;
+    assert!(
+        load_app(br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json", "tables": { "_e2ee_notes": { "columns": { "title": "string" } } } }"#)
+            .is_ok()
+    );
     let error = refusal(load_app(older.as_bytes()));
     assert!(error.contains("history"), "{error}");
     assert!(error.contains("are reserved for Jazz's own"), "{error}");
@@ -940,36 +959,6 @@ fn an_encrypted_enum_default_must_be_a_variant() {
         error.contains("the declared default is not a value of its type"),
         "{error}"
     );
-}
-
-/// The app-file reader refuses a source on either an existing or a fresh encrypted column.
-#[test]
-fn a_column_cannot_declare_a_conversion_source() {
-    let version = |columns: &str, entry: &str, migrate: &str| {
-        format!(
-            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-            "tables": {{ "notes": {{ "columns": {columns},
-                "encryption": {{ "space": "id", "scope": "notes", "columns": {entry} }} }} }},
-            "history": {{ "v1": {{ "tables": {{ "notes": {{
-                "columns": {{ "title": "bytes", "legacy": "string" }},
-                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }} }} }} }} }} }},
-            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {migrate} }} }}] }}"#
-        )
-    };
-    let over = version(
-        r#"{ "title": "bytes", "legacy": "string", "done": "boolean" }"#,
-        r#"{ "title": { "type": "int", "from": "legacy", "convert": "parse" } }"#,
-        r#"{ "done": { "add": "boolean", "default": false } }"#,
-    );
-    let error = refusal(load_app(over.as_bytes()));
-    assert!(error.contains("unknown key `from`"), "{error}");
-
-    let into_new = version(
-        r#"{ "title": "bytes", "title2": { "type": "bytes", "default": "" } }"#,
-        r#"{ "title2": { "type": "int", "from": "title", "convert": "parse" } }"#,
-        r#"{ "title2": { "add": "bytes", "default": "" }, "legacy": { "drop": "string", "backwardsDefault": "" } }"#,
-    );
-    assert!(refusal(load_app(into_new.as_bytes())).contains("unknown key `from`"));
 }
 
 /// Existing tables cannot add equality. Removing equality drops the token column in the same step.
@@ -1296,15 +1285,8 @@ fn reserved_column_names_cannot_be_encrypted_columns() {
 /// ```
 #[test]
 fn a_version_without_declarations_keeps_the_system_tables_after_an_encrypted_one() {
-    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-        "tables": { "notes": { "columns": { "done": "boolean" } } },
-        "history": { "v1": { "tables": { "notes": {
-            "columns": { "title": "bytes", "done": "boolean" },
-            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
-        "migrations": [{ "from": "v1", "migrate": { "notes": {
-            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
-    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let file = KEEPS_FRAGMENT_APP;
+    let permissions = KEEPS_FRAGMENT_PERMISSIONS;
     let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     // Both versions hold the fragment, though only v1 declares encryption.
     assert!(
@@ -1415,15 +1397,8 @@ fn historical_versions_refuse_unknown_encryption_keys() {
 #[test]
 fn the_backend_loader_accepts_a_version_that_keeps_the_system_tables() {
     use jazz::tools::deployment::artifact::load_backend;
-    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-        "tables": { "notes": { "columns": { "done": "boolean" } } },
-        "history": { "v1": { "tables": { "notes": {
-            "columns": { "title": "bytes", "done": "boolean" },
-            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
-        "migrations": [{ "from": "v1", "migrate": { "notes": {
-            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
-    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let file = KEEPS_FRAGMENT_APP;
+    let permissions = KEEPS_FRAGMENT_PERMISSIONS;
     let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     let body = loaded.deployment_body(false);
     let bound = |encryption: serde_json::Value| {

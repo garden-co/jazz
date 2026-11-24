@@ -11,7 +11,7 @@ use crate::common;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use duplex_transport::duplex;
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, block_on};
@@ -60,37 +60,13 @@ fn inherits_from(operation: Operation) -> PolicyExpr {
     }
 }
 
-/// The members of a space see each other: `MEMBER(session)`.
-fn member_of_same_space() -> PolicyExpr {
-    exists(
-        MEMBERS,
-        vec![
-            cmp("scopeId", this("scopeId")),
-            cmp("identifier", this("identifier")),
-            cmp("accountId", me()),
-        ],
-    )
-}
-
 /// Each shape of correlation an address policy takes: `M(projects)` on the
 /// space table (primary `identifier = this.id`), `MEMBER` on the members
 /// table (primary `scopeId = this.scopeId`), the creator clause (a row-id
 /// join on `identifier`) and `InheritsFrom` (the project's own policies
 /// reached through `identifier`).
 fn space_tables() -> SchemaBuilder {
-    let member_of_this_project = exists(
-        MEMBERS,
-        vec![
-            cmp(
-                "scopeId",
-                PolicyValue::TableIdentity {
-                    table: "projects".to_owned(),
-                },
-            ),
-            cmp("identifier", this("id")),
-            cmp("accountId", me()),
-        ],
-    );
+    let member_of_this_project = common::member_of_space(MEMBERS, "projects", "id");
     let creator = exists(
         "projects",
         vec![
@@ -128,7 +104,7 @@ fn space_tables() -> SchemaBuilder {
                     TablePolicies::new()
                         .with_select(PolicyExpr::Or(vec![
                             cmp("accountId", me()),
-                            member_of_same_space(),
+                            common::member_of_same_space(MEMBERS),
                         ]))
                         .with_insert(PolicyExpr::Or(vec![
                             manages.clone(),
@@ -192,6 +168,13 @@ fn person(n: u8) -> Value {
     account(AuthorSubject::for_test_bytes([n; 16]))
 }
 
+fn tick_ordered(server: &Db, replica: &Db, ticks: usize) {
+    for _ in 0..ticks {
+        block_on(replica.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+}
+
 /// A replica serving `MEMBER` (correlated on `scopeId` and `identifier`)
 /// loads and watches the member rows of one space, matched on both columns
 /// at once: not every space's of the same table, which share `scopeId`.
@@ -207,14 +190,8 @@ fn person(n: u8) -> Value {
 /// ```
 #[test]
 fn a_two_column_correlation_loads_and_watches_one_space() {
-    let server = block_on(Db::open_history_complete(DbConfig::new(
-        compile_schema(&space_tables().build()),
-        DbIdentity {
-            node: NodeUuid::from_bytes([0xee; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    )))
-    .unwrap();
+    let schema = space_tables().build();
+    let server = open_authority(&schema);
     let projects = Value::Uuid(
         jazz::db::block_on(server.table_identity("projects"))
             .unwrap()
@@ -225,34 +202,17 @@ fn a_two_column_correlation_loads_and_watches_one_space() {
         RowUuid::from_bytes([0x11; 16]),
         RowUuid::from_bytes([0x22; 16]),
     );
-    let insert = |table: &str, cells: BTreeMap<String, Value>| {
-        block_on(server.insert(table, cells, InsertOptions::default())).unwrap();
-    };
     // The member rows alone decide who reads them: no project row is read.
-    let member = |project: RowUuid, who: Value| {
-        BTreeMap::from([
-            ("scopeId".to_owned(), projects.clone()),
-            ("identifier".to_owned(), Value::Uuid(project.0)),
-            ("accountId".to_owned(), who),
-        ])
-    };
     for (project, who) in [
         (p1, account(alice())),
         (p1, person(0xb0)),
         (p2, account(alice())),
         (p2, person(0xc0)),
     ] {
-        insert(MEMBERS, member(project, who));
+        add_member(&server, &projects, project, who);
     }
 
-    let replica = block_on(Db::open(DbConfig::new(
-        compile_schema(&space_tables().build()),
-        DbIdentity {
-            node: NodeUuid::from_bytes([0xa1; 16]),
-            author: alice(),
-        },
-    )))
-    .unwrap();
+    let replica = open_as(&schema, 0xa1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
     jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
@@ -264,45 +224,25 @@ fn a_two_column_correlation_loads_and_watches_one_space() {
         )
         .unwrap();
     let _stream = block_on(replica.subscribe(&mine, ReadOpts::default())).unwrap();
-    let pump = || {
-        for _ in 0..20 {
-            block_on(replica.tick()).unwrap();
-            block_on(server.tick()).unwrap();
-        }
-    };
-    // The member rows the replica holds, as (project, account).
-    let held = || {
-        let every = replica.prepare_query(&Query::from(MEMBERS)).unwrap();
-        block_on(replica.all(&every, ReadOpts::for_read_tier(ReadTier::LocalOnly)))
-            .unwrap()
-            .into_iter()
-            .map(|row| {
-                (
-                    row.cell("identifier").expect("identifier"),
-                    row.cell("accountId").expect("accountId"),
-                )
-            })
-            .map(|(project, who)| (format!("{project:?}"), format!("{who:?}")))
-            .collect::<BTreeSet<_>>()
-    };
-    let pair = |project: RowUuid, who: Value| {
-        (format!("{:?}", Value::Uuid(project.0)), format!("{who:?}"))
-    };
+    let pump = || tick_ordered(&server, &replica, 20);
     pump();
     assert_eq!(
-        held(),
-        BTreeSet::from([pair(p1, account(alice())), pair(p1, person(0xb0))])
+        members_held(&replica),
+        BTreeSet::from([
+            member_held(&projects, p1, account(alice())),
+            member_held(&projects, p1, person(0xb0)),
+        ])
     );
 
-    insert(MEMBERS, member(p1, person(0xd0)));
-    insert(MEMBERS, member(p2, person(0xe0)));
+    add_member(&server, &projects, p1, person(0xd0));
+    add_member(&server, &projects, p2, person(0xe0));
     pump();
     assert_eq!(
-        held(),
+        members_held(&replica),
         BTreeSet::from([
-            pair(p1, account(alice())),
-            pair(p1, person(0xb0)),
-            pair(p1, person(0xd0)),
+            member_held(&projects, p1, account(alice())),
+            member_held(&projects, p1, person(0xb0)),
+            member_held(&projects, p1, person(0xd0)),
         ])
     );
 }
@@ -560,12 +500,7 @@ fn table_identity_correlation_follows_one_tables_spaces() {
     jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let all_projects = replica.prepare_query(&Query::from("projects")).unwrap();
     let _stream = block_on(replica.subscribe(&all_projects, ReadOpts::default())).unwrap();
-    let pump = || {
-        for _ in 0..20 {
-            block_on(replica.tick()).unwrap();
-            block_on(server.tick()).unwrap();
-        }
-    };
+    let pump = || tick_ordered(&server, &replica, 20);
     pump();
     assert_eq!(row_ids(&replica, "projects"), vec![x]);
     assert_eq!(
@@ -672,12 +607,7 @@ fn a_null_correlated_cell_follows_no_space_by_table_identity_alone() {
     jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let notes = replica.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(replica.subscribe(&notes, ReadOpts::default())).unwrap();
-    let pump = || {
-        for _ in 0..20 {
-            block_on(replica.tick()).unwrap();
-            block_on(server.tick()).unwrap();
-        }
-    };
+    let pump = || tick_ordered(&server, &replica, 20);
     pump();
     assert_eq!(
         row_ids(&replica, "notes")
@@ -792,12 +722,7 @@ fn a_correlation_on_differently_stored_columns_follows_its_rows() {
     jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let docs = replica.prepare_query(&Query::from("docs")).unwrap();
     let _stream = block_on(replica.subscribe(&docs, ReadOpts::default())).unwrap();
-    let pump = || {
-        for _ in 0..20 {
-            block_on(replica.tick()).unwrap();
-            block_on(server.tick()).unwrap();
-        }
-    };
+    let pump = || tick_ordered(&server, &replica, 20);
     pump();
     assert_eq!(row_ids(&replica, "docs"), vec![doc]);
     assert_eq!(row_ids(&replica, "grants"), vec![g1]);

@@ -46,6 +46,21 @@ const TOKEN_KEY: u8 = 0x33;
 /// `space_roots(space)`, the internal rows a first write to a space stages;
 /// and `closed(space)`, which nobody may write.
 fn schema() -> JazzSchema {
+    schema_with_notes_body(true)
+}
+
+fn schema_with_notes_body(has_body: bool) -> JazzSchema {
+    let mut notes = TableSchemaBuilder::new("notes")
+        .fk_column("projectId", "projects")
+        .column("title", ColumnType::Text);
+    if has_body {
+        notes = notes
+            .column("body", ColumnType::Bytea)
+            .nullable_column("__e2ee_eq_body", ColumnType::Bytea);
+    }
+    notes = notes
+        .nullable_column("attachment", ColumnType::Bytea)
+        .policies(allow_all_policies());
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -53,15 +68,7 @@ fn schema() -> JazzSchema {
                     .column("name", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Text)
-                    .column("body", ColumnType::Bytea)
-                    .nullable_column("__e2ee_eq_body", ColumnType::Bytea)
-                    .nullable_column("attachment", ColumnType::Bytea)
-                    .policies(allow_all_policies()),
-            )
+            .table(notes)
             .table(
                 TableSchemaBuilder::new("comments")
                     .fk_column("noteId", "notes")
@@ -1871,43 +1878,7 @@ fn transaction_fates_survive_a_restart() {
 
 /// `schema()` before `notes` had `body` and its tokens.
 fn without_body() -> JazzSchema {
-    compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("projects")
-                    .column("name", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Text)
-                    .nullable_column("attachment", ColumnType::Bytea)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("comments")
-                    .fk_column("noteId", "notes")
-                    .column("text", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("vaults")
-                    .nullable_column("secret", ColumnType::Bytea)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("space_roots")
-                    .column("space", ColumnType::Uuid)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("closed")
-                    .column("space", ColumnType::Uuid)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
-            )
-            .build(),
-    )
+    schema_with_notes_body(false)
 }
 
 /// The migration that adds `body`, giving the rows stored before it the
