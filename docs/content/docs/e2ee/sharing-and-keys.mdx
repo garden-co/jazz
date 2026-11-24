@@ -85,6 +85,8 @@ writes nothing. If the space already has a key, a member whose device is waiting
 `rotation-needs-key`. Retry once the device has the current key. The same code can also mean the
 device cannot confirm the space's key state. If the device sees that its account has no membership,
 it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
+If the server hides the key root and the device has no evidence of it, `rotate` returns `0` for an
+active member, just as it does for a space that has never had a key.
 
 If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
 
