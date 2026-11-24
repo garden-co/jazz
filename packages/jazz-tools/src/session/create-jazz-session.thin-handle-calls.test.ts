@@ -169,6 +169,21 @@ function sync(run: () => unknown): unknown {
 }
 
 describe("calls on a db.encryption handle taken while thin", () => {
+  it("waits for local-first before dispatching an account reset", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    const resetAccount = vi.spyOn(Encryption.prototype, "resetAccount").mockResolvedValue("active");
+    const reset = kept.encryption.resetAccount();
+    await expect.poll(() => gate.calls).toBe(1);
+    expect(resetAccount).not.toHaveBeenCalled();
+    gate.release();
+    await expect(reset).resolves.toBe("active");
+    expect(isThinDb(kept)).toBe(false);
+    expect(resetAccount).toHaveBeenCalledOnce();
+  }, 60_000);
+
   it("recovery.create() refuses and itself starts the load", async () => {
     const host = await serve();
     // No background upgrade: only the call can start the load.

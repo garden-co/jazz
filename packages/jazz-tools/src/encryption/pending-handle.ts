@@ -88,12 +88,17 @@ export function pendingEncryption(host: PendingEncryptionHost): Encryption {
         if (lifecycle) return undefined;
         if (synchronous) throw host.refuseSync(name);
         if (path.length === 1 && LISTENERS.has(path[0]!)) return listen(path[0]!, args[0]);
-        // A caller's own `ready({ timeoutMs })` shortens the wait; the host keeps its cap.
-        const own =
-          name === "ready" ? (args[0] as { timeoutMs?: number } | undefined)?.timeoutMs : undefined;
-        return host
-          .resolve(typeof own === "number" ? own : undefined)
-          .then((next) => call(next, path, args));
+        if (name === "ready") {
+          const options = args[0] as Parameters<Encryption["ready"]>[0];
+          const timeoutMs = options?.timeoutMs ?? 30_000;
+          const started = Date.now();
+          return host
+            .resolve(timeoutMs)
+            .then((next) =>
+              next.ready({ timeoutMs: Math.max(0, timeoutMs - (Date.now() - started)) }),
+            );
+        }
+        return host.resolve().then((next) => call(next, path, args));
       },
     });
 

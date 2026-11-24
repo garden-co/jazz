@@ -1543,20 +1543,25 @@ the 32 secret bytes, created and read with user verification required
 
 ### 2.10 Sign-out, account change and device linking
 
-- **Sign-out** closes every live owner synchronously: in-flight operations are
-  cancelled, owned secret buffers erased, pending approvals and recovery drafts
-  disposed, and late results never reach a later session. Private records stay
-  on disk (§6.4) so a later offline sign-in can reopen.
+- **Sign-out.** When teardown starts, the TypeScript client refuses new
+  encryption calls and discards late results from the departing handle. It
+  allows up to one second for native encryption shutdown, including pending
+  private-store writes, then closes the runtime. Closing disposes its owned
+  secrets and approvals. Private records stay on disk (§6.4) so a later
+  offline sign-in can reopen.
 - **Account change.** An encryption handle bound to one account refuses
   operations for another ("does not match the admitted account").
 - **Same-account upgrade.** A stored encryption handle follows an in-place
   upgrade of the same account and encryption configuration. It is invalidated
   by sign-out, by an account or configuration change, and by a reopen after a
   failed logout (the reopened session gets a fresh owner; the old handle stays
-  closed). Owned approvals and drafts do not survive.
-- **Linking a device to an account.** While the link is pending, operations
-  wait for it within their own deadline; synchronous calls refuse. The handle
-  follows only if the account and configuration are unchanged.
+  closed). A logout that fails before teardown leaves the current client open.
+  Approvals owned by a closed handle cannot be used through that handle.
+- **Linking a device to an account.** The session detaches and closes its
+  current client before asking the registry to link the device. During the
+  transition, `session.db` throws and tells the caller to wait for the
+  session's `ready` status. After linking, get the encryption handle from the
+  new client.
 
 ### 2.11 Account reset
 
@@ -2446,8 +2451,8 @@ decrypted) and reported. A row whose space coordinate is not a string is
 reported against the space column as `invalid-ciphertext`. Any other error fails the read. Reports are
 deduplicated per account by `(table, id, column, code)` in a bounded
 least-recently-used set of 10,000 entries; a listener registered later first
-receives the reports still in that set. A console warning names table, row and
-column, never content. One-shot and subscription results carry metadata for
+receives the reports still in that set. Apps can log the table, row and column
+from these reports, which contain no cell content. One-shot and subscription results carry metadata for
 the rows that read omitted. In TypeScript, `unreadableRows(result)` returns
 their table, row ID, column and reason code. The runtime's report listeners
 also receive reports, including for rows that were returned. See the
@@ -2843,9 +2848,9 @@ before it, the device has nothing to compare with (§8).
   record and every held key bound to it (for a device-account store, together with
   the store's deletion). A tab that signs out while another holds the store
   keeps them. The wipe deletes the client's core storage first and the
-  private E2EE records second; if the second step fails, sign-out reports an
-  unfinished wipe. This sign-out wipe requires the persistent browser driver.
-  The memory driver closes the runtime and skips the private-store wipe. See
+  private E2EE records second. If the second step fails, sign-out reports an
+  unfinished wipe. With the memory driver, sign-out closes the in-memory
+  replica and still wipes the saved private E2EE records. See
   the [driver check](../../../packages/jazz-tools/src/session/create-jazz-session.ts#L318)
   and [browser sign-out tests](../../../packages/jazz-tools/tests/browser/encryption.server.test.ts#L647).
 - Browser `deleteClientStorage` deletes the active namespace’s database and

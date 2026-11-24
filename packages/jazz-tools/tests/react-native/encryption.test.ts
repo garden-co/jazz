@@ -80,10 +80,20 @@ it("opens an encrypted device from the public React Native session over the app'
   await expect(write.wait({ tier: "global" })).resolves.toEqual(write.value);
   await expect(first.db.one(app.tasks.where({ id: write.value.id }))).resolves.toEqual(write.value);
 
+  await first.db.disconnect();
+  const local = first.db.insert(app.tasks, { projectId, title: "local draft" });
+  await local.wait({ tier: "local" });
+  await first.db.deleteClientStorage();
   await first.close();
   const reopened = await createJazzClient(config);
   cleanups.push(() => reopened.close());
   await expect(reopened.db.encryption.deviceId()).resolves.toBe(device);
+  await expect
+    .poll(() => reopened.db.one(app.tasks.where({ id: write.value.id })), {
+      timeout: 30_000,
+    })
+    .toEqual(write.value);
+  await expect(reopened.db.one(app.tasks.where({ id: local.value.id }))).resolves.toBeNull();
 
   await expect(async () => {
     const write = backend.jazz.db.insert(app.tasks, {

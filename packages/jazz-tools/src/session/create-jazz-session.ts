@@ -314,26 +314,30 @@ export async function openBrowserSessionCore(
   );
   const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);
-  // A memory-only client has no storage to wipe.
-  const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
+  const persistentReplica = config.driver?.type !== "memory";
+  const keepsDataOnDevice = persistentReplica || !!clientConfig.encryption;
+  const wipesOnSignOut = !!clearOnSignOut && keepsDataOnDevice;
   // Accounts this page is opening a local-first client for.
   const opening = new Set<string>();
   /** Delete `account`'s store through its worker, without opening it. */
   const deleteStore = async (account: string) => {
-    // `jazz-tools/local-first` brings it in the app's own chunk; a loader
-    // that gives only `createClient` gets it loaded here.
-    const deleteLocalFirstStore =
-      (await loadLocalFirst!()).deleteLocalFirstStore ??
-      (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
-    const outcome = await deleteLocalFirstStore({
-      ...clientConfig,
-      accountId: account,
-      accountRegistryAuthority: registry,
-    });
+    if (persistentReplica) {
+      // `jazz-tools/local-first` brings it in the app's own chunk; a loader
+      // that gives only `createClient` gets it loaded here.
+      const deleteLocalFirstStore =
+        (await loadLocalFirst!()).deleteLocalFirstStore ??
+        (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
+      const outcome = await deleteLocalFirstStore({
+        ...clientConfig,
+        accountId: account,
+        accountRegistryAuthority: registry,
+      });
+      if (outcome === "held") return outcome;
+    }
     // The account's encryption keys go with its data: on a shared device the
     // next user, or any script on the origin, could otherwise still use them.
     // Only once the store is gone: a tab that still holds it keeps its keys.
-    if (outcome === "deleted" && clientConfig.encryption) {
+    if (clientConfig.encryption) {
       const { wipeEncryptionKeys } = await import("../encryption/wipe-keys.js");
       await wipeEncryptionKeys({
         store: clientConfig.encryption.store,
@@ -342,7 +346,7 @@ export async function openBrowserSessionCore(
         accountId: account,
       });
     }
-    return outcome;
+    return "deleted" as const;
   };
   // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
   const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;
@@ -436,9 +440,9 @@ export async function openBrowserSessionCore(
       clearOnSignOut: wipesOnSignOut,
       wipeSignedOut: replicas ? wipeSignedOut : undefined,
       openClient: (account) =>
-        config.driver?.type === "memory"
-          ? openLocalFirst(createClient, account)
-          : openReplica(createClient, account),
+        keepsDataOnDevice
+          ? openReplica(createClient, account)
+          : openLocalFirst(createClient, account),
       // No backend says who is signed in: there is nothing to ask again.
       decorate: () => ({ reauthenticate: async () => {} }),
     });
@@ -543,7 +547,6 @@ export async function openBrowserSessionCore(
   session = await createJazzSessionOwner({
     accounts,
     initial: coreInitial(initial),
-    // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
     ...(replicas
       ? {

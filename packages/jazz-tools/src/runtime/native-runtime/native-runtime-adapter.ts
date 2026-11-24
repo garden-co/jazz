@@ -165,6 +165,7 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   unavailable: "failed",
 };
 const NATIVE_LINK_POLL_MS = 250;
+const ENCRYPTION_SHUTDOWN_TIMEOUT_MS = 1_000;
 
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
@@ -1173,7 +1174,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private encryptionState?: {
     native: NativeEncryptionDb;
     createHandle: EncryptionHandleFactory;
-    serving: { stop(): void };
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">;
     uses: SpaceUse;
     handle?: Encryption;
     online?: boolean;
@@ -1231,7 +1232,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /** Adopt the private store bridge of the React Native foreground. */
   attachEncryption(
     native: NativeEncryptionDb,
-    serving: { stop(): void },
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">,
     createHandle: EncryptionHandleFactory,
   ): void {
     this.bindEncryption(native, serving, createHandle);
@@ -1240,7 +1241,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private bindEncryption(
     native: NativeEncryptionDb,
-    serving: { stop(): void },
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">,
     createHandle: EncryptionHandleFactory,
   ): void {
     this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
@@ -1271,7 +1272,10 @@ export class NativeRuntimeAdapter implements Runtime {
   encryptionHandle(): Encryption | undefined {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
-    state.handle ??= state.createHandle(state.native);
+    if (!state.handle) {
+      state.handle = state.createHandle(state.native);
+      if (this.ownerRuntime.closed) state.handle.stop();
+    }
     return state.handle;
   }
 
@@ -2149,9 +2153,12 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (this.phase === "closing" || this.phase === "closed") return;
+    // Deleting the native store already retired its foreground and encryption runtime.
+    const encryption = this.phase === "storageCleared" ? undefined : this.encryptionState;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.advancePhase("closing");
+    this.encryptionState?.handle?.stop();
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -2163,10 +2170,19 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       try {
-        await this.encryptionState?.native.encryptionCall("shutdown");
+        if (encryption) {
+          // Keep serving private-store requests while shutdown finishes, then
+          // release the runtime even if the store has stopped responding.
+          const deadline = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, ENCRYPTION_SHUTDOWN_TIMEOUT_MS);
+          });
+          await Promise.race([encryption.native.encryptionCall("shutdown"), deadline]);
+        }
       } finally {
+        clearTimeout(timer);
         this.closeRuntimeState();
         await this.db.close?.();
       }
@@ -2186,6 +2202,7 @@ export class NativeRuntimeAdapter implements Runtime {
   discard(): void {
     if (this.phase !== "open") return;
     this.advancePhase("closed");
+    this.encryptionState?.handle?.stop();
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -2212,8 +2229,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const write of this.writes.values()) {
       write.close?.();
     }
-    this.encryptionState?.handle?.stop();
-    this.encryptionState?.serving.stop();
+    this.encryptionState?.serving.stop({ cancelPending: true });
     this.subscriptions.clear();
     this.pendingTxs.clear();
     this.completedTxs.clear();
