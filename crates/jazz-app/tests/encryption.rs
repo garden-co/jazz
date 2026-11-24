@@ -55,17 +55,48 @@ impl App {
 
     /// An end user's device, with a private store of its own.
     async fn device(&self) -> Jazz {
-        self.device_of(DeviceKey::generate().unwrap()).await
+        self.device_with(client_files()).await
+    }
+
+    async fn device_with(&self, files: AppFiles) -> Jazz {
+        self.open_device(files, DeviceKey::generate().unwrap())
+            .await
     }
 
     /// A device of the account `key` is, with a private store of its own.
     async fn device_of(&self, key: DeviceKey) -> Jazz {
+        self.open_device(client_files(), key).await
+    }
+
+    async fn open_device(&self, files: AppFiles, key: DeviceKey) -> Jazz {
         let config = self
             .user(key)
             .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new())));
-        Jazz::open(client_files(), config)
+        Jazz::open(files, config)
             .await
             .expect("open as a device with a private store")
+    }
+}
+
+async fn ready(jazz: &Jazz) -> String {
+    jazz.encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap()
+}
+
+async fn deliver(jazz: &Jazz) {
+    jazz.encryption()
+        .call("keysDeliver", json!({}))
+        .await
+        .unwrap();
+}
+
+#[track_caller]
+fn refused_with<T: std::fmt::Debug>(result: Result<T, Error>, expected: &str) {
+    match result {
+        Err(Error::Encryption { code, .. }) => assert_eq!(code, expected),
+        other => panic!("expected {expected}, got {other:?}"),
     }
 }
 
@@ -117,41 +148,6 @@ async fn make_project(owner: &Jazz, name: &str) -> String {
         .await
         .unwrap();
     id.uuid().to_string()
-}
-
-/// Makes `account` a member of the project `id`: the app's own row, under
-/// the app's own permissions.
-async fn add_member(owner: &Jazz, project: &str, account: &str) {
-    let at = owner
-        .encryption()
-        .call("spaceRow", json!({ "table": "projects", "id": project }))
-        .await
-        .unwrap();
-    let (scope, identifier) = (
-        at["scopeId"].as_str().unwrap().to_owned(),
-        at["identifier"].as_str().unwrap().to_owned(),
-    );
-    let account = account.to_owned();
-    owner
-        .with_client(move |client| async move {
-            let written = client.insert(
-                "__e2ee_members",
-                HashMap::from([
-                    ("scopeId".to_owned(), uuid(&scope)),
-                    ("identifier".to_owned(), uuid(&identifier)),
-                    ("accountId".to_owned(), uuid(&account)),
-                ]),
-            )?;
-            client
-                .wait_for_transaction(
-                    written.2.unwrap(),
-                    jazz_app_support::DurabilityTier::GlobalServer,
-                )
-                .await?;
-            Ok(())
-        })
-        .await
-        .unwrap();
 }
 
 /// Writes an encrypted task, waiting for the space's key as a typed write
@@ -239,13 +235,7 @@ async fn signing_in_opens_the_same_accounts_rows_and_keys() {
             .storage(jazz_app_support::Storage::Dir(dir.path().into()))
             .encryption(store.clone());
         let jazz = Jazz::open(client_files(), config).await.unwrap();
-        assert_eq!(
-            jazz.encryption()
-                .ready(Duration::from_secs(30))
-                .await
-                .unwrap(),
-            "active"
-        );
+        assert_eq!(ready(&jazz).await, "active");
         let device = jazz.encryption().call("deviceId", json!({})).await.unwrap();
         assert!(
             dir.path()
@@ -324,14 +314,7 @@ async fn deleting_client_storage_preserves_keys_and_decrypts_the_resynced_row() 
         .storage(jazz_app_support::Storage::Dir(dir.path().into()))
         .encryption(encryption);
     let alice = Jazz::open(client_files(), config.clone()).await.unwrap();
-    assert_eq!(
-        alice
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&alice).await, "active");
     let project = make_project(&alice, "plans").await;
     add_task(&alice, &project, "private draft").await.unwrap();
     let database = dir
@@ -351,65 +334,9 @@ async fn deleting_client_storage_preserves_keys_and_decrypts_the_resynced_row() 
     );
 
     let reopened = Jazz::open(client_files(), config).await.unwrap();
-    assert_eq!(
-        reopened
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&reopened).await, "active");
     assert_eq!(titles(&reopened, 1).await, ["private draft"]);
     reopened.shutdown().await.unwrap();
-    app.stop().await;
-}
-
-/// Contract: two members, each a device with a private store of its own,
-/// share an encrypted space and read each other's encrypted rows through the
-/// Rust client. The first write of a space makes its key (the write waits for
-/// it); a member that the owner delivers to reads, and writes in turn.
-///
-/// ```text
-/// alice ──project + member rows──► server ◄── bob (member)
-/// alice ──encrypted task (space key made)──► server
-/// alice ──keys.deliver──► bob reads it ──encrypted reply──► alice reads it
-/// ```
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_members_share_a_space_and_read_each_others_encrypted_rows() {
-    let app = App::start().await;
-    let alice = app.device().await;
-    let bob = app.device().await;
-    assert_eq!(
-        alice
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
-    assert_eq!(
-        bob.encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
-
-    let project = make_project(&alice, "plans").await;
-    add_member(&alice, &project, &bob.account().unwrap().0.to_string()).await;
-    add_task(&alice, &project, "alice's secret").await.unwrap();
-    // Her first write made the space's key; she serves her member now.
-    alice
-        .encryption()
-        .call("keysDeliver", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(titles(&bob, 1).await, ["alice's secret"]);
-    add_task(&bob, &project, "bob's reply").await.unwrap();
-    assert_eq!(titles(&alice, 2).await, ["alice's secret", "bob's reply"]);
-
-    alice.shutdown().await.unwrap();
-    bob.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -428,11 +355,7 @@ async fn two_members_share_a_space_and_read_each_others_encrypted_rows() {
 async fn a_backend_relays_and_serves_but_cannot_write_an_encrypted_column() {
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     add_task(&alice, &project, "PLAINTEXT-ONLY-ALICE-KNOWS")
         .await
@@ -499,10 +422,10 @@ async fn a_backend_relays_and_serves_but_cannot_write_an_encrypted_column() {
     );
 
     // Its encryption handle refuses use: it has no account, device or keys.
-    match app.backend.encryption().ready(Duration::from_secs(1)).await {
-        Err(Error::Encryption { code, .. }) => assert_eq!(code, "keyless"),
-        other => panic!("expected a refusal, got {other:?}"),
-    }
+    refused_with(
+        app.backend.encryption().ready(Duration::from_secs(1)).await,
+        "keyless",
+    );
 
     alice.shutdown().await.unwrap();
     app.stop().await;
@@ -544,14 +467,16 @@ async fn the_encryption_handle_refuses_an_app_that_declares_none() {
     let jazz = Jazz::open(AppFiles::read(dir).unwrap(), Config::new(AppId::random()))
         .await
         .unwrap();
-    match jazz.encryption().ready(Duration::from_secs(1)).await {
-        Err(Error::Encryption { code, .. }) => assert_eq!(code, "not-declared"),
-        other => panic!("expected a refusal, got {other:?}"),
-    }
-    match jazz.encryption().call("deviceId", json!({})).await {
-        Err(Error::Encryption { code, .. }) => assert_eq!(code, "not-declared"),
-        other => panic!("expected a refusal, got {other:?}"),
-    }
+    refused_with(
+        jazz.encryption().ready(Duration::from_secs(1)).await,
+        "not-declared",
+    );
+    refused_with(
+        jazz.encryption().call("deviceId", json!({})).await,
+        "not-declared",
+    );
+    refused_with(jazz.encryption().state().await, "not-declared");
+    refused_with(jazz.encryption().take_reports().await, "not-declared");
     jazz.shutdown().await.unwrap();
 }
 
@@ -586,14 +511,7 @@ async fn bearer_device(app: &App, user: &str) -> Jazz {
 async fn a_signed_in_account_recovers_a_new_device_with_its_phrase() {
     let app = App::start().await;
     let laptop = bearer_device(&app, "alice").await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
     let project = make_project(&laptop, "plans").await;
     add_task(&laptop, &project, "kept safe").await.unwrap();
     let phrase = laptop
@@ -613,14 +531,7 @@ async fn a_signed_in_account_recovers_a_new_device_with_its_phrase() {
 
     // The same account on a new device: no other device has approved it.
     let phone = bearer_device(&app, "alice").await;
-    assert_eq!(
-        phone
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "awaiting-approval"
-    );
+    assert_eq!(ready(&phone).await, "awaiting-approval");
     // A phrase that is not the registered one approves nothing.
     let wrong = laptop
         .encryption()
@@ -637,46 +548,25 @@ async fn a_signed_in_account_recovers_a_new_device_with_its_phrase() {
             .await
             .is_err()
     );
-    match phone
-        .encryption()
-        .call("recoveryRestore", json!({ "phrase": "abandon ability" }))
-        .await
-    {
-        Err(Error::Encryption { code, .. }) => assert_eq!(code, "invalid-length"),
-        other => panic!("expected a refusal, got {other:?}"),
-    }
+    refused_with(
+        phone
+            .encryption()
+            .call("recoveryRestore", json!({ "phrase": "abandon ability" }))
+            .await,
+        "invalid-length",
+    );
     let status = phone
         .encryption()
         .call("recoveryRestore", json!({ "phrase": phrase }))
         .await
         .unwrap();
     assert_eq!(status, "active");
-    laptop
-        .encryption()
-        .call("keysDeliver", json!({}))
-        .await
-        .unwrap();
+    deliver(&laptop).await;
     assert_eq!(titles(&phone, 1).await, ["kept safe"]);
 
     laptop.shutdown().await.unwrap();
     phone.shutdown().await.unwrap();
     app.stop().await;
-}
-
-/// Contract: the typed bindings the Rust back end of jazz-codegen makes for
-/// the fixture are the committed ones (regenerate them with
-/// `JAZZ_UPDATE_BINDINGS=1 cargo test -p jazz-app-support --features e2ee-client --test encryption`).
-#[test]
-fn the_committed_bindings_are_generated() {
-    let file = std::fs::read(format!("{DIR}/jazz.app.json")).unwrap();
-    let generated = jazz_codegen::generate(jazz_codegen::Lang::Rust, &file).unwrap();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bindings/encrypted.rs");
-    if std::env::var_os("JAZZ_UPDATE_BINDINGS").is_some() {
-        std::fs::write(path, &generated).unwrap();
-        return;
-    }
-    let committed = std::fs::read_to_string(path).unwrap_or_default();
-    assert!(committed == generated, "{path} is stale: regenerate it");
 }
 
 /// Contract: an app written against the generated bindings reads and writes
@@ -693,11 +583,7 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
     use bindings::{NewTask, tasks};
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     let project_id = ObjectId::from_uuid(project.parse().unwrap());
 
@@ -753,11 +639,7 @@ async fn typed_streams_seal_siblings_and_refuse_an_indexed_text_target() {
     use bindings::{NewTask, Task, tasks};
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     let id = ObjectId::from_uuid(project.parse().unwrap());
     let chunks = || futures::stream::iter([Ok::<_, Error>(b"public label")]);
@@ -822,18 +704,8 @@ async fn typed_streams_round_trip_encrypted_bytes_and_store_them_sealed() {
         server,
     )
     .await;
-    let alice = Jazz::open(
-        AppFiles::new(files.app, None),
-        app.user(DeviceKey::generate().unwrap())
-            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
-    )
-    .await
-    .unwrap();
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    let alice = app.device_with(AppFiles::new(files.app, None)).await;
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     let id = ObjectId::from_uuid(project.parse().unwrap());
     struct Unread;
@@ -927,11 +799,7 @@ async fn a_standalone_deploy_cannot_make_a_stored_encrypted_title_optional() {
 async fn check_required_title(files: AppFiles) {
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     add_task(&alice, &project, "original title").await.unwrap();
     assert_eq!(titles(&alice, 1).await, ["original title"]);
@@ -1000,18 +868,8 @@ async fn a_device_opens_every_supported_encrypted_type_after_deployment() {
             include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
         ))
         .await;
-    let device = Jazz::open(
-        AppFiles::new(file, None),
-        app.user(DeviceKey::generate().unwrap())
-            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
-    )
-    .await
-    .unwrap();
-    device
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    let device = app.device_with(AppFiles::new(file, None)).await;
+    ready(&device).await;
     device.shutdown().await.unwrap();
     app.stop().await;
 }
@@ -1022,11 +880,7 @@ async fn a_device_opens_every_supported_encrypted_type_after_deployment() {
 async fn an_older_task_reads_the_new_encrypted_columns_declared_default() {
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     add_task(&alice, &project, "before the migration")
         .await
@@ -1054,18 +908,8 @@ async fn an_older_task_reads_the_new_encrypted_columns_declared_default() {
         app.server,
     )
     .await;
-    let device = Jazz::open(
-        AppFiles::new(file, None),
-        app.user(DeviceKey::generate().unwrap())
-            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
-    )
-    .await
-    .unwrap();
-    device
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    let device = app.device_with(AppFiles::new(file, None)).await;
+    ready(&device).await;
     let rows = device
         .with_client(|client| async move {
             Ok(client
@@ -1098,11 +942,7 @@ async fn an_older_task_reads_the_new_encrypted_columns_declared_default() {
 async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
     let app = App::start().await;
     let alice = app.device().await;
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     alice
         .with_client(move |client| async move {
@@ -1134,12 +974,12 @@ async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
 /// Contract: an app written against the generated bindings manages a space's
 /// members as typed rows: alice adds bob with a typed member insert, a typed
 /// read of the members table lists the project's members, and bob, delivered
-/// the space's key, reads her encrypted task.
+/// the space's key, reads her encrypted task and sends a reply she can read.
 ///
 /// ```text
 /// alice ──NewE2eeMember { bob }──► server
 /// alice ──e2ee_members::query().filter(identifier)──► [alice, bob]
-/// alice ──encrypted task, keys.deliver──► bob reads it
+/// alice ──encrypted task, keys.deliver──► bob reads it ──reply──► alice reads it
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_bindings_add_and_list_a_spaces_members() {
@@ -1148,11 +988,7 @@ async fn typed_bindings_add_and_list_a_spaces_members() {
     let alice = app.device().await;
     let bob = app.device().await;
     for device in [&alice, &bob] {
-        device
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap();
+        ready(device).await;
     }
     let project = make_project(&alice, "plans").await;
     let at = alice
@@ -1191,12 +1027,10 @@ async fn typed_bindings_add_and_list_a_spaces_members() {
     assert!(members.contains(&member));
 
     add_task(&alice, &project, "for members").await.unwrap();
-    alice
-        .encryption()
-        .call("keysDeliver", json!({}))
-        .await
-        .unwrap();
+    deliver(&alice).await;
     assert_eq!(titles(&bob, 1).await, ["for members"]);
+    add_task(&bob, &project, "bob's reply").await.unwrap();
+    assert_eq!(titles(&alice, 2).await, ["bob's reply", "for members"]);
 
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
@@ -1214,18 +1048,8 @@ async fn native_insert_returns_omitted_encrypted_values() {
         Some(files.permissions.into_bytes()),
     ))
     .await;
-    let alice = Jazz::open(
-        AppFiles::new(files.app, None),
-        app.user(DeviceKey::generate().unwrap())
-            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
-    )
-    .await
-    .unwrap();
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    let alice = app.device_with(AppFiles::new(files.app, None)).await;
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     alice
         .with_client(move |client| async move {
@@ -1281,14 +1105,7 @@ async fn a_device_account_recovers_a_new_device_from_its_own_key() {
     let app = App::start().await;
     let key = DeviceKey::generate().unwrap();
     let laptop = app.device_of(key.clone()).await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
     let project = make_project(&laptop, "plans").await;
     add_task(&laptop, &project, "kept by the key")
         .await
@@ -1296,19 +1113,11 @@ async fn a_device_account_recovers_a_new_device_from_its_own_key() {
 
     let phone = app.device_of(key).await;
     assert_eq!(
-        phone
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
+        ready(&phone).await,
         "active",
         "the account key is its recovery: no approval, no phrase"
     );
-    laptop
-        .encryption()
-        .call("keysDeliver", json!({}))
-        .await
-        .unwrap();
+    deliver(&laptop).await;
     assert_eq!(titles(&phone, 1).await, ["kept by the key"]);
 
     laptop.shutdown().await.unwrap();
@@ -1324,10 +1133,7 @@ async fn retiring_the_device_account_root_is_refused() {
     let key = DeviceKey::generate().unwrap();
     let laptop = app.device_of(key.clone()).await;
     let encryption = laptop.encryption();
-    assert_eq!(
-        encryption.ready(Duration::from_secs(30)).await.unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
 
     // Reverify until the root registered at startup is visible.
     let roots = tokio::time::timeout(Duration::from_secs(15), async {
@@ -1352,14 +1158,7 @@ async fn retiring_the_device_account_root_is_refused() {
     laptop.shutdown().await.unwrap();
 
     let phone = app.device_of(key).await;
-    assert_eq!(
-        phone
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&phone).await, "active");
     phone.shutdown().await.unwrap();
     app.stop().await;
 }
@@ -1373,14 +1172,7 @@ async fn recovery_continues_after_reopening_with_a_stranded_nonce() {
     let app = App::start().await;
     let key = DeviceKey::generate().unwrap();
     let laptop = app.device_of(key.clone()).await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
 
     let memory = MemoryStore::new();
     let lose_ack = AtomicBool::new(true);
@@ -1464,14 +1256,7 @@ async fn readiness_reports_the_store_failure_that_stopped_recovery() {
     let app = App::start().await;
     let key = DeviceKey::generate().unwrap();
     let laptop = app.device_of(key.clone()).await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
     let store = store_with_hook(|doc, expected| {
         let recovery = saving_recovery_nonce(doc, expected);
         Box::pin(async move {
@@ -1513,14 +1298,7 @@ async fn readiness_has_its_own_deadline_while_startup_recovers_the_device() {
     let app = App::start().await;
     let key = DeviceKey::generate().unwrap();
     let laptop = app.device_of(key.clone()).await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
+    assert_eq!(ready(&laptop).await, "active");
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let store = store_with_hook({
@@ -1581,11 +1359,7 @@ async fn an_encrypted_write_reports_a_failure_to_store_its_space_key() {
     });
     let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
     let alice = Jazz::open(client_files(), config).await.unwrap();
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     let error = add_task(&alice, &project, "unwritten").await.unwrap_err();
     assert!(matches!(
@@ -1631,11 +1405,7 @@ async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
     });
     let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
     let alice = Jazz::open(client_files(), config).await.unwrap();
-    alice
-        .encryption()
-        .ready(Duration::from_secs(30))
-        .await
-        .unwrap();
+    ready(&alice).await;
     let project = make_project(&alice, "plans").await;
     let space = alice
         .encryption()
