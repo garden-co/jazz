@@ -14,12 +14,11 @@
  * Usage: node dev/gates/server-excludes-e2ee-client.mjs [--self-test]
  */
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
 const FEATURE = "e2ee-client";
 
 /** The lines of a `cargo tree -e features` listing that name the feature. */
-export function e2eeClientLines(tree) {
+function e2eeClientLines(tree) {
   return tree.split("\n").filter((line) => line.includes(`"${FEATURE}"`));
 }
 
@@ -47,4 +46,4 @@ function main() {
   console.log(`jazz-server builds without ${FEATURE}`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main();
+main();

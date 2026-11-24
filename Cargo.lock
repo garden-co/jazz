@@ -2591,7 +2591,6 @@ dependencies = [
  "futures",
  "jazz-codegen",
  "jazz-core",
- "jazz-e2ee",
  "jazz-e2ee-client",
  "jazz-native-relay",
  "jazz-otel",
@@ -2604,11 +2603,9 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

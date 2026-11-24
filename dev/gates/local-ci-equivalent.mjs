@@ -363,11 +363,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    // jazz-core's integration tests again with the client's encryption hooks
-    // compiled in: the hook tests exist only then, and every other test must
-    // pass with the call sites built. A run of its own, so the workspace run
-    // above keeps the server's feature set.
-    command("jazz-core integration tests with e2ee-client", "node", [
+    // Run jazz-core's integration tests without the client encryption hooks,
+    // which the workspace run above unifies on through its binding crates.
+    command("jazz-core integration tests without e2ee-client", "node", [
       "dev/gates/run-rust-tests.mjs",
       "--require-nextest",
       "--timeout-seconds",
@@ -379,8 +377,9 @@ export const ciPartitions = Object.freeze({
       "jazz-core",
       "--test",
       "integration",
+      "--no-default-features",
       "--features",
-      "jazz-core/testing,jazz-core/e2ee-client",
+      "jazz-core/testing",
     ]),
     // The native relay's encryption tests exist only with its `e2ee-client`
     // feature, which no other run enables.
