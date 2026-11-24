@@ -1,3 +1,6 @@
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { queryObjects } from "node:v8";
 import { EncryptionRuntime, NapiDb } from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import {
@@ -52,7 +55,7 @@ function counting(store: PrivateStore) {
   return { store: wrapped, calls };
 }
 
-async function openEncrypted(store: PrivateStore, label: string) {
+async function openEncrypted(store: PrivateStore, label: string, path?: string) {
   const runtime = new EncryptionRuntime(
     new TextEncoder().encode(JSON.stringify(encryptedFile)),
     "napi-encryption-test",
@@ -65,11 +68,15 @@ async function openEncrypted(store: PrivateStore, label: string) {
   } finally {
     building.stop();
   }
-  const db = NapiDb.openMemoryEncrypted(encodeSchema(encrypted.wasmSchema), config(label), runtime);
+  const schema = encodeSchema(encrypted.wasmSchema);
+  const db = path
+    ? NapiDb.openPersistentEncrypted(path, schema, config(label), runtime)
+    : NapiDb.openMemoryEncrypted(schema, config(label), runtime);
   const serving = servePrivateStore(db, store);
   return {
     db,
     encryption: new Encryption(db),
+    stopServing: serving.stop,
     close: async () => {
       serving.stop();
       await db.close();
@@ -109,6 +116,37 @@ describe("encryption on the Node binding", () => {
     expect(await elsewhere.encryption.deviceId()).not.toBe(id);
     await elsewhere.close();
   });
+
+  it.each(["close", "drop"])(
+    "releases the encrypted owner's persistent store on %s",
+    async (end) => {
+      const path = await mkdtemp(`${tmpdir()}/encrypted-owner-`);
+      try {
+        const openAndRelease = async () => {
+          const owner = await openEncrypted(memoryPrivateStore(), "alice", path);
+          owner.stopServing();
+          expect(await readdir(path)).toContain("jazz.sqlite-wal");
+          if (end === "close") await owner.close();
+        };
+        await openAndRelease();
+        // SQLite removes the WAL when the last connection to the store closes.
+        if (end === "drop") {
+          await expect
+            .poll(async () => {
+              // queryObjects runs a full GC. Give N-API a turn to finalise the wrapper.
+              queryObjects(NapiDb);
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              return readdir(path);
+            })
+            .not.toContain("jazz.sqlite-wal");
+        } else {
+          expect(await readdir(path)).not.toContain("jazz.sqlite-wal");
+        }
+      } finally {
+        await rm(path, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("refuses an encrypted app opened as a plain database, and leaves a plain app alone", async () => {
     expect(() =>
