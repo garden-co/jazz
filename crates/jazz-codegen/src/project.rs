@@ -408,6 +408,68 @@ mod tests {
         check_recorded_history(Lang::Rust);
     }
 
+    fn notes(declaration: serde_json::Value, indexes: &[&str]) -> String {
+        serde_json::json!({
+            "format": 1,
+            "tables": { "notes": {
+                "columns": { "title": "string", "detail": "bytes" },
+                "indexes": indexes,
+                "encryption": { "space": "id", "scope": "notes", "columns": { "detail": declaration } }
+            } }
+        }).to_string()
+    }
+
+    /// Alice adds an index and appends an encrypted enum variant under its shipped sealed type.
+    #[test]
+    fn an_index_edit_can_widen_an_encrypted_enum() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let detail = |variants: &[&str]| {
+            serde_json::json!({
+                "type": { "enum": variants }, "sealedType": { "enum": ["a"] }
+            })
+        };
+        std::fs::write(&path, notes(detail(&["a", "b"]), &[])).unwrap();
+        generate(&dir, &langs, false).unwrap();
+        std::fs::write(&path, notes(detail(&["a", "b", "c"]), &["title"])).unwrap();
+
+        assert!(
+            !migrations_create(&dir, &langs, "index-title")
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            generate(&dir, &langs, false).unwrap().written,
+            [Lang::Rust.file()]
+        );
+        generate(&dir, &langs, true).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice's index edit cannot replace the plaintext type recorded in her Rust bindings.
+    #[test]
+    fn an_index_edit_cannot_retype_an_encrypted_column() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let bindings = dir.join(Lang::Rust.file());
+        std::fs::write(&path, notes("string?".into(), &[])).unwrap();
+        generate(&dir, &langs, false).unwrap();
+        let original = std::fs::read(&bindings).unwrap();
+        std::fs::write(&path, notes("int?".into(), &["title"])).unwrap();
+
+        for error in [
+            migrations_create(&dir, &langs, "index-title").unwrap_err(),
+            generate(&dir, &langs, false).unwrap_err(),
+            generate(&dir, &langs, true).unwrap_err(),
+        ] {
+            assert!(error.contains("notes.detail"), "{error}");
+        }
+        assert_eq!(std::fs::read(bindings).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Bindings headed as before alpha.66 still read: `--check` passes on
     /// them, and plain `generate` rewrites them with today's header.
     #[test]

@@ -3,7 +3,16 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
-import { generateTs, migrationsCreate, writeAppFiles } from "../dev/codegen-napi.js";
+import { publishLoadedDeployment, type LoadedDeployment } from "../dev/catalogue.js";
+import { startLocalJazzServer } from "../dev/dev-server.js";
+import {
+  generateForDir,
+  generateTs,
+  loadAppFiles,
+  migrationsCreate,
+  migrationsCreateForDir,
+  writeAppFiles,
+} from "../dev/codegen-napi.js";
 import { createAppMigration, generateApp } from "../dev/project.js";
 import { printTs } from "../printer/cli.js";
 
@@ -722,5 +731,76 @@ describe("migrations create over a shipped encrypted migration", () => {
     await expect(migrationsCreate(edited, bindings, "again")).rejects.toThrow(
       "jazz.app.json: migrations[0]: tasks.notes: the migration's backwardsDefault must be an empty byte string",
     );
+  });
+});
+
+describe("encrypted declarations across an index edit", () => {
+  function notes(detail: unknown, indexes: string[]) {
+    return JSON.stringify({
+      format: 1,
+      tables: {
+        notes: {
+          columns: { title: "string", rank: "int", detail: "bytes" },
+          indexes,
+          encryption: { scope: "notes", space: "id", columns: { detail } },
+        },
+      },
+    });
+  }
+
+  it("generates and deploys an appended enum under its shipped sealed type", async () => {
+    const { root } = await createWorkspace();
+    const path = join(root, "jazz.app.json");
+    const detail = (...variants: string[]) => ({
+      type: { enum: variants },
+      sealedType: { enum: ["a"] },
+    });
+    const permissions = JSON.stringify({
+      format: 1,
+      tables: {
+        notes: {
+          read: "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)",
+        },
+      },
+    });
+    const server = await startLocalJazzServer();
+    try {
+      const publish = async () =>
+        publishLoadedDeployment(
+          { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret },
+          (await loadAppFiles(await readFile(path, "utf8"), permissions)) as LoadedDeployment,
+        );
+      // The first deployment establishes the sealed type before either append.
+      await writeFile(path, notes({ enum: ["a"] }, ["rank"]));
+      await publish();
+      await writeFile(path, notes(detail("a", "b"), []));
+      await generateForDir(root);
+      const first = await publish();
+
+      await writeFile(path, notes(detail("a", "b", "c"), ["title"]));
+      expect((await migrationsCreateForDir(root, "index-title")).changed).toBe(false);
+      expect((await generateForDir(root)).written).toEqual(["jazz.generated.ts"]);
+      await generateForDir(root, { check: true });
+      const next = await publish();
+      expect(next.schema.status).toBe("published");
+      expect(next.schema.hash).not.toBe(first.schema.hash);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("refuses a new plaintext type and preserves the shipped bindings", async () => {
+    const { root } = await createWorkspace();
+    const path = join(root, "jazz.app.json");
+    const bindings = join(root, "jazz.generated.ts");
+    await writeFile(path, notes("string?", []));
+    await generateForDir(root);
+    const original = await readFile(bindings);
+    await writeFile(path, notes("int?", ["title"]));
+
+    await expect(migrationsCreateForDir(root, "index-title")).rejects.toThrow("notes.detail");
+    await expect(generateForDir(root)).rejects.toThrow("notes.detail");
+    await expect(generateForDir(root, { check: true })).rejects.toThrow("notes.detail");
+    expect(await readFile(bindings)).toEqual(original);
   });
 });

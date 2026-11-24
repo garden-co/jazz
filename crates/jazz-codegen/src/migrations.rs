@@ -96,14 +96,10 @@ pub fn create(
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
-        // No migration is written, so the file must load as it is: say why
-        // it doesn't. And the current version is the bindings' one, so it
-        // keeps their declarations, even when it declares none and so
-        // leaves out Jazz's system tables.
-        if let Err(error) = loaded {
-            return Err(CodegenError::from_artifact(error));
-        }
-        bindings::check_current_declarations(current_declared, &recorded)?;
+        // No migration will repair an invalid file. Once it loads, check the
+        // declarations against the version whose rows it will keep.
+        loaded.map_err(CodegenError::from_artifact)?;
+        bindings::check_index_transition(&recorded, to, current_declared)?;
         return Ok(Created {
             note: Some(
                 "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
