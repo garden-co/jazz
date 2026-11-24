@@ -45,6 +45,9 @@ export function markerToWrite({
   };
 }
 
+const pendingMarkerIds = new Map<string, string>();
+const pendingKey = (roomId: string, author: string) => JSON.stringify([roomId, author]);
+
 /**
  * Moves this reader's private marker to the newest message's time (or now)
  * while the room is open and the page is visible. A refused write is not
@@ -75,15 +78,13 @@ export function useMarkRead({
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
   const attempted = useRef<string | null>(null);
-  // The marker this hook inserted, until this reader's query shows it: a newer message can
-  // arrive first, and must move that marker rather than insert a second one.
-  const inserted = useRef<{ key: string; id: string } | null>(null);
-  // Once the query shows it, the query is the record: if the marker is later deleted (leaving
-  // the room deletes it), the next write inserts a new one.
+  const key = pendingKey(roomId, author);
+  // Keep an unobserved insert across leaving and reopening this room. Once the live query shows
+  // it, the query is the record: if the marker is later deleted, the next write inserts anew.
   useEffect(() => {
-    const id = inserted.current?.id;
-    if (id && markers?.some((marker) => marker.id === id)) inserted.current = null;
-  }, [markers]);
+    const id = pendingMarkerIds.get(key);
+    if (id && markers?.some((marker) => marker.id === id)) pendingMarkerIds.delete(key);
+  }, [key, markers]);
   const write = isVisible
     ? markerToWrite({ newest, decryptedIds, markers, markersUnreadable })
     : null;
@@ -94,14 +95,13 @@ export function useMarkRead({
     if (!hasWrite || !newestId || attempted.current === newestId) return;
     attempted.current = newestId;
     const lastReadAt = write!.lastReadAt;
-    const key = `${roomId}/${author}`;
-    const existing = markerId ?? (inserted.current?.key === key ? inserted.current.id : undefined);
+    const existing = markerId ?? pendingMarkerIds.get(key);
     const insertId = existing ? undefined : crypto.randomUUID();
     // A refused insert leaves no marker to move.
     const forget = () => {
-      if (insertId && inserted.current?.id === insertId) inserted.current = null;
+      if (insertId && pendingMarkerIds.get(key) === insertId) pendingMarkerIds.delete(key);
     };
-    if (insertId) inserted.current = { key, id: insertId };
+    if (insertId) pendingMarkerIds.set(key, insertId);
     try {
       const written = existing
         ? db.update(app.readMarkers, existing, { lastReadAt })
@@ -113,5 +113,5 @@ export function useMarkRead({
       forget();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [db, hasWrite, newestId, markerId, roomId, author]);
+  }, [db, hasWrite, newestId, markerId, roomId, author, key]);
 }

@@ -18,8 +18,10 @@ function Reader(props: Props) {
   return null;
 }
 const newest = { id: "m3", $createdAt: new Date("2026-01-03T00:00:00Z") };
+let roomSequence = 0;
+let testRoomId = "room";
 const props = (over: Partial<Props>): Props => ({
-  roomId: "room",
+  roomId: testRoomId,
   author: "alice-account",
   newest,
   decryptedIds: new Set(["m3", "m2"]),
@@ -29,7 +31,10 @@ const props = (over: Partial<Props>): Props => ({
 });
 const writes = () => db.insert.mock.calls.length + db.update.mock.calls.length;
 
-beforeEach(resetWorld);
+beforeEach(() => {
+  resetWorld();
+  testRoomId = `room-${++roomSequence}`;
+});
 afterEach(cleanup);
 
 describe("read marker writes", () => {
@@ -55,7 +60,7 @@ describe("read marker writes", () => {
   });
 
   it("writes one marker when the newest message is decrypted and newer than the marker", () => {
-    render(<Reader {...props({})} />);
+    render(<Reader {...props({ roomId: "room" })} />);
     expect(db.insert).toHaveBeenCalledTimes(1);
     const row = db.insert.mock.calls[0]![1] as { roomId: string; reader: string; lastReadAt: Date };
     expect(row.roomId).toBe("room");
@@ -90,6 +95,23 @@ describe("read marker writes", () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
     expect(db.update).toHaveBeenCalledTimes(1);
     expect(db.update.mock.calls[0]![1]).toBe(id);
+  });
+
+  it("moves a pending marker across a room unmount before its query shows it", () => {
+    const roomProps = props({ roomId: "remount-room", markers: [] });
+    const firstView = render(<Reader {...roomProps} />);
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const id = (db.insert.mock.calls[0]![2] as { id: string }).id;
+
+    firstView.unmount();
+    const secondView = render(<Reader {...roomProps} />);
+
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(db.update).toHaveBeenCalledTimes(1);
+    expect(db.update.mock.calls[0]![1]).toBe(id);
+    secondView.rerender(
+      <Reader {...roomProps} markers={[{ id, lastReadAt: newest.$createdAt }]} />,
+    );
   });
 
   it("inserts a new marker after the one it inserted was shown and then deleted", () => {
