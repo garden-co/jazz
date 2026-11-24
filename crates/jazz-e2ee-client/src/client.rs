@@ -652,6 +652,7 @@ impl E2eeClient {
                 .await
             {
                 Ok(_) => {
+                    self.ensure_open()?;
                     drop(documents);
                     return Ok(());
                 }
@@ -687,12 +688,20 @@ impl E2eeClient {
         f(&self.shared.keys.borrow().held)
     }
 
-    /// Closes the runtime after finding its scope wiped by another writer:
-    /// the device's secrets and the held keys are dropped and nothing more
-    /// is written.
-    fn close(&self) -> ClientError {
+    /// Closes the client and drops the device, account and held space keys.
+    pub(crate) fn close(&self) -> ClientError {
         self.shared.forget_secrets();
+        self.account.borrow_mut().take();
         ClientError::Closed
+    }
+
+    /// Refuses new writes, waits for the current store operation to settle,
+    /// and clears secrets while the host can still answer store requests.
+    pub(crate) async fn shutdown(&self) {
+        self.shared.keys.borrow_mut().closed = true;
+        let mut documents = self.documents.lock().await;
+        self.close();
+        *documents = Documents::default();
     }
 
     pub(crate) fn ensure_open(&self) -> Result<(), ClientError> {
@@ -845,6 +854,7 @@ impl E2eeClient {
                 .await
             {
                 Ok(revision) => {
+                    self.ensure_open()?;
                     documents
                         .floors
                         .insert(account_id.to_owned(), (Some(floor.clone()), revision));
@@ -917,6 +927,7 @@ impl E2eeClient {
                 return Err(error);
             }
         };
+        self.ensure_open()?;
         self.incarnation.set(incarnation);
         *self.shared.device.borrow_mut() = Some(device);
         Ok(())

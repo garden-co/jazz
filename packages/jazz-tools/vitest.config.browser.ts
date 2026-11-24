@@ -47,6 +47,7 @@ import {
   pageCacheKeepsSharedWorkerPages,
   sessionTabNavigationType,
 } from "./tests/browser/session-tab-node.js";
+import { encryptedSessionTab } from "./tests/browser/session-tab-encrypted-node.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
@@ -276,6 +277,8 @@ export default defineConfig({
         sessionTabHoldBackend: async (_context, id, hold) => holdSessionTabBackend(id, hold),
         sessionTabRun: async (_context, id, action, title) => runInSessionTab(id, action, title),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
+        encryptedSessionTab: async ({ context, page }, input) =>
+          encryptedSessionTab(context, page, input),
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
         sessionTabLeave: async (_context, id) => leaveSessionTab(id),
         sessionTabReturn: async (_context, id) => returnToSessionTab(id),

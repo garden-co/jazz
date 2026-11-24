@@ -442,6 +442,9 @@ impl Encryption {
     /// must be dropped for the runtime to be.
     pub fn stop(&self) {
         *self.main.borrow_mut() = None;
+        self.client.close();
+        self.approvals.borrow_mut().clear();
+        self.commands.borrow_mut().clear();
         if let Some(native) = &self.native {
             native.recovery.borrow_mut().take();
             *native.result.borrow_mut() = Verification::Failed(ClientError::Closed);
@@ -666,6 +669,14 @@ impl Encryption {
     }
 
     async fn run(&self, op: &str, args: &Value) -> Result<Value, String> {
+        if op == "shutdown" {
+            // The loop can be holding the store lock while waiting for its
+            // save to settle. Keep driving it until the client is closed.
+            self.client.shutdown().await;
+            self.stop();
+            return Ok(Value::Null);
+        }
+        self.client.ensure_open().map_err(describe)?;
         // The delivery pass belongs to the loop, which takes its turn itself.
         // A space's row is a local catalogue lookup: it never waits for the
         // loop's work.
@@ -674,6 +685,7 @@ impl Encryption {
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
+        client.ensure_open().map_err(describe)?;
         let text = |name: &str| -> Result<String, String> {
             args.get(name)
                 .and_then(Value::as_str)
@@ -709,6 +721,7 @@ impl Encryption {
                     .challenge_device(db, &device)
                     .await
                     .map_err(describe)?;
+                client.ensure_open().map_err(describe)?;
                 self.approvals.borrow_mut().insert(device.clone(), pending);
                 json!({ "deviceId": device })
             }
@@ -718,6 +731,7 @@ impl Encryption {
                 let pending = self.approvals.borrow_mut().remove(&device);
                 let pending = pending.ok_or("no approval was started for this device")?;
                 let code = client.approval_code_of(db, &pending).await;
+                client.ensure_open().map_err(describe)?;
                 self.approvals.borrow_mut().insert(device, pending);
                 json!(code.map_err(describe)?)
             }
@@ -728,6 +742,7 @@ impl Encryption {
                 let pending = pending.ok_or("no approval was started for this device")?;
                 let done = client.approve_device(db, &pending, &code).await;
                 if done.is_err() {
+                    client.ensure_open().map_err(describe)?;
                     self.approvals.borrow_mut().insert(device, pending);
                 }
                 done.map_err(describe)?;

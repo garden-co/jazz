@@ -2164,8 +2164,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     await this.coreOperation?.completion.catch(() => undefined);
     try {
-      this.closeRuntimeState();
-      await this.db.close?.();
+      try {
+        await this.encryptionState?.native.encryptionCall("shutdown");
+      } finally {
+        this.closeRuntimeState();
+        await this.db.close?.();
+      }
     } finally {
       this.advancePhase("closed");
     }
