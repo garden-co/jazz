@@ -13,6 +13,7 @@ function awaitingDevice(restore: () => Promise<string>) {
   const native = {
     encryptionCall: async (op: string, args: Record<string, unknown>) => {
       calls.push({ op, args });
+      if (op === "reportsForListener") return JSON.stringify({ active: [], queued: [] });
       if (op === "ready") return JSON.stringify("awaiting-approval");
       if (op === "recoveryRestore") return restore();
       throw new Error(`unexpected op ${op}`);
@@ -131,8 +132,9 @@ it("replays active unreadable reports to a new listener until withdrawn", async 
     space: { scopeId: "projects", id: "project" },
   };
   const pending = [JSON.stringify(report)];
+  let active = [report];
   const encryption = new Encryption({
-    encryptionCall: vi.fn(),
+    encryptionCall: async () => JSON.stringify({ active, queued: pending.splice(0) }),
     encryptionState: vi.fn(),
     takeEncryptionReports: () => pending.splice(0),
   });
@@ -148,12 +150,75 @@ it("replays active unreadable reports to a new listener until withdrawn", async 
     expect(second).toHaveBeenCalledExactlyOnceWith(report);
     expect(first).toHaveBeenCalledTimes(1);
 
+    active = [];
     pending.push(JSON.stringify({ ...report, type: "withdrawn" }));
     await vi.advanceTimersByTimeAsync(25);
     const third = vi.fn();
     encryption.onReport(third);
     await vi.advanceTimersByTimeAsync(25);
     expect(third).not.toHaveBeenCalled();
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not replay an unreadable row withdrawn while no listeners were attached", async () => {
+  vi.useFakeTimers();
+  const report = { type: "unreadable", table: "tasks", id: null, code: "key-pending" };
+  const pending = [JSON.stringify(report)];
+  let active = [report];
+  const encryption = new Encryption({
+    encryptionCall: async () => JSON.stringify({ active, queued: pending.splice(0) }),
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => pending.splice(0),
+  });
+  try {
+    const first = vi.fn();
+    const detach = encryption.onUnreadable(first);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(first).toHaveBeenCalledExactlyOnceWith(report);
+    detach();
+
+    active = [];
+    pending.push(JSON.stringify({ ...report, type: "withdrawn" }));
+    const next = vi.fn();
+    encryption.onUnreadable(next);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(next).not.toHaveBeenCalled();
+
+    active = [report];
+    pending.push(JSON.stringify(report));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(next).toHaveBeenCalledExactlyOnceWith(report);
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("replays all active reports to the first listener even after the event queue overflowed", async () => {
+  vi.useFakeTimers();
+  const active = Array.from({ length: 10_000 }, (_, id) => ({
+    type: "unreadable",
+    table: "tasks",
+    id: String(id),
+    column: "title",
+    code: "invalid-ciphertext",
+    space: null,
+  }));
+  const pending = active.slice(-1024).map((report) => JSON.stringify(report));
+  const encryption = new Encryption({
+    encryptionCall: async () => JSON.stringify({ active, queued: pending.splice(0) }),
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => pending.splice(0),
+  });
+  try {
+    const heard: unknown[] = [];
+    encryption.onUnreadable((report) => heard.push(report));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(heard).toHaveLength(10_000);
+    expect(heard).toEqual(active);
   } finally {
     encryption.stop();
     vi.useRealTimers();

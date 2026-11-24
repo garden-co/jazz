@@ -1021,6 +1021,10 @@ impl Shared {
         );
     }
 
+    pub(crate) fn held_reports(&self) -> Vec<Report> {
+        self.published.borrow().held()
+    }
+
     pub(crate) fn listen(&self, listener: Listener) {
         let held = {
             let mut published = self.published.borrow_mut();

@@ -658,6 +658,24 @@ impl Encryption {
             return Ok(Value::Null);
         }
         self.client.ensure_open().map_err(describe)?;
+        if op == "reportsForListener" {
+            // Flush and take the queue before sampling the held reports. The
+            // reports produced after this call go in the next poll.
+            let queued = self.take_reports();
+            let keys = self.client.shared.keys.borrow();
+            let active: Vec<_> = self
+                .client
+                .shared
+                .held_reports()
+                .iter()
+                .map(|report| {
+                    report_json(report, |scope| {
+                        keys.catalogue.as_ref()?.table_names.get(scope).cloned()
+                    })
+                })
+                .collect();
+            return Ok(json!({ "active": active, "queued": queued }));
+        }
         // The delivery pass belongs to the loop, which takes its turn itself.
         // A space's row is a local catalogue lookup: it never waits for the
         // loop's work.
@@ -1694,6 +1712,39 @@ mod tests {
             Err(crate::StoreError::Wiped) => (false, "wiped".to_owned()),
             Err(error) => (false, error.to_string()),
         }
+    }
+
+    /// Alice's first listener gets all 10,000 active unreadables even when
+    /// the host's event queue overflowed. Inject reports at the runtime to
+    /// exercise both limits without 10,000 database reads.
+    #[test]
+    fn a_new_listener_gets_the_active_set_after_event_queue_overflow() {
+        use jazz::e2ee::{Unreadable, UnreadableCode};
+        use jazz::ids::RowUuid;
+
+        let runtime = native_runtime_with_catalogue(true);
+        for id in 1..=10_000 {
+            runtime.client.shared.report(Report::Unreadable(Unreadable {
+                table: "notes".into(),
+                id: Some(RowUuid(uuid::Uuid::from_u128(id))),
+                column: Some("body".into()),
+                code: UnreadableCode::InvalidCiphertext,
+                space: None,
+            }));
+        }
+        let snapshot = run(runtime.call("reportsForListener".into(), Value::Null)).unwrap();
+        let active = snapshot["active"].as_array().unwrap();
+        assert_eq!(active.len(), 10_000);
+        assert_eq!(active[0]["id"], uuid::Uuid::from_u128(1).to_string());
+        let queued = snapshot["queued"].as_array().unwrap();
+        assert_eq!(queued.len(), MAX_REPORTS + 1);
+        let dropped: Value = serde_json::from_str(queued[0].as_str().unwrap()).unwrap();
+        assert_eq!(
+            dropped,
+            json!({ "type": "reports-dropped", "count": 10_000 - MAX_REPORTS })
+        );
+        assert!(runtime.take_reports().is_empty());
+        runtime.stop();
     }
 
     /// Alice's host delivers each report once and drains the client's raw copy
