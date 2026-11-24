@@ -136,9 +136,9 @@ fn record_co_published_by_a_reset_is_valid() {
 #[test]
 fn record_co_published_by_a_rotation_is_valid() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(3);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     ledger.rotate(
         &env,
         &laptop,
@@ -156,9 +156,9 @@ fn record_co_published_by_a_rotation_is_valid() {
 #[test]
 fn record_co_published_by_a_removal_is_signed_by_its_author() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(4);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     ledger.rotate(
         &env,
         &laptop,
@@ -176,7 +176,7 @@ fn record_at_a_bootstrap_signed_by_a_device_without_standing_is_not_valid() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(5);
     let laptop = env.device(&mut rng);
-    let stranger = env.device(&mut rng);
+    let mut stranger = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.request(&stranger, &mut rng);
@@ -189,7 +189,7 @@ fn record_at_a_bootstrap_signed_by_a_device_without_standing_is_not_valid() {
         .push(Accepted::new(root_at, forged.clone()));
     assert_eq!(valid_ids(&env, &ledger), [record_id(&ledger, 0)]);
 
-    ledger.approve(&env, &laptop, &stranger, &mut rng);
+    ledger.approve(&env, &laptop, &mut stranger, &mut rng);
     assert!(ledger.state(&env).is_active(&stranger.id));
     assert!(!valid_ids(&env, &ledger).contains(&forged.id));
 }
@@ -201,14 +201,14 @@ fn record_at_a_bootstrap_signed_by_a_device_without_standing_is_not_valid() {
 #[test]
 fn record_at_a_rotation_signed_by_another_device_is_not_valid() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(6);
-    let phone = env.device(&mut rng);
-    let tablet = env.device(&mut rng);
-    let stranger = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
+    let mut tablet = env.device(&mut rng);
+    let mut stranger = env.device(&mut rng);
     for device in [&phone, &tablet, &stranger] {
         ledger.request(device, &mut rng);
     }
-    ledger.approve(&env, &laptop, &phone, &mut rng);
-    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut tablet, &mut rng);
     let (at, rotation) = ledger.rotate(
         &env,
         &laptop,
@@ -229,7 +229,7 @@ fn record_at_a_rotation_signed_by_another_device_is_not_valid() {
         assert!(!valid.contains(id), "{id}");
     }
 
-    ledger.approve(&env, &laptop, &stranger, &mut rng);
+    ledger.approve(&env, &laptop, &mut stranger, &mut rng);
     assert!(ledger.state(&env).is_active(&stranger.id));
     let valid = valid_ids(&env, &ledger);
     for id in &forged {
@@ -248,12 +248,12 @@ fn later_publication_by_an_active_device_is_valid() {
     let migrated = Env::with(registry, sealing_with(OTHER_SEAL), ALICE);
     let mut rng = TestRandom(7);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
 
     let state = ledger.state(&env);
     let key = ledger.acquire(&env, &phone).unwrap();
@@ -310,11 +310,11 @@ fn later_publication_by_an_active_device_is_valid() {
 #[test]
 fn later_publication_by_a_device_that_was_not_active_is_not_valid() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(8);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let stranger = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
     ledger.request(&stranger, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     let (_, rotation) = ledger.rotate(
         &env,
         &laptop,
@@ -343,9 +343,9 @@ fn later_publication_for_an_epoch_no_longer_current_is_not_valid() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(9);
     let root_epoch = ledger.state(&env).epoch_id().to_owned();
     let root_key = *ledger.acquire(&env, &laptop).unwrap().key();
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
 
     // A record of the next epoch, accepted before the rotation creating it.
     let key = ledger.acquire(&env, &laptop).unwrap();
@@ -417,9 +417,9 @@ fn senders_seal_to_the_first_valid_record() {
 #[test]
 fn a_valid_record_that_does_not_derive_from_the_key_is_reported() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(11);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     ledger.rotate(
         &env,
         &laptop,
@@ -476,9 +476,9 @@ fn epoch_keys_reach_every_epoch_of_the_generation() {
     let root_key = *ledger.acquire(&env, &laptop).unwrap().key();
     let mut expected = vec![(ledger.state(&env).epoch_id().to_owned(), root_key)];
     for _ in 0..2 {
-        let phone = env.device(&mut rng);
+        let mut phone = env.device(&mut rng);
         ledger.request(&phone, &mut rng);
-        ledger.approve(&env, &laptop, &phone, &mut rng);
+        ledger.approve(&env, &laptop, &mut phone, &mut rng);
         let (_, rotation) = ledger.rotate(
             &env,
             &laptop,
@@ -521,9 +521,9 @@ fn epoch_keys_reach_every_epoch_of_the_generation() {
 #[test]
 fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(13);
-    let phone = env.device(&mut rng);
-    let tablet = env.device(&mut rng);
-    for device in [&phone, &tablet] {
+    let mut phone = env.device(&mut rng);
+    let mut tablet = env.device(&mut rng);
+    for device in [&mut phone, &mut tablet] {
         ledger.request(device, &mut rng);
         ledger.approve(&env, &laptop, device, &mut rng);
     }
@@ -643,12 +643,12 @@ fn a_record_signed_with_an_unsupported_signing_mechanism_is_skipped() {
     let reader = Env::new(ALICE);
     let mut rng = TestRandom(17);
     let laptop = env.device(&mut rng);
-    let phone = other_signing.device(&mut rng);
+    let mut phone = other_signing.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     let key = *ledger.acquire(&env, &laptop).unwrap().key();
     let epoch = ledger.state(&env).epoch_id().to_owned();
     let record = crafted(&env, &phone, &epoch, derived(&key), &mut rng);
@@ -749,7 +749,7 @@ fn a_record_of_an_unsupported_sealing_mechanism_is_skipped() {
 fn record_at_a_reset_signed_by_another_device_is_not_valid() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(16);
     let tablet = env.device(&mut rng);
-    let stranger = env.device(&mut rng);
+    let mut stranger = env.device(&mut rng);
     ledger.request(&tablet, &mut rng);
     ledger.request(&stranger, &mut rng);
     let (reset_at, key) = ledger.root(&env, &tablet, 1, &mut rng);
@@ -765,7 +765,7 @@ fn record_at_a_reset_signed_by_another_device_is_not_valid() {
     }
     assert_eq!(valid_ids(&env, &ledger), [record_id(&ledger, 1)]);
 
-    ledger.approve(&env, &tablet, &stranger, &mut rng);
+    ledger.approve(&env, &tablet, &mut stranger, &mut rng);
     assert!(ledger.state(&env).is_active(&stranger.id));
     let valid = valid_ids(&env, &ledger);
     for id in &forged {
@@ -783,12 +783,12 @@ fn own_selection_checks_derivation_against_the_current_read() {
     let env = Env::with(registry, Default::default(), ALICE);
     let mut rng = TestRandom(41);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     let epoch = ledger.state(&env).epoch_id().to_owned();
 
     // Keys taken before anything of the new mechanism is published.

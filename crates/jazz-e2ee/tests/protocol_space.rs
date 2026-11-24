@@ -2685,10 +2685,10 @@ fn non_derived_account_epoch(
     LocalDevice,
 ) {
     world.with_account(account, |entry, rng| {
-        let phone = entry.env.device(rng);
-        let tablet = entry.env.device(rng);
+        let mut phone = entry.env.device(rng);
+        let mut tablet = entry.env.device(rng);
         let approver = entry.device.clone();
-        for device in [&phone, &tablet] {
+        for device in [&mut phone, &mut tablet] {
             entry.ledger.request(device, rng);
             entry.ledger.approve(&entry.env, &approver, device, rng);
         }

@@ -55,16 +55,26 @@ struct Device {
 }
 
 fn device(server: &Db, who: AuthorSubject, store: MemoryStore, node: u8) -> Device {
+    device_with_wire(server, who, store, node).0
+}
+
+fn device_with_wire(
+    server: &Db,
+    who: AuthorSubject,
+    store: MemoryStore,
+    node: u8,
+) -> (Device, Rc<RefCell<Vec<u8>>>) {
     let settings = EncryptionSettings::default();
     let client = open_account(Rc::new(store), who, settings.clone(), None);
-    let (db, link) = session(&client, server, who, &settings, node, None);
-    Device {
+    let (db, link, wire) = recorded_session(&client, server, who, &settings, node, None);
+    let device = Device {
         who,
         client,
         db,
         _link: Some(link),
         live: Default::default(),
-    }
+    };
+    (device, wire)
 }
 
 impl Device {
@@ -185,10 +195,11 @@ fn marks(device: &Device, space: uuid::Uuid) -> Vec<KeyMark> {
 fn a_first_encrypted_write_creates_its_space() {
     within(|| {
         let server = secure_authority_with(&EncryptionSettings::default(), None);
-        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        let (alice, wire) = device_with_wire(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
         let space = new_project(&server, &alice, "plans");
 
+        wire.borrow_mut().clear();
         write_note(&server, &alice, space, SECRET).unwrap();
         assert!(matches!(
             marks(&alice, space)[..],
@@ -201,13 +212,16 @@ fn a_first_encrypted_write_creates_its_space() {
 
         assert_eq!(count(&server, SPACES), 1);
         assert_eq!(count(&server, "notes"), 2);
-        let wire_secret = all(&server, Query::from("notes")).unwrap();
-        for row in &wire_secret {
-            for column in ["body", "note"] {
-                if let Some(Value::Bytes(bytes)) = row.cell(column) {
-                    assert!(!contains(&bytes, SECRET.as_bytes()));
-                }
-            }
+        let wire = wire.borrow();
+        assert!(contains(&wire, SPACES.as_bytes()), "the space root went up");
+        assert!(!contains(&wire, SECRET.as_bytes()), "plaintext on the wire");
+        drop(wire);
+        for row in all(&server, Query::from("notes")).unwrap() {
+            let Some(Value::Bytes(body)) = row.cell("body") else {
+                panic!("the authority must hold a sealed body");
+            };
+            assert!(body.starts_with(b"JE2E"));
+            assert!(!contains(&body, SECRET.as_bytes()));
         }
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
         assert_eq!(marks(&alice, space), [KeyMark::Published]);

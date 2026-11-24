@@ -7,7 +7,10 @@ mod common;
 
 use common::TestRandom;
 use common::protocol::{ALICE, Env, Ledger};
-use jazz_e2ee::protocol::account::build::{self, ResetPolicy, RootAuthority, RotationTarget};
+use jazz_e2ee::mechanisms::signature;
+use jazz_e2ee::protocol::account::build::{
+    self, LocalDevice, ResetPolicy, RootAuthority, RotationTarget,
+};
 use jazz_e2ee::protocol::account::{AccountReplay, verify_private};
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::device_account::{self, DeviceAccountIdentity};
@@ -15,12 +18,10 @@ use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RefusalCode, RootRejection,
 };
-use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot};
-use jazz_e2ee::protocol::{Accepted, Position, ids};
+use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot, PublicAccountSuccessor};
+use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
 
 const SECRET: [u8; 32] = [7; 32];
-
-type Tamper = Box<dyn Fn(&mut jazz_e2ee::protocol::records::account::PublicAccountSuccessor)>;
 
 fn identity(secret: [u8; 32]) -> DeviceAccountIdentity {
     DeviceAccountIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap()
@@ -37,38 +38,31 @@ fn device_account_derivation_matches_typescript() {
     let vectors =
         include_str!("../../../packages/jazz-tools/src/local-first-auth/test-vectors.json");
     let app = AppDomain::new("6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b", None).unwrap();
-    let cases: [([u8; 32], &str, &str, &str); 4] = [
-        (
-            [0; 32],
-            "f9f532c83b83c214b9e88f66ff159067f63d23bb405b8c82be54dd2a06b806d4",
-            "412a3d72-132d-5e55-bad2-d3bad0eb5ea5",
-            "709df402-3648-507d-a725-3fb5b06d7ab8",
-        ),
-        (
-            [0xff; 32],
-            "b80682ae077693de867d390b4762319d13ebbd00a792a5f4aadc1b5f9171e893",
-            "cccecc7d-4bba-52dd-98f9-c339b13d1e5e",
-            "6b2c95ee-eea1-59cc-9bcf-1e984d73f5c6",
-        ),
-        (
-            std::array::from_fn(|i| i as u8),
-            "ff3d97bfb89227b2ae43697296031fe63bcfb9628f17df15e0e28013021451d9",
-            "fa65957a-8b63-53c8-8187-fb1568365fa1",
-            "d31c2893-e3f2-5285-9034-66bb6757657c",
-        ),
-        (
-            std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11)),
-            "8152f422c30f383f5b263a4c1832b59f2203795cfb7b7efe2fa3f32a4174fff3",
-            "116c83a5-068d-554e-94bc-8cba6733c0d3",
-            "73bcafd1-7832-503e-b310-f417556b1b3c",
-        ),
+    // The fixture's cases are flat objects whose fields contain plain ASCII
+    // strings. Read all three values from the same object.
+    let (_, cases) = vectors.split_once("\"cases\"").unwrap();
+    let (cases, _) = cases.split_once(']').unwrap();
+    let cases: Vec<_> = cases.split('{').skip(1).collect();
+    let public_keys = [
+        "f9f532c83b83c214b9e88f66ff159067f63d23bb405b8c82be54dd2a06b806d4",
+        "b80682ae077693de867d390b4762319d13ebbd00a792a5f4aadc1b5f9171e893",
+        "ff3d97bfb89227b2ae43697296031fe63bcfb9628f17df15e0e28013021451d9",
+        "8152f422c30f383f5b263a4c1832b59f2203795cfb7b7efe2fa3f32a4174fff3",
     ];
-    for (secret, public_key, subject, founder) in cases {
-        let identity = identity(secret);
+    assert_eq!(cases.len(), public_keys.len());
+    for (case, public_key) in cases.into_iter().zip(public_keys) {
+        let field = |name: &str| {
+            let (_, tail) = case.split_once(&format!("\"{name}\"")).unwrap();
+            let quoted = tail.trim_start().strip_prefix(':').unwrap().trim_start();
+            quoted.strip_prefix('"').unwrap().split_once('"').unwrap().0
+        };
+        let secret = RecoverySecret::parse(field("secret")).unwrap();
+        let subject = field("subject");
+        let founder = field("founderAccountV1");
+        let identity = DeviceAccountIdentity::from_secret(&secret).unwrap();
         assert_eq!(common::to_hex(identity.public_key()), public_key);
         assert_eq!(identity.subject(), subject);
         assert_eq!(identity.account_id(&app).unwrap(), founder);
-        assert!(vectors.contains(subject) && vectors.contains(founder));
         assert!(device_account::derives_account(
             &app,
             identity.public_key(),
@@ -375,12 +369,12 @@ fn substituted_app_root_is_not_mine() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(104);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     let state = ledger.state(&env);
     let floor = state.floor(ledger.public.through, Some(&laptop.id));
     state.check_floor(ledger.public.through, &floor).unwrap();
@@ -527,13 +521,13 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(106);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let stranger = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     ledger.request(&stranger, &mut rng);
     let recovery =
         RecoveryKeys::derive(&RecoverySecret::from_bytes([5; 32]), &env.application(), 0).unwrap();
@@ -546,38 +540,64 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     );
     assert!(ledger.state(&env).is_removed(&phone.id));
 
-    let stranger_id = stranger.id.clone();
-    let variants: Vec<(&str, Tamper)> = vec![
-        (
-            "bad signature",
-            Box::new(|row| {
-                let last = row.signature.len() - 1;
-                row.signature[last] ^= 1;
-            }),
-        ),
-        (
-            "inactive signer",
-            Box::new(move |row| row.signer_id = stranger_id.clone()),
-        ),
-        ("malformed", Box::new(|row| row.removed_device_id = None)),
-        (
-            "wrong revision",
-            Box::new(|row| row.revision = b"[]".to_vec()),
-        ),
-    ];
-    for (name, tamper) in variants {
-        let mut invalid = records.public.clone();
-        invalid.id = ids::random_v4(&mut rng).unwrap();
-        invalid.epoch_id = ids::random_v4(&mut rng).unwrap();
-        tamper(&mut invalid);
-        let mut view = ledger.public.clone();
-        view.successors.push(Accepted::new(at, invalid));
-        let state = AccountReplay::new(&view, &env.domain, &env.registry)
+    let sign = |row: &mut PublicAccountSuccessor, author: &LocalDevice| {
+        let bytes = row.signed_bytes(&env.application()).unwrap();
+        row.signature = signing::sign(&signature::Builtin, &author.signing, &bytes).unwrap();
+    };
+    let mut control = records.public.clone();
+    control.id = ids::random_v4(&mut rng).unwrap();
+    control.epoch_id = ids::random_v4(&mut rng).unwrap();
+    sign(&mut control, &laptop);
+    let replay = |view| {
+        AccountReplay::new(&view, &env.domain, &env.registry)
             .unwrap()
             .current()
             .unwrap()
-            .unwrap();
-        assert!(state.is_removed(&phone.id), "{name}");
+            .unwrap()
+    };
+    let mut standalone = ledger.public.clone();
+    standalone.successors.clear();
+    standalone
+        .successors
+        .push(Accepted::new(at, control.clone()));
+    assert_eq!(replay(standalone.clone()).epoch_id(), control.epoch_id);
+
+    let mut tie = ledger.public.clone();
+    tie.successors.push(Accepted::new(at, control.clone()));
+    assert!(
+        !replay(tie).is_removed(&phone.id),
+        "two valid successors block each other"
+    );
+
+    let mut bad_signature = control.clone();
+    *bad_signature.signature.last_mut().unwrap() ^= 1;
+    let mut inactive_signer = control.clone();
+    inactive_signer.signer_id = stranger.id.clone();
+    sign(&mut inactive_signer, &stranger);
+    let mut malformed = control.clone();
+    malformed.removed_device_id = None;
+    // A removal with no target has no valid signed representation.
+    assert!(malformed.signed_bytes(&env.application()).is_err());
+    let mut wrong_revision = control;
+    assert_ne!(wrong_revision.revision, b"[]");
+    wrong_revision.revision = b"[]".to_vec();
+    sign(&mut wrong_revision, &laptop);
+    for (name, invalid) in [
+        ("bad signature", bad_signature),
+        ("inactive signer", inactive_signer),
+        ("malformed", malformed),
+        ("wrong revision", wrong_revision),
+    ] {
+        let mut alone = standalone.clone();
+        alone.successors[0].row = invalid.clone();
+        assert!(!replay(alone).is_removed(&phone.id), "{name} was accepted");
+
+        let mut tie = ledger.public.clone();
+        tie.successors.push(Accepted::new(at, invalid));
+        assert!(
+            replay(tie).is_removed(&phone.id),
+            "{name} blocked the valid successor"
+        );
     }
 
     let mut bad_root = ledger.public.recovery_roots[0].clone();
@@ -621,13 +641,13 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
 fn device_no_longer_active_after_removal_and_reset() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(107);
-    let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut laptop = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
     let before = ledger.state(&env);
     let phone_floor = before.floor(ledger.public.through, Some(&phone.id));
     let laptop_floor = before.floor(ledger.public.through, Some(&laptop.id));
@@ -666,7 +686,7 @@ fn device_no_longer_active_after_removal_and_reset() {
     after.check_floor(ledger.public.through, &other).unwrap();
 
     // A device approved in the new generation passes its old floor.
-    ledger.approve(&env, &tablet, &laptop, &mut rng);
+    ledger.approve(&env, &tablet, &mut laptop, &mut rng);
     ledger
         .state(&env)
         .check_floor(ledger.public.through, &laptop_floor)

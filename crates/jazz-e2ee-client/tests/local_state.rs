@@ -84,14 +84,41 @@ fn the_device_is_generated_once_and_stored_only_protected() {
 
     let files = documents(&inner);
     assert_eq!(files.len(), 1, "one device document");
-    for secret in [&sealing, &signing, &nonce] {
-        assert!(!contains(&files[0], secret), "a secret stored in the clear");
+    let document: serde_json::Value = serde_json::from_slice(&files[0]).unwrap();
+    for (name, secret) in [
+        ("sealing key", sealing),
+        ("signing key", signing),
+        ("nonce", nonce),
+    ] {
+        let secret = secret
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect::<Vec<_>>();
+        assert!(
+            !contains_byte_array(&document, &secret),
+            "{name} stored in the clear"
+        );
     }
     assert!(contains(&files[0], b"jazz-e2ee-local-devices-v3"));
 
     let copied = try_open(store(0x33), declarations());
     assert!(copied.is_err(), "a copy without the protection opens");
     assert_eq!(documents(&inner), files, "and it changes nothing");
+}
+
+fn contains_byte_array(value: &serde_json::Value, secret: &[serde_json::Value]) -> bool {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.windows(secret.len()).any(|window| window == secret)
+                || values
+                    .iter()
+                    .any(|value| contains_byte_array(value, secret))
+        }
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .any(|value| contains_byte_array(value, secret)),
+        _ => false,
+    }
 }
 
 /// The bytes of every document the store holds.
