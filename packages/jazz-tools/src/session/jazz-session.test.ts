@@ -490,7 +490,7 @@ describe("JazzSession lifecycle", () => {
         status: "transitioning",
         pending: "linkDeviceAccount",
       });
-      expect(() => app.db.encryption).toThrow(
+      expect(() => app.db).toThrow(
         'session.db: there is no Db while the session is transitioning: wait for status "ready"',
       );
       expect(f.events).not.toContain("link");

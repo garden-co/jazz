@@ -23,21 +23,29 @@ vi.mock("../local-first-auth/secret.js", async (load) => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-it("closes a retained encryption handle and discards a late native result", async () => {
+it("closes a retained encryption handle and discards a late approval result", async () => {
   let answer!: (output: string) => void;
-  const native = vi.fn(() => new Promise<string>((resolve) => (answer = resolve)));
+  const native = vi.fn(async (op: string) => {
+    if (op === "challenge") return "null";
+    return new Promise<string>((resolve) => (answer = resolve));
+  });
   const encryption = new Encryption({
     encryptionCall: native,
     encryptionState: () => "{}",
     takeEncryptionReports: () => [],
   });
-  const pending = encryption.deviceId();
+  const approval = await encryption.devices.challenge("waiting-device");
+  const pending = approval.code();
   encryption.stop();
-  answer(JSON.stringify("old-device"));
+  answer(JSON.stringify("123456"));
   await expect(pending).rejects.toMatchObject({ code: "closed" });
+  await expect(approval.approve("123456")).rejects.toMatchObject({ code: "closed" });
   expect(() => encryption.recovery.create()).toThrow(/closed/);
   await expect(encryption.devices.list()).rejects.toMatchObject({ code: "closed" });
-  expect(native).toHaveBeenCalledOnce();
+  expect(native.mock.calls).toEqual([
+    ["challenge", { deviceId: "waiting-device" }],
+    ["approvalCode", { deviceId: "waiting-device" }],
+  ]);
 });
 
 it.each([false, true])(

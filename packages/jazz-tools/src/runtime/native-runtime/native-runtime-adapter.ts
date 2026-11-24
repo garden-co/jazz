@@ -2153,6 +2153,8 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (this.phase === "closing" || this.phase === "closed") return;
+    // Deleting the native store already retired its foreground and encryption runtime.
+    const encryption = this.phase === "storageCleared" ? undefined : this.encryptionState;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.advancePhase("closing");
@@ -2171,13 +2173,13 @@ export class NativeRuntimeAdapter implements Runtime {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       try {
-        if (this.encryptionState) {
+        if (encryption) {
           // Keep serving private-store requests while shutdown finishes, then
           // release the runtime even if the store has stopped responding.
           const deadline = new Promise<void>((resolve) => {
             timer = setTimeout(resolve, ENCRYPTION_SHUTDOWN_TIMEOUT_MS);
           });
-          await Promise.race([this.encryptionState.native.encryptionCall("shutdown"), deadline]);
+          await Promise.race([encryption.native.encryptionCall("shutdown"), deadline]);
         }
       } finally {
         clearTimeout(timer);
