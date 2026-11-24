@@ -1,6 +1,12 @@
+// One JVM class, SerializersKt, with InputStream.chunks (src/jna): the class
+// beta.1's callers (Java, and anything compiled against it) link against.
+@file:JvmName("SerializersKt")
+@file:JvmMultifileClass
+
 package tools.jazz
 
-import kotlinx.coroutines.flow.flowOn
+import kotlin.jvm.JvmMultifileClass
+import kotlin.jvm.JvmName
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.descriptors.PrimitiveKind
@@ -66,16 +72,3 @@ public fun <R> computeField(
     }
     row[name] = jazzJson.encodeToJsonElement(result, compute(args))
 }
-
-/** This stream's bytes as a [kotlinx.coroutines.flow.Flow] of chunks of [size], read on [kotlinx.coroutines.Dispatchers.IO]; closes it at the end. */
-public fun java.io.InputStream.chunks(size: Int = 256 * 1024): kotlinx.coroutines.flow.Flow<ByteArray> =
-    kotlinx.coroutines.flow.flow {
-        use { input ->
-            val buffer = ByteArray(size)
-            while (true) {
-                val n = input.read(buffer)
-                if (n < 0) break
-                if (n > 0) emit(buffer.copyOf(n))
-            }
-        }
-    }.flowOn(kotlinx.coroutines.Dispatchers.IO)

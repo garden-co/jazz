@@ -56,7 +56,7 @@ public data class JazzConfig(
     /** How the user signs in to [serverUrl]: a device account, or your backend's sign-in. */
     val auth: JazzAuth? = null,
     /** Where the blocking native calls run; every call is main-safe either way. */
-    val dispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
+    val dispatcher: kotlinx.coroutines.CoroutineDispatcher = ioDispatcher,
 ) {
     internal fun toJson(app: String): String {
         val json: JsonObject = buildJsonObject {
