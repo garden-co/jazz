@@ -887,6 +887,35 @@ describe("encrypted declarations across sibling versions", () => {
     return project;
   }
 
+  const detail = { detail: "string?" };
+  it.each([
+    { before: detail, after: {}, equality: [], reason: "holds ciphertext" },
+    {
+      before: detail,
+      after: detail,
+      equality: ["detail"],
+      reason: "token column __e2ee_eq_detail stays",
+    },
+    { before: {}, after: detail, equality: [], reason: "held plaintext" },
+  ])(
+    "preserves index-only storage rules for $reason",
+    async ({ before, after, equality, reason }) => {
+      const project = await workspace();
+      const notes = (columns: Record<string, unknown>, equality: string[], indexes: string[]) =>
+        app({
+          notes: {
+            columns: { title: "string", detail: "bytes", __e2ee_eq_detail: "bytes" },
+            encryption: { space: "id", scope: "notes", columns, equality },
+            indexes,
+          },
+        });
+      await project.write(notes(before, equality, []));
+      await generateForDir(project.dir);
+      await project.write(notes(after, [], ["title"]));
+      await project.refused(reason);
+    },
+  );
+
   it("generates and deploys a sibling enum prefix after an index edit", async () => {
     const project = await workspace();
     const server = await startLocalJazzServer();
@@ -924,6 +953,76 @@ describe("encrypted declarations across sibling versions", () => {
       tables("detail", sealed("a", "c"), ["rank"]),
     );
     await divergent.refused("notes.detail");
+  });
+
+  it("accepts sibling branches that both introduce the space column", async () => {
+    const project = await workspace();
+    const rooms = { columns: { name: "string" } };
+    const root = { rooms, notes: { columns: { title: "string" } } };
+    const shipped = {
+      rooms,
+      notes: {
+        columns: {
+          title: "string",
+          roomId: { type: "uuid?", references: "rooms" },
+          detail: "bytes",
+        },
+        encryption: { space: "roomId", scope: "rooms", columns: { detail: "string?" } },
+      },
+    };
+    const step = {
+      from: "root",
+      migrate: {
+        notes: {
+          roomId: { add: "uuid", default: null },
+          detail: { add: "bytes", default: "" },
+        },
+      },
+    };
+    await project.write(app(shipped, { history: { root: { tables: root } }, migrations: [step] }));
+    await generateForDir(project.dir);
+    await project.write(
+      app(
+        { rooms, notes: { ...shipped.notes, indexes: ["title"] } },
+        {
+          history: { root: { tables: root }, shipped: { tables: shipped } },
+          migrations: [{ ...step, to: "shipped" }, step],
+        },
+      ),
+    );
+    await project.accepted();
+  });
+
+  it("checks divergent sibling branches beside a diamond", async () => {
+    const project = await branchFromTheRoot("detail", tables("detail", sealed("a", "c"), ["rank"]));
+    const file = JSON.parse(await readFile(join(project.dir, "jazz.app.json"), "utf8"));
+    for (const [name, rank] of [
+      ["left", 1],
+      ["right", 2],
+      ["joined", 3],
+    ] as const) {
+      file.history[name] = {
+        tables: {
+          notes: {
+            ...root.notes,
+            columns: {
+              ...root.notes.columns,
+              rank: { type: "int", default: rank },
+            },
+          },
+        },
+      };
+    }
+    for (const [from, to] of [
+      ["root", "left"],
+      ["root", "right"],
+      ["left", "joined"],
+      ["right", "joined"],
+    ]) {
+      file.migrations.push({ from, to });
+    }
+    await project.write(JSON.stringify(file));
+    await project.refused("only appending enum variants");
   });
 
   it("follows a rename on the shipped branch to the same stored column", async () => {

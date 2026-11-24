@@ -581,6 +581,37 @@ pub fn check_mapped_transition(
     old_name: impl Fn(&str, &str) -> Option<String>,
     new_name: impl Fn(&str, &str) -> Option<String>,
 ) -> Result<(), String> {
+    check_mapped_columns(
+        (old_schema, old_entries),
+        new_entries,
+        old_table,
+        new_table,
+        old_name,
+        new_name,
+        false,
+    )
+}
+
+/// An index edit keeps every stored column. Apply the storage checks of an
+/// identity migration, allowing sibling declarations of either enum prefix.
+pub fn check_index_transition(
+    from: (&Schema, &Entries),
+    new_entries: &Entries,
+) -> Result<(), String> {
+    let table = |name: &str| Some(name.to_owned());
+    let column = |_: &str, name: &str| Some(name.to_owned());
+    check_mapped_columns(from, new_entries, table, table, column, column, true)
+}
+
+fn check_mapped_columns(
+    (old_schema, old_entries): (&Schema, &Entries),
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+    siblings: bool,
+) -> Result<(), String> {
     // Every old encrypted column the new version keeps stays encrypted,
     // as long as its stored column remains.
     for (table, old) in old_entries {
@@ -645,7 +676,7 @@ pub fn check_mapped_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((was_name, previous)) => {
-                    check_stored_column_type(&path, previous, declared, false)?;
+                    check_stored_column_type(&path, previous, declared, siblings)?;
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&was_name));
                     if tagged_before
                         && new.equality.contains(name)
@@ -700,6 +731,35 @@ pub async fn check_unlinked_transition<E>(
     new_table: impl Fn(&str) -> Option<String>,
     old_name: impl Fn(&str, &str) -> Option<String>,
     new_name: impl Fn(&str, &str) -> Option<String>,
+    precedes: impl AsyncFnMut() -> Result<bool, E>,
+) -> Result<Result<(), String>, E> {
+    check_unlinked_columns(
+        old_entries,
+        new_entries,
+        old_table,
+        old_name,
+        |table, was, old, new| {
+            check_stored_space(
+                table,
+                old,
+                new,
+                new_table(&old.scope),
+                new_name(was, &old.space),
+            )
+        },
+        precedes,
+    )
+    .await
+}
+
+/// Compare the declarations whose old names are known. The caller checks
+/// the space using the identities available from the catalogue or the file.
+pub async fn check_unlinked_columns<E>(
+    old_entries: &Entries,
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    check_space: impl Fn(&str, &str, &EncryptionEntry, &EncryptionEntry) -> Result<(), String>,
     mut precedes: impl AsyncFnMut() -> Result<bool, E>,
 ) -> Result<Result<(), String>, E> {
     for (table, new) in new_entries {
@@ -709,13 +769,7 @@ pub async fn check_unlinked_transition<E>(
         let Some(old) = old_entries.get(&was) else {
             continue;
         };
-        if let Err(refusal) = check_stored_space(
-            table,
-            old,
-            new,
-            new_table(&old.scope),
-            new_name(&was, &old.space),
-        ) {
+        if let Err(refusal) = check_space(table, &was, old, new) {
             return Ok(Err(refusal));
         }
         for (name, declared) in &new.columns {
@@ -741,7 +795,25 @@ pub fn check_stored_space(
     mapped_scope: Option<String>,
     mapped_space: Option<String>,
 ) -> Result<(), String> {
-    if mapped_scope.as_deref() != Some(&new.scope) {
+    check_space_matches(
+        table,
+        old,
+        new,
+        mapped_scope.as_deref() == Some(&new.scope),
+        mapped_space.as_deref() == Some(&new.space),
+    )
+}
+
+/// Check the scope and space comparisons the caller can resolve. The
+/// implicit row id always maps to the row id.
+pub fn check_space_matches(
+    table: &str,
+    old: &EncryptionEntry,
+    new: &EncryptionEntry,
+    scope_matches: bool,
+    space_matches: bool,
+) -> Result<(), String> {
+    if !scope_matches {
         return Err(format!(
             "table {table} moves its space table (`scope`) from {} to {}, which \
              changes every cell's context; copy the data into a new encrypted table \
@@ -749,12 +821,12 @@ pub fn check_stored_space(
             old.scope, new.scope
         ));
     }
-    let space = if old.space == "id" {
-        Some("id")
+    let same_space = if old.space == "id" {
+        new.space == "id"
     } else {
-        mapped_space.as_deref()
+        space_matches
     };
-    if space != Some(new.space.as_str()) {
+    if !same_space {
         return Err(format!(
             "table {table} changes its space column from {} to {}; copy the data into a \
              new encrypted table (docs/e2ee/encrypting-existing-data)",
