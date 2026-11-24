@@ -766,10 +766,7 @@ impl Shared {
         let mut watch = self.member_watch.borrow_mut();
         let mut changed = BTreeSet::new();
         watch.streams.retain(|&table, sub| {
-            let (mut accounts, closed) = sub.rows.changes(|row| match row.cell("accountId") {
-                Some(jazz::records::Value::Uuid(id)) => Some(id.to_string()),
-                _ => None,
-            });
+            let (mut accounts, closed) = sub.rows.changes(crate::account::rows::row_account_id);
             if closed {
                 accounts.extend(sub.accounts.iter().cloned());
             }

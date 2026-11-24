@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use jazz::db::CurrentRow;
 use jazz::records::Value;
+use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::records::KeyColumns;
 use jazz_e2ee::protocol::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
@@ -40,15 +41,26 @@ pub(crate) fn uuid_cell(id: &str) -> Option<Value> {
     uuid::Uuid::parse_str(id).ok().map(Value::Uuid)
 }
 
-/// What a decoder reads from a row.
-struct Read<'r>(&'r CurrentRow);
+pub(crate) fn account_id_cell(id: &str) -> Result<Value, ProtocolError> {
+    uuid_cell(id).ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))
+}
 
-fn unwrap_optional(value: Value) -> Option<Value> {
+pub(crate) fn row_account_id(row: &CurrentRow) -> Option<String> {
+    match row.cell("accountId")? {
+        Value::Uuid(id) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn unwrap_optional(value: &Value) -> Option<&Value> {
     match value {
-        Value::Nullable(inner) => inner.map(|inner| *inner),
+        Value::Nullable(inner) => inner.as_deref(),
         value => Some(value),
     }
 }
+
+/// What a decoder reads from a row.
+struct Read<'r>(&'r CurrentRow);
 
 impl Read<'_> {
     fn row_id(&self) -> String {
@@ -56,7 +68,12 @@ impl Read<'_> {
     }
 
     fn optional(&self, column: &str) -> Option<Value> {
-        self.0.cell(column).and_then(unwrap_optional)
+        self.0
+            .cells()
+            .find(|(name, _)| *name == column)
+            .and_then(|(_, value)| value)
+            .and_then(unwrap_optional)
+            .cloned()
     }
 
     fn id(&self, column: &str) -> Option<String> {

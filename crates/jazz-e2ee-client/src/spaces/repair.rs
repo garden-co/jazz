@@ -187,11 +187,7 @@ impl E2eeClient {
             .plans
             .get(table)
             .ok_or_else(|| ClientError::Unsupported(format!("`{table}` is not encrypted")))?;
-        let column = if plan.self_space() {
-            "id"
-        } else {
-            plan.entry.space.as_str()
-        };
+        let column = plan.entry.space.as_str();
         let id = uuid::Uuid::parse_str(&space.identifier).map_err(|_| {
             ClientError::Unsupported("a space identifier that is not a UUID".to_owned())
         })?;

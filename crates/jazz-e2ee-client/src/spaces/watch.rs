@@ -17,7 +17,7 @@ use jazz::query::{Operand, Predicate, Query, col, eq, lit};
 use jazz_e2ee::protocol::ProtocolError;
 
 use super::{SpaceKeyState, protocol_address};
-use crate::account::rows::{self, uuid_cell};
+use crate::account::rows::{self, account_id_cell, row_account_id, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, row_space};
@@ -109,6 +109,12 @@ pub fn watch_queries(spaces: &[SpaceAddress], versions: &[String]) -> Vec<(&'sta
     queries
 }
 
+const WATCHED_ACCOUNT_TABLES: [&str; 3] = [
+    rows::ACCOUNT_ROOTS,
+    rows::PUBLIC_ACCOUNT_SUCCESSORS,
+    rows::ACCOUNT_KEYS,
+];
+
 /// The queries of the account watch, one per table, over `accounts`:
 /// `accountId IN (…)`, which the tables' `accountId` indexes serve. Public
 /// only so that a test can ask the store for their plan.
@@ -117,14 +123,10 @@ pub fn account_watch_queries(accounts: &[String]) -> Vec<(&'static str, Query)> 
     if accounts.is_empty() {
         return Vec::new();
     }
-    [
-        rows::ACCOUNT_ROOTS,
-        rows::PUBLIC_ACCOUNT_SUCCESSORS,
-        rows::ACCOUNT_KEYS,
-    ]
-    .into_iter()
-    .map(|table| (table, account_query(table, accounts)))
-    .collect()
+    WATCHED_ACCOUNT_TABLES
+        .into_iter()
+        .map(|table| (table, account_query(table, accounts)))
+        .collect()
 }
 
 fn account_query(table: &str, accounts: &[String]) -> Query {
@@ -236,11 +238,11 @@ impl E2eeClient {
             });
             for space in active {
                 let deps = members.spaces.entry(space.clone()).or_default();
-                for (table, accounts) in [
-                    (rows::ACCOUNT_ROOTS, &deps.members),
-                    (rows::PUBLIC_ACCOUNT_SUCCESSORS, &deps.holders),
-                    (rows::ACCOUNT_KEYS, &deps.waiting),
-                ] {
+                for (table, accounts) in WATCHED_ACCOUNT_TABLES.into_iter().zip([
+                    &deps.members,
+                    &deps.holders,
+                    &deps.waiting,
+                ]) {
                     for account in accounts {
                         by_account
                             .entry((table, account.clone()))
@@ -251,11 +253,7 @@ impl E2eeClient {
             }
             members.by_account = by_account.clone();
         }
-        for table in [
-            rows::ACCOUNT_ROOTS,
-            rows::PUBLIC_ACCOUNT_SUCCESSORS,
-            rows::ACCOUNT_KEYS,
-        ] {
+        for table in WATCHED_ACCOUNT_TABLES {
             let accounts: BTreeSet<_> = by_account
                 .keys()
                 .filter(|(t, _)| *t == table)
@@ -294,8 +292,7 @@ impl E2eeClient {
     /// the deliveries addressed to it. Spaces join as
     /// [`E2eeClient::sync_spaces`] finds them.
     pub async fn watch_spaces(&self, db: &Db) -> Result<SpaceWatch, ClientError> {
-        let account = uuid_cell(&self.shared.account_id)
-            .ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))?;
+        let account = account_id_cell(&self.shared.account_id)?;
         let mut own = Vec::new();
         for (table, column) in [
             (rows::SPACE_MEMBERS, "accountId"),
@@ -471,13 +468,7 @@ impl E2eeClient {
                         if let Some(deps) =
                             self.shared.member_watch.borrow_mut().spaces.get_mut(&space)
                         {
-                            deps.members = rows
-                                .iter()
-                                .filter_map(|row| match row.cell("accountId") {
-                                    Some(jazz::records::Value::Uuid(id)) => Some(id.to_string()),
-                                    _ => None,
-                                })
-                                .collect();
+                            deps.members = rows.iter().filter_map(row_account_id).collect();
                             deps.holders.clear();
                             deps.waiting.retain(|id| deps.members.contains(id));
                             deps.version = None;

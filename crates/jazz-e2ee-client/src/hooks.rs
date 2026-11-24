@@ -33,7 +33,7 @@ use jazz_e2ee::protocol::content::{
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 
-use crate::account::rows::{Row, SPACE_ROOTS};
+use crate::account::rows::{Row, SPACE_ROOTS, unwrap_optional};
 use crate::state::{
     Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
 };
@@ -68,13 +68,9 @@ pub(crate) fn unsupported_query(what: &str, table: &str) -> Error {
 
 /// A space cell's row ID, `None` when it is null or absent.
 fn identifier(value: Option<&Value>) -> Result<Option<String>, ()> {
-    match value {
-        None | Some(Value::Nullable(None)) => Ok(None),
+    match value.and_then(unwrap_optional) {
+        None => Ok(None),
         Some(Value::Uuid(id)) => Ok(Some(id.to_string())),
-        Some(Value::Nullable(Some(inner))) => match &**inner {
-            Value::Uuid(id) => Ok(Some(id.to_string())),
-            _ => Err(()),
-        },
         Some(_) => Err(()),
     }
 }
@@ -591,17 +587,13 @@ impl E2eeHooks for Hooks {
                 // A stored cell is bytes; a physical null reads like the
                 // empty value, "never written"; anything else no writer
                 // could have sealed.
-                let stored = match cell {
-                    Value::Bytes(bytes) => Ok(Some(bytes)),
-                    Value::Nullable(None) => Ok(None),
-                    Value::Nullable(Some(inner)) => match *inner {
-                        Value::Bytes(bytes) => Ok(Some(bytes)),
-                        _ => Err(()),
-                    },
-                    _ => Err(()),
+                let stored = match unwrap_optional(&cell) {
+                    Some(Value::Bytes(bytes)) => Ok(Some(bytes.as_slice())),
+                    None => Ok(None),
+                    Some(_) => Err(()),
                 };
                 let column = column(catalogue, site.table, name, codec)?;
-                let opened = match &stored {
+                let opened = match stored {
                     Err(()) => Opened::Unreadable(DataError::InvalidCiphertext),
                     Ok(None) => Opened::Empty,
                     Ok(Some(stored)) => {
@@ -610,7 +602,7 @@ impl E2eeHooks for Hooks {
                     }
                 };
                 let stored = stored.ok().flatten();
-                let streamed = stored.as_deref().is_some_and(|stored| {
+                let streamed = stored.is_some_and(|stored| {
                     read_stored_record(stored).is_ok_and(|record| record.kind == RecordKind::Stream)
                 });
                 let notice = |code: UnreadableCode, space: &SpaceAddress| Unreadable {
@@ -697,7 +689,7 @@ impl E2eeHooks for Hooks {
                 row.set_cell(name, Some(decoded), codec.value_type.clone());
                 // A cell that opened under the key of a refused or lost
                 // creation is for the repair to rewrite (protocol §3.2).
-                if let Some(stored) = stored.as_deref()
+                if let Some(stored) = stored
                     && under_refused_key(&keys, &address, stored)
                 {
                     self.shared
@@ -760,11 +752,7 @@ impl E2eeHooks for Hooks {
         if searched.is_empty() {
             return Ok(QueryPlan::Plain);
         }
-        let space_column = if plan.self_space() {
-            "id"
-        } else {
-            plan.entry.space.as_str()
-        };
+        let space_column = plan.entry.space.as_str();
         let identifier = query.filters.iter().find_map(|filter| match filter {
             Predicate::Eq(Operand::Column(name), Operand::Literal(Value::Uuid(id)))
                 if name == space_column =>

@@ -27,7 +27,7 @@ use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
 
 use crate::account::has_removed_devices;
-use crate::account::rows::{self, uuid_cell};
+use crate::account::rows::{self, account_id_cell, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::hooks::code;
@@ -177,8 +177,7 @@ impl E2eeClient {
         let identifier = uuid_cell(&address.identifier).ok_or(ProtocolError::InvalidRecord(
             "the space's identifier is not a UUID",
         ))?;
-        let account =
-            uuid_cell(&own).ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))?;
+        let account = account_id_cell(&own)?;
         let of_space = |table: &str| {
             Query::from(table)
                 .filter(eq(col("scopeId"), lit(scope.clone())))
