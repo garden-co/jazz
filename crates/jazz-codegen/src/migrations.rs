@@ -57,55 +57,42 @@ pub fn create(
     // retargets it until the version it was written for is named below.
     // Read the edited `tables` alone, then. Either way, no version the
     // bindings were generated from may change its encryption declarations.
-    let loaded = App::load(app_json);
-    let (versions, declared) = match &loaded {
-        Ok(app) => (
-            app.compiled.schemas.iter().map(|(h, _)| *h).collect(),
-            app.compiled.encryption.clone(),
-        ),
-        Err(_) => {
+    let loaded = match App::load(app_json) {
+        Ok(app) => {
+            if bindings::check_recorded_version(&app.compiled, &recorded)? {
+                return Ok(unchanged());
+            }
+            Ok(app)
+        }
+        Err(error) => {
             let (versions, declared) =
                 artifact::read_declared_versions(app_json).map_err(CodegenError::from_artifact)?;
-            (versions, Some(declared))
+            bindings::check_declarations_of(versions.iter().copied(), Some(&declared), &recorded)?;
+            // If history already holds the bindings' version, another stub
+            // would duplicate it. Report why the authored file failed.
+            if versions
+                .split_last()
+                .is_some_and(|(_, history)| history.contains(&recorded.current))
+            {
+                return Err(CodegenError::from_artifact(error));
+            }
+            Err(error)
         }
     };
-    bindings::check_declarations_of(&versions, declared.as_ref(), &recorded)?;
-    if let Ok(app) = &loaded
-        && app
-            .compiled
-            .schemas
-            .iter()
-            .any(|(h, _)| *h == recorded.current)
-    {
-        bindings::check_recorded_transition(&recorded, &app.compiled)?;
-        return Ok(unchanged());
-    }
-    // If history already holds the bindings' version, another migration
-    // stub would duplicate that schema. Report why the authored file failed.
-    if versions
-        .split_last()
-        .is_some_and(|(_, history)| history.contains(&recorded.current))
-        && let Err(error) = loaded
-    {
-        return Err(CodegenError::from_artifact(error));
-    }
     let from = &recorded.current_schema;
     // The current version as the file will load once the migration below
     // leads to it from the bindings' version: with Jazz's system tables
     // when it declares encryption or that version has them.
     let (to, fragment) =
         artifact::migration_target_schema(app_json, from).map_err(CodegenError::from_artifact)?;
-    let current_declared = versions
-        .last()
-        .and_then(|current| declared.as_ref()?.entries(&current.to_string()));
     let to = &to;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
         // No migration will repair an invalid file. Once it loads, check the
         // declarations against the version whose rows it will keep.
-        loaded.map_err(CodegenError::from_artifact)?;
-        bindings::check_index_transition(&recorded, to, current_declared)?;
+        let app = loaded.map_err(CodegenError::from_artifact)?;
+        bindings::check_index_transition(&recorded, to, app.compiled.current_entries())?;
         return Ok(Created {
             note: Some(
                 "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
