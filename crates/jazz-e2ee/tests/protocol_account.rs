@@ -2528,6 +2528,49 @@ fn approve_refuses_a_request_other_than_the_challenged_one() {
     .unwrap();
 }
 
+/// Alice's linked device has no account secret. It can retire an independent
+/// root, but needs the secret to distinguish a derived root from her own.
+#[test]
+fn retiring_a_derived_root_on_a_linked_device_requires_the_account_secret() {
+    let env = Env::device_account([1; 32]);
+    let mut rng = TestRandom(13);
+    let owner = env.device(&mut rng);
+    let mut linked = env.device(&mut rng);
+    let mut ledger = Ledger::new(&env.account);
+    ledger.request(&owner, &mut rng);
+    ledger.root(&env, &owner, 0, &mut rng);
+    ledger.request(&linked, &mut rng);
+    ledger.approve(&env, &owner, &mut linked, &mut rng);
+    let derived =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([2; 32]), &env.application(), 0).unwrap();
+    let mut independent =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([3; 32]), &env.application(), 0).unwrap();
+    independent.root_id = jazz_e2ee::protocol::ids::random_v4(&mut rng).unwrap();
+    ledger.register_recovery(&env, &linked, &derived, &mut rng);
+    ledger.register_recovery(&env, &linked, &independent, &mut rng);
+    ledger.rotate(
+        &env,
+        &linked,
+        RotationTarget::RetireRecoveryRoot(independent.root_id.clone()),
+        &mut rng,
+    );
+    let state = ledger.state(&env);
+    assert!(state.recovery_root(&independent.root_id).is_none());
+    let key = ledger.acquire(&env, &linked).unwrap();
+    let result = build::rotate(
+        &env.writer(),
+        &state,
+        &linked,
+        &key,
+        &RotationTarget::RetireRecoveryRoot(derived.root_id),
+        &mut rng,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        refused(RefusalCode::DeviceAccountSecretRequired)
+    );
+}
+
 /// A successor that retires a recovery root retires one of its own account:
 /// the server does not check it (the target is in an ID list no policy
 /// reads), so replay does. A root of another account is not accepted as the

@@ -69,6 +69,7 @@ impl Env {
 
     pub fn writer(&self) -> AccountWriter<'_> {
         AccountWriter {
+            account_secret_root_id: None,
             suite: self.registry.select(&self.config).unwrap(),
             registry: &self.registry,
             domain: &self.domain,

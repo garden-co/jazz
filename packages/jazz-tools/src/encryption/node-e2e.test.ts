@@ -20,6 +20,7 @@ import { generateTs } from "../dev/codegen-napi.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import {
+  EncryptionError,
   EncryptionNotDeclaredError,
   EncryptionStoreRequiredError,
   memoryPrivateStore,
@@ -923,6 +924,14 @@ describe("encryption on Node, end to end", () => {
       .insert(app.tasks, { projectId: project, title: "kept" })
       .wait({ tier: "global" });
     const key = first.session.exportDeviceKey();
+    await first.db.encryption.ready();
+    const [root] = await first.db.encryption.recovery.list();
+    const retirement = first.db.encryption.recovery.retire(root!.id);
+    await expect(retirement).rejects.toBeInstanceOf(EncryptionError);
+    await expect(retirement).rejects.toMatchObject({
+      code: "device-account-root-required",
+      message: expect.stringContaining("prevent recovery"),
+    });
     // The first device goes away; a new device (an empty private store) restores the account.
     await first.session.close();
     const second = await device(host, { key });

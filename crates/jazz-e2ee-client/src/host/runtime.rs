@@ -27,7 +27,6 @@ use jazz::e2ee::SpaceAddress;
 use jazz::tools::public_schema::E2eeDeclarations;
 use jazz_e2ee::OsRandom;
 use jazz_e2ee::protocol::derive::RecoverySecret;
-use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 
 use super::bridge::JsStore;
 use serde_json::{Value, json};
@@ -274,10 +273,6 @@ async fn build_client(
             })
             .collect(),
     );
-    let device_account = recovery
-        .map(DeviceAccountIdentity::from_secret)
-        .transpose()
-        .map_err(|error| error.to_string())?;
     let store: Rc<dyn PrivateStore> = store;
     let client = E2eeClient::open(ClientConfig {
         store,
@@ -285,7 +280,7 @@ async fn build_client(
         account_id,
         registry: jazz_e2ee::registry::Registry::builtin(),
         random: Box::new(OsRandom),
-        device_account,
+        device_account: recovery,
     })
     .await
     .map_err(|error| error.to_string())?;

@@ -58,6 +58,8 @@ export class EncryptionError extends Error {
   readonly code:
     | "rotation-needs-key"
     | "not-a-member"
+    | "device-account-root-required"
+    | "device-account-secret-required"
     | "no-account"
     | (string & Record<never, never>);
   constructor(code: string, message: string) {

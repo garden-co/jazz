@@ -385,6 +385,7 @@ pub fn new_root(device: &LocalDevice, address: &SpaceAddress) -> RootRecords {
     let mut random = OsRandom;
     let suite = registry.select(&config).unwrap();
     let writer = AccountWriter {
+        account_secret_root_id: None,
         suite,
         registry: &registry,
         domain: &domain,
@@ -646,24 +647,18 @@ pub fn account_id(who: AuthorSubject) -> String {
     who.account_id().unwrap().0.to_string()
 }
 
-/// A device-account account and its identity, which the secret `seed`
-/// derives: its account ID is the one the identity founds for this app.
-pub fn device_account(
-    seed: u8,
-) -> (
-    AuthorSubject,
-    jazz_e2ee::protocol::device_account::DeviceAccountIdentity,
-) {
+/// The device account founded by this secret in the test app, and the secret itself.
+pub fn device_account(seed: u8) -> (AuthorSubject, jazz_e2ee::protocol::derive::RecoverySecret) {
     use jazz_e2ee::protocol::derive::RecoverySecret;
     use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
-    let identity =
-        DeviceAccountIdentity::from_secret(&RecoverySecret::from_bytes([seed; 32])).unwrap();
+    let secret = RecoverySecret::from_bytes([seed; 32]);
+    let identity = DeviceAccountIdentity::from_secret(&secret).unwrap();
     let subject = identity.subject();
     let app = *app_id().as_object_id().uuid();
     let who = AuthorSubject::reserved(jazz::identity::DEVICE_ACCOUNT_ISSUER, &subject)
         .unwrap()
         .with_account(jazz::account_registry::device_account_id(app, &subject));
-    (who, identity)
+    (who, secret)
 }
 
 /// The authority of the secure schema, in memory or at `path`.
@@ -682,7 +677,7 @@ pub fn open_account(
     store: Rc<dyn PrivateStore>,
     who: AuthorSubject,
     settings: EncryptionSettings,
-    device_account: Option<jazz_e2ee::protocol::device_account::DeviceAccountIdentity>,
+    device_account: Option<jazz_e2ee::protocol::derive::RecoverySecret>,
 ) -> E2eeClient {
     block_on(E2eeClient::open(ClientConfig {
         store,
@@ -690,7 +685,7 @@ pub fn open_account(
         account_id: account_id(who),
         registry: Registry::builtin(),
         random: Box::new(OsRandom),
-        device_account,
+        device_account: device_account.as_ref(),
     }))
     .unwrap()
 }

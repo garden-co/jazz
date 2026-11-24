@@ -40,7 +40,7 @@ const FLOOR_PREFIX: &str = "floor-";
 const SAVE_ATTEMPTS: usize = 3;
 
 /// What a runtime opens with.
-pub struct ClientConfig {
+pub struct ClientConfig<'a> {
     pub store: Rc<dyn PrivateStore>,
     /// The application's encryption declarations, as the database opens
     /// with them.
@@ -52,11 +52,9 @@ pub struct ClientConfig {
     pub registry: Registry,
     /// The operating system's random source outside tests.
     pub random: Box<dyn RandomSource>,
-    /// For a device-account account, the identity its account secret derives:
-    /// it signs the account's roots, and the device checks the account's
-    /// root against it (§2.3, §2.4). `None` for an account of the
-    /// application's own sign-in.
-    pub device_account: Option<DeviceAccountIdentity>,
+    /// The device-account secret, when available. Opening derives the signing
+    /// identity and the ID of the recovery root that must stay active (§2.9).
+    pub device_account: Option<&'a derive::RecoverySecret>,
 }
 
 /// One held-key document as last read or written.
@@ -91,6 +89,7 @@ pub struct E2eeClient {
     /// moves it to a new incarnation.
     incarnation: Cell<u64>,
     pub(crate) device_account: RefCell<Option<DeviceAccountIdentity>>,
+    pub(crate) account_secret_root_id: Option<String>,
     /// The account as this device last verified it.
     pub(crate) account: RefCell<Option<OwnAccount>>,
     /// Whether this run reconciled the creations it found stored.
@@ -170,7 +169,7 @@ impl E2eeClient {
     /// document of a format this runtime does not read fails the open if
     /// it is the device document, and is otherwise reported and never
     /// overwritten. A store or provider failure fails the open.
-    pub async fn open(config: ClientConfig) -> Result<Self, ClientError> {
+    pub async fn open(config: ClientConfig<'_>) -> Result<Self, ClientError> {
         let ClientConfig {
             store,
             declarations,
@@ -188,7 +187,21 @@ impl E2eeClient {
             &declarations.app_id.as_object_id().uuid().to_string(),
             environment,
         )?;
-        let scope = domain.account(&account_id)?.as_str().to_owned();
+        let application = domain.account(&account_id)?;
+        // Device accounts cannot reset, so their recovery root is in generation 0.
+        let (identity, account_secret_root_id) = match device_account {
+            Some(secret) => {
+                let identity = DeviceAccountIdentity::from_secret(secret)?;
+                let root_id = if identity.account_id(&domain).as_deref() == Some(&account_id) {
+                    Some(derive::RecoveryKeys::derive(secret, &application, 0)?.root_id)
+                } else {
+                    None
+                };
+                (Some(identity), root_id)
+            }
+            None => (None, None),
+        };
+        let scope = application.as_str().to_owned();
         // A wipe that lands while the scope opens deletes it under this
         // runtime: open the new scope and load again.
         let mut opened = None;
@@ -255,7 +268,8 @@ impl E2eeClient {
             store,
             scope,
             incarnation: Cell::new(incarnation),
-            device_account: device_account.into(),
+            device_account: identity.into(),
+            account_secret_root_id,
             account: RefCell::new(None),
             reconciled: Cell::new(false),
             documents: Mutex::new(Documents::default()),

@@ -1530,16 +1530,19 @@ the 32 secret bytes, created and read with user verification required
     The app calls retirement separately. Retirement rotates the account and
     retires the old root. See the [runtime's recovery operations](../../jazz-e2ee-client/src/host/runtime.rs#L759-L798).
   - **Device accounts:** the account secret is the account, and it cannot
-    be rotated without becoming a different account. Retiring its derived root
-    therefore only turns off recovery by account secret for this account (the
-    account may still register exported material); it does not protect against
-    a leaked account secret, because whoever holds the secret signs in as the
-    account. A leaked device-account secret loses the account, E2EE
-    included, and so does a lost or stolen device of a device account,
-    which holds the secret (§2.8). Recovery stays derived from the account
+    be rotated without becoming a different account. The SDK refuses to retire
+    the root derived from that secret (`device-account-root-required`), so the secret
+    can still recover the account after every device is lost. A device signed
+    in with the account secret can retire any other root. A linked device
+    without the secret cannot distinguish the account's root from another
+    derived (version 8) root. It refuses to retire a derived root with
+    `device-account-secret-required` and asks the user to sign in with the
+    account secret. It can still retire an independently generated root.
+    Anyone who holds a leaked account secret can still sign in as the account.
+    A lost or stolen device that holds the secret therefore compromises the
+    account, including E2EE (§2.8). Recovery stays derived from the account
     secret: there is no separate recovery secret and no device check on
-    writes for device accounts. The SDK asks for confirmation before
-    retiring a derived root of a device account.
+    writes for device accounts.
 
 ### 2.10 Sign-out, account change and device linking
 
@@ -2961,6 +2964,8 @@ Refusal codes:
 | `target-not-active`                | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
 | `self-removal`                     | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
 | `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                                      |
+| `device-account-root-required`     | Retiring the device account's own recovery root would prevent recovery with its account secret (§2.9).                                                                    |
+| `device-account-secret-required`   | A linked device needs the account secret to distinguish other derived roots from the device account's own (§2.9).                                                         |
 | `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
 | `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |

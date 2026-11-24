@@ -123,6 +123,7 @@ struct View {
 impl E2eeClient {
     pub(super) fn writer(&self) -> Result<AccountWriter<'_>, ClientError> {
         Ok(AccountWriter {
+            account_secret_root_id: self.account_secret_root_id.as_deref(),
             suite: self.shared.registry.select(&self.shared.selected)?,
             registry: &self.shared.registry,
             domain: &self.shared.domain,
