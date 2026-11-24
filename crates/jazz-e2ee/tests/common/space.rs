@@ -304,7 +304,7 @@ impl World {
                 RotationTarget::RemoveDevice(device_id.to_owned()),
                 rng,
             );
-            rotation.public.id.clone()
+            rotation.public.columns.id.clone()
         })
     }
 

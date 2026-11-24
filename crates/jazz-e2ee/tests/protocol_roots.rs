@@ -546,8 +546,8 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
         row.signature = signature::Builtin.sign(&author.signing, &bytes).unwrap();
     };
     let mut control = records.public.clone();
-    control.id = ids::random_v4(&mut rng).unwrap();
-    control.epoch_id = ids::random_v4(&mut rng).unwrap();
+    control.columns.id = ids::random_v4(&mut rng).unwrap();
+    control.columns.epoch_id = ids::random_v4(&mut rng).unwrap();
     sign(&mut control, &laptop);
     let replay = |view| {
         AccountReplay::new(&view, &env.domain, &env.registry)
@@ -561,7 +561,10 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     standalone
         .successors
         .push(Accepted::new(at, control.clone()));
-    assert_eq!(replay(standalone.clone()).epoch_id(), control.epoch_id);
+    assert_eq!(
+        replay(standalone.clone()).epoch_id(),
+        control.columns.epoch_id
+    );
 
     let mut tie = ledger.public.clone();
     tie.successors.push(Accepted::new(at, control.clone()));
@@ -573,10 +576,10 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     let mut bad_signature = control.clone();
     *bad_signature.signature.last_mut().unwrap() ^= 1;
     let mut inactive_signer = control.clone();
-    inactive_signer.signer_id = stranger.id.clone();
+    inactive_signer.columns.signer_id = stranger.id.clone();
     sign(&mut inactive_signer, &stranger);
     let mut malformed = control.clone();
-    malformed.removed_device_id = None;
+    malformed.columns.removed_device_id = None;
     // A removal with no target has no valid signed representation.
     assert!(malformed.signed_bytes(&env.application()).is_err());
     let mut wrong_revision = control;

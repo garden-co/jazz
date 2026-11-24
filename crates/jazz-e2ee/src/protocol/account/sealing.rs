@@ -128,10 +128,9 @@ impl SealingKeys {
         epoch_id: &str,
         mechanism: Mechanism<'_>,
     ) -> Option<&Accepted<AccountSealingKey>> {
-        self.valid.iter().find(|record| {
-            record.row.epoch_id == epoch_id
-                && Mechanism::new(&record.row.mechanism, record.row.version) == mechanism
-        })
+        self.valid
+            .iter()
+            .find(|record| record.row.epoch_id == epoch_id && record.row.mechanism() == mechanism)
     }
 
     /// The record a sender seals to: the first valid record of the current
@@ -170,7 +169,7 @@ impl SealingKeys {
             let Some(key) = keys.get(&record.row.epoch_id) else {
                 continue;
             };
-            let mechanism = Mechanism::new(&record.row.mechanism, record.row.version);
+            let mechanism = record.row.mechanism();
             let sealer = match registry.key_sealer(mechanism) {
                 Ok(sealer) => sealer,
                 Err(Error::UnknownMechanism) => continue,
@@ -268,7 +267,7 @@ impl AccountReplay<'_> {
             // creation itself and not by membership of the new epoch.
             let signer = match &epoch.successor {
                 None => &state.root.row.device_id,
-                Some(successor) => &successor.row.signer_id,
+                Some(successor) => &successor.row.columns.signer_id,
             };
             if row.signer_id != *signer {
                 return Ok(Validity::Invalid);

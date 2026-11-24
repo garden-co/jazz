@@ -246,7 +246,7 @@ impl AccountKeyEvidence<'_> {
                             .successors()
                             .iter()
                             .find(|private| {
-                                private.row.id == public.row.id
+                                private.row.columns.id == public.row.columns.id
                                     && private.position == public.position
                             })
                             .map(|private| &private.row)
@@ -272,8 +272,8 @@ impl AccountKeyEvidence<'_> {
                 &successor_context(
                     self.application(),
                     self.account_id(),
-                    &successor.id,
-                    &successor.epoch_id,
+                    &successor.columns.id,
+                    &successor.columns.epoch_id,
                     "verification",
                     "",
                 )?,
@@ -410,8 +410,8 @@ impl AccountKeyEvidence<'_> {
             let context = successor_context(
                 self.application(),
                 self.account_id(),
-                &successor.id,
-                &successor.epoch_id,
+                &successor.columns.id,
+                &successor.columns.epoch_id,
                 "history",
                 "",
             )?;
@@ -472,8 +472,8 @@ impl AccountKeyEvidence<'_> {
             let context = successor_context(
                 self.application(),
                 self.account_id(),
-                &successor.id,
-                &successor.epoch_id,
+                &successor.columns.id,
+                &successor.columns.epoch_id,
                 "history",
                 "",
             )?;
@@ -557,8 +557,8 @@ impl AccountKeyEvidence<'_> {
                     let context = successor_context(
                         application,
                         account_id,
-                        &successor.id,
-                        &successor.epoch_id,
+                        &successor.columns.id,
+                        &successor.columns.epoch_id,
                         "delivery",
                         device_id,
                     )?;
@@ -621,12 +621,10 @@ impl AccountKeyEvidence<'_> {
                 return Ok(key);
             }
         }
-        if unsupported_delivery {
-            return Err(ProtocolError::Unsupported(
-                UnsupportedCapability::AccountKeyEnvelope,
-            ));
-        }
-        Err(ProtocolError::AccountKeyUnavailable)
+        Err(delivery_error(
+            unsupported_delivery,
+            ProtocolError::AccountKeyUnavailable,
+        ))
     }
 
     /// The current account key from a recovery delivery (§2.9, "Restore").
@@ -670,11 +668,17 @@ impl AccountKeyEvidence<'_> {
                 return Ok(key);
             }
         }
-        if unsupported_delivery {
-            return Err(ProtocolError::Unsupported(
-                UnsupportedCapability::AccountKeyEnvelope,
-            ));
-        }
-        Err(ProtocolError::Recovery(RecoveryFailure::DeliveryUnusable))
+        Err(delivery_error(
+            unsupported_delivery,
+            ProtocolError::Recovery(RecoveryFailure::DeliveryUnusable),
+        ))
+    }
+}
+
+fn delivery_error(unsupported: bool, unavailable: ProtocolError) -> ProtocolError {
+    if unsupported {
+        ProtocolError::Unsupported(UnsupportedCapability::AccountKeyEnvelope)
+    } else {
+        unavailable
     }
 }
