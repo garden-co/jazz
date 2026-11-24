@@ -439,7 +439,10 @@ const assertEntryCacheTrustBoundary = (source) => {
     fullSuiteStatus.if,
     /github\.event_name == 'workflow_dispatch' && needs\.untrusted\.result == 'success' && needs\.trusted\.result == 'skipped' \|\|\n/,
   );
-  assert.match(fullSuiteStatus.if, /github\.event_name == 'push' && needs\.trusted\.result == 'success' \|\|\n/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'push' && needs\.trusted\.result == 'success' \|\|\n/,
+  );
   assert.match(
     fullSuiteStatus.if,
     /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
@@ -448,7 +451,10 @@ const assertEntryCacheTrustBoundary = (source) => {
   // An untrusted suite result counts for dispatches only: a pull request's
   // untrusted (fast-scope) run must never post full-suite.
   assert.equal([...fullSuiteStatus.if.matchAll(/needs\.untrusted/g)].length, 1);
-  assert.match(fullSuiteStatus.if, /github\.event_name == 'workflow_dispatch' && needs\.untrusted\./);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\./,
+  );
   assert.deepEqual(fullSuiteStatus.needs, ["untrusted", "trusted"]);
   assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
   assert.equal(fullSuiteStatus.steps.length, 2);
