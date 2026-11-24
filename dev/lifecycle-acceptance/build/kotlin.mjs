@@ -21,18 +21,26 @@ export async function buildKotlin() {
   await timed("kotlin build", () => run("gradle", [...gradle, "--offline", "installDist"], { cwd: dir, env }));
 
   const lib = join(dir, "build", "install", "lifecycle-driver", "lib");
+  // tools.jazz:jazz-kotlin may be one jar (beta.1) or a Multiplatform root whose Gradle module
+  // sends JVM builds to jazz-kotlin-jvm (beta.2). Either way, every Jazz jar on the classpath is a
+  // release-maven file of this candidate, byte for byte, at this version.
   const jazzJars = readdirSync(lib).filter((name) => name.startsWith("jazz"));
-  const jar = `jazz-kotlin-${version}.jar`;
-  assert(jazzJars.join() === jar, `the install holds ${jazzJars.join(", ") || "no jazz jar"}, not just ${jar}`);
+  assert(jazzJars.some((name) => /^jazz-kotlin(-jvm)?-/.test(name)), `the install holds no jazz-kotlin jar (${jazzJars.join(", ") || "none"})`);
   const manifest = JSON.parse(readFileSync(join(WORK, "artifacts", "release-manifest", "manifest.json"), "utf8"));
-  const listed = manifest.files.find(
-    (file) => file.artifact === "release-maven" && file.path === `jazz-kotlin/${version}/${jar}`,
-  );
-  const got = await sha256(join(lib, jar));
-  assert(listed && got === listed.sha256, `gradle resolved a ${jar} (${got}) that isn't the manifest's`);
+  const resolved = [];
+  for (const name of jazzJars) {
+    const artifact = name.replace(`-${version}.jar`, "");
+    assert(name === `${artifact}-${version}.jar`, `the install holds ${name}, not version ${version}`);
+    const listed = manifest.files.find(
+      (file) => file.artifact === "release-maven" && file.path === `${artifact}/${version}/${name}`,
+    );
+    const got = await sha256(join(lib, name));
+    assert(listed && got === listed.sha256, `gradle resolved a ${name} (${got}) that isn't the manifest's`);
+    resolved.push({ what: `release-maven tools.jazz:${artifact}:${version}`, sha256: got });
+  }
   const classpath = readdirSync(lib).map((name) => join(lib, name)).join(":");
   writeDriver("kotlin", {
     cmd: ["java", "-cp", classpath, "lifecycle.DriverKt"],
-    resolved: [{ what: `release-maven tools.jazz:jazz-kotlin:${version}`, sha256: got }],
+    resolved,
   });
 }
