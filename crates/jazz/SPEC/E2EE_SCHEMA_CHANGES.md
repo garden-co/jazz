@@ -118,7 +118,9 @@ app encrypts data it already stores. References: the
   An encrypted table can be dropped unless it is itself an inherited space
   table. To drop or rename a space table, declare encryption in the new
   version so its own entries govern. An entry with no encrypted columns is
-  enough. Otherwise, keep the table under its original name.
+  enough. Otherwise, keep the table under its original name. A version a
+  server already stores without declarations can't gain them (declarations
+  are fixed per version, below), so there the change needs a new version.
 - The entries add nothing to the schema hash (H1); the deploy request carries
   every version's declarations so the server can check them.
 - **Declarations are fixed per version.** A server keeps the declarations a

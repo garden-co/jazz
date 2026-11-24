@@ -967,7 +967,9 @@ pub fn check_space_tables(schema: &Schema, entries: &Entries) -> Result<(), Stri
                 "space table {scope} is not in this version (dropped or renamed). This version \
                  declares no encryption entries, so it follows the nearest earlier declarations, \
                  which use {scope}. Either keep {scope} under its original name or declare encryption in this version. \
-                 Even one entry with no encrypted columns makes this version follow its own declarations."
+                 Even one entry with no encrypted columns makes this version follow its own declarations. \
+                 If a server already stores this version without declarations, they can't be added to it: \
+                 make the change in a new version."
             ));
         }
     }
