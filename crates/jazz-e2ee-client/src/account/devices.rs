@@ -46,7 +46,7 @@ use jazz_e2ee::protocol::position::Position;
 use jazz_e2ee::protocol::records::account::{DeviceProof, DeviceRequest, approval_code};
 use jazz_e2ee::protocol::{Accepted, ProtocolError};
 
-use super::{ATTEMPTS, AccountRead, AccountStatus, FloorCheck, conflict};
+use super::{ATTEMPTS, AccountRead, AccountStatus, FloorCheck};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
 
@@ -335,9 +335,6 @@ impl E2eeClient {
         let keys = self.shared.device()?.keys();
         let code = self.code(&challenge, &keys, &proof.nonce)?;
         self.mark_nonce_spent().await?;
-        if let Some(device) = self.shared.device.borrow_mut().as_mut() {
-            device.approval_nonce.take();
-        }
         self.publish_proof(db, &proof).await?;
         Ok(code)
     }
@@ -630,7 +627,7 @@ impl E2eeClient {
                     .await;
                     match item {
                         // A conflict reads again, as for any other call.
-                        Err(ClientError::Database(error)) if conflict(&error) => {
+                        Err(ClientError::Database(error)) if error.is_conflict() => {
                             Err(ClientError::Database(error))
                         }
                         other => Ok(Some((device, other))),
@@ -914,7 +911,7 @@ impl E2eeClient {
                     }
                     result => result?,
                 };
-                recovery_approve(
+                Ok(recovery_approve(
                     &self.writer()?,
                     &state,
                     &mut device,
@@ -922,8 +919,7 @@ impl E2eeClient {
                     &key,
                     &mut SharedRandom(&self.shared.random),
                 )
-                .map(|records| Some(Attempt::Ready(records)))
-                .map_err(ClientError::from)
+                .map(|records| Some(Attempt::Ready(records)))?)
             })
             .await?;
         match attempt {
@@ -941,9 +937,6 @@ impl E2eeClient {
             Some(Attempt::Ready(None)) => {}
             Some(Attempt::Ready(Some(records))) => {
                 self.mark_nonce_spent().await?;
-                if let Some(device) = self.shared.device.borrow_mut().as_mut() {
-                    device.approval_nonce.take();
-                }
                 self.publish_recovery(db, &records).await?;
             }
         }
@@ -1041,23 +1034,6 @@ mod tests {
 
     fn junk() -> ProtocolError {
         ProtocolError::Crypto(jazz_e2ee::Error::InvalidCiphertext)
-    }
-
-    /// Contract: a newer challenge (mallory's junk, signed by a member)
-    /// whose answer fails with an error proving it invalid does not hide
-    /// an older valid one.
-    ///
-    /// ```text
-    /// newest: junk ──answer──✗ invalid ciphertext (skipped)
-    /// older:  valid ──answer──► answered
-    /// ```
-    #[test]
-    fn a_newer_challenge_that_errors_does_not_hide_a_valid_one() {
-        let answered = newest_answered(["junk", "valid"], |candidate| match *candidate {
-            "valid" => Ok(7),
-            _ => Err(junk()),
-        });
-        assert!(matches!(answered, Ok((7, "valid"))), "{answered:?}");
     }
 
     /// Contract: each failure that proves a challenge invalid (a bad

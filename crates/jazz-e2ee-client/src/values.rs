@@ -39,9 +39,6 @@ pub(crate) struct ColumnCodec {
     /// declared default; else null for an optional column; else nothing
     /// (a required column without a default).
     pub(crate) empty: Option<Value>,
-    /// The declared default, as the column's type: what an insert that
-    /// leaves the column out writes.
-    pub(crate) default: Option<Value>,
 }
 
 fn unsupported(column: &str, what: &str) -> ClientError {
@@ -67,10 +64,6 @@ fn equality_type(column_type: &ColumnType) -> EqualityColumnType {
         _ => EqualityColumnType::Row,
     }
 }
-
-/// The name of the cell type encoding: the `T` every cell record of
-/// version 1 binds (crypto format, "Cell type, version 1").
-pub const CELL_TYPE_ENCODING: &str = "jazz-e2ee-cell-type-v1";
 
 /// A JSON schema value: objects with keys sorted by UTF-16 code unit,
 /// integers in decimal; a number with a fraction or exponent is refused.
@@ -200,9 +193,8 @@ impl ColumnCodec {
             is_bytes: plain.column_type == ColumnType::Bytea,
             column_type: plain.column_type.clone(),
             empty: None,
-            default: None,
         };
-        codec.default = match &plain.default {
+        let default = match &plain.default {
             Some(default) => Some(
                 record_value(default)
                     .and_then(|value| codec.typed(&value))
@@ -214,7 +206,7 @@ impl ColumnCodec {
             ),
             None => None,
         };
-        codec.empty = match &codec.default {
+        codec.empty = match &default {
             Some(default) => Some(default.clone()),
             None if plain.nullable => Some(Value::Nullable(None)),
             // A required column without a default has no value a never
@@ -348,28 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_types_are_pinned() {
-        let text = codec(ColumnType::Text, false, true);
-        assert_eq!(
-            String::from_utf8(text.cell_type).unwrap(),
-            r#"{"column_type":{"type":"Text"},"nullable":false}"#
-        );
-        let status = codec(
-            ColumnType::Enum {
-                variants: vec!["open".into(), "done".into()],
-            },
-            true,
-            true,
-        );
-        assert_eq!(
-            String::from_utf8(status.cell_type).unwrap(),
-            r#"{"column_type":{"type":"Enum","variants":["open","done"]},"nullable":true}"#
-        );
-    }
-
-    #[test]
     fn every_cell_type_has_its_pinned_encoding() {
-        assert_eq!(CELL_TYPE_ENCODING, "jazz-e2ee-cell-type-v1");
         let encoded = |column_type: ColumnType, nullable: bool| {
             String::from_utf8(
                 cell_type(
@@ -399,6 +370,15 @@ mod tests {
                 format!(r#"{{"column_type":{{"type":"{name}"}},"nullable":true}}"#)
             );
         }
+        assert_eq!(
+            encoded(
+                ColumnType::Enum {
+                    variants: vec!["open".into(), "done".into()]
+                },
+                true
+            ),
+            r#"{"column_type":{"type":"Enum","variants":["open","done"]},"nullable":true}"#
+        );
         assert_eq!(
             encoded(ColumnType::Json { schema: None }, false),
             r#"{"column_type":{"type":"Json"},"nullable":false}"#

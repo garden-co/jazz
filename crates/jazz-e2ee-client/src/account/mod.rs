@@ -89,13 +89,6 @@ struct AccountRead {
     skipped: usize,
 }
 
-/// Whether a publication failed because the rows it read changed before it
-/// committed (§0 item 5): its read is out of date, and it reads again.
-pub(crate) fn conflict(error: &jazz::db::Error) -> bool {
-    error.code == ErrorCode::TransactionConflict
-        || error.reason == Some(jazz::db::Reason::SerializationConflict)
-}
-
 /// Runs `step` in a serializable transaction of `db` and abandons its
 /// handle afterwards; a conflict reads again, `attempts` times in all, and
 /// the last one is the error. Every other outcome is returned as it is.
@@ -113,9 +106,9 @@ pub(crate) async fn serializable<T>(
         let outcome = Box::pin(step(tx)).await;
         let _ = db.abandon_transaction_handle(tx);
         let retry = match &outcome {
-            Err(ClientError::Database(error)) => conflict(error),
+            Err(ClientError::Database(error)) => error.is_conflict(),
             Err(ClientError::AccountResetPublication { source, .. }) => {
-                matches!(source.as_ref(), ClientError::Database(error) if conflict(error))
+                matches!(source.as_ref(), ClientError::Database(error) if error.is_conflict())
             }
             _ => false,
         };
@@ -449,7 +442,7 @@ impl E2eeClient {
                     reenrolled = true;
                     continue;
                 }
-                Err(ClientError::Database(error)) if conflict(&error) => continue,
+                Err(ClientError::Database(error)) if error.is_conflict() => continue,
                 Err(error) => return Err(self.forget_account_on(error)),
             }
         }
@@ -623,7 +616,7 @@ impl E2eeClient {
         .await
         .map_err(|error| publication_error(error, true))?;
         self.publish(db, tx).await.map_err(|error| {
-            let refused = error.code == ErrorCode::WriteRejected || conflict(&error);
+            let refused = error.code == ErrorCode::WriteRejected || error.is_conflict();
             publication_error(error.into(), refused)
         })
     }

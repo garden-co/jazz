@@ -69,4 +69,3 @@ pub use store::{MemoryStore, PrivateStore, StoreError, Stored};
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-pub use values::CELL_TYPE_ENCODING;

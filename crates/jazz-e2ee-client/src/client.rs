@@ -633,7 +633,7 @@ impl E2eeClient {
     /// says spent, answers no challenge. Fails if the document already says
     /// spent.
     pub(crate) async fn mark_nonce_spent(&self) -> Result<(), ClientError> {
-        let mut documents = self.documents.lock().await;
+        let documents = self.documents.lock().await;
         self.ensure_open()?;
         let unrecognised = || ClientError::UnrecognisedDocument(DEVICE_DOCUMENT.to_owned());
         for _ in 0..SAVE_ATTEMPTS {
@@ -663,6 +663,9 @@ impl E2eeClient {
             {
                 Ok(_) => {
                     self.ensure_open()?;
+                    if let Some(device) = self.shared.device.borrow_mut().as_mut() {
+                        device.approval_nonce.take();
+                    }
                     drop(documents);
                     return Ok(());
                 }
@@ -671,7 +674,6 @@ impl E2eeClient {
                 Err(error) => return Err(error.into()),
             }
         }
-        let _ = &mut documents;
         Err(StoreError::Conflict.into())
     }
 

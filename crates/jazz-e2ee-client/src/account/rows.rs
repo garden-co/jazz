@@ -120,7 +120,6 @@ impl Read<'_> {
 }
 
 /// Builds a row's cells; any ID that is not a UUID makes it `None`.
-#[derive(Default)]
 struct Write(Option<Cells>);
 
 impl Write {
