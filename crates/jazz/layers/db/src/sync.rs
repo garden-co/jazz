@@ -7810,6 +7810,13 @@ impl Store {
         if !self.has_rejected_store().await? {
             return Ok(());
         }
+        #[cfg(feature = "e2ee-client")]
+        if let Some(hooks) = self.e2ee_hooks()
+            && let Some(error) = self.rejected_error(tx).await?
+        {
+            let ops = pending::ops(&self.conn, "_jazz_rejected", tx).await?;
+            hooks.transaction_refused(&ops, &error);
+        }
         for table in [
             "_jazz_rejected",
             "_jazz_rejected_ops",

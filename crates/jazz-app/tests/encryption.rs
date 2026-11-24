@@ -1462,19 +1462,29 @@ async fn key_refusal_on_transaction_write() {
 /// write stops, and a transaction reports the original coded refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preparation_after_root_refusal() {
-    check_root_refusal(Duration::ZERO).await;
+    check_root_refusal(Some(Duration::ZERO)).await;
 }
 
-/// The mutation-error reporter can release the refusal before Alice's
-/// encryption runtime reads it. The comparison is in the cleanup build
-/// report at `e2ee-l12-evidence/plans/cleanup/build/feynman2/report.md`.
+/// Alice's refused root still prevents writing after a delay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "the rejected root's record can be discarded before encryption observes it"]
 async fn delayed_preparation_after_root_refusal() {
-    check_root_refusal(Duration::from_millis(250)).await;
+    check_root_refusal(Some(Duration::from_millis(250))).await;
 }
 
-async fn check_root_refusal(delay: Duration) {
+/// Alice receives the refusal of a locally committed write before preparing
+/// the space again. Preparation and her next write both report the missing root.
+///
+/// ```text
+/// alice ──insert──► server ──refuse──► mutation_errors
+/// alice ◄──refusal── reporter
+/// alice ──prepareSpace──► false
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preparation_after_root_refusal_is_collected() {
+    check_root_refusal(None).await;
+}
+
+async fn check_root_refusal(delay_after_durable_write: Option<Duration>) {
     let app = App::start().await;
     let alice = app.device().await;
     ready(&alice).await;
@@ -1487,15 +1497,29 @@ async fn check_root_refusal(delay: Duration) {
         )
         .await
         .unwrap();
-    let first = add_task(&alice, &project.to_string(), "first")
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&first, Error::WriteRejected { code, .. } if code == "permission_denied"),
-        "{first:?}"
-    );
-    if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
+    if let Some(delay) = delay_after_durable_write {
+        let first = add_task(&alice, &project.to_string(), "first")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&first, Error::WriteRejected { code, .. } if code == "permission_denied"),
+            "{first:?}"
+        );
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    } else {
+        use futures_util::StreamExt;
+        let mut errors = alice.mutation_errors().await.unwrap();
+        alice
+            .insert(bindings::NewTask::new(project, "first"))
+            .await
+            .unwrap();
+        let refusal = tokio::time::timeout(Duration::from_secs(30), errors.next())
+            .await
+            .expect("the reporter collected the root transaction")
+            .unwrap();
+        assert_eq!(refusal.code, "permission_denied");
     }
     assert_eq!(
         alice

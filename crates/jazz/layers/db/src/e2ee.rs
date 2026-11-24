@@ -104,6 +104,9 @@ pub trait E2eeHooks {
         let _ = rows;
     }
 
+    /// Called before the host releases this client's refused transaction.
+    fn transaction_refused(&self, _ops: &[crate::db::WireOp], _error: &Error) {}
+
     /// Open the rows of one read in place: decrypt each encrypted cell,
     /// remove the equality token cells, and, outside strict reads, remove
     /// the rows it cannot open and report them. In a strict read the first
