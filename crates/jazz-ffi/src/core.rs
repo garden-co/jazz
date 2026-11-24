@@ -708,24 +708,7 @@ impl Core {
             .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
-            // The values come in the stored schema's column order, which has
-            // an encrypted column's token columns that `table` (the app's
-            // plain view) does not.
-            let stored = client.schema()?;
-            let columns = stored
-                .get(&jazz_app_support::jazz::tools::TableName::new(&name))
-                .map(|stored| stored.columns.columns.clone())
-                .unwrap_or_default();
-            let fields = columns
-                .iter()
-                .zip(values)
-                .map(
-                    |(column, value)| jazz_app_support::jazz::tools::QueryResultField {
-                        name: column.name.as_str().to_owned(),
-                        value,
-                    },
-                )
-                .collect();
+            let fields = jazz_app_support::inserted_fields(&client, &name, values)?;
             Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())

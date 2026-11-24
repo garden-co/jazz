@@ -708,12 +708,23 @@ fn inserted<N: Insert>(
     written: Option<TransactionId>,
     implementations: &Implementations,
 ) -> Result<(N::Row, Option<TransactionId>)> {
-    let name = <N::Row as Table>::NAME;
+    let fields = inserted_fields(client, <N::Row as Table>::NAME, values)?;
+    Ok((table::decode(id, fields, implementations)?, written))
+}
+
+/// Names an insert's returned values using the stored schema's column order,
+/// including any internal columns absent from the app's plaintext schema.
+#[doc(hidden)]
+pub fn inserted_fields(
+    client: &JazzClient,
+    name: &str,
+    values: Vec<jazz::tools::Value>,
+) -> Result<Vec<jazz::tools::QueryResultField>> {
     let schema = client.schema()?;
     let table = schema
         .get(&TableName::new(name))
         .ok_or_else(|| Error::App(format!("the app has no table {name}")))?;
-    let fields = table
+    Ok(table
         .columns
         .columns
         .iter()
@@ -722,8 +733,7 @@ fn inserted<N: Insert>(
             name: column.name.as_str().to_owned(),
             value,
         })
-        .collect();
-    Ok((table::decode(id, fields, implementations)?, written))
+        .collect())
 }
 
 pub(crate) fn decode_result<T: Row>(

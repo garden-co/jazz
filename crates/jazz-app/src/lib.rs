@@ -105,6 +105,8 @@ pub use encryption::with_key_wait;
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
+#[doc(hidden)]
+pub use handle::inserted_fields;
 pub use handle::{DEFAULT_FIRST_LOAD_REMOTE_WAIT, DefaultRead, Jazz};
 pub use history::Version;
 pub use include::{
