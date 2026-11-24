@@ -14,50 +14,22 @@
 //! this device's own store, whose commits it keeps across restarts.
 
 use jazz::db::{Db, ErrorCode, Reason, WireWrite};
-use jazz::e2ee::{Provisional, SpaceAddress, TransactionFate};
-use jazz::ids::RowUuid;
+use jazz::e2ee::{Provisional, TransactionFate};
 use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
-use jazz::tx::DurabilityTier;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::{CreationFate, HeldSpace};
-use jazz_e2ee::protocol::error::RefusalCode;
 use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
 use jazz_e2ee::protocol::space::AccountDirectory;
 use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, space_root};
 
-use super::{ATTEMPTS, has_live_key, has_unpublished, offline, protocol_address};
+use super::{has_live_key, has_unpublished};
 use crate::account::rows::{self, uuid_cell};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
-use crate::state::{db_address, not_observed};
-
-/// What [`E2eeClient::create_space`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SpaceCreation {
-    /// The authority accepted this device's root, and it is the space's
-    /// root.
-    Created,
-    /// The space already had a valid root (or another root won): it was
-    /// not created again.
-    Existing,
-    /// An earlier creation of this device has not been accepted or
-    /// refused yet: no second root was staged.
-    Pending,
-}
+use crate::state::db_address;
 
 impl E2eeClient {
-    /// The space whose space row is `row` of table `scope`.
-    fn space_address(&self, scope: &str, row: RowUuid) -> Result<SpaceAddress, ClientError> {
-        let keys = self.shared.keys.borrow();
-        let catalogue = keys.catalogue.as_ref().ok_or_else(not_observed)?;
-        Ok(SpaceAddress {
-            scope_id: catalogue.table(scope)?.to_owned(),
-            identifier: row.0.to_string(),
-        })
-    }
-
     /// Prepares a root for `address` from this device's last verified
     /// account: its key is kept `unpublished` (and stored) before anything
     /// stages the root, so a write never rests on a key this device could
@@ -104,163 +76,6 @@ impl E2eeClient {
             .prepared
             .insert(address.clone(), records.root);
         Ok(())
-    }
-
-    /// Creates the space whose space row is `row` of table `scope`
-    /// (protocol §3.2, `createSpace`): one transaction holding only the
-    /// root, which waits for the authority. It reads the address's roots
-    /// first and returns [`SpaceCreation::Existing`] if one is valid; it
-    /// attempts even after an earlier refusal on this device, except while
-    /// a creation of this device is neither accepted nor refused, which it
-    /// reconciles and reports as [`SpaceCreation::Pending`]. A refusal of
-    /// the root is `space-create-refused` and stops the automatic paths for
-    /// this space while the client runs. Needs the authority and the
-    /// account verified in this run.
-    pub async fn create_space(
-        &self,
-        db: &Db,
-        scope: &str,
-        row: RowUuid,
-    ) -> Result<SpaceCreation, ClientError> {
-        self.ensure_open()?;
-        let space = self.space_address(scope, row)?;
-        let address = protocol_address(&space)?;
-        self.reconcile_once(db).await?;
-        if self.settle_creations(db, &address, None).await?
-            || self.shared.keys.borrow().held.holds_unpublished(&address)
-        {
-            // Accepted but not yet seen as the space's root, or undecided.
-            self.acquire_full(db, &space).await?;
-            return Ok(
-                if self.shared.keys.borrow().held.holds_unpublished(&address) {
-                    SpaceCreation::Pending
-                } else {
-                    SpaceCreation::Existing
-                },
-            );
-        }
-        if !self.shared.keys.borrow().online {
-            return Err(offline());
-        }
-        let attempt = crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.create_step(db, tx, &address).await
-        })
-        .await?;
-        match attempt {
-            Attempt::Existing => {
-                self.acquire_full(db, &space).await?;
-                Ok(SpaceCreation::Existing)
-            }
-            Attempt::Created(root_id) => {
-                let acquired = self.acquire_full(db, &space).await?;
-                let ours = acquired
-                    .chain
-                    .is_some_and(|chain| chain.root.row.id == root_id);
-                Ok(if ours {
-                    SpaceCreation::Created
-                } else {
-                    SpaceCreation::Existing
-                })
-            }
-            Attempt::Refused => {
-                self.shared
-                    .keys
-                    .borrow_mut()
-                    .creation_refused
-                    .insert(address.clone());
-                Err(ProtocolError::Refused(RefusalCode::SpaceCreateRefused).into())
-            }
-        }
-    }
-
-    /// One attempt of [`E2eeClient::create_space`]: the root alone in the
-    /// transaction `tx`, whose read set is the address's roots and the
-    /// public rows of the author's account.
-    async fn create_step(
-        &self,
-        db: &Db,
-        tx: OpenTransactionId,
-        address: &ProtocolAddress,
-    ) -> Result<Attempt, ClientError> {
-        let mut read = self.read_space(db, tx, address).await?;
-        let records = {
-            let chain = self.replay_space(&mut read).await?.chain;
-            if chain.is_some() {
-                return Ok(Attempt::Existing);
-            }
-            // Rows this client cannot decode may be the root it does not
-            // see; a key this device holds means a root exists that this
-            // read hides: neither creates a second root (protocol §3.3).
-            if read.skipped > 0 {
-                return Err(ClientError::Unsupported(
-                    "the space has rows this client cannot read: it is not created".to_owned(),
-                ));
-            }
-            if self.holds_live_key(address) {
-                return Ok(Attempt::Existing);
-            }
-            let account = self.account.borrow();
-            let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            let directory = AccountDirectory::new(
-                &read.accounts,
-                &self.shared.domain,
-                &self.shared.registry,
-                read.ledger.through,
-            )
-            .map_err(ClientError::from)?;
-            let device = self.shared.device()?.clone();
-            let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)
-                .map_err(ClientError::from)?;
-            let writer = SpaceWriter {
-                suite: self
-                    .shared
-                    .registry
-                    .select(&self.shared.selected)
-                    .map_err(ClientError::from)?,
-                registry: &self.shared.registry,
-                domain: &self.shared.domain,
-                account_id: &self.shared.account_id,
-            };
-            space_root(
-                &writer,
-                address,
-                &author,
-                &mut SharedRandom(&self.shared.random),
-            )
-            .map_err(ClientError::from)?
-        };
-        let held = HeldSpace::from_creation(
-            &self.shared.registry,
-            &self.shared.domain,
-            &records,
-            &records.root.id,
-        )
-        .map_err(ClientError::from)?;
-        let root_id = records.root.id.clone();
-        self.keep(held).await?;
-        // From here the key exists: whatever happens, it settles it.
-        let committed = async {
-            self.stage(db, tx, &records.root).await?;
-            let receipt = db.commit_serializable_handle(tx).await?;
-            db.wait_for_transaction(receipt.0, DurabilityTier::Global)
-                .await?;
-            Ok::<_, ClientError>(())
-        }
-        .await;
-        match committed {
-            Ok(()) => Ok(Attempt::Created(root_id)),
-            Err(error) => {
-                self.abandon_creation(&root_id).await?;
-                match error {
-                    ClientError::Database(error)
-                        if error.reason == Some(Reason::AuthorizationDenied) =>
-                    {
-                        Ok(Attempt::Refused)
-                    }
-                    other => Err(other),
-                }
-            }
-        }
     }
 
     /// Settles the keys of this device's creations of `address` whose fate
@@ -509,14 +324,4 @@ impl E2eeClient {
         }
         self.reconcile(db).await
     }
-}
-
-/// What one attempt of `create_space` did.
-enum Attempt {
-    /// The address already had a valid root.
-    Existing,
-    /// The authority accepted this root.
-    Created(String),
-    /// The authority refused the root: the session may not create it.
-    Refused,
 }

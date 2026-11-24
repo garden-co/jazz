@@ -742,7 +742,7 @@ mod tests {
 
     /// Contract: a call answered before its deadline leaves nothing with the
     /// deadline thread: the waker it handed over is dropped when the call
-    /// ends, not kept until the deadline (a minute by default).
+    /// ends, not kept until the deadline (30 seconds by default).
     ///
     /// Lower-level than a black-box test: the waker the thread holds is only
     /// observable by counting its references.

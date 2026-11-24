@@ -6,7 +6,7 @@
 //! space's deliveries: the first holder to commit wins, a later one finds
 //! its read changed (a phantom), reads again and finds nothing to do. The
 //! pass runs at natural moments, never on a timer: when the app asks
-//! ([`E2eeClient::deliver_keys`], [`E2eeClient::deliver_space`]) and when
+//! ([`E2eeClient::deliver_keys`]) and when
 //! [`E2eeClient::sync_spaces`] sees a space's rows change. Rotation is by an
 //! updater, lazily before an encrypted write to a space that needs it, or
 //! at once by [`E2eeClient::rotate`].
@@ -221,16 +221,6 @@ impl E2eeClient {
             *watched = deps;
         }
         Ok(written)
-    }
-
-    /// The pass over `space`: delivers the versions this device holds to the
-    /// members that lack them (protocol §3.4). It reads the space in a
-    /// serializable transaction, so a delivery another holder commits first
-    /// makes this one conflict; it then reads again and finds nothing to
-    /// do: the first holder wins, with no delay. How many deliveries it
-    /// wrote. Needs the authority and the account verified in this run.
-    pub async fn deliver_space(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
-        self.deliver_pass(db, space).await
     }
 
     /// The pass over `space`.

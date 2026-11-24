@@ -35,10 +35,10 @@ fn an_empty_cell_of_a_required_column_without_a_default_withholds_its_row() {
         .unwrap()
         .row_uuid();
     let everything = Query::from("notes");
+    let seen = observe_reports(&client);
     let _live = block_on(db.subscribe(&db.prepare_query(&everything).unwrap(), Default::default()))
         .unwrap();
     pump(&server, &db);
-    client.take_reports();
 
     let rows = all(&db, everything).unwrap();
     assert_eq!(
@@ -46,8 +46,8 @@ fn an_empty_cell_of_a_required_column_without_a_default_withholds_its_row() {
         [kept]
     );
     assert_eq!(rows[0].cell("body"), Some(text("kept")));
-    let reports: Vec<_> = client
-        .take_reports()
+    client.flush_reports();
+    let reports: Vec<_> = std::mem::take(&mut *seen.borrow_mut())
         .into_iter()
         .filter_map(|report| match report {
             Report::Unreadable(unreadable) => Some(unreadable),

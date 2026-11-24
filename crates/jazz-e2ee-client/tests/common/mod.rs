@@ -39,7 +39,9 @@ use jazz_e2ee::protocol::space::build::{Author, RootRecords, SpaceWriter, space_
 use jazz_e2ee::protocol::{Accepted, Position};
 use jazz_e2ee::registry::Registry;
 use jazz_e2ee_client::testing::StoreWithSaveHook;
-use jazz_e2ee_client::{ClientConfig, E2eeClient, MemoryStore, PrivateStore, StoreError, Stored};
+use jazz_e2ee_client::{
+    ClientConfig, ClientError, E2eeClient, MemoryStore, PrivateStore, Report, StoreError, Stored,
+};
 
 pub const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
 pub const SECRET: &str = "PLAINTEXT-SECRET";
@@ -825,4 +827,67 @@ pub fn tamper(path: &std::path::Path, table: &str, column: &str, value: impl rus
 
 pub fn count(server: &Db, table: &str) -> usize {
     all(server, Query::from(table)).unwrap().len()
+}
+
+/// Repeat key-refused database writes after the host's preparation step.
+pub async fn host_write<T>(
+    client: &E2eeClient,
+    db: &Db,
+    mut write: impl AsyncFnMut() -> Result<T, jazz::db::Error>,
+) -> Result<T, ClientError> {
+    use jazz::e2ee::E2eeRefusal;
+
+    for _ in 0..3 {
+        match write().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let space = match E2eeRefusal::of(&error) {
+                    Some(E2eeRefusal::NeedsKey { space } | E2eeRefusal::SpacePending { space }) => {
+                        space
+                    }
+                    None => return Err(error.into()),
+                };
+                if !client.prepare_host_write(db, &space, None).await? {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    write().await.map_err(Into::into)
+}
+
+/// Read through the database hooks, then let the host settle missing keys.
+pub async fn host_read<T>(
+    client: &E2eeClient,
+    db: &Db,
+    mut read: impl AsyncFnMut() -> Result<T, jazz::db::Error>,
+) -> Result<T, ClientError> {
+    let value = read().await?;
+    let settled = client.settle_reads(db).await;
+    client.flush_reports();
+    if settled? {
+        return read().await.map_err(Into::into);
+    }
+    Ok(value)
+}
+
+/// Observe the named space's result from the host's delivery pass.
+pub async fn deliver_for(
+    client: &E2eeClient,
+    db: &Db,
+    space: &jazz::e2ee::SpaceAddress,
+) -> Result<usize, ClientError> {
+    for (address, result) in client.deliver_keys(db).await? {
+        if address == *space {
+            return result;
+        }
+    }
+    panic!("delivery pass omitted {space:?}");
+}
+
+pub fn observe_reports(client: &E2eeClient) -> Rc<RefCell<Vec<Report>>> {
+    let reports = Rc::new(RefCell::new(Vec::new()));
+    let sink = reports.clone();
+    client.on_report(move |report| sink.borrow_mut().push(report.clone()));
+    reports
 }

@@ -70,8 +70,7 @@ impl SettleBackoff {
 pub enum Report {
     /// A cell or row a read left out, or returned with a notice
     /// (protocol §4.3). Listeners ([`crate::E2eeClient::on_report`]) get each
-    /// distinct one once; [`crate::E2eeClient::take_reports`] gives every
-    /// occurrence the hooks saw.
+    /// distinct one once.
     Unreadable(Unreadable),
     /// A row a read left out because this device does not hold the version
     /// its cell names: the runtime acquires it (protocol §4.2).
@@ -492,15 +491,8 @@ pub(crate) struct KeyState {
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
     pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
-    /// Spaces whose rotation a write already tried, by the write: it seals
-    /// under the current version whatever came of it, and the mark stays
-    /// unless the rotation succeeded or was refused (protocol §3.5). Each
-    /// [`crate::E2eeClient::write`] call has its own marks (`Some` of its
-    /// number), removed when it returns, so a concurrent call to the same
-    /// space still gets its own rotation chance. Writes the runtime does not
-    /// wrap share `None`: such a write (a host's, retried after
-    /// [`crate::E2eeClient::prepare_space`]) takes its space's mark when it
-    /// seals, so the next write gets its own chance.
+    /// Rotation attempts made during a host preparation (`Some` of its
+    /// number), and grants that its next retry consumes when sealing (`None`).
     pub(crate) rotation_tried: BTreeSet<(
         Option<u64>,
         jazz_e2ee::protocol::records::space::SpaceAddress,
@@ -661,9 +653,6 @@ pub(crate) struct Creations {
     /// Roots prepared, with their keys held `unpublished`, that the next
     /// write to their space stages.
     pub(crate) prepared: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, SpaceRoot>,
-    /// Roots staged by the call in progress, which the runtime settles
-    /// when the call fails.
-    pub(crate) attempt: Vec<(jazz_e2ee::protocol::records::space::SpaceAddress, String)>,
     /// Roots staged in this run whose transaction may not have committed
     /// yet: a root absent from the store is not yet known to be lost.
     pub(crate) staged: BTreeSet<String>,
@@ -686,7 +675,6 @@ pub(crate) struct Shared {
     pub(crate) device: RefCell<Option<LocalDevice>>,
     pub(crate) keys: RefCell<KeyState>,
     pub(crate) random: RefCell<Box<dyn RandomSource>>,
-    pub(crate) reports: RefCell<VecDeque<Report>>,
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
     pub(crate) outbox: RefCell<VecDeque<Report>>,
@@ -718,11 +706,7 @@ pub(crate) struct Shared {
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
-    /// The [`crate::E2eeClient::write`] call whose operation is being polled,
-    /// if any: what the hooks seal belongs to that call's `rotation_tried`
-    /// marks.
-    pub(crate) current_write: std::cell::Cell<Option<u64>>,
-    /// The number the next [`crate::E2eeClient::write`] call takes.
+    /// The number the next host write preparation takes.
     pub(crate) next_write: std::cell::Cell<u64>,
     /// The watch of the watched spaces' member accounts.
     pub(crate) member_watch: RefCell<MemberWatch>,
@@ -868,18 +852,11 @@ impl Shared {
     }
 
     pub(crate) fn report(&self, report: Report) {
-        {
-            let mut outbox = self.outbox.borrow_mut();
-            if outbox.len() == MAX_REPORTS {
-                outbox.pop_front();
-            }
-            outbox.push_back(report.clone());
+        let mut outbox = self.outbox.borrow_mut();
+        if outbox.len() == MAX_REPORTS {
+            outbox.pop_front();
         }
-        let mut reports = self.reports.borrow_mut();
-        if reports.len() == MAX_REPORTS {
-            reports.pop_front();
-        }
-        reports.push_back(report);
+        outbox.push_back(report);
     }
 
     /// Notes that `column` of the row opened under a refused creation's key
@@ -981,7 +958,6 @@ impl Shared {
     /// them. The listeners stay; the withdrawals of the reports they hold
     /// reach them with the next delivery.
     pub(crate) fn reset_reports(&self) {
-        self.reports.borrow_mut().clear();
         let withdrawn = self.published.borrow_mut().reset();
         *self.outbox.borrow_mut() = withdrawn.into();
     }

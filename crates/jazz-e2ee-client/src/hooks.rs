@@ -152,8 +152,7 @@ impl Hooks {
                     SealError::Refused(rejected("a space root's IDs are not UUIDs"))
                 })?;
                 rows.push((SPACE_ROOTS.to_owned(), RowUuid(row), cells));
-                creations.staged.insert(root.id.clone());
-                creations.attempt.push((address.clone(), root.id));
+                creations.staged.insert(root.id);
             }
         }
         Ok(())
@@ -176,15 +175,7 @@ impl Hooks {
         self.shared.note_write(address);
         self.shared.notice_member_changes();
         let mut keys = self.shared.keys.borrow_mut();
-        let call = self.shared.current_write.get();
-        let mark = (call, address.clone());
-        // A retry without a wrapping write call takes its mark here, so the
-        // next write gets its own attempt. A wrapped call keeps it until exit.
-        let tried = if call.is_none() {
-            keys.rotation_tried.remove(&mark)
-        } else {
-            keys.rotation_tried.contains(&mark)
-        };
+        let tried = keys.rotation_tried.remove(&(None, address.clone()));
         let removal = !self.shared.member_removals.borrow().is_empty();
         // A key of a space whose mark this runtime has not evaluated may be
         // one a removed device holds (see `KeyState::needs_evaluation`): the

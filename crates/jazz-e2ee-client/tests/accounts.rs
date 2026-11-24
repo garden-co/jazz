@@ -197,7 +197,7 @@ fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
     drive(
         &server,
         &[&db],
-        client.write(&db, async || {
+        host_write(&client, &db, async || {
             db.insert("notes", note(space, SECRET), Default::default())
                 .await
         }),

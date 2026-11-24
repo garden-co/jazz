@@ -6,9 +6,8 @@
 //!
 //! Each watch opens before the decision it guards: a space joins the
 //! watch, and only then is acquired, so a delivery that syncs in between
-//! is seen. Watches of the member accounts' own rows and of the
-//! deliveries of each held version belong to the delivery and rotation
-//! parts of the runtime.
+//! is seen. The shared watch also tracks member accounts and current
+//! version deliveries.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -169,10 +168,6 @@ impl E2eeClient {
     /// Opens the shared subscriptions of the spaces in `interest`, one per
     /// system table, when the set, or a current version, changed since they
     /// were opened; the new ones are open before the old ones close.
-    /// Both columns of the address are filtered: the store serves
-    /// `scopeId IN (…) AND identifier IN (…)` from its
-    /// `(scopeId, identifier, …)` index, but scans the table for
-    /// `identifier IN (…)` alone. Whether it changed anything.
     pub(super) async fn refresh_shared(
         &self,
         db: &Db,

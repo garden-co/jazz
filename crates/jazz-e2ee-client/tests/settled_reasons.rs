@@ -158,7 +158,7 @@ fn executing_an_equality_query_reports_the_space_when_it_cannot_search_every_epo
         let row = drive(
             &server,
             &[&alice_db],
-            writer.write(&alice_db, async || {
+            host_write(&writer, &alice_db, async || {
                 alice_db
                     .insert("notes", note(space, SECRET), Default::default())
                     .await
@@ -172,7 +172,7 @@ fn executing_an_equality_query_reports_the_space_when_it_cannot_search_every_epo
         drive(
             &server,
             &[&alice_db],
-            writer.deliver_space(&alice_db, &address),
+            deliver_for(&writer, &alice_db, &address),
         )
         .unwrap();
         pump(&server, &bob_db);

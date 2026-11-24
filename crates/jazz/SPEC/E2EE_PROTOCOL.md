@@ -250,10 +250,9 @@ be built is stated in the [core hooks note](E2EE_CORE_HOOKS.md) (§4 there):
    evidence that spans cuts. Every returned row has exactly one position and no
    position exceeds the cut.
 4. **Ledger transactions.** Inserts staged in one transaction become accepted
-   atomically, at one position. Account operations, rotation and an explicit
-   `createSpace` wait for Global acceptance (the authority's decision), not
-   only Local; a space creation staged with an application write follows
-   that write's own durability (§3.2).
+   atomically, at one position. Account operations and rotation
+   wait for Global acceptance (the authority's decision). Space creation
+   follows the durability of the application write that stages it (§3.2).
 5. **Read-set validation.** The authority refuses to commit a ledger
    transaction (with a conflict, not a policy refusal) when any evidence the
    transaction read at its cut has changed by its commit: a row it read was
@@ -1750,22 +1749,11 @@ creator generates the root epoch and `K₀`, and writes the root with
 `accountEnvelope`, its own account's copy. The other members receive `K₀`
 by delivery (§3.4).
 
-**When a space is created.** Inserting a space row creates nothing. A space
-is created only:
-
-- **with the first encrypted write that needs it.** An encrypted write to a space for which
-  the client knows no valid root stages the root in the **same
-  transaction** as the write ([core hooks](E2EE_CORE_HOOKS.md) H2), so the
-  encrypted rows and their space are accepted or refused together. Online,
-  the runtime first reads the address's roots, so it does not stage a root
-  for a space that already has one;
-- **explicitly**, by `db.encryption.createSpace(row)`: one transaction
-  holding only the root (stage `create`), which waits for Global
-  acceptance. Online it first reads the address's roots and returns the
-  existing space if one has a valid root. It always attempts otherwise,
-  even after an earlier refusal on this device (below), except while this device has a creation of the
-  space whose outcome is pending or unknown: it then reconciles that
-  creation and returns its outcome instead of staging a second root.
+**When a space is created.** Inserting a space row creates nothing. The first
+encrypted write that needs the space stages its root in the **same
+transaction** as the write ([core hooks](E2EE_CORE_HOOKS.md) H2). The
+encrypted rows and their space are accepted or refused together. Online, the
+runtime first reads the address's roots to check for an existing valid root.
 
 **Creation is optimistic.** A Jazz replica evaluates no write policy, and
 the runtime does not try to predict the authority's decision: it stages a
@@ -1783,9 +1771,7 @@ update the space row cannot create it.
 - **Creation refused**: the authority refused the root row itself (R15).
   The SDK reports a publication error of stage `create` with code
   `space-create-refused`, naming the space, and the device stops
-  automatic attempts for the space (below). When the transaction holds
-  only the root (`createSpace`), a policy refusal
-  of it is this outcome; a conflict or another failure of it is the next.
+  automatic attempts for the space (below).
 - **Transaction failed otherwise**: the transaction that carried the root
   failed definitively for another reason: another of its rows was refused,
   it conflicted, or a refusal does not name the root. The transaction's own
@@ -1796,34 +1782,29 @@ update the space row cannot create it.
   cancellation is reported, and automatic attempts continue.
 - **Unknown**: the outcome is reconciled by the transaction's durable
   identity (§5.4, §5.6), never by staging another root. While it is pending
-  or unknown, no path, `createSpace` included, stages a second root for the
-  space on this device.
+  or unknown, this device stages no second root for the space.
 
 Whatever the outcome, a key whose root did not become the space's root
 follows §5.4 and is repaired as below.
 
 **After a refusal.** Once a creation is refused, the runtime's automatic
 path (the first encrypted write) stages no root for that space on this device while the
-client runs: encrypted writes to the space fail with `space-pending`, and
-reads report it `space-pending` (§4.3), until a valid root exists. An
-explicit `createSpace(row)` always attempts. This is kept only in the
-memory of the running client; nothing about it is stored, so after a
-restart the next automatic path may try the space once more. A space is
-created only by someone who may update its row, through an encrypted write
-or `createSpace`; a member who may not update the row reports
+client runs. Encrypted writes fail with `space-pending`, and reads report
+it `space-pending` (§4.3), until a valid root exists. The client keeps the
+refusal in memory, so the first encrypted write after a restart may try
+again. Only someone who may update the space row can create the space.
+A member who may not update the row reports
 the space `space-pending` until then. A session that is not a member is
 refused (R15) and reports `space-create-refused`; it would get no key
 anyway. Rotation follows the
 same rule (§3.5).
 
-Required tests: after a creation refused, an encrypted write fails
-`space-pending` without staging a root, and an explicit `createSpace`
-attempts and, once the session may update the space row, creates the
-space; after a restart, at most one automatic attempt per space is made
-before automatic attempts stop again; a transaction that fails because
+Required tests include a creation refusal followed by a write that fails
+with `space-pending` without staging a root. After a restart, the client
+makes at most one automatic attempt per space before automatic attempts stop again; a transaction that fails because
 another of its rows is refused, and a cancellation before submission, do
-not stop automatic attempts; a `createSpace` while an earlier creation's
-outcome is unknown reconciles it and stages no second root.
+not stop automatic attempts. An encrypted write while an earlier creation's
+outcome is unknown stages no second root.
 
 **Several roots.** The server does not limit roots per address (R15).
 Concurrent creators, offline creators, and a creator whose root clients
@@ -2648,8 +2629,7 @@ A rowless upload rejects named encrypted cells at begin and checks the mutation 
   anything commits. After the local-first client loads, Jazz runs the callback
   once more on it. Keep external side effects out of transaction callbacks.
   See the [thin transaction test](../../../packages/jazz-tools/src/session/create-jazz-session.thin-encrypted.test.ts#L625-L644).
-- Space creation commits with the first encrypted rows that need it, or
-  alone for `createSpace` (§3.2).
+- Space creation commits with the first encrypted rows that need it (§3.2).
 - **Keys inside a callback transaction.** A staging call that needs a key
   this device does not hold returns "needs key". Core's `Db::transaction`
   takes an asynchronous callback, so the staging call awaits acquisition
@@ -2869,9 +2849,9 @@ before it, the device has nothing to compare with (§8).
   [loads](../../jazz-e2ee-client/src/client.rs#L395-L400) and
   [rewrites](../../jazz-e2ee-client/src/client.rs#L751-L761) held keys. A local
   [wipe](../../jazz-e2ee-client/src/client.rs#L944-L949) clears secrets in memory
-  and deletes the store scope. The online
-  [read wrapper](../../jazz-e2ee-client/src/spaces/mod.rs#L1080-L1146) repeats the read once if
-  acquisition obtains a missing key. Space membership removal relies on
+  and deletes the store scope. The online client
+  [settles missing keys after a read](../../jazz-e2ee-client/src/spaces/mod.rs#L1065)
+  and refreshes reads when it obtains a key. Space membership removal relies on
   row permissions and key rotation (§3.5).
 
 ## 7. Failure taxonomy
@@ -2970,7 +2950,7 @@ Refusal codes:
 | `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
 | `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
-| `space-create-refused`             | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
+| `space-create-refused`             | The authority refused the root itself, staged with a write (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`               | No confirmed current key, or no held version for recovery (§3.5). Ordinary rotation returns zero when an active member confirms the space has no root.                    |
 | `no-account`                       | The device has no verified account, including a device awaiting approval that asks to rotate a space (§3.5).                                                              |
 | `not-a-member`                     | The account asking to rotate the space has no current member row (§3.5).                                                                                                  |

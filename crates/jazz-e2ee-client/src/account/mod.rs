@@ -132,8 +132,6 @@ fn by_account(table: &str, account: &Value) -> Query {
     Query::from(table).filter(eq(col("accountId"), lit(account.clone())))
 }
 
-/// A device whose state this runtime keeps changing (re-enrolment) is read
-/// once per operation.
 impl E2eeClient {
     /// Reads `query` in transaction `tx`, as records with their positions;
     /// rows that are not records of their table are left out and reported.
