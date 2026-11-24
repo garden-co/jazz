@@ -2533,11 +2533,9 @@ test("relay artifact staging targets every supported Android ABI and iOS framewo
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);
   assert.doesNotMatch(script, /i686-linux-android|\[x86\]/);
-  assert.match(script, /cargo ndk [^\n]+ --features e2ee-client --crate-type staticlib/);
-  assert.match(
-    script,
-    /cargo rustc [^\n]+ --features e2ee-client --target "\$target" --crate-type staticlib/,
-  );
+  assert.doesNotMatch(script, /--features e2ee-client/);
+  assert.match(script, /cargo ndk [^\n]+ --crate-type staticlib/);
+  assert.match(script, /cargo rustc [^\n]+ --target "\$target" --crate-type staticlib/);
   assert.match(script, /JazzNativeRelay\.xcframework/);
   assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
   assert.match(script, /simulator_stage=.*simulator/);

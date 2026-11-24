@@ -5,19 +5,17 @@ use super::*;
 use jazz::identity::DeviceAccountSecret;
 use jazz::ids::AuthorSubject;
 
-#[cfg(all(test, feature = "e2ee-client"))]
+#[cfg(test)]
 #[path = "tests/encrypted_foreground.rs"]
 mod encrypted_foreground;
 
 pub(super) struct AccountSessionOwner {
     pub runtime_token: u64,
     pub app_id: String,
-    #[cfg(feature = "e2ee-client")]
     pub environment: String,
     /// The device account's secret until the scope's first encrypted
     /// foreground takes it for its runtime's recovery at start (wiped when
     /// dropped). Nothing here keeps a copy after that.
-    #[cfg(feature = "e2ee-client")]
     pub device_account_secret: Option<DeviceAccountSecret>,
 }
 
@@ -261,9 +259,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
         let owner = AccountSessionOwner {
             runtime_token: lease.runtime_token,
             app_id: request.app_id.clone(),
-            #[cfg(feature = "e2ee-client")]
             environment: request.env.clone(),
-            #[cfg(feature = "e2ee-client")]
             device_account_secret,
         };
         let pending = request.prepare(root)?;

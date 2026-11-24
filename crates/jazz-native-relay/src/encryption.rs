@@ -1,4 +1,4 @@
-//! End-to-end encryption on a native relay, behind the `e2ee-client` feature
+//! End-to-end encryption on a native relay
 //! (`E2EE_PROTOCOL.md` §1.4, §4; core hooks note H9, H10).
 //!
 //! The relay's own durable database holds no keys: it opens with keyless

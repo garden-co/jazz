@@ -152,7 +152,7 @@ case "$platform" in
     mkdir -p "$stage"
     for android_abi in "${android_abis[@]}"; do
       rust_target=${rust_targets[$android_abi]}
-      cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --features e2ee-client --crate-type staticlib --profile release-mobile
+      cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --crate-type staticlib --profile release-mobile
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release-mobile/libjazz_native_relay.a" "$stage/$android_abi/"
       "$llvm_strip" --strip-debug "$stage/$android_abi/libjazz_native_relay.a"
@@ -185,7 +185,7 @@ case "$platform" in
       done
     else
       for target in "$device_target" "${simulator_targets[@]}"; do
-        cargo rustc --manifest-path "$relay_manifest" --features e2ee-client --target "$target" --crate-type staticlib --profile release-mobile
+        cargo rustc --manifest-path "$relay_manifest" --target "$target" --crate-type staticlib --profile release-mobile
       done
     fi
     staging=$(mktemp -d)
