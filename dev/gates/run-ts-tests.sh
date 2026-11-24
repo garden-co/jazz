@@ -251,9 +251,10 @@ echo "Node test live log: ${node_tests_log}"
 echo "Browser test live log: ${browser_tests_log}"
 
 set -m
-bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
+test_env="$(dirname "${BASH_SOURCE[0]}")/with-test-env.sh"
+bash "$test_env" bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
-bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
+bash "$test_env" bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
 browser_tests_pid=$!
 (trap - INT TERM; monitor_logs) &
 log_monitor_pid=$!

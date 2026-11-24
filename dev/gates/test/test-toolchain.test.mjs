@@ -72,12 +72,12 @@ for (const [path, task] of [
   });
 }
 
-test("workspace tests inherit the runner environment and nested admission capability", () => {
+test("workspace tests and CI lanes receive only the allowed parent environment", () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), "jazz-test-tmpdir-"));
   try {
     const rootManifest = manifest("package.json");
     const runner = rootManifest.scripts.test.split(" ");
-    assert.equal(runner.shift(), "vp");
+    symlinkSync(join(root, "dev"), join(directory, "dev"), "dir");
     writeFileSync(
       join(directory, "package.json"),
       JSON.stringify({
@@ -98,6 +98,7 @@ test("workspace tests inherit the runner environment and nested admission capabi
     );
     const env = {
       TMPDIR: directory,
+      JAZZ_TEST_SEALED_INSPECTOR_DIST: "1",
       RUSTC: "probe-rustc",
       RUSTC_WRAPPER: "probe-wrapper",
       SCCACHE_SERVER_UDS: "probe-socket",
@@ -111,20 +112,49 @@ test("workspace tests inherit the runner environment and nested admission capabi
       JAZZ_CORRECTNESS_CONSUMER_CAPABILITY: "probe-capability",
       JAZZ_CORRECTNESS_CONSUMER_TOKEN: "probe-token",
     };
+    const blocked = [
+      "UNLISTED_PROBE",
+      "JAZZ_UNLISTED_PROBE",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "TURBO_TOKEN",
+      "TURBO_REMOTE_CACHE_SIGNATURE_KEY",
+    ];
     writeFileSync(
       join(directory, "probe/probe.cjs"),
       `const assert = require("node:assert/strict");
       for (const [name, value] of Object.entries(${JSON.stringify(env)})) assert.equal(process.env[name], value);
+      for (const name of ${JSON.stringify(blocked)}) assert.ok(!(name in process.env), name);
       console.log("workspace probe passed");`,
     );
-    const child = spawnSync(join(root, "node_modules/.bin/vp"), runner, {
-      cwd: directory,
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-      timeout: 30000,
-    });
-    assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
-    assert.match(child.stdout + child.stderr, /workspace probe passed/);
+    const childEnv = {
+      ...process.env,
+      ...env,
+      ...Object.fromEntries(blocked.map((name) => [name, "probe"])),
+      PATH: join(root, "node_modules/.bin") + ":" + process.env.PATH,
+    };
+    for (const [command, args, overrides] of [
+      [runner[0], runner.slice(1), {}],
+      [
+        "bash",
+        [join(root, "dev/gates/run-ts-tests.sh")],
+        {
+          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+          JAZZ_NODE_TEST_COMMAND: "node probe/probe.cjs",
+          JAZZ_BROWSER_TEST_COMMAND: "node probe/probe.cjs",
+        },
+      ],
+    ]) {
+      const child = spawnSync(command, args, {
+        cwd: directory,
+        env: { ...childEnv, ...overrides },
+        encoding: "utf8",
+        timeout: 30000,
+      });
+      assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+      assert.match(child.stdout + child.stderr, /workspace probe passed/);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

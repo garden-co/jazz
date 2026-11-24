@@ -27,7 +27,7 @@
     "release:version:alpha": "changeset version --snapshot alpha",
     "release:publish": "changeset publish",
     "release:publish:alpha": "changeset publish --tag alpha",
-    "test": "vp run --parallel --concurrency-limit=10 --ignore-depends-on --no-cache --filter=!. test",
+    "test": "bash dev/gates/with-test-env.sh vp run --parallel --concurrency-limit=10 --ignore-depends-on --no-cache --filter=!. test",
     "bench:realistic:profile-browser": "node dev/benchmarks/realistic/profile_browser.mjs",
     "postinstall": "vp config --hooks --no-agent"
   },

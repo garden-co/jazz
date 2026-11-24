@@ -1885,7 +1885,7 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
     // The real runner and verifier resolve from cwd, so this is a controlled
     // checkout rather than a mutation of the developer's generated dist. Lint
     // CI deliberately has no Jazz Tools build before it runs this contract.
-    for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
+    for (const source of ["run-ts-tests.sh", "with-test-env.sh", "verify-jazz-tools-exports.mjs"])
       write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
     write("dev/artifacts/correctness-artifact-producer.mjs", "process.exit(0);\n");
     write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
