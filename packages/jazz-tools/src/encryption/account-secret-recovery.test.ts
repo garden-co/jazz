@@ -268,11 +268,14 @@ it("replays withdrawals polled while a new listener's snapshot is pending", asyn
   };
   const withdrawn = { ...report, type: "withdrawn" };
   const queued: string[] = [];
-  const snapshot = Promise.withResolvers<string>();
+  let resolveSnapshot!: (value: string) => void;
+  const snapshotReply = new Promise<string>((resolve) => {
+    resolveSnapshot = resolve;
+  });
   const encryptionCall = vi
     .fn()
     .mockResolvedValueOnce(JSON.stringify({ active: [report], queued: [] }))
-    .mockReturnValueOnce(snapshot.promise);
+    .mockReturnValueOnce(snapshotReply);
   const encryption = new Encryption({
     encryptionCall,
     encryptionState: vi.fn(),
@@ -294,7 +297,7 @@ it("replays withdrawals polled while a new listener's snapshot is pending", asyn
     expect(established.mock.calls).toEqual([[report], [withdrawn]]);
     expect(late).not.toHaveBeenCalled();
 
-    snapshot.resolve(JSON.stringify({ active: [report], queued: [] }));
+    resolveSnapshot(JSON.stringify({ active: [report], queued: [] }));
     await vi.advanceTimersByTimeAsync(25);
     expect(late.mock.calls).toEqual([[report], [withdrawn]]);
     expect(established.mock.calls).toEqual([[report], [withdrawn]]);
