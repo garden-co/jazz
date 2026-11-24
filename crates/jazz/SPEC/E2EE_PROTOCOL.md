@@ -2859,8 +2859,14 @@ before it, the device has nothing to compare with (§8).
   `device-no-longer-active` (§2.4, "Floors": the account's device record,
   held keys and floors) and explicit deletion. A refused or lost creation's
   key is kept (§3.2). A wiped store is never recreated by a late operation.
-- A held-key revision counter advances on every removal, so in-flight reads
-  notice and retry (3 attempts).
+- The runtime preserves the document's stored removal counter when it
+  [loads](../../jazz-e2ee-client/src/client.rs#L395-L400) and
+  [rewrites](../../jazz-e2ee-client/src/client.rs#L751-L761) held keys. A local
+  [wipe](../../jazz-e2ee-client/src/client.rs#L944-L949) clears secrets in memory
+  and deletes the store scope. The online
+  [read wrapper](../../jazz-e2ee-client/src/spaces/mod.rs#L1080-L1146) repeats the read once if
+  acquisition obtains a missing key. Space membership removal relies on
+  row permissions and key rotation (§3.5).
 
 ## 7. Failure taxonomy
 

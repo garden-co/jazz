@@ -25,7 +25,8 @@ Manager, libsecret).
 
 Keep the files in a directory and the key that protects them in your key store. Give each directory
 one owner. Use a single store instance for that directory, including across processes. Its queue
-serialises the revision check and replacement within that instance.
+serialises the revision check and replacement within that instance. Document names must be non-empty.
+Names starting with a dot are reserved for store metadata and temporary files.
 
 A scope is active while its incarnation marker exists. Deletion removes that marker atomically
 before cleaning up the documents. If cleanup is interrupted, reads ignore the orphaned documents
@@ -46,7 +47,10 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
     if (!scope || scope === "." || scope === "..") throw new Error("Invalid scope name");
     return `${dir}/${encodeURIComponent(scope)}`;
   };
-  const docPath = (scope: string, doc: string) => `${at(scope)}/${encodeURIComponent(doc)}`;
+  const docPath = (scope: string, doc: string) => {
+    if (!doc || doc.startsWith(".")) throw new Error("Invalid document name");
+    return `${at(scope)}/${encodeURIComponent(doc)}`;
+  };
   const marker = (scope: string) => `${at(scope)}/.incarnation`;
   const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
   const incarnationOf = async (scope: string) => {
@@ -107,7 +111,7 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
       serial(async () => {
         if ((await incarnationOf(scope)) === null) return [];
         return (await readdir(at(scope)))
-          .filter((name) => !name.startsWith(".") && !name.endsWith(".tmp"))
+          .filter((name) => !name.startsWith("."))
           .map(decodeURIComponent);
       }),
     delete: (scope) =>
