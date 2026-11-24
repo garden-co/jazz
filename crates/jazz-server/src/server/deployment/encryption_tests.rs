@@ -1645,6 +1645,73 @@ async fn a_later_version_without_declarations_deploys_with_the_system_tables() {
     );
 }
 
+fn space_app_files() -> (Value, Value) {
+    let file: Value = serde_json::from_str(include_str!(
+        "../../../../jazz/tests/fixtures/drop_space_table.json"
+    ))
+    .unwrap();
+    let permissions = json!({
+        "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "true" } }
+    });
+    (file, permissions)
+}
+
+fn load_space_app(file: &Value, permissions: &Value) -> LoadedApp {
+    artifact::load(
+        file.to_string().as_bytes(),
+        permissions.to_string().as_bytes(),
+    )
+    .unwrap()
+}
+
+/// Alice drops rooms without declaring a replacement space in the deployment body.
+#[tokio::test]
+async fn dropping_an_inherited_space_table_is_an_invalid_schema() {
+    let (file, permissions) = space_app_files();
+    let app = load_space_app(&file, &permissions);
+    let mut inherited = app.deployment_body(false);
+    inherited["encryption"]["versions"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&app.current_hash().to_string());
+    let (status, response) = publish(&router().await, inherited).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "invalid_schema", "{response}");
+    let error = response["error"].as_str().unwrap();
+    assert!(
+        error.contains("space table rooms is not in this version (dropped or renamed)"),
+        "{response}"
+    );
+}
+
+/// Alice drops rooms by declaring notes as a space with no encrypted columns.
+#[tokio::test]
+async fn dropping_an_inherited_space_table_with_an_empty_column_entry_deploys() {
+    let (file, permissions) = space_app_files();
+    let app = load_space_app(&file, &permissions);
+    let (status, response) = publish(&router().await, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["bundle"], app.bundle().to_hex());
+}
+
+/// Alice keeps the rooms space and its membership rule while dropping messages.
+#[tokio::test]
+async fn keeping_an_inherited_space_table_deploys() {
+    let (mut file, mut permissions) = space_app_files();
+    file["tables"]["notes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("encryption");
+    file["tables"]["rooms"] = file["history"]["v1"]["tables"]["rooms"].clone();
+    file["migrations"][0]["dropTables"] = json!(["messages"]);
+    permissions["tables"]["rooms"] = json!({ "read": MEMBERS_RULE.replace("projects", "rooms") });
+    let kept = load_space_app(&file, &permissions);
+    let (status, response) = publish(&router().await, kept.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["bundle"], kept.bundle().to_hex());
+}
+
 /// Alice can declare encryption on the first deployment of a schema that
 /// the host already knows as its unpublished genesis.
 #[test]

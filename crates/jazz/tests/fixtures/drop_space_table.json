@@ -1,0 +1,22 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "notes": {
+      "columns": { "done": "boolean" },
+      "encryption": { "space": "id", "scope": "notes", "columns": {} }
+    }
+  },
+  "history": {
+    "v1": {
+      "tables": {
+        "rooms": { "columns": { "label": "string" } },
+        "messages": {
+          "columns": { "room": { "type": "uuid", "references": "rooms" }, "body": "bytes" },
+          "encryption": { "space": "room", "scope": "rooms", "columns": { "body": "string" } }
+        },
+        "notes": { "columns": { "done": "boolean" } }
+      }
+    }
+  },
+  "migrations": [{ "from": "v1", "dropTables": ["messages", "rooms"] }]
+}

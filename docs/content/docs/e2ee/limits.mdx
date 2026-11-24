@@ -16,10 +16,12 @@ languageTabs: backend
   has already deployed, such as shortening an encrypted enum list in a version that only adds an
   index. The tooling accepts those, and the deploy may still refuse them with an error naming the
   column.
-- **An app that stops encrypting keeps its space tables.** You can drop every encrypted table, but
-  a version with no encrypted columns can't drop a space table, such as a room table whose rows are
-  their own spaces. The deploy refuses it with an error naming the table. Keep it, with its read
-  rule from the members table.
+- **A version that declares no encryption entries keeps its inherited space tables.** If the
+  nearest earlier declarations use `rooms` as a space table, keep `rooms` under that name. Keep its
+  read rule from the members table if any inherited entry using `rooms` encrypts a column.
+  You can drop an encrypted table unless it is itself an inherited space table. To drop or
+  rename a space table, declare encryption in the new version. Even one entry with no encrypted
+  columns makes the new version follow its own declarations.
 - **A writer that hasn't loaded a row can move it to another space.** A write can't change an
   encrypted row's space, but the client or backend making the write checks this against its own
   copy of the row, and the server does not check it again. A writer that has never loaded the row

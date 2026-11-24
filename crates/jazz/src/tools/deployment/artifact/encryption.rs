@@ -957,30 +957,29 @@ fn scopes(entries: &Entries) -> BTreeMap<&str, bool> {
     scopes
 }
 
+/// Own entries have already been checked against their schema. Inherited
+/// entries can name a space that no longer exists under its original name.
+pub fn check_space_tables(schema: &Schema, entries: &Entries) -> Result<(), String> {
+    for entry in entries.values() {
+        let scope = entry.scope.as_str();
+        if !schema.contains_key(&TableName::from(scope)) {
+            return Err(format!(
+                "space table {scope} is not in this version (dropped or renamed). This version \
+                 declares no encryption entries, so it follows the nearest earlier declarations, \
+                 which use {scope}. Either keep {scope} under its original name or declare encryption in this version. \
+                 Even one entry with no encrypted columns makes this version follow its own declarations."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a space table whose read rule doesn't come from the members
 /// table (protocol R13), naming it. Only space tables of an entry that
 /// encrypts a column are checked: an entry without encrypted columns lets
 /// an app write member rows first (E2EE_SCHEMA_CHANGES.md §4).
-///
-/// `entries` may be an earlier version's, when `schema`'s version declares
-/// none. A space table they name that `schema` has dropped then gets its own
-/// error, since no read rule can be written for it.
-pub fn check_space_read_rules(
-    permissions: &Permissions,
-    entries: &Entries,
-    schema: &Schema,
-) -> Result<(), String> {
+pub fn check_space_read_rules(permissions: &Permissions, entries: &Entries) -> Result<(), String> {
     for (scope, encrypts) in scopes(entries) {
-        if encrypts && schema.get(&TableName::from(scope)).is_none() {
-            return Err(format!(
-                "space table {scope} is dropped in a version that declares no encryption. \
-                 Such a version follows the encryption declarations of the nearest earlier \
-                 version, and those still use {scope} as a space table, so it can't be \
-                 dropped: keep {scope}, with its read rule from the members table \
-                 (`exists __e2ee_members(scopeId = table_id('{scope}'), identifier = this.id, \
-                 accountId = session.user)`)"
-            ));
-        }
         let rule = permissions
             .get(&TableName::from(scope))
             .and_then(TablePolicies::select_policy);

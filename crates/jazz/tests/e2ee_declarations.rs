@@ -1513,49 +1513,40 @@ fn the_system_tables_follow_the_migrations_not_the_order_of_the_file() {
     load_client_current(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// A version that declares no encryption follows the nearest earlier
-/// declarations, so it can't drop a space table they name. The deploy
-/// says so, instead of asking for a read rule on the dropped table.
-///
-/// ```text
-/// v1: rooms (its own space, name encrypted), notes
-/// current: notes only, no encryption        ✗ rooms is still a space table
-/// ```
-#[test]
-fn a_version_without_declarations_cannot_drop_a_space_table() {
-    let file = |current: &str, migration: &str| {
-        format!(
-            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+fn encrypted_rooms_version(current: &str, migration: &str) -> String {
+    format!(
+        r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": {{ {current} }},
             "history": {{ "v1": {{ "tables": {{
                 "rooms": {{ "columns": {{ "name": "bytes" }},
                     "encryption": {{ "space": "id", "scope": "rooms", "columns": {{ "name": "string" }} }} }},
                 "notes": {{ "columns": {{ "done": "boolean" }} }} }} }} }},
             "migrations": [{{ "from": "v1", {migration} }}] }}"#
-        )
-    };
-    let permissions = |tables: &str| {
-        format!(
-            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-            "tables": {{ {tables} }} }}"#
-        )
-    };
-    let rooms_rule = r#""rooms": { "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)" }"#;
-    let notes_rule = r#""notes": { "read": "true" }"#;
+    )
+}
 
-    let dropped = file(
+/// Alice drops the encrypted table that is also its own inherited space.
+#[test]
+fn a_version_without_declarations_cannot_drop_a_space_table() {
+    let dropped = encrypted_rooms_version(
         r#""notes": { "columns": { "done": "boolean" } }"#,
         r#""dropTables": ["rooms"]"#,
     );
-    let error = refusal(load(dropped.as_bytes(), permissions(notes_rule).as_bytes()));
+    let error = refusal(load(dropped.as_bytes(), NOTES_PERMISSIONS));
     assert!(
-        error.contains("space table rooms is dropped in a version that declares no encryption")
-            && error.contains("keep rooms"),
+        error.starts_with(
+            "jazz.app.json: space table rooms is not in this version (dropped or renamed)"
+        ) && error.contains("declares no encryption entries")
+            && error.contains("keep rooms")
+            && error.contains("declare encryption in this version"),
         "{error}"
     );
+}
 
-    // Keeping rooms, with its rule from the members table, deploys.
-    let kept = file(
+/// Alice keeps rooms and its membership rule after dropping its encrypted column.
+#[test]
+fn a_version_without_declarations_can_keep_the_space_table() {
+    let kept = encrypted_rooms_version(
         r#""rooms": { "columns": { "label": "string?" } }, "notes": { "columns": { "done": "boolean" } }"#,
         r#""migrate": { "rooms": {
             "name": { "drop": "bytes", "backwardsDefault": "" },
@@ -1563,7 +1554,110 @@ fn a_version_without_declarations_cannot_drop_a_space_table() {
     );
     load(
         kept.as_bytes(),
-        permissions(&format!("{rooms_rule}, {notes_rule}")).as_bytes(),
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": {
+            "rooms": { "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)" },
+            "notes": { "read": "true" }
+        } }"#,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+}
+
+fn drop_space_app() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/drop_space_table.json")).unwrap()
+}
+
+const NOTES_PERMISSIONS: &[u8] =
+    br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+    "tables": { "notes": { "read": "true" } } }"#;
+
+/// Alice drops a space named only by an entry with no encrypted columns.
+#[test]
+fn a_missing_space_table_with_only_empty_column_entries_names_the_app_file() {
+    let mut file = drop_space_app();
+    file["tables"]["notes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("encryption");
+    file["history"]["v1"]["tables"]["messages"]["encryption"]["columns"] = serde_json::json!({});
+    let error = refusal(load(file.to_string().as_bytes(), NOTES_PERMISSIONS));
+    assert!(
+        error.starts_with(
+            "jazz.app.json: space table rooms is not in this version (dropped or renamed)"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains("keep rooms") && error.contains("declare encryption in this version"),
+        "{error}"
+    );
+}
+
+/// Alice renames the space table while the inherited entry still names rooms.
+#[test]
+fn a_renamed_space_table_reports_the_missing_original_name() {
+    let mut file = drop_space_app();
+    file["tables"]["notes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("encryption");
+    file["tables"]["channels"] = file["history"]["v1"]["tables"]["rooms"].clone();
+    file["migrations"][0] = serde_json::json!({
+        "from": "v1", "dropTables": ["messages"], "renameTables": { "channels": "rooms" }
+    });
+    let error = refusal(load(file.to_string().as_bytes(), NOTES_PERMISSIONS));
+    assert!(
+        error.starts_with(
+            "jazz.app.json: space table rooms is not in this version (dropped or renamed)"
+        ),
+        "{error}"
+    );
+}
+
+/// Alice can drop the old space by declaring a new one with no encrypted columns.
+#[test]
+fn an_empty_column_entry_allows_dropping_the_old_space_table() {
+    load(drop_space_app().to_string().as_bytes(), NOTES_PERMISSIONS).unwrap();
+}
+
+fn prepare_missing_space_table(v1_stored: bool) {
+    use jazz::tools::deployment::{
+        DeploymentCatalogue, DeploymentError, prepare_encrypted_deployment,
+    };
+    let app = load(drop_space_app().to_string().as_bytes(), NOTES_PERMISSIONS).unwrap();
+    let target = app.current_hash();
+    let mut request = app.deployment_request(false);
+    let mut stored = DeploymentCatalogue::default();
+    if v1_stored {
+        let (v1, schema) = request.schemas.remove(
+            request
+                .schemas
+                .iter()
+                .position(|(hash, _)| *hash != target)
+                .unwrap(),
+        );
+        stored.schemas.push(schema);
+        stored.admitted_schema_hashes.push(v1);
+    }
+    let mut encryption = app.encryption().clone();
+    encryption.versions.remove(&target.to_string());
+    let error = prepare_encrypted_deployment(&stored, request, &encryption).unwrap_err();
+    assert!(
+        matches!(&error, DeploymentError::InvalidSchema { schema, reason }
+        if *schema == target && reason.contains("space table rooms is not in this version (dropped or renamed)")
+            && reason.contains("keep rooms") && reason.contains("declare encryption in this version")),
+        "{error}"
+    );
+}
+
+/// Alice submits both versions to a fresh server, with the inherited space missing.
+#[test]
+fn a_missing_space_table_is_an_invalid_schema_on_a_fresh_deploy() {
+    prepare_missing_space_table(false);
+}
+
+/// Alice submits just the target schema after the server has admitted v1.
+#[test]
+fn a_missing_space_table_is_an_invalid_schema_with_v1_stored() {
+    prepare_missing_space_table(true);
 }

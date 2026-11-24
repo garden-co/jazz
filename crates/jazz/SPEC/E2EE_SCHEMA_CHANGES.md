@@ -109,17 +109,16 @@ app encrypts data it already stores. References: the
   narrowing a deployed descendant when that descendant is the only version
   with the same row shape, and refuses it. The tooling never refuses a
   change the deploy accepts.
-- **Known limit: a version that declares no encryption can't drop a space
-  table.** Such a version keeps Jazz's system tables, and their policies
-  follow the declarations of the nearest earlier version that has them
-  (see E2EE_CORE_HOOKS.md). The deploy then asks each space table in those
-  declarations for a read rule that comes from the members table. If the
-  version has dropped that table, the deploy refuses it with an error that
-  names the table and says to keep it. Dropping the encrypted tables while
-  their space table stays works.
-  An app that stops encrypting keeps its space tables, with their read rules
-  from the members table. Nothing is disclosed and no data is lost; the
-  table just can't be removed.
+- **Known limit: a version that declares no encryption entries keeps its
+  inherited space tables.** Jazz derives its system-table policies from the
+  nearest earlier declarations (see E2EE_CORE_HOOKS.md). Every space table
+  they name must exist under its original name, even if the entries naming
+  it have no encrypted columns. If any of those entries encrypts a column,
+  the space table's read rule must come from the members table.
+  An encrypted table can be dropped unless it is itself an inherited space
+  table. To drop or rename a space table, declare encryption in the new
+  version so its own entries govern. An entry with no encrypted columns is
+  enough. Otherwise, keep the table under its original name.
 - The entries add nothing to the schema hash (H1); the deploy request carries
   every version's declarations so the server can check them.
 - **Declarations are fixed per version.** A server keeps the declarations a

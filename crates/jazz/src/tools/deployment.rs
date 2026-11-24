@@ -706,18 +706,17 @@ fn check_encryption(
         }
         return Ok(Vec::new());
     };
-    let target_schema = schemas
-        .get(&target.0)
-        .ok_or(DeploymentError::MissingSchema { schema: target })?;
-    declared::check_space_read_rules(&permissions, entries, target_schema).map_err(refused)?;
+    let target_schema = &schemas[&target.0];
+    declared::check_space_tables(target_schema, entries)
+        .map_err(|reason| invalid(target, reason))?;
+    declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
     // Only the columns the target itself declares encrypted: one that is
     // plaintext in it (decrypted, say) may be read by a policy.
     if let Some(own) = encryption.entries(&target.to_string()) {
         declared::check_encrypted_reads(&permissions, own).map_err(refused)?;
     }
-    let derived =
-        system_tables::derive_e2ee_policies(&schemas[&target.0], entries, &encryption.settings)
-            .map_err(|reason| invalid(target, reason))?;
+    let derived = system_tables::derive_e2ee_policies(target_schema, entries, &encryption.settings)
+        .map_err(|reason| invalid(target, reason))?;
     request.permissions.extend(derived);
     Ok(declared::warnings(&permissions, entries))
 }
