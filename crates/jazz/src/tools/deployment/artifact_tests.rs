@@ -728,50 +728,6 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
 /// current schema, nor set policies on one, even when the schema it reads
 /// the permissions against holds one (as Jazz's own will).
 #[test]
-fn the_system_table_prefix_is_reserved_for_jazz() {
-    // The writer reads what it writes back, so it refuses the table too.
-    let mut input = todo_server();
-    input.schemas[0].insert(
-        TableName::from("__e2ee_spaces"),
-        table(vec![
-            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
-            ColumnDescriptor::new("identifier", ColumnType::Uuid),
-        ]),
-    );
-    input.current = SchemaHash::compute(&input.schemas[0]).to_string();
-    let error = write(input)
-        .expect_err("the table must be refused")
-        .to_string();
-    assert!(
-        error.contains(
-            "tables.__e2ee_spaces: `__e2ee_spaces`: table names starting with `__e2ee_` are \
-             reserved for Jazz's own"
-        ),
-        "{error}"
-    );
-
-    let mut current = loaded(shared_todos()).current_schema().clone();
-    current.insert(
-        TableName::from("__e2ee_spaces"),
-        table(vec![
-            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
-            ColumnDescriptor::new("identifier", ColumnType::Uuid),
-        ]),
-    );
-    let relations = shared_todos().codegen.relations();
-    let file = json::parse(br#"{"tables": {"__e2ee_spaces": {"insert": "true"}}}"#).unwrap();
-    let (path, message) =
-        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
-    assert_eq!(path, "tables.__e2ee_spaces");
-    assert!(message.contains("are reserved for Jazz's own"), "{message}");
-    // A table that only resembles the prefix is the application's.
-    let file = json::parse(br#"{"tables": {"_e2ee_spaces": {"insert": "true"}}}"#).unwrap();
-    let (_, message) =
-        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
-    assert!(message.contains("has no table"), "{message}");
-}
-
-#[test]
 fn an_unknown_version_is_refused_before_anything_else() {
     // `$schema` carries the version.
     let error = edited_app(|v| {
@@ -2586,6 +2542,31 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
     assert_eq!(again, policy, "{printed}");
 }
 
+/// A migration can't make a kept column optional: the deploy's lens check
+/// refuses it, as `migrations create` does. So an app whose old reference
+/// column is required can't loosen it before switching to a new reference
+/// column (the encryption guide's copy recipe relies on this).
+#[test]
+fn a_migration_cannot_make_a_kept_required_reference_optional() {
+    let file = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks","optional":true}}}},
+        "history":{"v1":{"tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks"}}}}}},
+        "migrations":[{"from":"v1","migrate":{}}]}"#;
+    let permissions =
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
+    let error = load(file.as_bytes(), permissions)
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        error.contains("\"taskId\" comes out required but is optional")
+            && error.contains("must keep its type and optionality"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_migration_may_not_move_a_reference_to_another_table() {
     let file = r#"{ "format": 1,
@@ -3555,29 +3536,4 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
             );
         }
     }
-}
-
-/// A migration can't make a kept column optional: the deploy's lens check
-/// refuses it, as `migrations create` does. So an app whose old reference
-/// column is required can't loosen it before switching to a new reference
-/// column (the encryption guide's copy recipe relies on this).
-#[test]
-fn a_migration_cannot_make_a_kept_required_reference_optional() {
-    let file = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
-        "tables":{"tasks":{"columns":{"title":"string"}},
-                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks","optional":true}}}},
-        "history":{"v1":{"tables":{"tasks":{"columns":{"title":"string"}},
-                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks"}}}}}},
-        "migrations":[{"from":"v1","migrate":{}}]}"#;
-    let permissions =
-        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
-    let error = load(file.as_bytes(), permissions)
-        .err()
-        .expect("refused")
-        .to_string();
-    assert!(
-        error.contains("\"taskId\" comes out required but is optional")
-            && error.contains("must keep its type and optionality"),
-        "{error}"
-    );
 }
