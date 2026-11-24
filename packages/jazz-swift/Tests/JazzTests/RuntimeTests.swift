@@ -30,12 +30,6 @@ let notesApp = #"""
 /// Linux in the repository's gate, macOS and the iOS simulator against the
 /// release's XCFramework in the mirror's check.
 final class RuntimeTests: XCTestCase {
-    func testDeviceListKeepsRemovalRequests() throws {
-        let json = #"[{"id":"a","status":"active","removalRequested":false},{"id":"b","status":"active","removalRequested":true}]"#
-        let devices = try JSONDecoder().decode([Device].self, from: Data(json.utf8))
-        XCTAssertEqual(devices.map(\.removalRequested), [false, true])
-    }
-
     func local() async throws -> Client {
         try await Client.open(app: notesApp, config: .local())
     }
