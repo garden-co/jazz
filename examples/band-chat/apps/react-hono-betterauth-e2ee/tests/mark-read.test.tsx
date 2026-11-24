@@ -8,7 +8,7 @@ import { db, resetWorld } from "./support/fake-jazz";
 vi.mock("../jazz.generated", async () => ({ app: (await import("./support/fake-jazz")).fakeApp }));
 vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).reactMock);
 
-import { useMarkRead } from "../src/lib/mark-read";
+import { clearPendingMarkerIds, useMarkRead } from "../src/lib/mark-read";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -33,6 +33,7 @@ const writes = () => db.insert.mock.calls.length + db.update.mock.calls.length;
 
 beforeEach(() => {
   resetWorld();
+  clearPendingMarkerIds();
   testRoomId = `room-${++roomSequence}`;
 });
 afterEach(cleanup);

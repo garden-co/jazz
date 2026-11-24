@@ -9,6 +9,7 @@ import { EncryptionNotices } from "./components/EncryptionNotices";
 import { authClient } from "./lib/auth-client";
 import { DeviceStateProvider, useDeviceState } from "./lib/device-state";
 import { clearLeaveRecord } from "./lib/leave-record";
+import { clearPendingMarkerIds } from "./lib/mark-read";
 
 /** Signed out: the sign-in form. Signed in: BandChat, synced through `/jazz`. */
 export function App() {
@@ -34,6 +35,11 @@ function Dashboard({ name }: { name: string }) {
   const { signOut } = useBandChatLifecycle();
   const db = useDb();
   const accountId = useJazzSession().user?.accountId;
+  const previousAccountId = useRef(accountId);
+  useEffect(() => {
+    if (previousAccountId.current !== accountId) clearPendingMarkerIds();
+    previousAccountId.current = accountId;
+  }, [accountId]);
   // An ordinary sign-out keeps this browser's keys and device record. It
   // also drops a wish to leave, so a later sign-in is not signed out again.
   const onSignOut = () => {
@@ -73,6 +79,7 @@ function SignOutWhenLeft({ children }: { children: React.ReactNode }) {
       setFailure(cause instanceof Error ? cause.message : String(cause));
       return;
     }
+    clearPendingMarkerIds();
     clearLeaveRecord();
     await refresh();
     window.location.assign("/");
