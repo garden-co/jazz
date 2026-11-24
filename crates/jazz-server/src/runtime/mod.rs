@@ -1050,6 +1050,7 @@ impl Owner {
 
 type InitialCatalogue = (CatalogueChange, crate::portable::deployment::KeptValues);
 
+#[cfg(feature = "native")]
 fn schema_encrypts<'a>(mut table_names: impl Iterator<Item = &'a str>) -> bool {
     table_names.any(|name| name == jazz::tools::deployment::artifact::system_tables::MEMBERS)
 }
