@@ -25,6 +25,9 @@ final="$1"
 label="$2"
 : "${REPO:?}" "${GH_TOKEN:?}"
 wait_seconds="${LAND_WAIT_SECONDS:-2700}"
+# Pause between the 15 reads of main's tree after a merge (30 s in total by
+# default). Tests set 0 so a merge that never shows its tree fails at once.
+tree_poll_seconds="${LAND_TREE_POLL_SECONDS:-2}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 members="$("${here}/group-members.sh" "${final}" "${label}")"
@@ -64,7 +67,7 @@ expect_main_tree() {
   for _ in $(seq 1 15); do
     have="$(main_tree)"
     [ "${have}" = "${want}" ] && return 0
-    sleep 2
+    sleep "${tree_poll_seconds}"
   done
   echo "::error::main's tree is ${have}, expected ${want}"
   return 1
