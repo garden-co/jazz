@@ -433,7 +433,16 @@ mod plan {
             let space = match refusal {
                 E2eeRefusal::NeedsKey { space } | E2eeRefusal::SpacePending { space } => space,
             };
-            let decision = polled(&runtime, runtime.retry_write(&space, deadline, repeated))
+            // Native preparation runs on the client thread and wakes its
+            // waiter on completion, even between database ticks.
+            let retry = runtime.retry_write_with(&space, deadline, repeated, |preparation| {
+                let runtime = Rc::clone(&runtime);
+                tokio::task::spawn_local(async move {
+                    polled(&runtime, preparation).await;
+                    TICKED.with(|ticked| ticked.notify_waiters());
+                });
+            });
+            let decision = polled(&runtime, retry)
                 .await
                 .map_err(|reason| preparation_error(failure(reason)))?;
             if decision == WriteRetry::Stop {

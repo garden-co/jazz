@@ -4,7 +4,30 @@ use std::{future::ready, rc::Rc, sync::Arc};
 
 use futures_util::future::LocalBoxFuture;
 use jazz_app_support::{EncryptionConfig, PrivateStore as NativeStore, StoreError, Stored};
+use uniffi::{Lift, Lower, TypeId};
 use zeroize::Zeroizing;
+
+use crate::UniFfiTag;
+
+// SAFETY: host bindings see the same UniFFI byte sequence as Vec<u8>.
+// Serialize directly from the guarded copy so it is wiped as soon as UniFFI
+// lowers it. The serialized buffer belongs to UniFFI and we cannot wipe it.
+unsafe impl uniffi::FfiConverter<UniFfiTag> for Zeroizing<Vec<u8>> {
+    uniffi::ffi_converter_rust_buffer_lift_and_lower!(UniFfiTag);
+
+    const TYPE_ID_META: uniffi::MetadataBuffer = <Vec<u8> as TypeId<UniFfiTag>>::TYPE_ID_META;
+
+    fn write(bytes: Self, buf: &mut Vec<u8>) {
+        <i32 as Lower<UniFfiTag>>::write(i32::try_from(bytes.len()).unwrap(), buf);
+        buf.extend_from_slice(&bytes);
+    }
+
+    fn try_read(buf: &mut &[u8]) -> uniffi::Result<Self> {
+        <Vec<u8> as Lift<UniFfiTag>>::try_read(buf).map(Zeroizing::new)
+    }
+}
+
+uniffi::derive_ffi_traits!(local Zeroizing<Vec<u8>>);
 
 /// A device's private store. Callbacks run synchronously on the client's
 /// thread. The app provides storage and platform protection for its keys.
@@ -18,7 +41,7 @@ pub trait PrivateStore: Send + Sync {
         scope: String,
         incarnation: u64,
         doc: String,
-        bytes: Vec<u8>,
+        bytes: Zeroizing<Vec<u8>>,
         expected: Option<u64>,
     ) -> Result<u64, PrivateStoreError>;
     fn list(&self, scope: String) -> Result<Vec<String>, PrivateStoreError>;
@@ -99,7 +122,7 @@ impl NativeStore for CallbackStore {
             scope.to_owned(),
             incarnation,
             doc.to_owned(),
-            bytes.to_vec(),
+            Zeroizing::new(bytes.to_vec()),
             expected,
         );
         Box::pin(ready(result.map_err(Into::into)))
@@ -125,5 +148,19 @@ impl NativeStore for CallbackStore {
                 .map(Zeroizing::new)
                 .map_err(Into::into),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Alice's host reads the guarded save argument as its usual UniFFI byte
+    /// sequence. Exercise lowering directly because a Rust callback skips it.
+    #[test]
+    fn guarded_document_matches_the_host_byte_sequence() {
+        let bytes = Zeroizing::new(vec![0, 128, 255]);
+        let buffer = <Zeroizing<Vec<u8>> as Lower<UniFfiTag>>::lower(bytes);
+        assert_eq!(buffer.destroy_into_vec(), [0, 0, 0, 3, 0, 128, 255]);
     }
 }

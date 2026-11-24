@@ -131,6 +131,61 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
     }
 }
 
+/// Alice's foreground can read state and finish subscription and network
+/// notifications after its encryption runtime shuts down.
+#[test]
+fn foreground_state_and_notifications_after_encryption_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let (_, schema) = encrypted_schema();
+    let store = serve(Rc::new(MemoryStore::new()));
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let foreground = open_account_foreground(
+            &*lease,
+            root.path().to_str().unwrap().as_bytes(),
+            &alice_request(),
+            &schema,
+        );
+        let execute = |command| leased_execute(&*lease, foreground, command).unwrap();
+        finish_store_open(&execute, &store);
+        let call = |op: &str, args: serde_json::Value| {
+            settle(
+                &execute,
+                execute(Request::EncryptionCall {
+                    op: op.to_owned(),
+                    args_json: args.to_string(),
+                }),
+                || {
+                    answer_store(&execute, &store);
+                },
+            )
+        };
+        let spaces = call("spaces", json!({}));
+        let null = Response::EncryptionResult {
+            json: "null".into(),
+        };
+        assert_eq!(call("shutdown", json!({})), null);
+        assert!(
+            matches!(call("deviceId", json!({})), Response::OperationError { reason } if reason.starts_with("closed"))
+        );
+        assert_eq!(call("spaces", json!({})), spaces);
+        assert!(
+            matches!(call("state", json!({})), Response::EncryptionResult { json } if serde_json::from_str::<serde_json::Value>(&json).unwrap()["readable"].is_boolean())
+        );
+        assert_eq!(
+            call(
+                "useSpace",
+                json!({"open": false, "table": "projects", "id": "alice"})
+            ),
+            null
+        );
+        assert_eq!(call("setOnline", json!({"online": false})), null);
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
+
 /// Alice's relay admits her encrypted foreground. A peer attached to the
 /// same relay without a device runtime receives the keyless write refusal.
 #[test]

@@ -70,7 +70,7 @@ impl PrivateStore for HostStore {
         scope: String,
         incarnation: u64,
         doc: String,
-        bytes: Vec<u8>,
+        bytes: zeroize::Zeroizing<Vec<u8>>,
         expected: Option<u64>,
     ) -> Result<u64, PrivateStoreError> {
         *self.saves.lock().unwrap() += 1;
@@ -523,4 +523,77 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
     .await;
     app.stop().await;
     result.unwrap();
+}
+
+/// Alice's host receives a refusal when her device has no key for the project,
+/// whether she edits a task directly or stages the write in a transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn key_refusal_on_transaction_write_and_edit() {
+    let app = start().await;
+    let config = app.config();
+    tokio::task::spawn_blocking(move || {
+        let alice =
+            JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
+        wait_until_ready(&alice, 30_000).unwrap();
+        let project = jazz_app_support::ObjectId::new().to_string();
+        let task = jazz_app_support::ObjectId::new().to_string();
+        let patch = json!({ "projectId": project, "title": "private" }).to_string();
+        let edit = || {
+            alice.edit(
+                "tasks".into(),
+                task.clone(),
+                Some(patch.clone()),
+                "[]".into(),
+            )
+        };
+        // Before a root has been attempted, the original NotObserved edit
+        // error is reported as a missing row.
+        assert_eq!(
+            edit().unwrap_err(),
+            JazzError::Refused {
+                reason: format!("configuration: no tasks row {task}"),
+            }
+        );
+
+        let space = alice
+            .encryption_call(
+                "spaceRow".into(),
+                json!({ "table": "projects", "id": project }).to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            alice.insert_at("tasks".into(), patch.clone(), "global".into()),
+            Err(JazzError::Permission { .. })
+        ));
+        assert_eq!(
+            alice
+                .encryption_call("prepareSpace".into(), space.clone())
+                .unwrap(),
+            "false"
+        );
+        let tx = alice.clone().begin().unwrap();
+        let staged = tx
+            .edit(
+                "tasks".into(),
+                task.clone(),
+                Some(patch.clone()),
+                "[]".into(),
+            )
+            .unwrap_err();
+        tx.rollback().unwrap();
+        let address = parse(&space);
+        let expected = JazzError::Refused {
+            reason: format!(
+                "write rejected (write_rejected): space {}/{} has no valid root",
+                address["scopeId"].as_str().unwrap(),
+                project
+            ),
+        };
+        assert_eq!(staged, expected);
+        assert_eq!(edit().unwrap_err(), expected);
+        alice.shutdown().unwrap();
+    })
+    .await
+    .unwrap();
+    app.stop().await;
 }
