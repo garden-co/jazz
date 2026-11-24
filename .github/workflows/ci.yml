@@ -38,6 +38,7 @@ jobs:
       statuses: read
     outputs:
       covered: ${{ steps.coverage.outputs.covered }}
+      head: ${{ steps.head.outputs.head }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -54,6 +55,22 @@ jobs:
           if group="$(dev/ci/main-push-coverage.sh "${HEAD_SHA}")"; then
             echo "::notice::Full suite already passed on this tree in ${group}; skipping it"
             echo "covered=true" >> "${GITHUB_OUTPUT}"
+          fi
+      # A landed group pushes main once per PR within seconds. Only the push
+      # still at main's head warms the native build cache: warming the
+      # intermediate trees too raced them for one cache key, and the first
+      # (stale) tree's entry could win.
+      - name: Check this push is still main's head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)" = "${HEAD_SHA}" ]; then
+            echo "head=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::main has moved past ${HEAD_SHA}; its newer push warms the native build cache"
           fi
 
   untrusted:
@@ -94,7 +111,7 @@ jobs:
   # (ci-suite.yml's warm-native-builds), which merge groups restore.
   warm:
     needs: [main-coverage]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true' && needs.main-coverage.outputs.head == 'true'
     permissions:
       contents: read
       id-token: write

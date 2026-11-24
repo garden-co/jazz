@@ -286,7 +286,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   );
   assert.equal(
     warm.if,
-    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'",
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true' && needs.main-coverage.outputs.head == 'true'",
   );
   assert.deepEqual(warm.needs, ["main-coverage"]);
   assert.deepEqual(warm.permissions, { contents: "read", "id-token": "write", packages: "read" });
@@ -397,7 +397,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     contents: "read",
     statuses: "read",
   });
-  assert.equal(mainCoverage.steps.length, 2);
+  assert.equal(mainCoverage.steps.length, 3);
   assert.equal(
     mainCoverage.steps[0].uses,
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
@@ -405,6 +405,10 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(mainCoverage.steps[0].with["persist-credentials"], false);
   assert.match(mainCoverage.steps[1].run, /dev\/ci\/main-push-coverage\.sh /);
   assert.match(mainCoverage.steps[1].run, /echo "covered=true" >> "\$\{GITHUB_OUTPUT\}"/);
+  // Only the push still at main's head warms, so a landed group's
+  // per-PR pushes do not race each other for one native cache key.
+  assert.match(mainCoverage.steps[2].run, /repos\/\$\{REPO\}\/git\/ref\/heads\/main/);
+  assert.match(mainCoverage.steps[2].run, /echo "head=true" >> "\$\{GITHUB_OUTPUT\}"/);
 
   // Only dispatched runs may write a commit status, and only test-rust's own.
   assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
