@@ -396,24 +396,20 @@ impl E2eeClient {
             revision: Some(stored.revision),
             removals: loaded.revision,
             carried: loaded.unsupported,
-            lineage: loaded.lineage,
+            lineage: None,
         };
-        let mut space = loaded.space;
-        if space
-            .as_ref()
-            .is_some_and(|space| space.root_id() != root_id)
-        {
-            self.skipped(name, "the document holds another root's keys");
-            state.carried.clear();
-            space = None;
-        }
-        if state
-            .lineage
-            .as_ref()
-            .is_some_and(|lineage| lineage.root_id() != root_id)
-        {
-            state.lineage = None;
-        }
+        let space = match loaded.space {
+            Some(space) if space.is_empty() => {
+                state.lineage = (space.root_id() == root_id).then_some(space);
+                None
+            }
+            Some(space) if space.root_id() != root_id => {
+                self.skipped(name, "the document holds another root's keys");
+                state.carried.clear();
+                None
+            }
+            space => space,
+        };
         documents.held.insert(root_id.to_owned(), state);
         Ok(space)
     }

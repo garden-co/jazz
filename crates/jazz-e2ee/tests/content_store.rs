@@ -776,7 +776,7 @@ fn a_provider_failure_fails_the_load() {
             .load(&document)
             .unwrap()
             .space
-            .is_some()
+            .is_some_and(|space| !space.is_empty())
     );
     wrap_fails.store(true, Ordering::SeqCst);
     assert_eq!(
@@ -799,7 +799,7 @@ fn a_provider_failure_opening_a_held_key_envelope_fails_the_load() {
             .load(&document)
             .unwrap()
             .space
-            .is_some()
+            .is_some_and(|space| !space.is_empty())
     );
     // The envelope's own mechanism fails, not the marker's: never a
     // skipped record.
@@ -850,7 +850,7 @@ fn a_key_record_of_a_mechanism_this_reader_does_not_route_is_unsupported() {
         ..owner(&world, ALICE)
     };
     let loaded = reader.load(&document).unwrap();
-    assert!(loaded.space.is_none());
+    assert!(loaded.space.unwrap().is_empty());
     assert_eq!(
         loaded.rejected,
         vec![Rejected {
@@ -1057,8 +1057,8 @@ fn a_document_whose_keys_all_need_a_newer_client_can_still_be_rewritten() {
     .encode()
     .unwrap();
     let loaded = owner.load(&decode_document(&stored).unwrap()).unwrap();
-    assert!(loaded.space.is_none(), "no key loads here");
-    let base = loaded.rewrite_base().expect("the checked lineage");
+    let base = loaded.space.as_ref().expect("the checked lineage");
+    assert!(base.is_empty(), "no key loads here");
     let rewritten = owner
         .seal_document(base, &loaded.unsupported, 1, &mut TestRandom(5))
         .unwrap()
@@ -1075,7 +1075,7 @@ fn a_document_whose_keys_all_need_a_newer_client_can_still_be_rewritten() {
     let mut base = owner
         .load(&decode_document(&stored).unwrap())
         .unwrap()
-        .lineage
+        .space
         .expect("the key-less space");
     base.keep(acquire_held(&world, ALICE, ROW)).unwrap();
     let rewritten = owner
@@ -1084,6 +1084,9 @@ fn a_document_whose_keys_all_need_a_newer_client_can_still_be_rewritten() {
         .encode()
         .unwrap();
     let reloaded = owner.load(&decode_document(&rewritten).unwrap()).unwrap();
-    assert!(reloaded.space.is_some(), "the kept key loads");
+    assert!(
+        reloaded.space.is_some_and(|space| !space.is_empty()),
+        "the kept key loads"
+    );
     assert_eq!(reloaded.unsupported, carried);
 }
