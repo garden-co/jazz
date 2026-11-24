@@ -7,8 +7,8 @@ import type { AccountStore } from "../../src/accounts/persistence.js";
 import { EncryptionError, memoryPrivateStore } from "../../src/encryption/index.js";
 import { createJazzClient } from "../../src/react-native/create-jazz-session.js";
 import { startTestJazz } from "../../src/testing/index.js";
-import { app } from "../browser/apps/encrypted-tab/jazz.generated.js";
-import permissions from "../browser/apps/encrypted-tab/jazz.permissions.json";
+import { app } from "../fixtures/encrypted/jazz.generated.js";
+import permissions from "../fixtures/encrypted/jazz.permissions.json";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 
 const cleanups: Array<() => unknown | Promise<unknown>> = [];
@@ -81,7 +81,13 @@ it("opens an encrypted device from the public React Native session over the app'
   });
   await project.wait({ tier: "global" });
   const write = first.db.insert(app.tasks, { projectId, title: "private plans" });
-  expect(write.value).toEqual({ id: expect.any(String), projectId, title: "private plans" });
+  expect(write.value).toEqual({
+    id: expect.any(String),
+    projectId,
+    title: "private plans",
+    label: null,
+    note: null,
+  });
   await expect(write.wait({ tier: "global" })).resolves.toEqual(write.value);
   await expect(first.db.one(app.tasks.where({ id: write.value.id }))).resolves.toEqual(write.value);
 
