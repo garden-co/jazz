@@ -936,7 +936,10 @@ fn an_encrypted_enum_default_must_be_a_variant() {
     };
     load_app(with_default("done").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     let error = refusal(load_app(with_default("lost").as_bytes()));
-    assert!(error.contains("one of the enum's variants"), "{error}");
+    assert!(
+        error.contains("the declared default is not a value of its type"),
+        "{error}"
+    );
 }
 
 /// The app-file reader refuses a source on either an existing or a fresh encrypted column.
@@ -1111,7 +1114,7 @@ fn a_client_refuses_an_encrypted_app_until_it_has_hooks() {
 /// transaction ID and an array of either are refused, naming what stops it.
 #[test]
 fn equality_follows_the_types_the_format_encodes() {
-    use jazz::tools::deployment::artifact::encryption::check_entry;
+    use jazz::tools::deployment::artifact::encryption::check_version_entry;
     use jazz::tools::public_schema::{
         ColumnDescriptor, EncryptedColumn, EncryptionEntry, PlainType, RowDescriptor, Schema,
         TableSchema,
@@ -1151,7 +1154,7 @@ fn equality_follows_the_types_the_format_encodes() {
         array(ColumnType::Json { schema: None }),
         array(array(ColumnType::Integer)),
     ] {
-        check_entry("notes", &entry(accepted.clone()), &schema)
+        check_version_entry("notes", &entry(accepted.clone()), &schema, true)
             .unwrap_or_else(|(at, e)| panic!("{accepted:?}: {at}: {e}"));
     }
     for (refused, named) in [
@@ -1163,7 +1166,7 @@ fn equality_follows_the_types_the_format_encodes() {
             "array of array of transaction-ID",
         ),
     ] {
-        let (_, message) = check_entry("notes", &entry(refused.clone()), &schema)
+        let (_, message) = check_version_entry("notes", &entry(refused.clone()), &schema, true)
             .expect_err("a type the format can't encode");
         assert!(message.contains(named), "{refused:?}: {message}");
     }

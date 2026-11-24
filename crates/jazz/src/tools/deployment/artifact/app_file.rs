@@ -13,6 +13,7 @@ use crate::tools::public_schema::{
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
+use super::encryption::Entries;
 use super::json::Json;
 use super::system_tables::FragmentVersion;
 use super::{
@@ -21,9 +22,6 @@ use super::{
 
 /// A refusal at a JSON path of the app file.
 pub type Refusal = (String, String);
-
-/// A schema version's encryption entries, by table.
-pub type Entries = BTreeMap<String, EncryptionEntry>;
 
 /// Why an `enum` given as an object of cases with fields is refused: Jazz
 /// had such columns declared but no store could hold them, and they were
@@ -682,7 +680,7 @@ fn read_settings(value: &Json, path: &str) -> Result<EncryptionSettings, Refusal
 }
 
 /// A table's `encryption` entry (protocol §1.5, E2EE_SCHEMA_CHANGES.md §3.1), read
-/// for its form only; [`super::encryption::check_entry`] checks it against
+/// for its form only; [`super::encryption::check_version_entry`] checks it against
 /// its schema version.
 fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
     const EXAMPLE: &str = "e.g. { \"space\": \"projectId\", \"scope\": \"projects\", \"columns\": { \"title\": \"string\" } }";
@@ -724,20 +722,6 @@ fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
         columns,
         equality: list("equality")?,
     })
-}
-
-/// Whether every enum value in `value` is one of its column type's
-/// variants.
-fn in_variants(column_type: &ColumnType, value: &Value) -> bool {
-    match (column_type, value) {
-        (_, Value::Null) => true,
-        (ColumnType::Enum { variants }, Value::Text(variant)) => variants.contains(variant),
-        (ColumnType::Enum { .. }, _) => false,
-        (ColumnType::Array { element }, Value::Array(items)) => {
-            items.iter().all(|item| in_variants(element, item))
-        }
-        _ => true,
-    }
 }
 
 /// Check only type objects. A JSON schema inside a type is application data.
@@ -789,21 +773,7 @@ fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, 
     } else {
         None
     };
-    if let Some(default) = &default
-        && !in_variants(&column.column_type, default)
-    {
-        return Err(refuse(
-            format!("{path}.default"),
-            "an enum default must be one of the enum's variants",
-        ));
-    }
     plain_type(&column, spec, path)?;
-    if spec.get("transform").is_some() {
-        return Err(refuse(
-            format!("{path}.transform"),
-            "an encrypted column takes no transform",
-        ));
-    }
     Ok(PlainType {
         column_type: column.column_type,
         nullable: column.nullable,
@@ -828,14 +798,7 @@ fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Ref
     let mut plain = read_plain(ty, &format!("{path}.type"), false)?;
     if let Some(default) = spec.get("default") {
         let at = format!("{path}.default");
-        let value = read_value(default, &plain.column_type, &at)?;
-        if !in_variants(&plain.column_type, &value) {
-            return Err(refuse(
-                at,
-                "an enum default must be one of the enum's variants",
-            ));
-        }
-        plain.default = Some(value);
+        plain.default = Some(read_value(default, &plain.column_type, &at)?);
     }
     Ok(EncryptedColumn {
         plain,
@@ -1346,18 +1309,12 @@ pub(super) fn version_fields(
     Ok(fields)
 }
 
-/// A history version's `tables`: a schema without relations, computed fields
-/// or transforms.
-pub fn write_version_tables(schema: &Schema, entries: &Entries) -> Result<Json, String> {
-    write_tables(schema, None, entries).map(|(tables, _)| tables)
-}
-
 /// A schema's tables, with their encryption entries. Jazz's system tables
 /// are left out when they are exactly Jazz's fragment: the loaders add them.
 /// Any other table with the reserved prefix, or a partial or altered
 /// fragment, is refused before anything is written, as the reader would
 /// refuse it.
-fn write_tables(
+pub(super) fn write_tables(
     schema: &Schema,
     codegen: Option<&Codegen>,
     entries: &Entries,

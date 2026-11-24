@@ -112,13 +112,14 @@ impl DeclaredVersion {
     }
 
     fn check_transition_to(&self, next: &Self) -> Result<(), String> {
-        encryption::check_mapped_transition(
+        encryption::check_mapped_columns(
             (&self.schema, &self.entries),
-            (&next.schema, &next.entries),
+            &next.entries,
             |table| next.table_in(self, table),
             |table| self.table_in(next, table),
             |table, name| next.column_in(self, table, name),
             |table, name| self.column_in(next, table, name),
+            false,
         )
     }
 }

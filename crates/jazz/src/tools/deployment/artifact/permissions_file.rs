@@ -168,13 +168,7 @@ pub fn read(
                 }
             }
         }
-        let clauses = [
-            ("read", &policies.select),
-            ("insert", &policies.insert),
-            ("update", &policies.update),
-            ("delete", &policies.delete),
-        ];
-        for (op, policy) in clauses {
+        for (op, policy) in super::policy_clauses(&policies) {
             if let Some(system) = [&policy.using, &policy.with_check]
                 .into_iter()
                 .flatten()

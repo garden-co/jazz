@@ -21,10 +21,11 @@ use crate::tools::public_schema::{
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
+use super::expr::OUTER_ROW;
 use super::system_tables::{MEMBERS, is_system_table};
 
 /// How an existing plaintext app can adopt encryption.
-pub const COPY_GUIDE: &str = "to encrypt existing data, copy it into a new encrypted table (docs/e2ee/encrypting-existing-data)";
+const COPY_GUIDE: &str = "into a new encrypted table (docs/e2ee/encrypting-existing-data)";
 
 /// A schema version's encryption entries, by table.
 pub type Entries = BTreeMap<String, EncryptionEntry>;
@@ -147,15 +148,7 @@ fn check_space(
 
 /// Check one table's entry against its schema version (protocol §1.5,
 /// E2EE_SCHEMA_CHANGES.md §3.1). Deploy, `generate` and the loaders share it.
-pub fn check_entry(
-    table: &str,
-    entry: &EncryptionEntry,
-    schema: &Schema,
-) -> Result<(), EntryRefusal> {
-    check_version_entry(table, entry, schema, true)
-}
-
-pub(crate) fn check_version_entry(
+pub fn check_version_entry(
     table: &str,
     entry: &EncryptionEntry,
     schema: &Schema,
@@ -399,53 +392,6 @@ fn without_equality_encoding(column_type: &ColumnType) -> Option<String> {
 // The transition check
 // ---------------------------------------------------------------------------
 
-/// A migration's view of one table: which old column each new one comes
-/// from, and where each old one goes.
-struct TableMap<'a> {
-    lens: Option<&'a PublishTableLens>,
-}
-
-impl TableMap<'_> {
-    /// The old name of new column `column`, or `None` for one the
-    /// migration introduces.
-    fn old_name(&self, column: &str) -> Option<String> {
-        let Some(lens) = self.lens else {
-            return Some(column.to_owned());
-        };
-        if lens.added {
-            return None;
-        }
-        for op in &lens.operations {
-            match op {
-                PublishLensOp::Rename { column: was, value } if value == column => {
-                    return Some(was.clone());
-                }
-                PublishLensOp::Introduce { column: c, .. } if c == column => return None,
-                _ => {}
-            }
-        }
-        Some(column.to_owned())
-    }
-
-    /// The new name of old column `column`, or `None` when the migration
-    /// drops it.
-    fn new_name(&self, column: &str) -> Option<String> {
-        let Some(lens) = self.lens else {
-            return Some(column.to_owned());
-        };
-        for op in &lens.operations {
-            match op {
-                PublishLensOp::Rename { column: was, value } if was == column => {
-                    return Some(value.clone());
-                }
-                PublishLensOp::Drop { column: c, .. } if c == column => return None,
-                _ => {}
-            }
-        }
-        Some(column.to_owned())
-    }
-}
-
 /// How a migration names the tables and columns on either side of it.
 pub struct MigrationNames<'a> {
     pub migration: &'a PublishMigrationRequest,
@@ -493,18 +439,40 @@ impl MigrationNames<'_> {
 
     /// The old name of `column` in new table `table`.
     pub fn old_name(&self, table: &str, column: &str) -> Option<String> {
-        TableMap {
-            lens: self.lens_of(table),
+        let Some(lens) = self.lens_of(table) else {
+            return Some(column.to_owned());
+        };
+        if lens.added {
+            return None;
         }
-        .old_name(column)
+        for op in &lens.operations {
+            match op {
+                PublishLensOp::Rename { column: was, value } if value == column => {
+                    return Some(was.clone());
+                }
+                PublishLensOp::Introduce { column: c, .. } if c == column => return None,
+                _ => {}
+            }
+        }
+        Some(column.to_owned())
     }
 
     /// The new name of `column` in old table `table`.
     pub fn new_name(&self, table: &str, column: &str) -> Option<String> {
-        TableMap {
-            lens: self.lens_of(&self.new_table(table)?),
+        let table = self.new_table(table)?;
+        let Some(lens) = self.lens_of(&table) else {
+            return Some(column.to_owned());
+        };
+        for op in &lens.operations {
+            match op {
+                PublishLensOp::Rename { column: was, value } if was == column => {
+                    return Some(value.clone());
+                }
+                PublishLensOp::Drop { column: c, .. } if c == column => return None,
+                _ => {}
+            }
         }
-        .new_name(column)
+        Some(column.to_owned())
     }
 }
 
@@ -553,34 +521,13 @@ pub fn check_transition(
             }
         }
     }
-    check_mapped_transition(
+    check_mapped_columns(
         (old_schema, old_entries),
-        (new_schema, new_entries),
+        new_entries,
         |table| names.old_table(table),
         |table| names.new_table(table),
         |table, name| names.old_name(table, name),
         |table, name| names.new_name(table, name),
-    )
-}
-
-/// Check the same transition after catalogue admission has resolved the
-/// table and column identities of both versions. Each mapping takes names in its source
-/// version and returns their names in the destination version, if kept.
-pub fn check_mapped_transition(
-    (old_schema, old_entries): (&Schema, &Entries),
-    (_, new_entries): (&Schema, &Entries),
-    old_table: impl Fn(&str) -> Option<String>,
-    new_table: impl Fn(&str) -> Option<String>,
-    old_name: impl Fn(&str, &str) -> Option<String>,
-    new_name: impl Fn(&str, &str) -> Option<String>,
-) -> Result<(), String> {
-    check_mapped_columns(
-        (old_schema, old_entries),
-        new_entries,
-        old_table,
-        new_table,
-        old_name,
-        new_name,
         false,
     )
 }
@@ -596,7 +543,10 @@ pub fn check_index_transition(
     check_mapped_columns(from, new_entries, table, table, column, column, true)
 }
 
-fn check_mapped_columns(
+/// Check the same transition after catalogue admission has resolved the
+/// table and column identities of both versions. Each mapping takes names in its source
+/// version and returns their names in the destination version, if kept.
+pub fn check_mapped_columns(
     (old_schema, old_entries): (&Schema, &Entries),
     new_entries: &Entries,
     old_table: impl Fn(&str) -> Option<String>,
@@ -645,12 +595,12 @@ fn check_mapped_columns(
         let old_column =
             |name: &str| old_name(table, name).and_then(|n| column(old_schema, &was, &n));
         if let Some(old) = old {
-            check_stored_space(
+            check_space_matches(
                 table,
                 old,
                 new,
-                new_table(&old.scope),
-                new_name(&was, &old.space),
+                new_table(&old.scope).as_deref() == Some(&new.scope),
+                new_name(&was, &old.space).as_deref() == Some(&new.space),
             )?;
         }
         for (name, declared) in &new.columns {
@@ -689,8 +639,7 @@ fn check_mapped_columns(
                     if old_column(name).is_some() {
                         return Err(format!(
                             "{path}: column {name} held plaintext in the earlier version; \
-                             copy existing data into a new encrypted table \
-                             (docs/e2ee/encrypting-existing-data)"
+                             copy existing data {COPY_GUIDE}"
                         ));
                     }
                     // A column added to a table that may hold rows: they
@@ -716,7 +665,7 @@ fn check_mapped_columns(
 /// `precedes` says whether the new version descends from the old one; it
 /// runs only for a column whose plaintext type differs, and its error is
 /// returned as the outer one. Each mapping is as in
-/// [`check_mapped_transition`].
+/// [`check_mapped_columns`].
 pub async fn check_unlinked_transition<E>(
     old_entries: &Entries,
     new_entries: &Entries,
@@ -726,53 +675,22 @@ pub async fn check_unlinked_transition<E>(
     new_name: impl Fn(&str, &str) -> Option<String>,
     precedes: impl AsyncFnMut() -> Result<bool, E>,
 ) -> Result<Result<(), String>, E> {
-    check_unlinked_columns(
-        old_entries,
-        new_entries,
-        old_table,
-        old_name,
-        |table, was, old, new| {
-            check_stored_space(
-                table,
-                old,
-                new,
-                new_table(&old.scope),
-                new_name(was, &old.space),
-            )
-        },
-        precedes,
-    )
-    .await
-}
-
-/// Compare the declarations whose old names are known. The caller checks
-/// the space using the identities available from the catalogue or the file.
-pub async fn check_unlinked_columns<E>(
-    old_entries: &Entries,
-    new_entries: &Entries,
-    old_table: impl Fn(&str) -> Option<String>,
-    old_name: impl Fn(&str, &str) -> Option<String>,
-    check_space: impl Fn(&str, &str, &EncryptionEntry, &EncryptionEntry) -> Result<(), String>,
-    mut precedes: impl AsyncFnMut() -> Result<bool, E>,
-) -> Result<Result<(), String>, E> {
-    for (table, new) in new_entries {
-        let Some(was) = old_table(table) else {
-            continue;
-        };
-        let Some(old) = old_entries.get(&was) else {
-            continue;
-        };
-        if let Err(refusal) = check_space(table, &was, old, new) {
+    let mut precedes = precedes;
+    for (table, was, old, new) in unlinked_tables(old_entries, new_entries, old_table) {
+        if let Err(refusal) = check_space_matches(
+            table,
+            old,
+            new,
+            new_table(&old.scope).as_deref() == Some(&new.scope),
+            new_name(&was, &old.space).as_deref() == Some(&new.space),
+        ) {
             return Ok(Err(refusal));
         }
-        for (name, declared) in &new.columns {
-            let Some(previous) = old_name(table, name).and_then(|column| old.columns.get(&column))
-            else {
-                continue;
-            };
-            let path = format!("{table}.{name}");
+        for (name, previous, declared) in unlinked_columns(old, new, |name| old_name(table, name)) {
             let siblings = !previous.plain.same_type(&declared.plain) && !precedes().await?;
-            if let Err(refusal) = check_stored_column_type(&path, previous, declared, siblings) {
+            if let Err(refusal) =
+                check_stored_column_type(&format!("{table}.{name}"), previous, declared, siblings)
+            {
                 return Ok(Err(refusal));
             }
         }
@@ -780,21 +698,47 @@ pub async fn check_unlinked_columns<E>(
     Ok(Ok(()))
 }
 
-/// Check the scope table and space column after mapping their stored identities into the new version.
-pub fn check_stored_space(
-    table: &str,
-    old: &EncryptionEntry,
-    new: &EncryptionEntry,
-    mapped_scope: Option<String>,
-    mapped_space: Option<String>,
+/// Compare the declarations whose old names are known. The caller checks
+/// the space using the identities available from the catalogue or the file.
+pub fn check_unlinked_columns(
+    old_entries: &Entries,
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    check_space: impl Fn(&str, &str, &EncryptionEntry, &EncryptionEntry) -> Result<(), String>,
+    precedes: bool,
 ) -> Result<(), String> {
-    check_space_matches(
-        table,
-        old,
-        new,
-        mapped_scope.as_deref() == Some(&new.scope),
-        mapped_space.as_deref() == Some(&new.space),
-    )
+    for (table, was, old, new) in unlinked_tables(old_entries, new_entries, old_table) {
+        check_space(table, &was, old, new)?;
+        for (name, previous, declared) in unlinked_columns(old, new, |name| old_name(table, name)) {
+            let siblings = !previous.plain.same_type(&declared.plain) && !precedes;
+            check_stored_column_type(&format!("{table}.{name}"), previous, declared, siblings)?;
+        }
+    }
+    Ok(())
+}
+
+fn unlinked_tables<'a>(
+    old_entries: &'a Entries,
+    new_entries: &'a Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+) -> impl Iterator<Item = (&'a str, String, &'a EncryptionEntry, &'a EncryptionEntry)> {
+    new_entries.iter().filter_map(move |(table, new)| {
+        let was = old_table(table)?;
+        let old = old_entries.get(&was)?;
+        Some((table.as_str(), was, old, new))
+    })
+}
+
+fn unlinked_columns<'a>(
+    old: &'a EncryptionEntry,
+    new: &'a EncryptionEntry,
+    old_name: impl Fn(&str) -> Option<String>,
+) -> impl Iterator<Item = (&'a str, &'a EncryptedColumn, &'a EncryptedColumn)> {
+    new.columns.iter().filter_map(move |(name, declared)| {
+        let previous = old.columns.get(&old_name(name)?)?;
+        Some((name.as_str(), previous, declared))
+    })
 }
 
 /// Check the scope and space comparisons the caller can resolve. The
@@ -809,8 +753,7 @@ pub fn check_space_matches(
     if !scope_matches {
         return Err(format!(
             "table {table} moves its space table (`scope`) from {} to {}, which \
-             changes every cell's context; copy the data into a new encrypted table \
-             (docs/e2ee/encrypting-existing-data)",
+             changes every cell's context; copy the data {COPY_GUIDE}",
             old.scope, new.scope
         ));
     }
@@ -821,8 +764,7 @@ pub fn check_space_matches(
     };
     if !same_space {
         return Err(format!(
-            "table {table} changes its space column from {} to {}; copy the data into a \
-             new encrypted table (docs/e2ee/encrypting-existing-data)",
+            "table {table} changes its space column from {} to {}; copy the data {COPY_GUIDE}",
             old.space, new.space
         ));
     }
@@ -841,7 +783,7 @@ pub fn check_stored_column_type(
         return Err(format!(
             "{path}: the encrypted column's type changes from {:?} to {:?}, \
              which its cells were sealed under; only append-only enum widening can pin \
-             the old type with sealedType; {COPY_GUIDE}",
+             the old type with sealedType; to encrypt existing data, copy it {COPY_GUIDE}",
             previous.cell_type(),
             declared.cell_type()
         ));
@@ -852,7 +794,7 @@ pub fn check_stored_column_type(
     if declared.plain.default != previous.plain.default {
         return Err(format!(
             "{path}: the encrypted column's default changes, and the rows \
-             stored before the column read it; {COPY_GUIDE}"
+             stored before the column read it; to encrypt existing data, copy it {COPY_GUIDE}"
         ));
     }
     let compatible = widens(&previous.plain, &declared.plain)
@@ -860,7 +802,7 @@ pub fn check_stored_column_type(
     if !widens(declared.cell_type(), &declared.plain) || !compatible {
         return Err(format!(
             "{path}: only appending enum variants preserves existing encrypted values in place; \
-             {COPY_GUIDE}"
+             to encrypt existing data, copy it {COPY_GUIDE}"
         ));
     }
     Ok(())
@@ -881,8 +823,6 @@ fn widens(
 // ---------------------------------------------------------------------------
 // Space tables' read rules and the deploy's warnings
 // ---------------------------------------------------------------------------
-
-const OUTER_ROW: &str = "__jazz_outer_row";
 
 /// Whether `expr` is exactly `M(table)`: `exists __e2ee_members(scopeId =
 /// table_id('table'), identifier = this.id, accountId = session.user)`,
@@ -1271,13 +1211,12 @@ pub fn check_encrypted_reads(permissions: &Permissions, entries: &Entries) -> Re
         table: &str,
         entries: &Entries,
     ) -> Option<(String, String)> {
-        fn walk(
-            value: &serde_json::Value,
-            scans: &mut Vec<(String, Option<String>)>,
-            columns: &mut Vec<(Option<String>, String)>,
-        ) {
-            match value {
-                serde_json::Value::Object(map) => {
+        let (mut scans, mut columns) = (Vec::new(), Vec::new());
+        walk_relation_json(
+            &serde_json::to_value(rel).unwrap_or_default(),
+            None,
+            &mut |_, item| {
+                if let serde_json::Value::Object(map) = item {
                     if let Some(serde_json::Value::Object(scan)) = map.get("TableScan")
                         && let Some(serde_json::Value::String(t)) = scan.get("table")
                     {
@@ -1291,19 +1230,8 @@ pub fn check_encrypted_reads(permissions: &Permissions, entries: &Entries) -> Re
                         let scope = map.get("scope").and_then(|s| s.as_str()).map(str::to_owned);
                         columns.push((scope, column.clone()));
                     }
-                    map.values().for_each(|item| walk(item, scans, columns));
                 }
-                serde_json::Value::Array(items) => {
-                    items.iter().for_each(|item| walk(item, scans, columns));
-                }
-                _ => {}
-            }
-        }
-        let (mut scans, mut columns) = (Vec::new(), Vec::new());
-        walk(
-            &serde_json::to_value(rel).unwrap_or_default(),
-            &mut scans,
-            &mut columns,
+            },
         );
         let every: Vec<&str> = scans
             .iter()
@@ -1328,13 +1256,7 @@ pub fn check_encrypted_reads(permissions: &Permissions, entries: &Entries) -> Re
         })
     }
     for (table, policies) in permissions {
-        let clauses = [
-            ("read", &policies.select),
-            ("insert", &policies.insert),
-            ("update", &policies.update),
-            ("delete", &policies.delete),
-        ];
-        for (op, policy) in clauses {
+        for (op, policy) in super::policy_clauses(policies) {
             if let Some((owner, column)) = [&policy.using, &policy.with_check]
                 .into_iter()
                 .flatten()
@@ -1356,22 +1278,6 @@ pub fn check_encrypted_reads(permissions: &Permissions, entries: &Entries) -> Re
 /// (protocol §1.3). `InheritsFrom` and `InsertedByThisTransaction` are the
 /// permissions reader's to refuse.
 pub fn reaches_system_table(expr: &PolicyExpr) -> Option<String> {
-    fn relation_tables(value: &serde_json::Value, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for (key, item) in map {
-                    match (key.as_str(), item) {
-                        ("table", serde_json::Value::String(t)) => out.push(t.clone()),
-                        _ => relation_tables(item, out),
-                    }
-                }
-            }
-            serde_json::Value::Array(items) => {
-                items.iter().for_each(|i| relation_tables(i, out));
-            }
-            _ => {}
-        }
-    }
     match expr {
         PolicyExpr::Exists { table, condition } => {
             if is_system_table(table) && table != MEMBERS {
@@ -1384,7 +1290,15 @@ pub fn reaches_system_table(expr: &PolicyExpr) -> Option<String> {
         }
         PolicyExpr::ExistsRel { rel } => {
             let mut tables = Vec::new();
-            relation_tables(&serde_json::to_value(rel).unwrap_or_default(), &mut tables);
+            walk_relation_json(
+                &serde_json::to_value(rel).unwrap_or_default(),
+                None,
+                &mut |key, item| {
+                    if let (Some("table"), serde_json::Value::String(table)) = (key, item) {
+                        tables.push(table.clone());
+                    }
+                },
+            );
             tables
                 .into_iter()
                 .find(|t| is_system_table(t) && t != MEMBERS)
@@ -1394,6 +1308,27 @@ pub fn reaches_system_table(expr: &PolicyExpr) -> Option<String> {
         }
         PolicyExpr::Not(inner) => reaches_system_table(inner),
         _ => None,
+    }
+}
+
+fn walk_relation_json(
+    value: &serde_json::Value,
+    key: Option<&str>,
+    visit: &mut impl FnMut(Option<&str>, &serde_json::Value),
+) {
+    visit(key, value);
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, item) in fields {
+                walk_relation_json(item, Some(key), visit);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk_relation_json(item, None, visit);
+            }
+        }
+        _ => {}
     }
 }
 
