@@ -244,8 +244,18 @@ test("switched back to central, the Maven leg publishes as before", () => {
 test("the jar and AAR installs declare exactly the dependencies of the Kotlin builds", () => {
   const MAVEN = /\b(?:api|implementation)\("([^"]+:[^"]+:[^"]+)"\)/g;
   const coordinates = (text) => [...text.matchAll(MAVEN)].map((match) => match[1]).sort();
-  const jvm = coordinates(repoFile("packages/jazz-kotlin/build.gradle.kts"));
-  const android = coordinates(repoFile("packages/jazz-kotlin-android/build.gradle.kts"));
+  const build = repoFile("packages/jazz-kotlin/build.gradle.kts");
+  let jvm, android;
+  if (build.includes('kotlin("multiplatform")')) {
+    // One Kotlin Multiplatform module: commonMain's dependencies plus each target's main.
+    const block = (start, end) => build.split(start)[1].split(end)[0];
+    const common = coordinates(block("commonMain.dependencies {", "}"));
+    jvm = [...common, ...coordinates(block("jvmMain {", "jvmTest"))].sort();
+    android = [...common, ...coordinates(block("androidMain {", "\n        }"))].sort();
+  } else {
+    jvm = coordinates(build);
+    android = coordinates(repoFile("packages/jazz-kotlin-android/build.gradle.kts"));
+  }
   assert.equal(jvm.length, 3);
   assert.equal(android.length, 3);
   assert.deepEqual(
@@ -258,7 +268,10 @@ test("the jar and AAR installs declare exactly the dependencies of the Kotlin bu
     const blocks = [...section.matchAll(/```kotlin[^\n]*\n([\s\S]*?)```/g)].map((match) =>
       coordinates(match[1]).filter((c) => !c.startsWith("tools.jazz:")),
     );
-    assert.deepEqual(blocks, [jvm, android], path);
+    // The jar and AAR installs first; any later block (the Maven repository zip's) declares
+    // only tools.jazz coordinates: Gradle module metadata brings the rest.
+    assert.deepEqual(blocks.slice(0, 2), [jvm, android], path);
+    for (const rest of blocks.slice(2)) assert.deepEqual(rest, [], path);
   };
   install("docs/content/docs/setup/kotlin.mdx", "## Install");
   install(
