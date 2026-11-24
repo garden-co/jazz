@@ -12,6 +12,7 @@ import {
   BINDING_ORIGIN,
   bindingTransport,
   networkTransport,
+  refuseRedirect,
   type CoreBinding,
   type CoreTransport,
   type CoreWebSocket,
@@ -394,6 +395,7 @@ async function durableObjectCore(store: Extract<JazzStore, { kind: "durableObjec
       redirect: "manual",
       signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
     });
+    await refuseRedirect(store.url, `${store.url}/app`, response, "durableObjects()");
     body = (await response.json().catch(() => undefined)) as typeof body;
   } catch (error) {
     if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
@@ -1587,7 +1589,8 @@ function openRemoteCore(
     adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
     backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
     async handle(method, path, headers, body, access = "session") {
-      const response = await transport.fetch(`${target.url}${path}`, {
+      const requestUrl = `${target.url}${path}`;
+      const response = await transport.fetch(requestUrl, {
         method,
         // The request carries this backend's credential: never to another
         // URL. ("manual", not "error", which workerd doesn't implement.)
@@ -1597,10 +1600,7 @@ function openRemoteCore(
         ),
         ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
       });
-      if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
-        await response.body?.cancel();
-        throw new TypeError(`the Jazz core at ${target.url} answered with a redirect`);
-      }
+      await refuseRedirect(target.url, requestUrl, response);
       const replyHeaders: string[][] = [];
       response.headers.forEach((value, name) => {
         // fetch already decoded the body.
