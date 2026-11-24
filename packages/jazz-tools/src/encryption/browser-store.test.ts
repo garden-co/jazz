@@ -116,7 +116,7 @@ describe("the browser private store", () => {
     );
   });
 
-  it("treats documents left without an incarnation as wiped: a new scope never adopts them", async () => {
+  it.each(["before reopen", "after reopen"])("hides orphan documents %s", async (when) => {
     const indexedDB = new IDBFactory();
     const store = browserPrivateStore({ name: "test-store", indexedDB, locks: null });
     const incarnation = await store.openScope("device");
@@ -132,10 +132,14 @@ describe("the browser private store", () => {
       transaction.oncomplete = () => resolve();
     });
     raw.close();
-    const again = await store.openScope("device");
-    expect(again).not.toBe(incarnation);
-    expect(await store.load("device", "keys")).toBeNull();
-    expect(await store.list("device")).toEqual([]);
+    if (when === "after reopen") {
+      const again = await store.openScope("device");
+      expect(again).not.toBe(incarnation);
+    }
+    expect(await Promise.all([store.load("device", "keys"), store.list("device")])).toEqual([
+      null,
+      [],
+    ]);
   });
 
   it("two tabs saving the same document: one wins, the other conflicts and writes nothing", async () => {

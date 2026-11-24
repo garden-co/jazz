@@ -7,7 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { plainSchema } from "../encryption/plain-schema.js";
+import { declaredEntries, declaresEncryption, plainSchema } from "../encryption/plain-schema.js";
 import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
@@ -152,10 +152,8 @@ import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.j
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { encryptionForDb, notDeclaredEncryption, type Encryption } from "../encryption/index.js";
-import { declaresEncryption } from "../encryption/build.js";
 import { pendingEncryption } from "../encryption/pending-handle.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { declaredEntries } from "../encryption/plain-schema.js";
 import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
 import { unreadableRows, withUnreadable } from "../encryption/unreadable.js";
 

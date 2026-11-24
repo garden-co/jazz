@@ -11,7 +11,30 @@
  * counts on a value being there.
  */
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { boundApp } from "../typed-app.js";
+
+interface Declared {
+  schema: {
+    current: string;
+    encryption?: { versions?: Record<string, object> };
+    schemas?: { hash: string; schema: { tables?: Record<string, unknown> } }[];
+  };
+}
+
+/**
+ * Whether the app is an encrypted app: its current version declares
+ * encryption, or keeps Jazz's system tables without declaring an encrypted
+ * column (once added, the tables stay).
+ */
+export function declaresEncryption(app: SchemaSourceInput): boolean {
+  const bound = boundApp(resolveSchemaSource(app)) as Declared | undefined;
+  if (!bound) return false;
+  const current = bound.schema.encryption?.versions?.[bound.schema.current];
+  if (current !== undefined && Object.keys(current).length > 0) return true;
+  const version = bound.schema.schemas?.find((entry) => entry.hash === bound.schema.current);
+  return Object.keys(version?.schema.tables ?? {}).some((name) => name.startsWith("__e2ee_"));
+}
 
 export type PlainEntries = Record<
   string,

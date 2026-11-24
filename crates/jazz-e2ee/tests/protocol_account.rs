@@ -668,6 +668,51 @@ fn retired_recovery_root_no_longer_approves() {
     assert!(!ledger.state(&env).is_active(&replacement.id));
 }
 
+/// Alice's replacement device must have its own matching request and a
+/// representable next generation. Check overflow at the protocol boundary
+/// because reaching the maximum through successive resets is impractical.
+#[test]
+fn reset_requires_matching_device_evidence_and_a_next_generation() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(12);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let mut state = ledger.state(&env);
+    let check = |state: &_, ledger: &Ledger| {
+        build::check_reset(
+            &env.writer(),
+            ResetPolicy {
+                device_account: false,
+                allow_account_reset: true,
+            },
+            state,
+            &phone,
+            &ledger.public,
+            &ledger.private,
+        )
+    };
+    assert_eq!(
+        check(&state, &ledger),
+        Err(refused(RefusalCode::NoDeviceRequest))
+    );
+    ledger.request(&phone, &mut rng);
+    assert_eq!(check(&state, &ledger).unwrap().generation(), 1);
+    let mut mismatched = ledger.clone();
+    mismatched.private.requests.last_mut().unwrap().row.keys = laptop.request().keys;
+    assert_eq!(
+        check(&state, &mismatched),
+        Err(refused(RefusalCode::DeviceKeysMismatch))
+    );
+    state.generation = u64::MAX;
+    assert_eq!(
+        check(&state, &ledger),
+        Err(ProtocolError::InvalidRecord("generation overflow"))
+    );
+}
+
 /// An account reset starts a new generation: the new root's device is the
 /// only active one, earlier devices and recovery roots are inactive, and the
 /// state as of a position before the reset is still generation 0.
@@ -2455,6 +2500,49 @@ fn approve_refuses_a_request_other_than_the_challenged_one() {
         &writer, &state, &laptop, &challenge, &proof, &request, &key, &mut rng,
     )
     .unwrap();
+}
+
+/// Alice's linked device has no account secret. It can retire an independent
+/// root, but needs the secret to distinguish a derived root from her own.
+#[test]
+fn retiring_a_derived_root_on_a_linked_device_requires_the_account_secret() {
+    let env = Env::device_account([1; 32]);
+    let mut rng = TestRandom(13);
+    let owner = env.device(&mut rng);
+    let mut linked = env.device(&mut rng);
+    let mut ledger = Ledger::new(&env.account);
+    ledger.request(&owner, &mut rng);
+    ledger.root(&env, &owner, 0, &mut rng);
+    ledger.request(&linked, &mut rng);
+    ledger.approve(&env, &owner, &mut linked, &mut rng);
+    let derived =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([2; 32]), &env.application(), 0).unwrap();
+    let mut independent =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([3; 32]), &env.application(), 0).unwrap();
+    independent.root_id = jazz_e2ee::protocol::ids::random_v4(&mut rng).unwrap();
+    ledger.register_recovery(&env, &linked, &derived, &mut rng);
+    ledger.register_recovery(&env, &linked, &independent, &mut rng);
+    ledger.rotate(
+        &env,
+        &linked,
+        RotationTarget::RetireRecoveryRoot(independent.root_id.clone()),
+        &mut rng,
+    );
+    let state = ledger.state(&env);
+    assert!(state.recovery_root(&independent.root_id).is_none());
+    let key = ledger.acquire(&env, &linked).unwrap();
+    let result = build::rotate(
+        &env.writer(),
+        &state,
+        &linked,
+        &key,
+        &RotationTarget::RetireRecoveryRoot(derived.root_id),
+        &mut rng,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        refused(RefusalCode::DeviceAccountSecretRequired)
+    );
 }
 
 /// A successor that retires a recovery root retires one of its own account:

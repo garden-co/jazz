@@ -23,6 +23,31 @@ vi.mock("../local-first-auth/secret.js", async (load) => {
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("closes a retained encryption handle and discards a late approval result", async () => {
+  let answer!: (output: string) => void;
+  const native = vi.fn(async (op: string) => {
+    if (op === "challenge") return "null";
+    return new Promise<string>((resolve) => (answer = resolve));
+  });
+  const encryption = new Encryption({
+    encryptionCall: native,
+    encryptionState: () => "{}",
+    takeEncryptionReports: () => [],
+  });
+  const approval = await encryption.devices.challenge("waiting-device");
+  const pending = approval.code();
+  encryption.stop();
+  answer(JSON.stringify("123456"));
+  await expect(pending).rejects.toMatchObject({ code: "closed" });
+  await expect(approval.approve("123456")).rejects.toMatchObject({ code: "closed" });
+  expect(() => encryption.recovery.create()).toThrow(/closed/);
+  await expect(encryption.devices.list()).rejects.toMatchObject({ code: "closed" });
+  expect(native.mock.calls).toEqual([
+    ["challenge", { deviceId: "waiting-device" }],
+    ["approvalCode", { deviceId: "waiting-device" }],
+  ]);
+});
+
 it.each([false, true])(
   "clears the generated recovery key after passkey backup (registration fails: %s)",
   async (refused) => {

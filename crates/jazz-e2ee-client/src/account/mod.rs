@@ -112,11 +112,17 @@ pub(crate) async fn serializable<T>(
         // polls it.
         let outcome = Box::pin(step(tx)).await;
         let _ = db.abandon_transaction_handle(tx);
-        match outcome {
-            Err(ClientError::Database(error)) if conflict(&error) => {
-                last = Some(ClientError::Database(error));
+        let retry = match &outcome {
+            Err(ClientError::Database(error)) => conflict(error),
+            Err(ClientError::AccountResetPublication { source, .. }) => {
+                matches!(source.as_ref(), ClientError::Database(error) if conflict(error))
             }
-            other => return other,
+            _ => false,
+        };
+        if retry {
+            last = outcome.err();
+        } else {
+            return outcome;
         }
     }
     Err(last.expect("an attempt was made"))
@@ -481,15 +487,14 @@ impl E2eeClient {
         }
         if read.public.is_empty() && !read.private.has_history() && read.skipped == 0 {
             let permit = check_bootstrap(&writer, &device, &read.public, &read.private)?;
-            let authority = match &self.device_account {
-                Some(identity) => RootAuthority::DeviceAccount(identity),
-                None => RootAuthority::App,
-            };
             let records = account_root(
                 &writer,
                 &device,
                 &permit,
-                authority,
+                self.device_account
+                    .borrow()
+                    .as_ref()
+                    .map_or(RootAuthority::App, RootAuthority::DeviceAccount),
                 &mut **self.shared.random.borrow_mut(),
             )?;
             self.stage(db, tx, &records.identity).await?;
@@ -506,7 +511,7 @@ impl E2eeClient {
             return Err(ProtocolError::InconsistentEvidence.into());
         };
         let through = read.public.through;
-        if let Some(identity) = &self.device_account {
+        if let Some(identity) = self.device_account.borrow().as_ref() {
             state.check_device_account(identity)?;
         }
         let floor = state.floor(through, Some(&device.id));
@@ -537,19 +542,23 @@ impl E2eeClient {
             }
         }
         let conflicts = epoch_keys.non_derived_sealing_keys().to_vec();
+        let unsupported = epoch_keys.unsupported_sealing_keys().to_vec();
         *self.account.borrow_mut() = Some(OwnAccount {
             state,
             key,
             epoch_keys,
             public: read.public.clone(),
         });
-        for conflict in conflicts {
+        for conflict in &conflicts {
+            self.shared.conflicting_account_key(conflict);
+        }
+        for record in unsupported {
             self.shared.event(
-                format!("conflicting-account-key:{}", conflict.record_id),
-                Report::ConflictingAccountKey {
-                    record_id: conflict.record_id,
-                    signer_id: conflict.signer_id,
-                    epoch_id: conflict.epoch_id,
+                format!("unsupported-account-key:{}", record.record_id),
+                Report::UnsupportedAccountKey {
+                    record_id: record.record_id,
+                    signer_id: record.signer_id,
+                    capability: record.capability,
                 },
             );
         }
@@ -581,7 +590,7 @@ impl E2eeClient {
             .current()?
             .ok_or(ProtocolError::InconsistentEvidence)?;
         let policy = ResetPolicy {
-            device_account: self.device_account.is_some(),
+            device_account: self.device_account.borrow().is_some(),
             allow_account_reset: self.allow_account_reset(),
         };
         let permit = check_reset(
@@ -599,11 +608,26 @@ impl E2eeClient {
             RootAuthority::App,
             &mut **self.shared.random.borrow_mut(),
         )?;
-        self.stage(db, tx, &records.identity).await?;
-        self.stage(db, tx, &records.root).await?;
-        self.stage(db, tx, &records.account_key).await?;
-        self.publish(db, tx).await?;
-        Ok(())
+        let publication_error = |source, refused| ClientError::AccountResetPublication {
+            record_ids: Box::new([
+                records.identity.id.clone(),
+                records.root.id.clone(),
+                records.account_key.id.clone(),
+            ]),
+            refused,
+            source: Box::new(source),
+        };
+        async {
+            self.stage(db, tx, &records.identity).await?;
+            self.stage(db, tx, &records.root).await?;
+            self.stage(db, tx, &records.account_key).await
+        }
+        .await
+        .map_err(|error| publication_error(error, true))?;
+        self.publish(db, tx).await.map_err(|error| {
+            let refused = error.code == ErrorCode::WriteRejected || conflict(&error);
+            publication_error(error.into(), refused)
+        })
     }
 
     /// Checks `read` against this device's floor for its account, if it has

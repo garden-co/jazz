@@ -147,6 +147,8 @@ impl LocalDevice {
 /// registry to read back with, and the account's domain.
 #[derive(Clone, Copy)]
 pub struct AccountWriter<'a> {
+    /// The recovery root derived from the account secret, if available.
+    pub account_secret_root_id: Option<&'a str>,
     pub suite: Suite<'a>,
     pub registry: &'a Registry,
     pub domain: &'a AppDomain,
@@ -945,6 +947,17 @@ pub fn rotate(
         RotationTarget::RetireRecoveryRoot(root) => {
             if state.recovery_root(root).is_none() {
                 return refuse(RefusalCode::TargetNotActive);
+            }
+            if state.root.row.kind == AccountKind::DeviceAccount
+                && ids::uuid_version(root) == Some(8)
+            {
+                match writer.account_secret_root_id {
+                    Some(own) if own == root => {
+                        return refuse(RefusalCode::DeviceAccountRootRequired);
+                    }
+                    None => return refuse(RefusalCode::DeviceAccountSecretRequired),
+                    Some(_) => {}
+                }
             }
             (AccountAction::RetireRecoveryRoot, None, vec![root.clone()])
         }

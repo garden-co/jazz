@@ -234,3 +234,54 @@ fn raw_system_table_lenses_require_the_exact_declared_column() {
         );
     }
 }
+
+/// Alice's database refuses a lens that adds the optional system column
+/// again after an earlier version already added it.
+#[test]
+fn raw_system_table_lenses_cannot_add_the_same_column_twice() {
+    use jazz::db::ErrorCode;
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+    let schema = |notes: TableSchemaBuilder| {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(notes)
+                .table(TableSchemaBuilder::new(MEMBERS).nullable_column("label", ColumnType::Text))
+                .build(),
+        )
+        .unwrap()
+    };
+    let notes = || TableSchemaBuilder::new("notes").column("body", ColumnType::Text);
+    let source = schema(notes());
+    let target = schema(notes().nullable_column("title", ColumnType::Text));
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        source.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+
+    let add = |table: &str, column: &str| TableLens {
+        source_table: table.into(),
+        target_table: table.into(),
+        ops: vec![LensOp::AddColumn {
+            column: column.into(),
+            default: Value::Nullable(None),
+        }],
+    };
+    let lens = MigrationLens::new(
+        source.version_id(),
+        target.version_id(),
+        vec![add("notes", "title"), add(MEMBERS, "label")],
+    )
+    .unwrap();
+    let error = block_on(db.admit_schema_with_lenses(target, &[lens])).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Schema);
+    assert!(
+        error.message.contains("carried between versions unchanged"),
+        "{error}"
+    );
+}

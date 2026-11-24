@@ -112,7 +112,16 @@ member waiting on another member's delivery) before it fails with the reason `ke
 A row this device cannot decrypt (it holds no key for it, or the key is still on its way) is never read
 as empty: the read leaves it out and says so. `unreadableRows(result)` returns the rows a read left out,
 each with its `table`, `id`, the `column` that could not be opened and a `code` (`key-pending`,
-`key-unavailable`, `invalid-ciphertext`, ...); it is empty when the result is complete.
+`key-unavailable`, `invalid-ciphertext`, ...). When key acquisition settles, Jazz updates provisional missing-key reasons
+to reflect the space’s state, such as `space-pending` when a member’s space has no valid
+root yet. A live result can update that reason even if its visible rows stay the same.
+See the [settled read reasons test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L57-L139).
+
+An empty `unreadableRows(result)` list means the query left out no candidate rows at decryption.
+An online equality filter can still miss matches when Jazz knows about key versions it does not
+hold. Jazz reports the affected query as `type: "unreadable"` with `table` and `space`,
+`id` and `column` set to `null`, and a code such as `key-pending`. It reports that condition
+once while the keys are missing. See the [incomplete equality query test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L140).
 
 ```ts
 import { unreadableRows } from "jazz-tools/backend";
@@ -229,7 +238,7 @@ React it also works on `data` itself.
 
 React Native's and Expo's `useAll` return the same fields as React's.
 
-The runtime also reports each row it could not read, as it happens:
+The runtime also reports unreadable rows, pending space keys and notices about rows it returned:
 
 ```ts
 session.db.encryption.onReport((report) => {
@@ -238,9 +247,12 @@ session.db.encryption.onReport((report) => {
 });
 ```
 
-While no listener is registered, the runtime keeps up to 1,024 reports. When the queue fills, it
-drops the oldest report it can, giving device challenges priority. The next `onReport` listener first receives a `reports-dropped` report with
-their count. Use `onUnreadable` if you only need individual unreadable-row reports. See the
+While no listener is registered, the runtime keeps up to 1,024 native reports and queues a
+`ready-failed` report if background verification fails. When the native queue fills, it drops the
+oldest report it can, giving device challenges priority. The next `onReport` listener receives a
+`reports-dropped` report with the count before the other native reports. Use `onUnreadable` to
+receive only reports of type `unreadable`, including space-level reports and notices about returned
+rows. Use `unreadableRows(result)` for the rows a particular read omitted. See the
 [report listener implementation](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/index.ts#L348-L368) and the
 [report overflow test](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/host/runtime.rs#L1598-L1625).
 

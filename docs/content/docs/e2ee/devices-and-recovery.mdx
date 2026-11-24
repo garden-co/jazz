@@ -80,3 +80,23 @@ await db.encryption.recovery.restore(phrase);
 
 The encryption recovery phrase is a different phrase from a device account's own (entering the wrong one
 just fails). `recovery.list()` shows the registered credentials and `recovery.retire(id)` retires one.
+
+## Reset an app sign-in account
+
+If a user loses every approved device and has no usable recovery phrase, their new device can
+call `await db.encryption.resetAccount()` while it is awaiting approval. This is available to
+accounts that use your app’s sign-in. In `schema.ts`, pass
+`{ encryption: { allowAccountReset: true } }` as the second argument to `s.defineSchema`.
+Run `npx jazz-tools generate` and deploy the generated app files. The setting is off by default. Device accounts always recover using their account secret. Jazz refuses to retire the
+recovery root derived from that secret. To retire a different derived root on a linked device,
+sign in with the account secret first.
+
+Reset starts a new account generation. Other members’ clients can send the new device the
+keys, including past keys, for spaces the account still belongs to. Enable reset only if your
+app’s sign-in is enough to grant this access. Anyone who can sign in as the user can reset the
+account on a new device and receive those space keys.
+
+A member’s device reports a reset once per space, account and generation.
+It remembers the last 10,000 distinct event identities and drops the oldest
+when a new one arrives. Re-enrolment starts a fresh event history.
+See the [schema generation test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/schema-dsl/encryption.test.ts#L89-L105), the [account reset test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/encryption/node-e2e.test.ts#L175-L229) and the [key redelivery test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/spaces.rs#L4652-L4691).

@@ -46,9 +46,9 @@ import {
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import { randomNodeUuidBytes } from "./runtime-entropy.js";
 import { buildBrowserEncryption } from "../encryption/browser-host.js";
-import { declaresEncryption, compiledBindings } from "../encryption/build.js";
+import { compiledBindings } from "../encryption/build.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { declaredEntries } from "../encryption/plain-schema.js";
+import { declaredEntries, declaresEncryption } from "../encryption/plain-schema.js";
 import { Encryption } from "../encryption/index.js";
 import { accountConfigBearer } from "../accounts/config-capability.js";
 import { bearerWebSocket } from "./credentialed-transport.js";

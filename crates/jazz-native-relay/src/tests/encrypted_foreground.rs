@@ -692,6 +692,8 @@ fn readiness_reads_the_authority_again(
         json: "\"active\"".to_owned(),
     };
     assert_eq!(call("ready", json!({ "timeoutMs": 10_000 }), true), active);
+    assert!(matches!(call("resetAccount", json!({}), true),
+        Response::OperationError { reason } if reason.contains("account-reset-not-allowed")));
     assert_eq!(
         call(
             "recoveryRegister",

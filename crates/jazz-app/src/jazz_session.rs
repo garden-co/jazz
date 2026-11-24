@@ -1084,6 +1084,11 @@ mod tests {
 
         let error = JazzSession::open(files, config).await.unwrap_err();
         assert!(matches!(error, Error::EncryptedSessionUnsupported));
+        assert!(
+            error
+                .to_string()
+                .contains("Use Jazz::open with Config::encryption and a private store.")
+        );
     }
 }
 

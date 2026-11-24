@@ -5,6 +5,9 @@
 //! refused and never overwritten, and a wiped store is never recreated.
 
 mod common;
+#[allow(dead_code)]
+#[path = "../../jazz-e2ee/tests/common/mechanisms.rs"]
+mod mechanisms;
 
 use std::rc::Rc;
 
@@ -482,6 +485,52 @@ fn a_wipe_during_a_keep_closes_it() {
     assert!(matches!(kept, Err(ClientError::Closed)), "{kept:?}");
     wiped.unwrap();
     assert!(store.inner.scopes().is_empty());
+}
+
+/// Alice's persisted device is valid; a failing key provider during its
+/// reopen check reaches the caller with the provider's error.
+#[test]
+fn a_device_reopen_preserves_a_crypto_provider_failure() {
+    use mechanisms::{FLAKY_SEAL, custom_registry};
+    let (registry, fails) = custom_registry(FLAKY_SEAL);
+    let store = Rc::new(MemoryStore::new());
+    let seal = serde_json::json!({ "id": FLAKY_SEAL.id, "version": FLAKY_SEAL.version });
+    let mut declarations = declarations();
+    declarations.settings.mechanisms = Some(serde_json::json!({
+        "selected": { "keySeal": seal }, "allowed": { "keySeal": [seal] }
+    }));
+    let open = || {
+        block_on(E2eeClient::open(ClientConfig {
+            store: store.clone(),
+            declarations: declarations.clone(),
+            account_id: ALICE.into(),
+            registry: registry.clone(),
+            random: Box::new(OsRandom),
+            device_account: None,
+        }))
+    };
+    drop(open().unwrap());
+    drop(open().unwrap());
+    fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        open(),
+        Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+    ));
+}
+
+/// Alice sees the store's original failure when opening her private scope.
+#[test]
+fn a_scope_open_failure_retains_the_store_error() {
+    use jazz_e2ee_client::host::bridge::JsStore;
+    let store = JsStore::served_by(Rc::new(|request| {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request).unwrap()["op"],
+            "openScope"
+        );
+        Box::pin(async { (false, "scope unavailable".into()) })
+    }));
+    assert!(matches!(try_open(Rc::new(store), declarations()),
+        Err(ClientError::Store(jazz_e2ee_client::StoreError::Failed(message))) if message == "scope unavailable"));
 }
 
 /// Contract: a stored device whose private key is not the pair of its

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AccountStore } from "../../src/accounts/persistence.js";
-import { memoryPrivateStore } from "../../src/encryption/index.js";
+import { EncryptionError, memoryPrivateStore } from "../../src/encryption/index.js";
 import { createJazzClient } from "../../src/react-native/create-jazz-session.js";
 import { startTestJazz } from "../../src/testing/index.js";
 import { app } from "../browser/apps/encrypted-tab/jazz.generated.js";
@@ -66,6 +66,11 @@ it("opens an encrypted device from the public React Native session over the app'
   const device = await encryption.deviceId();
   await expect(encryption.ready({ timeoutMs: 30_000 })).resolves.toBe("active");
   expect(() => encryption.recovery.create()).toThrow(/device account's recovery/);
+  await encryption.ready();
+  const [root] = await encryption.recovery.list();
+  const retirement = encryption.recovery.retire(root!.id);
+  await expect(retirement).rejects.toBeInstanceOf(EncryptionError);
+  await expect(retirement).rejects.toMatchObject({ code: "device-account-root-required" });
 
   const projectId = randomUUID();
   const accountId = first.getSnapshot().user!.accountId;
@@ -80,10 +85,20 @@ it("opens an encrypted device from the public React Native session over the app'
   await expect(write.wait({ tier: "global" })).resolves.toEqual(write.value);
   await expect(first.db.one(app.tasks.where({ id: write.value.id }))).resolves.toEqual(write.value);
 
+  await first.db.disconnect();
+  const local = first.db.insert(app.tasks, { projectId, title: "local draft" });
+  await local.wait({ tier: "local" });
+  await first.db.deleteClientStorage();
   await first.close();
   const reopened = await createJazzClient(config);
   cleanups.push(() => reopened.close());
   await expect(reopened.db.encryption.deviceId()).resolves.toBe(device);
+  await expect
+    .poll(() => reopened.db.one(app.tasks.where({ id: write.value.id })), {
+      timeout: 30_000,
+    })
+    .toEqual(write.value);
+  await expect(reopened.db.one(app.tasks.where({ id: local.value.id }))).resolves.toBeNull();
 
   await expect(async () => {
     const write = backend.jazz.db.insert(app.tasks, {

@@ -89,6 +89,12 @@ pub enum Report {
         signer_id: String,
         epoch_id: String,
     },
+    /// A sealing key record whose signature this device cannot verify.
+    UnsupportedAccountKey {
+        record_id: String,
+        signer_id: String,
+        capability: jazz_e2ee::protocol::error::UnsupportedCapability,
+    },
     /// A delivery to this account that provably failed to open or
     /// authenticate (protocol §3.4): nothing is written; the member stays
     /// `key-pending` until an updater rotates.
@@ -185,6 +191,7 @@ pub(crate) type Listener = Rc<dyn Fn(&Report)>;
 pub(crate) struct Published {
     /// Events already delivered, by what makes each one the same event.
     events: std::collections::HashSet<String>,
+    event_order: VecDeque<String>,
     tick: u64,
     seen: HashMap<ReportKey, (u64, Unreadable)>,
     order: BTreeMap<u64, ReportKey>,
@@ -192,6 +199,19 @@ pub(crate) struct Published {
 }
 
 impl Published {
+    /// Remembers the last MAX_REPORTS distinct event identities in publication order.
+    fn insert_event(&mut self, key: String) -> bool {
+        if !self.events.insert(key.clone()) {
+            return false;
+        }
+        self.event_order.push_back(key);
+        if self.events.len() > MAX_REPORTS {
+            let oldest = self.event_order.pop_front().unwrap();
+            self.events.remove(&oldest);
+        }
+        true
+    }
+
     /// Takes `unreadable`, returning whether it is new.
     fn insert(&mut self, unreadable: Unreadable) -> bool {
         let key = ReportKey::of(&unreadable);
@@ -244,8 +264,14 @@ impl Published {
     /// still missing after the space's keys changed is told again.
     fn forget_missing_keys(&mut self, space: &SpaceAddress) {
         let of_space = format!(":{}:{}:", space.scope_id, space.identifier);
-        self.events
-            .retain(|key| !(key.starts_with("missing-key:") && key.contains(&of_space)));
+        self.event_order.retain(|key| {
+            if key.starts_with("missing-key:") && key.contains(&of_space) {
+                self.events.remove(key);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Forgets every report and event, keeping the listeners, and returns
@@ -923,10 +949,7 @@ impl Shared {
                             "missing-key:{table}:{}:{}:{epoch_id}",
                             space.scope_id, space.identifier
                         );
-                        if published.events.len() >= MAX_REPORTS {
-                            published.events.clear();
-                        }
-                        if published.events.insert(key) {
+                        if published.insert_event(key) {
                             deliver.push(Report::MissingKey {
                                 table,
                                 space,
@@ -977,19 +1000,25 @@ impl Shared {
         self.flush(withdrawn);
     }
 
-    /// Delivers `report` once for `key` (an event is told once per
-    /// delivery, version or space, protocol §3.4, §3.8).
+    /// Delivers `report` once per identity among the last 10,000 distinct events.
     pub(crate) fn event(&self, key: String, report: Report) {
-        {
-            let mut published = self.published.borrow_mut();
-            if published.events.len() >= MAX_REPORTS {
-                published.events.clear();
-            }
-            if !published.events.insert(key) {
-                return;
-            }
+        if self.published.borrow_mut().insert_event(key) {
+            self.flush(vec![report]);
         }
-        self.flush(vec![report]);
+    }
+
+    pub(crate) fn conflicting_account_key(
+        &self,
+        key: &jazz_e2ee::protocol::account::NonDerivedSealingKey,
+    ) {
+        self.event(
+            format!("conflicting-account-key:{}", key.record_id),
+            Report::ConflictingAccountKey {
+                record_id: key.record_id.clone(),
+                signer_id: key.signer_id.clone(),
+                epoch_id: key.epoch_id.clone(),
+            },
+        );
     }
 
     pub(crate) fn listen(&self, listener: Listener) {
@@ -1011,6 +1040,64 @@ pub(crate) fn db_address(
     SpaceAddress {
         scope_id: address.scope_id.clone(),
         identifier: address.identifier.clone(),
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    /// Alice sees a repeated row or space report only after eviction. Exercise
+    /// the LRU directly to test the 10,000-entry boundary without 10,000 reads.
+    #[test]
+    fn unreadable_reports_evict_the_least_recently_observed_row_or_space() {
+        let mut published = Published::default();
+        let row = |i| Unreadable {
+            table: "notes".into(),
+            id: Some(RowUuid(uuid::Uuid::from_u128(i))),
+            column: Some("body".into()),
+            code: UnreadableCode::InvalidCiphertext,
+            space: None,
+        };
+        let space = Unreadable {
+            id: None,
+            column: None,
+            space: Some(SpaceAddress {
+                scope_id: "projects".into(),
+                identifier: "plans".into(),
+            }),
+            code: UnreadableCode::KeyPending,
+            ..row(0)
+        };
+        assert!(published.insert(space.clone()));
+        for i in 1..MAX_REPORTS {
+            assert!(published.insert(row(i as u128)));
+        }
+        assert!(!published.insert(space.clone()));
+        assert!(!published.insert(row(1)));
+        assert!(published.insert(row(MAX_REPORTS as u128)));
+        assert!(!published.insert(space));
+        assert!(!published.insert(row(1)));
+        assert!(published.insert(row(2)));
+    }
+
+    /// Alice sees each event once while its identity is retained. Exercise
+    /// the cache directly to reach capacity without creating 10,001 accounts.
+    #[test]
+    fn only_the_oldest_event_identity_is_evicted() {
+        let mut published = Published::default();
+        for i in 0..MAX_REPORTS {
+            assert!(published.insert_event(i.to_string()));
+        }
+        assert!(!published.insert_event("0".into()));
+        assert!(published.insert_event(MAX_REPORTS.to_string()));
+        assert!(!published.insert_event("1".into()));
+        assert!(published.insert_event("0".into()));
+        published.reset();
+        assert!(
+            published.insert_event(MAX_REPORTS.to_string()),
+            "fresh history after re-enrolment"
+        );
     }
 }
 

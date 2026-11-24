@@ -1894,19 +1894,15 @@ fn a_device_account_registers_its_recovery_root_at_start() {
     });
 }
 
-/// Contract: a device account whose secret's root was retired still
-/// starts: the start-up registration writes nothing and is not an error
-/// (§2.9, "Retiring a derived root"), unlike an explicit registration.
-///
-/// ```text
-/// lena's device ──start (secret)──► root; ──retire it──► server
-/// lena's device ──start (secret)──► active, nothing written
-/// ```
+/// Lena retires a second recovery credential but must keep her device account's
+/// own root. After the refusal a new device recovers using the account secret.
 #[test]
-fn a_device_account_starts_after_its_secrets_root_is_retired() {
+fn a_device_account_can_retire_only_its_other_recovery_roots() {
     within(|| {
+        use jazz_e2ee::protocol::derive::RecoverySecret;
+        use jazz_e2ee::protocol::error::RefusalCode;
         let server = secure_authority_with(&EncryptionSettings::default(), None);
-        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x6f; 32]);
+        let secret = RecoverySecret::from_bytes([0x6f; 32]);
         let (first, _) = lena_device(&server, 0x6f, 1);
         drive(
             &server,
@@ -1914,39 +1910,70 @@ fn a_device_account_starts_after_its_secrets_root_is_retired() {
             first.client.start_device_account(&first.db, &secret),
         )
         .unwrap();
-        let root = first
+        let own = first
             .client
-            .with_account(|account| account.state.recovery_roots[0].row.id.clone())
+            .with_account(|a| a.state.recovery_roots[0].row.id.clone())
+            .unwrap();
+        let other_secret = RecoverySecret::from_bytes([7; 32]);
+        drive(
+            &server,
+            &[&first.db],
+            first.client.register_recovery(&first.db, &other_secret),
+        )
+        .unwrap();
+        first.status(&server, &[]);
+        let other = first
+            .client
+            .with_account(|a| {
+                a.state
+                    .recovery_roots
+                    .iter()
+                    .find(|root| root.row.id != own)
+                    .unwrap()
+                    .row
+                    .id
+                    .clone()
+            })
             .unwrap();
         drive(
             &server,
             &[&first.db],
-            first.client.retire_recovery_root(&first.db, &root),
+            first.client.retire_recovery_root(&first.db, &other),
         )
         .unwrap();
-        pump(&server, &first.db);
-        let rows = || {
-            (
-                count(&server, "__e2ee_recovery_roots"),
-                count(&server, "__e2ee_recovery_deliveries"),
-            )
-        };
-        let before = rows();
-        let status = drive(
-            &server,
-            &[&first.db],
-            first.client.start_device_account(&first.db, &secret),
-        )
-        .unwrap();
-        assert_eq!(status, AccountStatus::Active);
-        pump(&server, &first.db);
-        assert_eq!(rows(), before, "nothing written");
-        assert_eq!(
+        assert!(
             first
                 .client
-                .with_account(|account| account.state.recovery_roots.len()),
-            Some(0),
-            "the root stays retired"
+                .with_account(|a| a.state.recovery_root(&other).is_none())
+                .unwrap()
+        );
+        let refused = drive(
+            &server,
+            &[&first.db],
+            first.client.retire_recovery_root(&first.db, &own),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::Refused(
+                    RefusalCode::DeviceAccountRootRequired
+                )))
+            ),
+            "{refused:?}"
+        );
+        let (second, _) = lena_device(&server, 0x6f, 2);
+        assert_eq!(
+            second.status(&server, &[&first]),
+            AccountStatus::AwaitingApproval
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.recover_device(&second.db, &secret)
+            )
+            .unwrap(),
+            AccountStatus::Active
         );
     });
 }
@@ -1980,10 +2007,7 @@ fn an_app_account_is_not_started_as_a_device_account() {
 /// Contract: a retired recovery root stays retired. Registering its secret
 /// again writes nothing and is refused with `recovery-root-mismatch`, as
 /// explicit recovery with it is: a user re-registering an old phrase must
-/// not believe they have recovery. (The start-up registration of a device
-/// account's own secret, the host runtime's `recoveryRegister` with
-/// `automatic`, writes nothing and goes on:
-/// `a_device_account_starts_after_its_secrets_root_is_retired`.)
+/// not believe they have recovery.
 ///
 /// ```text
 /// first ──register root──► server; first ──retire it──► server

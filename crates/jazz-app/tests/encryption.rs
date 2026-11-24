@@ -1398,16 +1398,13 @@ async fn a_device_accounts_automatic_registration_refuses_another_identitys_secr
     app.stop().await;
 }
 
-/// Alice's laptop remains active on reopening after its derived root is
-/// retired. Her new phone promptly waits for approval.
+/// Alice's laptop cannot retire the account-secret root. Her phone still
+/// recovers from the secret after the laptop closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_starts_after_its_secrets_root_is_retired() {
+async fn retiring_the_device_account_root_is_refused() {
     let app = App::start().await;
     let key = DeviceKey::generate().unwrap();
-    let memory = MemoryStore::new();
-    let store = EncryptionConfig::store(move || Rc::new(memory.clone()));
-    let config = app.user(key.clone()).encryption(store);
-    let laptop = Jazz::open(client_files(), config.clone()).await.unwrap();
+    let laptop = app.device_of(key.clone()).await;
     let encryption = laptop.encryption();
     assert_eq!(
         encryption.ready(Duration::from_secs(30)).await.unwrap(),
@@ -1428,35 +1425,24 @@ async fn a_device_account_starts_after_its_secrets_root_is_retired() {
     .await
     .expect("the root was registered");
     assert_eq!(roots.as_array().unwrap().len(), 1);
-    encryption
+    let refusal = encryption
         .call("recoveryRetire", json!({ "rootId": roots[0]["id"] }))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(matches!(refusal, Error::Encryption { code, message }
+        if code == "device-account-root-required" && message.contains("prevent recovery")));
     laptop.shutdown().await.unwrap();
 
-    let reopened = Jazz::open(client_files(), config).await.unwrap();
+    let phone = app.device_of(key).await;
     assert_eq!(
-        reopened
+        phone
             .encryption()
-            .ready(Duration::from_secs(15))
+            .ready(Duration::from_secs(30))
             .await
             .unwrap(),
         "active"
     );
-
-    let phone = app.device_of(key).await;
-    assert_eq!(
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            phone.encryption().ready(Duration::from_secs(30)),
-        )
-        .await
-        .expect("readiness returns before its deadline")
-        .unwrap(),
-        "awaiting-approval",
-    );
     phone.shutdown().await.unwrap();
-    reopened.shutdown().await.unwrap();
     app.stop().await;
 }
 

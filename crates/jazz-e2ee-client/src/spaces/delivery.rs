@@ -76,12 +76,6 @@ impl E2eeClient {
             acquisition,
             ..
         } = self.replay_space(&mut read).await?;
-        let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
-            if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
-                *deps = Default::default();
-            }
-            return Ok(0);
-        };
         // Only a member delivers (R17). What it delivers is what it holds of
         // this chain, which can be a skipped version without the current one
         // (protocol §3.4).
@@ -91,7 +85,6 @@ impl E2eeClient {
             }
             return Ok(0);
         }
-        let holds_current = acquisition.has_current(&chain);
         let directory = AccountDirectory::new(
             &read.accounts,
             &self.shared.domain,
@@ -100,8 +93,12 @@ impl E2eeClient {
         )?;
         // A member whose current generation is above 0 was reset
         // (protocol §2.11): told once per space, account and generation.
-        for account in read.ledger.member_accounts() {
-            if let Ok(Some(state)) = directory.current(&account)
+        let mut deps = crate::state::WatchedMembers {
+            members: read.ledger.member_accounts(),
+            ..Default::default()
+        };
+        for account in &deps.members {
+            if let Ok(Some(state)) = directory.current(account)
                 && state.generation > 0
             {
                 self.shared.event(
@@ -110,19 +107,21 @@ impl E2eeClient {
                         space.scope_id, space.identifier, state.generation
                     ),
                     Report::AccountReset {
-                        account,
+                        account: account.clone(),
                         space: space.clone(),
                         generation: state.generation,
                     },
                 );
             }
         }
-        let eligible =
-            holds_current && !self.shared.keys.borrow().rotation_refused.contains(address);
-        let mut deps = crate::state::WatchedMembers {
-            members: read.ledger.member_accounts(),
-            ..Default::default()
+        let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
+            if let Some(watched) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                *watched = deps;
+            }
+            return Ok(0);
         };
+        let eligible = acquisition.has_current(&chain)
+            && !self.shared.keys.borrow().rotation_refused.contains(address);
         if eligible {
             if self.shared.member_watch.borrow().covered.contains(space) {
                 deps.version =

@@ -226,6 +226,9 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 _ => Self::Refused(message),
             },
             E::Unsupported(what) => unsupported(what),
+            E::EncryptedSessionUnsupported => {
+                Self::NotSupported(format!("encryptedSessionUnsupported: {message}"))
+            }
             E::Encryption { code, .. } => Self::Encryption {
                 io: matches!(code.as_str(), "store" | "database"),
                 code,
@@ -268,6 +271,11 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 rejection(&reason, message)
             }
             E::Jazz(J::Write(reason)) => rejection(&reason, message),
+            E::Jazz(J::QueryFailed(error)) => Self::Refused(format!(
+                "query ({}): {}",
+                error.code.as_str(),
+                error.message
+            )),
             E::Jazz(J::Query(_) | J::Schema(_) | J::Json(_) | J::Identity(_)) => {
                 Self::Refused(message)
             }
@@ -299,6 +307,37 @@ mod tests {
         let error = JazzError::from(JazzErrorKind::from(error));
         assert_eq!(error.kind(), "io");
         assert!(matches!(error, JazzError::Encryption { code, .. } if code == "store"));
+    }
+
+    /// Alice's query cannot observe this catalogue version. The conversion
+    /// is tested directly to pin the FFI kind and code without catalogue timing.
+    #[test]
+    fn unobserved_catalogue_is_a_query_refusal() {
+        use jazz_app_support::jazz::{db, tools};
+
+        let error = db::Error::new(db::ErrorCode::NotObserved, "catalogue unavailable");
+        let error = jazz_app_support::Error::Jazz(tools::JazzError::QueryFailed(error));
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "refused");
+        assert_eq!(
+            error.to_string(),
+            "query (not_observed): catalogue unavailable"
+        );
+    }
+
+    /// Alice cannot open an encrypted app as a JazzSession. Test the mapping
+    /// directly so both native FFI contracts are covered by one conversion.
+    #[test]
+    fn encrypted_session_is_unsupported() {
+        let error = jazz_app_support::Error::EncryptedSessionUnsupported;
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "notSupported");
+        assert!(
+            error
+                .to_string()
+                .starts_with("encryptedSessionUnsupported: ")
+        );
+        assert_eq!(error.for_contract(1).kind(), "refused");
     }
 
     #[test]

@@ -36,7 +36,7 @@ use super::super::records::account::{
 };
 use super::private::{PrivateEvidence, VerifiedApproval};
 use super::replay::{AccountReplay, AccountState};
-use super::sealing::NonDerivedSealingKey;
+use super::sealing::{NonDerivedSealingKey, UnsupportedSealingKey};
 
 /// What the account key's authentication established.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +93,7 @@ pub struct AccountEpochKeys {
     root_id: String,
     keys: Vec<(String, Zeroizing<[u8; 32]>)>,
     non_derived: Vec<NonDerivedSealingKey>,
+    unsupported: Vec<UnsupportedSealingKey>,
 }
 
 impl AccountEpochKeys {
@@ -130,6 +131,11 @@ impl AccountEpochKeys {
     /// to one against the record, not against its sender (§3.4).
     pub fn non_derived_sealing_keys(&self) -> &[NonDerivedSealingKey] {
         &self.non_derived
+    }
+
+    /// Records skipped because this device cannot verify their signing mechanism.
+    pub fn unsupported_sealing_keys(&self) -> &[UnsupportedSealingKey] {
+        &self.unsupported
     }
 }
 
@@ -500,9 +506,11 @@ impl AccountKeyEvidence<'_> {
             root_id: self.state.root.row.id.clone(),
             keys,
             non_derived: Vec::new(),
+            unsupported: Vec::new(),
         };
         if let Some(sealing) = self.replay.sealing_keys()? {
             keys.non_derived = sealing.check_derived(self.registry(), &keys)?;
+            keys.unsupported = sealing.unsupported;
         }
         Ok(keys)
     }

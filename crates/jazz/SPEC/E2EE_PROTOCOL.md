@@ -1527,33 +1527,41 @@ the 32 secret bytes, created and read with user verification required
     The app calls retirement separately. Retirement rotates the account and
     retires the old root. See the [runtime's recovery operations](../../jazz-e2ee-client/src/host/runtime.rs#L759-L798).
   - **Device accounts:** the account secret is the account, and it cannot
-    be rotated without becoming a different account. Retiring its derived root
-    therefore only turns off recovery by account secret for this account (the
-    account may still register exported material); it does not protect against
-    a leaked account secret, because whoever holds the secret signs in as the
-    account. A leaked device-account secret loses the account, E2EE
-    included, and so does a lost or stolen device of a device account,
-    which holds the secret (§2.8). Recovery stays derived from the account
+    be rotated without becoming a different account. The SDK refuses to retire
+    the root derived from that secret (`device-account-root-required`), so the secret
+    can still recover the account after every device is lost. A device signed
+    in with the account secret can retire any other root. A linked device
+    without the secret cannot distinguish the account's root from another
+    derived (version 8) root. It refuses to retire a derived root with
+    `device-account-secret-required` and asks the user to sign in with the
+    account secret. It can still retire an independently generated root.
+    Anyone who holds a leaked account secret can still sign in as the account.
+    A lost or stolen device that holds the secret therefore compromises the
+    account, including E2EE (§2.8). Recovery stays derived from the account
     secret: there is no separate recovery secret and no device check on
-    writes for device accounts. The SDK asks for confirmation before
-    retiring a derived root of a device account.
+    writes for device accounts.
 
 ### 2.10 Sign-out, account change and device linking
 
-- **Sign-out** closes every live owner synchronously: in-flight operations are
-  cancelled, owned secret buffers erased, pending approvals and recovery drafts
-  disposed, and late results never reach a later session. Private records stay
-  on disk (§6.4) so a later offline sign-in can reopen.
+- **Sign-out.** When teardown starts, the TypeScript client refuses new
+  encryption calls and discards late results from the departing handle. It
+  allows up to one second for native encryption shutdown, including pending
+  private-store writes, then closes the runtime. Closing disposes its owned
+  secrets and approvals. Private records stay on disk (§6.4) so a later
+  offline sign-in can reopen.
 - **Account change.** An encryption handle bound to one account refuses
   operations for another ("does not match the admitted account").
 - **Same-account upgrade.** A stored encryption handle follows an in-place
   upgrade of the same account and encryption configuration. It is invalidated
   by sign-out, by an account or configuration change, and by a reopen after a
   failed logout (the reopened session gets a fresh owner; the old handle stays
-  closed). Owned approvals and drafts do not survive.
-- **Linking a device to an account.** While the link is pending, operations
-  wait for it within their own deadline; synchronous calls refuse. The handle
-  follows only if the account and configuration are unchanged.
+  closed). A logout that fails before teardown leaves the current client open.
+  Approvals owned by a closed handle cannot be used through that handle.
+- **Linking a device to an account.** The session detaches and closes its
+  current client before asking the registry to link the device. During the
+  transition, `session.db` throws and tells the caller to wait for the
+  session's `ready` status. After linking, get the encryption handle from the
+  new client.
 
 ### 2.11 Account reset
 
@@ -1563,7 +1571,8 @@ bootstrap (§2.3) refuses an account with history.
 
 **Availability.** Reset exists only for accounts authenticated by the
 application's own sign-in (for example WorkOS or Better Auth), and only when
-the application opts in with `"allowAccountReset": true` in the top-level
+the application opts in with `encryption: { allowAccountReset: true }` in
+`schema.ts`. Generation writes `"allowAccountReset": true` in the top-level
 `encryption` object of `jazz.app.json` (§1.5; off by default; carried in the
 deploy request). A device account has no reset without its secret:
 there the account secret is the account, and losing it is losing the
@@ -1576,6 +1585,9 @@ when the deployed configuration does not allow reset. Clients enforce the
 device-account part themselves: replay accepts a later generation of a
 device account only if the account's device-account key signed its root
 (§2.4 step 1), so nobody without the secret can reset it.
+
+The SDK exposes `db.encryption.resetAccount()`. See the
+[account reset test](../../../packages/jazz-tools/src/encryption/node-e2e.test.ts#L175).
 
 Stage `account-reset`. Preconditions, read at one cut: the account has a
 canonical root of generation `g`; this device has a request whose keys match
@@ -1600,7 +1612,9 @@ rows decide, as for every member (§8). Members see the reset: each member's
 runtime reads the public roots (R10) of the space's members and, for a
 member whose current generation is above 0, emits an `account-reset`
 encryption event `{account, space, generation}` once per space, account and
-generation, next to the unreadable-row reports (§4.3), so the application
+generation within the runtime’s event history (the last 10,000 distinct event identities,
+oldest evicted first). Re-enrolment starts a fresh history. The event appears
+next to the unreadable-row reports (§4.3), so the application
 can show "<account>'s encryption was reset". An account that reset before
 it joined the space is shown the same way. Member devices watch the public
 roots of the space's members (§3.8), so a reset is seen, and redelivered
@@ -2436,8 +2450,8 @@ decrypted) and reported. A row whose space coordinate is not a string is
 reported against the space column as `invalid-ciphertext`. Any other error fails the read. Reports are
 deduplicated per account by `(table, id, column, code)` in a bounded
 least-recently-used set of 10,000 entries; a listener registered later first
-receives the reports still in that set. A console warning names table, row and
-column, never content. One-shot and subscription results carry metadata for
+receives the reports still in that set. Apps can log the table, row and column
+from these reports, which contain no cell content. One-shot and subscription results carry metadata for
 the rows that read omitted. In TypeScript, `unreadableRows(result)` returns
 their table, row ID, column and reason code. The runtime's report listeners
 also receive reports, including for rows that were returned. See the
@@ -2629,8 +2643,11 @@ A rowless upload rejects named encrypted cells at begin and checks the mutation 
 
 ### 5.6 Atomicity
 
-- One public mutation or transaction callback is one Jazz transaction;
-  callbacks are never replayed.
+- Core runs a transaction callback once. If a thin browser client refuses an
+  operation that requires local-first, Jazz aborts that transaction before
+  anything commits. After the local-first client loads, Jazz runs the callback
+  once more on it. Keep external side effects out of transaction callbacks.
+  See the [thin transaction test](../../../packages/jazz-tools/src/session/create-jazz-session.thin-encrypted.test.ts#L625-L644).
 - Space creation commits with the first encrypted rows that need it, or
   alone for `createSpace` (§3.2).
 - **Keys inside a callback transaction.** A staging call that needs a key
@@ -2822,23 +2839,40 @@ before it, the device has nothing to compare with (§8).
 
 ### 6.4 Wipe rules
 
-- Normal sign-out retains device and held-key records, so a later offline
-  sign-in can read.
+- Sign-out releases the departing runtime’s held keys in memory after draining
+  pending private-store writes. Saved device and held-key records survive a
+  normal sign-out, so a later offline sign-in can read. See the
+  [shutdown test](../../jazz-e2ee-client/tests/signout_memory.rs#L23).
 - With `clearOnSignOut`, the **last tab out** removes the account's device
   record and every held key bound to it (for a device-account store, together with
   the store's deletion). A tab that signs out while another holds the store
   keeps them. The wipe deletes the client's core storage first and the
-  private E2EE records second; if the second step fails, sign-out reports an
-  unfinished wipe.
-- `deleteClientStorage` removes the namespace's storage and the registered
-  private records, and invalidates live handles. It revokes nothing remotely.
+  private E2EE records second. If the second step fails, sign-out reports an
+  unfinished wipe. With the memory driver, sign-out closes the in-memory
+  replica and still wipes the saved private E2EE records. See
+  the [driver check](../../../packages/jazz-tools/src/session/create-jazz-session.ts#L318)
+  and [browser sign-out tests](../../../packages/jazz-tools/tests/browser/encryption.server.test.ts#L647).
+- Browser `deleteClientStorage` deletes the active namespace’s database and
+  invalidates its live handles. The session’s opted-in sign-out path separately
+  wipes the private store. On native, `deleteClientStorage`
+  (`Jazz::delete_client_storage` in Rust) closes the client and deletes the
+  local database if it is persistent. The private records survive, so the
+  client can decrypt after reopening and syncing. Storage deletion is local.
+  See the [browser reset](../../../packages/jazz-tools/src/runtime/connection-manager/browser-connection-manager.ts#L684)
+  and the [native deletion test](../../jazz-app/tests/encryption.rs#L411-L428).
 - Access changes never remove held keys. Records are removed only by
   sign-out wipe, account change wipe, device removal, re-enrolment after
   `device-no-longer-active` (§2.4, "Floors": the account's device record,
   held keys and floors) and explicit deletion. A refused or lost creation's
   key is kept (§3.2). A wiped store is never recreated by a late operation.
-- A held-key revision counter advances on every removal, so in-flight reads
-  notice and retry (3 attempts).
+- The runtime preserves the document's stored removal counter when it
+  [loads](../../jazz-e2ee-client/src/client.rs#L395-L400) and
+  [rewrites](../../jazz-e2ee-client/src/client.rs#L751-L761) held keys. A local
+  [wipe](../../jazz-e2ee-client/src/client.rs#L944-L949) clears secrets in memory
+  and deletes the store scope. The online
+  [read wrapper](../../jazz-e2ee-client/src/spaces/mod.rs#L1080-L1146) repeats the read once if
+  acquisition obtains a missing key. Space membership removal relies on
+  row permissions and key rotation (§3.5).
 
 ## 7. Failure taxonomy
 
@@ -2889,7 +2923,9 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 
 `conflicting-account-key` is a report, not a contradiction: a valid sealing
 key record of the device's own account that does not derive from the
-account key is ignored by that device and reported (§2.12).
+account key is ignored by that device and reported (§2.12). The app event
+includes `recordId`, `signerId` and `epochId` and is deduplicated by record.
+See the [account verification test](../../jazz-e2ee-client/tests/accounts.rs#L110).
 
 The missing-key contradictions: `missing-root-key` (an accepted account
 root names a device with no published device keys, §1.2),
@@ -2903,9 +2939,13 @@ operations that are safe to repeat because they re-read their evidence and
 stage fresh rows: the runtime's own publications (space creation outside an
 application transaction, rotation, deliveries and the repair of refused or
 lost creations, §3.2), and a staging call retried after "needs key" before submission
-(§5.6). A public mutation or transaction callback is never retried or
-replayed: its conflict is returned to the caller, and an unknown outcome is
-reconciled by its transaction identity.
+(§5.6). Application transaction conflicts go back to the caller. Unknown
+publication outcomes are reconciled by transaction identity while the call is
+alive. A reset waits for its transaction’s global acknowledgement. After a
+process restart, the client replays the account at the authority. If the
+reset committed, the requesting device is active in the new generation and
+can continue. If it still awaits approval, the user can request a reset again. The thin
+browser callback rerun in §5.6 applies only to a refusal before commit.
 
 Refusal codes:
 
@@ -2925,6 +2965,8 @@ Refusal codes:
 | `target-not-active`                | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
 | `self-removal`                     | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
 | `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                                      |
+| `device-account-root-required`     | Retiring the device account's own recovery root would prevent recovery with its account secret (§2.9).                                                                    |
+| `device-account-secret-required`   | A linked device needs the account secret to distinguish other derived roots from the device account's own (§2.9).                                                         |
 | `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
 | `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |

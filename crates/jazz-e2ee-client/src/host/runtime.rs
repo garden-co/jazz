@@ -27,7 +27,6 @@ use jazz::e2ee::SpaceAddress;
 use jazz::tools::public_schema::E2eeDeclarations;
 use jazz_e2ee::OsRandom;
 use jazz_e2ee::protocol::derive::RecoverySecret;
-use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 
 use super::bridge::JsStore;
 use serde_json::{Value, json};
@@ -179,9 +178,9 @@ pub const MAX_REPORTS: usize = 1024;
 
 /// The reports waiting for JS, as JSON texts: at most [`MAX_REPORTS`]. An
 /// app that reads none (no listener) holds no more than that; past it the
-/// oldest report goes (never a challenge, which the device must answer)
-/// and the next take starts with one `reports-dropped` report counting
-/// those that went.
+/// oldest ordinary report goes first. If only challenges are waiting, a
+/// new challenge replaces the oldest and an ordinary report is dropped.
+/// The next take reports the number dropped.
 #[derive(Debug, Default)]
 pub struct ReportQueue {
     /// Each report, and whether it is a challenge.
@@ -193,13 +192,16 @@ impl ReportQueue {
     pub fn push(&mut self, report: Value) {
         let challenge = report["type"] == "challenged";
         if self.waiting.len() >= MAX_REPORTS {
-            let oldest = self
-                .waiting
-                .iter()
-                .position(|(challenge, _)| !challenge)
-                .unwrap_or(0);
-            self.waiting.remove(oldest);
             self.dropped += 1;
+            match self.waiting.iter().position(|(challenge, _)| !challenge) {
+                Some(oldest) => {
+                    self.waiting.remove(oldest);
+                }
+                None if challenge => {
+                    self.waiting.pop_front();
+                }
+                None => return,
+            }
         }
         self.waiting.push_back((challenge, report.to_string()));
     }
@@ -389,17 +391,13 @@ async fn build_client(
             })
             .collect(),
     );
-    let device_account = recovery
-        .map(DeviceAccountIdentity::from_secret)
-        .transpose()
-        .map_err(|error| error.to_string())?;
     let client = E2eeClient::open(ClientConfig {
         store,
         declarations,
         account_id,
         registry: jazz_e2ee::registry::Registry::builtin(),
         random: Box::new(OsRandom),
-        device_account,
+        device_account: recovery,
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -546,6 +544,11 @@ impl Encryption {
             native.recovery.borrow_mut().take();
             *native.result.borrow_mut() = Verification::Failed(ClientError::Closed);
         }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_approval_count(&self) -> usize {
+        self.approvals.borrow().len()
     }
 
     /// The reports waiting, as JSON texts.
@@ -824,9 +827,18 @@ impl Encryption {
             Value::String(text) => Some(Zeroizing::new(std::mem::take(text))),
             _ => None,
         });
+        let phrase = match op.as_str() {
+            "recoveryRegister" | "recoveryRestore" => take_recovery_phrase(&mut args),
+            _ => None,
+        };
         Box::pin(async move {
-            this.run(&op, &args, secret.as_ref().map(|text| text.as_str()))
-                .await
+            this.run(
+                &op,
+                &args,
+                phrase,
+                secret.as_ref().map(|text| text.as_str()),
+            )
+            .await
         })
     }
 
@@ -844,6 +856,7 @@ impl Encryption {
         self: &Rc<Self>,
         op: &str,
         args: &Value,
+        phrase: Option<Result<RecoverySecret, String>>,
         secret: Option<&str>,
     ) -> Result<Value, String> {
         if op == "shutdown" {
@@ -1004,7 +1017,7 @@ impl Encryption {
                     None if op == "recoveryRegister" => AccountStatus::Active,
                     None => AccountStatus::AwaitingApproval,
                 };
-                let secret = recovery_secret(args, secret)?;
+                let secret = recovery_secret(args, phrase, secret)?;
                 let restored = self
                     .recover_after_verification(status, &secret, false)
                     .await
@@ -1021,7 +1034,7 @@ impl Encryption {
                 }
             }
             "recoveryRegister" => {
-                let secret = recovery_secret(args, secret)?;
+                let secret = recovery_secret(args, phrase, secret)?;
                 client
                     .register_recovery(db, &secret)
                     .await
@@ -1029,7 +1042,7 @@ impl Encryption {
                 Value::Null
             }
             "recoveryRestore" => {
-                let secret = recovery_secret(args, secret)?;
+                let secret = recovery_secret(args, phrase, secret)?;
                 let status = client.recover_device(db, &secret).await.map_err(describe)?;
                 self.status.set(Some(status));
                 json!(status_name(status))
@@ -1471,6 +1484,30 @@ fn status_name(status: AccountStatus) -> &'static str {
 
 /// A runtime error as JS sees it: a stable code, then the message.
 fn describe(error: ClientError) -> String {
+    if let ClientError::AccountResetPublication {
+        record_ids,
+        refused,
+        source,
+    } = &error
+    {
+        let code = match source.as_ref() {
+            ClientError::Database(error) => error
+                .reason
+                .map_or(error.code.as_str(), |reason| reason.as_str()),
+            ClientError::Protocol(error) => error.code().unwrap_or("protocol"),
+            _ => "error",
+        };
+        return format!(
+            "publication: {}",
+            json!({
+                "stage": "account-reset",
+                "outcome": if *refused { "refused" } else { "unknown" },
+                "code": code,
+                "recordIds": record_ids.as_ref(),
+                "message": source.to_string(),
+            }),
+        );
+    }
     let code = match &error {
         ClientError::ApprovalAnswered => "approval-answered",
         ClientError::NoChallenge => "no-challenge",
@@ -1488,13 +1525,29 @@ fn describe(error: ClientError) -> String {
     format!("{code}: {error}")
 }
 
-/// Read a recovery phrase, a formatted device account secret for automatic
-/// recovery, or a hexadecimal backup secret for explicit recovery.
-fn recovery_secret(args: &Value, text: Option<&str>) -> Result<RecoverySecret, String> {
-    if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
-        return super::phrase::to_secret(phrase)
+/// Move the JSON string's allocation into a zeroizing buffer and parse it
+/// before creating the future, so only the parsed secret can wait in the gate.
+fn take_recovery_phrase(args: &mut Value) -> Option<Result<RecoverySecret, String>> {
+    let Value::String(text) = args.get_mut("phrase")? else {
+        return None;
+    };
+    let phrase = Zeroizing::new(std::mem::take(text));
+    Some(
+        super::phrase::to_secret(&phrase)
             .map(|bytes| RecoverySecret::from_bytes(*bytes))
-            .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
+            .map_err(|error| format!("{}: the recovery phrase is not valid", error.code())),
+    )
+}
+
+/// Use the supplied phrase, a formatted device account secret for automatic
+/// recovery, or a hexadecimal backup secret for explicit recovery.
+fn recovery_secret(
+    args: &Value,
+    phrase: Option<Result<RecoverySecret, String>>,
+    text: Option<&str>,
+) -> Result<RecoverySecret, String> {
+    if let Some(phrase) = phrase {
+        return phrase;
     }
     let text = text.ok_or("`phrase` is missing")?;
     if args.get("automatic").and_then(Value::as_bool) == Some(true) {
@@ -1551,6 +1604,14 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
         } => json!({
             "type": "conflicting-account-key", "recordId": record_id,
             "signerId": signer_id, "epochId": epoch_id,
+        }),
+        Report::UnsupportedAccountKey {
+            record_id,
+            signer_id,
+            capability,
+        } => json!({
+            "type": "unsupported-account-key", "recordId": record_id,
+            "signerId": signer_id, "capability": capability.code(),
         }),
         Report::InvalidDelivery {
             space: at,
@@ -1673,6 +1734,34 @@ mod tests {
         assert!(secret(&"ab".repeat(32)).is_ok());
         assert!(secret("ab").is_err());
         assert!(secret(&"zz".repeat(32)).is_err());
+    }
+
+    /// Alice's mnemonic is consumed before either recovery call can wait
+    /// or be cancelled. Test the argument boundary directly because callers
+    /// cannot inspect the call's owned JSON after handing it over.
+    #[test]
+    fn recovery_phrase_is_removed_before_success_error_or_cancellation() {
+        let bytes = [5; 32];
+        let phrase = super::super::phrase::from_secret(&bytes);
+        let mut args = json!({ "phrase": phrase.as_str() });
+        let parsed = take_recovery_phrase(&mut args).unwrap().unwrap();
+        assert_eq!(parsed.format(), RecoverySecret::from_bytes(bytes).format());
+        assert_eq!(args["phrase"], "");
+
+        let mut args = json!({ "phrase": "one word" });
+        let parsed = take_recovery_phrase(&mut args).unwrap();
+        assert!(matches!(parsed, Err(error) if error.starts_with("invalid-length: ")));
+        assert_eq!(args["phrase"], "");
+
+        let runtime = native_runtime_with_catalogue(true);
+        let busy = run(runtime.gate.enter());
+        let mut context = Context::from_waker(Waker::noop());
+        for op in ["recoveryRegister", "recoveryRestore"] {
+            let mut call = runtime.call(op.to_owned(), json!({ "phrase": phrase.as_str() }));
+            assert!(call.as_mut().poll(&mut context).is_pending());
+            drop(call);
+        }
+        drop(busy);
     }
 
     /// Contract: an encrypted app is installed from its own declarations: an
@@ -1941,6 +2030,31 @@ mod tests {
         assert!(queue.take().is_empty(), "the count is reported once");
     }
 
+    /// Alice's full queue of challenges drops an ordinary arrival; a new
+    /// challenge replaces the oldest. The bounded host queue owns that choice.
+    #[test]
+    fn a_full_queue_of_challenges_keeps_challenges_first() {
+        let mut queue = ReportQueue::default();
+        for index in 0..MAX_REPORTS {
+            queue.push(json!({ "type": "challenged", "index": index }));
+        }
+        queue.push(json!({ "type": "unreadable" }));
+        assert!(queue.waiting.iter().all(|(challenge, _)| *challenge));
+        queue.push(json!({ "type": "challenged", "index": MAX_REPORTS }));
+        let reports = queue.take();
+        assert_eq!(reports.len(), MAX_REPORTS + 1);
+        assert_eq!(
+            reports[0],
+            json!({ "type": "reports-dropped", "count": 2 }).to_string()
+        );
+        for (index, report) in reports.iter().enumerate().skip(1) {
+            assert_eq!(
+                *report,
+                json!({ "type": "challenged", "index": index }).to_string()
+            );
+        }
+    }
+
     /// Contract: a protocol failure that has a code of its own reaches JS
     /// with that code, so a caller can tell an expected refusal (nothing to
     /// recover from) from a failure; one without keeps `protocol`.
@@ -1956,6 +2070,24 @@ mod tests {
         );
         let described = describe(ClientError::Protocol(ProtocolError::ProviderFailure));
         assert!(described.starts_with("protocol: "), "{described}");
+    }
+
+    /// Alice's host receives the skipped record, its signer and the capability
+    /// needed to check it. The JSON serializer defines this binding contract.
+    #[test]
+    fn an_unsupported_account_key_names_its_signer_and_capability_in_json() {
+        let report = Report::UnsupportedAccountKey {
+            record_id: "record".into(),
+            signer_id: "signer".into(),
+            capability: jazz_e2ee::protocol::error::UnsupportedCapability::SigningVersion,
+        };
+        assert_eq!(
+            report_json(&report, |_| None),
+            json!({
+                "type": "unsupported-account-key", "recordId": "record",
+                "signerId": "signer", "capability": "signing-version"
+            })
+        );
     }
 
     /// A report on an obsolete scope still identifies the space after its table went away.

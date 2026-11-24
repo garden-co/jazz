@@ -3,6 +3,7 @@ import { JazzProvider as Jazz, useJazzSession } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { app } from "../jazz.generated";
 import { authClient } from "@/src/lib/auth-client";
+import { clearPendingMarkerIds } from "@/src/lib/mark-read";
 
 // #region bandchat-provider-load
 // Start on the thin client; load the local-first one (WASM, local storage,
@@ -21,6 +22,7 @@ export function useBandChatLifecycle(): AuthActions {
     async signOut() {
       // Signs out of Better Auth, then Jazz follows the backend's answer.
       await authClient.signOut();
+      clearPendingMarkerIds();
       await refresh();
       window.location.assign("/");
     },

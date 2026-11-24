@@ -5,8 +5,9 @@
  * every tab shares, and decrypts and seals itself.
  */
 import type { SchemaSourceInput } from "../schema-source.js";
-import { buildEncryption, declaresEncryption, type EncryptionRuntimeClass } from "./build.js";
+import { buildEncryption, type EncryptionRuntimeClass } from "./build.js";
 import { browserPrivateStore } from "./browser-store.js";
+import { declaresEncryption } from "./plain-schema.js";
 import type { PrivateStore } from "./private-store.js";
 
 /** What an app that declares encryption passes to its client. */

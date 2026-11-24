@@ -7,7 +7,8 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Db } from "../runtime/db.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type { SchemaSourceInput } from "../schema-source.js";
-import { buildEncryption, compiledBindings, declaresEncryption } from "./build.js";
+import { buildEncryption, compiledBindings } from "./build.js";
+import { declaresEncryption } from "./plain-schema.js";
 import {
   Devices,
   EncryptionError,

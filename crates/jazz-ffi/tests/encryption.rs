@@ -293,6 +293,20 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
         assert!(found[0].get("__e2ee_eq_title").is_none(), "{found}");
         assert!(by_title("nobody's").as_array().unwrap().is_empty());
 
+        // The generic native operation reaches the account's reset policy.
+        assert!(
+            matches!(alice.encryption_call("resetAccount".into(), "{}".into()),
+            Err(JazzError::Encryption { code, io: false, .. }) if code == "account-reset-not-allowed")
+        );
+        alice.encryption_call("ready".into(), "{}".into()).unwrap();
+        let roots = parse(&alice.encryption_call("recoveryList".into(), "{}".into()).unwrap());
+        assert_eq!(roots.as_array().unwrap().len(), 1);
+        let refusal = alice.encryption_call(
+            "recoveryRetire".into(),
+            json!({ "rootId": roots[0]["id"] }).to_string(),
+        ).unwrap_err();
+        assert!(matches!(refusal, JazzError::Encryption { code, reason, io: false }
+            if code == "device-account-root-required" && reason.contains("prevent recovery")));
         // An encryption call that names nothing is refused with its code.
         match alice.encryption_call("noSuchCall".into(), "{}".into()) {
             Err(JazzError::Encryption {
@@ -477,6 +491,18 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
             assert_eq!(failure["kind"], "refused");
             assert_eq!(failure["code"], "error");
 
+            let mut err = std::ptr::null_mut();
+            let reset = jazz_ffi::c_abi::jazz_call(
+                handle,
+                c"encryptionCall".as_ptr(),
+                c"{\"op\":\"resetAccount\"}".as_ptr(),
+                &mut err,
+            );
+            assert!(reset.is_null() && !err.is_null());
+            let failure = parse(CStr::from_ptr(err).to_str().unwrap());
+            assert_eq!(failure["kind"], "refused");
+            assert_eq!(failure["code"], "account-reset-not-allowed");
+            jazz_ffi::c_abi::jazz_string_free(err);
             // A negative readiness timeout is refused, not read as the default.
             let (method, args) = (
                 c"encryptionCall",

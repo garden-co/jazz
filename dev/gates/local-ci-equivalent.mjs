@@ -363,6 +363,14 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    command("jazz-napi encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec cargo test -p jazz-napi --lib --features rn-test-bridge",
+    ]),
+    command("jazz-wasm encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec wasm-pack test --node crates/jazz-wasm",
+    ]),
     // Run jazz-core's integration tests without the client encryption hooks,
     // which the workspace run above unifies on through its binding crates.
     command("jazz-core integration tests without e2ee-client", "node", [
