@@ -1359,10 +1359,9 @@ async fn main_loop(this: Rc<Encryption>) {
     let mut backoff = RETRY_FIRST;
     let mut retry_at: Option<web_time::Instant> = None;
     let mut start = true;
-    // A device awaiting approval looks for a challenge now and then: the
-    // challenge rows are not among the account's watched tables.
+    let mut approval: Option<(String, _)> = None;
     let mut noticed = false;
-    let mut looked = web_time::Instant::now();
+    let mut retry_challenge_at = None;
     loop {
         this.stage.set("waiting for its turn");
         let turn = this.gate.enter().await;
@@ -1391,6 +1390,7 @@ async fn main_loop(this: Rc<Encryption>) {
         if let Some(native) = &this.native {
             verify |= native.requested.get() > native.started.get();
         }
+        let account_changed = verify;
         if verify {
             verify = false;
             if let Some(native) = &this.native {
@@ -1440,7 +1440,11 @@ async fn main_loop(this: Rc<Encryption>) {
                         native.recovery.borrow_mut().take();
                         *native.result.borrow_mut() = Verification::Complete;
                     }
-                    if status == AccountStatus::Active {
+                    // The account watch was opened before verification; it
+                    // will pick up any removal request from a later cut.
+                    if status == AccountStatus::Active
+                        && (account.is_none() || client.may_have_other_removal_requests())
+                    {
                         match Box::pin(client.complete_removal_requests(&db)).await {
                             Ok(_) => {}
                             Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
@@ -1479,20 +1483,57 @@ async fn main_loop(this: Rc<Encryption>) {
                 }
             }
         }
-        if this.status.get() == Some(AccountStatus::AwaitingApproval)
-            && looked.elapsed() >= std::time::Duration::from_secs(2)
-        {
-            looked = web_time::Instant::now();
-            match Box::pin(client.challenged(&db)).await {
-                Ok(true) if !noticed => {
-                    noticed = true;
-                    this.reports
-                        .borrow_mut()
-                        .push(json!({ "type": "challenged" }));
-                }
-                Ok(false) => noticed = false,
-                _ => {}
+        if this.status.get() == Some(AccountStatus::AwaitingApproval) {
+            if approval
+                .as_ref()
+                .is_some_and(|(id, _)| client.device().is_ok_and(|device| device.id != *id))
+            {
+                approval = None;
+                noticed = false;
+                retry_challenge_at = None;
             }
+            if approval.is_none() {
+                approval = Box::pin(client.watch_approval(&db)).await.ok();
+            }
+            if let Some((_, [challenges, proved])) = approval.as_mut() {
+                let (changed, challenges_closed) = challenges.changes(|_| Some(()));
+                let (proved_changed, proofs_closed) = proved.changes(|_| Some(()));
+                if challenges.rows.is_empty() {
+                    if !changed.is_empty() {
+                        noticed = false;
+                    }
+                    retry_challenge_at = None;
+                } else if account_changed
+                    || !changed.is_empty()
+                    || !proved_changed.is_empty()
+                    || retry_challenge_at.is_some_and(|at| web_time::Instant::now() >= at)
+                {
+                    // A watch only tells us when looking could help. A
+                    // challenge still needs the account's authoritative cut.
+                    retry_challenge_at = None;
+                    match Box::pin(client.challenged(&db)).await {
+                        Ok(true) if !noticed => {
+                            noticed = true;
+                            this.reports
+                                .borrow_mut()
+                                .push(json!({ "type": "challenged" }));
+                        }
+                        Ok(false) => noticed = false,
+                        Ok(true) => {}
+                        Err(_) => {
+                            retry_challenge_at =
+                                Some(web_time::Instant::now() + Duration::from_secs(2));
+                        }
+                    }
+                }
+                if challenges_closed || proofs_closed {
+                    approval = None;
+                }
+            }
+        } else {
+            approval = None;
+            noticed = false;
+            retry_challenge_at = None;
         }
         if this.status.get() != Some(AccountStatus::Active) {
             // The pass needs an active device: answer what waits for it.
@@ -1571,9 +1612,7 @@ async fn main_loop(this: Rc<Encryption>) {
             }
         }
         this.stage.set("idle");
-        let probe = (this.status.get() == Some(AccountStatus::AwaitingApproval))
-            .then(|| looked + Duration::from_secs(2));
-        this.set_background_deadline(retry_at.into_iter().chain(probe).min());
+        this.set_background_deadline(retry_at.into_iter().chain(retry_challenge_at).min());
         drop(turn);
         yield_now().await;
     }

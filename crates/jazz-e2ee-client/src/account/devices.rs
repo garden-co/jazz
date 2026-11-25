@@ -30,6 +30,7 @@
 //! memory for the call only and are never stored.
 
 use jazz::db::Db;
+use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::build::{
     AccountWriter, Challenge, LocalDevice, RecoveryApprovalRecords, RotationTarget, approve,
@@ -46,9 +47,10 @@ use jazz_e2ee::protocol::position::Position;
 use jazz_e2ee::protocol::records::account::{DeviceProof, DeviceRequest, approval_code};
 use jazz_e2ee::protocol::{Accepted, ProtocolError};
 
-use super::{ATTEMPTS, AccountRead, AccountStatus, FloorCheck};
+use super::{ATTEMPTS, AccountRead, AccountStatus, FloorCheck, rows};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
+use crate::state::WatchedRows;
 
 /// What a device that answers or recovers finds: a proof to build, or a
 /// nonce spent without a proof of its own at the authority.
@@ -470,6 +472,33 @@ impl E2eeClient {
         .await
     }
 
+    /// Watch challenges for this device and the subset with a proof. Both
+    /// queries start at the device index; proofs share their challenge's row ID.
+    pub(crate) async fn watch_approval(
+        &self,
+        db: &Db,
+    ) -> Result<(String, [WatchedRows<()>; 2]), ClientError> {
+        let device_id = self.shared.device()?.id.clone();
+        let device = rows::uuid_cell(&device_id).ok_or(ProtocolError::InvalidRecord(
+            "a device ID that is not a UUID",
+        ))?;
+        let challenges =
+            Query::from(rows::DEVICE_CHALLENGES).filter(eq(col("deviceId"), lit(device)));
+        let proved = challenges
+            .clone()
+            .join_via_row_id(rows::DEVICE_PROOFS, "id", []);
+        let challenges = db
+            .subscribe(&db.prepare_query(&challenges)?, Default::default())
+            .await?;
+        let proved = db
+            .subscribe(&db.prepare_query(&proved)?, Default::default())
+            .await?;
+        Ok((
+            device_id,
+            [WatchedRows::new(challenges), WatchedRows::new(proved)],
+        ))
+    }
+
     /// Whether a challenge for this device of the account's current epoch is
     /// waiting for its answer: what a device awaiting approval looks for, so
     /// it can answer without polling blindly.
@@ -569,6 +598,21 @@ impl E2eeClient {
             Ok(())
         })
         .await
+    }
+
+    /// Whether verification found a removal request this device can complete.
+    pub(crate) fn may_have_other_removal_requests(&self) -> bool {
+        let Ok(device) = self.shared.device() else {
+            return true;
+        };
+        self.with_account(|account| {
+            account
+                .state
+                .removal_requested
+                .iter()
+                .any(|id| id != &device.id)
+        })
+        .unwrap_or(true)
     }
 
     /// Completes the pending removal requests of this account's other

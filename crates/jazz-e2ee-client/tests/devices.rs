@@ -9,13 +9,15 @@ mod common;
 use std::rc::Rc;
 
 use common::*;
-use jazz::db::{Db, SubscriptionStream, block_on};
+use jazz::db::{Db, ReadSpan, SubscriptionStream, SyncMessage, block_on};
 use jazz::e2ee::EncryptionSettings;
 use jazz::ids::AuthorSubject;
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee_client::PrivateStore as _;
+use jazz_e2ee_client::host::bridge::JsStore;
+use jazz_e2ee_client::host::runtime::{Built, Encryption};
 use jazz_e2ee_client::{AccountStatus, ClientError, E2eeClient, MemoryStore, PendingApproval};
 
 /// Runs `test` on its own thread; a hang fails after a minute, saying so.
@@ -1413,6 +1415,185 @@ fn a_removal_request_is_completed_by_another_device() {
         );
         pump(&server, &second.db);
         assert_eq!(second.status(&server, &[&first]), AccountStatus::Reenrolled);
+    });
+}
+
+/// Alice's first device skips the empty sweep after verifying. When her
+/// second device requests removal, the watch triggers verification and the
+/// sweep still reads the full ledger at its own cut before rotating.
+/// The wire trace distinguishes verification from the removal transaction.
+///
+///```text
+/// first ──verify──► idle ◄──watch── authority ◄──request── second
+/// first ──verify, read and rotate──► authority
+///```
+#[test]
+fn the_host_only_rereads_the_account_for_a_pending_removal() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let client = open_account(memory(), alice, settings.clone(), None);
+        let (db, link, wire) = recorded_session(&client, &server, alice, &settings, 1, None);
+        let first = Device {
+            notes: None,
+            client,
+            db,
+            _link: link,
+        };
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, memory(), 2, &settings);
+        assert_eq!(
+            second.status(&server, &[&first]),
+            AccountStatus::AwaitingApproval
+        );
+        approve(&server, &first, &second);
+        assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
+        let requester = second.id();
+        let client = Rc::new(first.client);
+        let db = Rc::new(first.db);
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: client.clone(),
+                reports: Rc::default(),
+            },
+            Rc::new(JsStore::default()),
+            db.clone(),
+        );
+
+        let take_ledger_tables = || {
+            // The test's small messages each fit in one frame.
+            let bytes = std::mem::take(&mut *wire.borrow_mut());
+            let mut remaining = bytes.as_slice();
+            let mut tables = Vec::new();
+            while !remaining.is_empty() {
+                let (message, rest) = postcard::take_from_bytes::<SyncMessage>(remaining).unwrap();
+                if let SyncMessage::Read {
+                    query,
+                    span: ReadSpan::Once { .. },
+                    ..
+                } = message
+                {
+                    tables.push(query.table);
+                }
+                remaining = rest;
+            }
+            tables
+        };
+
+        wire.borrow_mut().clear();
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                let state = runtime.state();
+                assert!(state["error"].is_null(), "{state}");
+                if state["status"] == "active" && state["stage"] == "idle" {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        let verification = take_ledger_tables();
+        assert_eq!(verification.len(), 15, "{verification:?}");
+
+        drive(
+            &server,
+            &[&second.db, &db],
+            second.client.request_removal(&second.db),
+        )
+        .unwrap();
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                let state = runtime.state();
+                assert!(state["error"].is_null(), "{state}");
+                if state["stage"] == "idle"
+                    && client.with_account(|account| account.state.removed.contains(&requester))
+                        == Some(true)
+                {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        let removal = take_ledger_tables();
+        assert_eq!(
+            removal.get(..30),
+            Some(
+                [verification.as_slice(), verification.as_slice()]
+                    .concat()
+                    .as_slice()
+            ),
+            "{removal:?}"
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db, &db],
+                second.client.ensure_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::Reenrolled
+        );
+        runtime.stop();
+    });
+}
+
+/// Alice's second device reports a challenge from her first device as
+/// soon as the challenge watch delivers it, without a polling interval.
+#[test]
+fn the_host_reports_a_new_approval_challenge_from_the_watch() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, memory(), 2, &settings);
+        let requester = second.id();
+        let db = Rc::new(second.db);
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: Rc::new(second.client),
+                reports: Rc::default(),
+            },
+            Rc::new(JsStore::default()),
+            db.clone(),
+        );
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                let state = runtime.state();
+                assert!(state["error"].is_null(), "{state}");
+                if state["status"] == "awaiting-approval" && state["stage"] == "idle" {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        let both = [&first.db, db.as_ref()];
+        drive(
+            &server,
+            &both,
+            first.client.challenge_device(&first.db, &requester),
+        )
+        .unwrap();
+        drive(&server, &both, async {
+            loop {
+                runtime.drive();
+                if runtime
+                    .take_reports()
+                    .iter()
+                    .any(|report| report == r#"{"type":"challenged"}"#)
+                {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        runtime.stop();
     });
 }
 
