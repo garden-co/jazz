@@ -3799,11 +3799,6 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Io(reason: String
     )
     /**
-     * Encryption refused the operation, or hit an I/O failure.
-     */
-    case Encryption(code: String, reason: String, io: Bool
-    )
-    /**
      * The app was closed, or (for a subscription) the subscription ended.
      */
     case Closed
@@ -3856,6 +3851,13 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case BundleMismatch(own: String, served: String, reason: String
     )
+    /**
+     * Contract 2: encryption refused the operation (`code` names the
+     * refusal), or hit an I/O failure (`io`). Last, so the variants before
+     * it keep their indexes.
+     */
+    case Encryption(code: String, reason: String, io: Bool
+    )
 
     
 
@@ -3891,40 +3893,40 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
         case 2: return .Io(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 3: return .Encryption(
-            code: try FfiConverterString.read(from: &buf), 
-            reason: try FfiConverterString.read(from: &buf), 
-            io: try FfiConverterBool.read(from: &buf)
-            )
-        case 4: return .Closed
-        case 5: return .Permission(
+        case 3: return .Closed
+        case 4: return .Permission(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .NotSupported(
+        case 5: return .NotSupported(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 7: return .Conflict(
+        case 6: return .Conflict(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 8: return .NoAccount(
+        case 7: return .NoAccount(
             userId: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 9: return .Unsynced(
+        case 8: return .Unsynced(
             pending: try FfiConverterUInt64.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 10: return .Replaced(
+        case 9: return .Replaced(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 11: return .NoUser(
+        case 10: return .NoUser(
             status: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 12: return .BundleMismatch(
+        case 11: return .BundleMismatch(
             own: try FfiConverterString.read(from: &buf), 
             served: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
+            )
+        case 12: return .Encryption(
+            code: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf), 
+            io: try FfiConverterBool.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -3948,60 +3950,60 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Encryption(code,reason,io):
-            writeInt(&buf, Int32(3))
-            FfiConverterString.write(code, into: &buf)
-            FfiConverterString.write(reason, into: &buf)
-            FfiConverterBool.write(io, into: &buf)
-            
-        
         case .Closed:
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(3))
         
         
         case let .Permission(reason):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .NotSupported(reason):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .Conflict(reason):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .NoAccount(userId,reason):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(userId, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .Unsynced(pending,reason):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(8))
             FfiConverterUInt64.write(pending, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .Replaced(reason):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(9))
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .NoUser(status,reason):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(status, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
         
         case let .BundleMismatch(own,served,reason):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(own, into: &buf)
             FfiConverterString.write(served, into: &buf)
             FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Encryption(code,reason,io):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            FfiConverterBool.write(io, into: &buf)
             
         }
     }
