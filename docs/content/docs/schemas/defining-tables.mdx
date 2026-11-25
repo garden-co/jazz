@@ -144,7 +144,8 @@ See [Relationships](/docs/schemas/relationships) for more.
 
 A table has the indexes you declare, plus one on each relation column, which Jazz always indexes.
 `.indexOnly([...])` lists the columns that get a single-column index each, and `.compositeIndex([...])`
-declares an index over several columns, which may end in `$createdAt` or `$updatedAt`. Queries can filter
+declares an index over several columns, which may use the provenance columns `$createdAt`,
+`$updatedAt`, `$createdBy` and `$updatedBy`. Queries can filter
 and sort by any column; an index on the columns they use lets them read only the matching rows
 instead of the whole table.
 
@@ -156,6 +157,31 @@ export const schema = s.defineSchema({
     .compositeIndex(["chatId", "$createdAt"]),
 });
 ```
+
+### Indexes for "only the creator" permissions
+
+A permission that keeps rows to who wrote them, such as `$createdBy.account = session.user`, reads
+only the reader's rows when the table has an index that starts with `$createdBy` (or `$updatedBy`,
+for a permission on the last writer). Without one, every read of the table visits every row of it.
+Declare it like any other index:
+
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  notes: s.table({ body: s.string() }).indexOnly(["$createdBy"]),
+});
+```
+
+`.compositeIndex(["$createdBy", "$createdAt"])` serves the same permission, and also a creator's
+rows newest first. This applies to a table an `exists` in a permission searches by creator too:
+index that table. When a deployment's permissions keep rows to their creator on a table with no such
+index, the backend prints a warning naming the table when it starts (`jazz: jazz.permissions.json: tables.notes: …`).
+
+Comparing the exact login (`$createdBy.identity = session.identity`, or `$createdBy.identity.subject`)
+uses the same index. Finding that login's rows first scans Jazz's list of everyone who has written
+to the app, once per read, so it grows with the number of distinct logins, not with the table.
+
+The index is built when the backend (or a client) first opens its database with the new schema;
+on a large table that takes a few seconds, once.
 
 Adding, removing or changing single-column indexes needs no migration: run `generate`, and the new
 bindings use them. Composite indexes are part of the schema version, so changing one is a schema

@@ -1148,30 +1148,6 @@ pub(crate) fn elided_as(stored: &str) -> Option<&'static str> {
     }
 }
 
-/// The stored author columns (`$createdBy`, `$updatedBy`) a policy
-/// compares the row's own author by, outside any relation: each a column a
-/// matching row can be sought by.
-fn author_columns(policy: &PolicyExpr, found: &mut impl FnMut(&'static str)) {
-    match policy {
-        PolicyExpr::Cmp { column, .. }
-        | PolicyExpr::In { column, .. }
-        | PolicyExpr::InList { column, .. } => {
-            let stored = author_part(column)
-                .map(|(stored, _)| stored)
-                .or_else(|| author_record(column).map(|(stored, _)| stored));
-            if let Some(stored @ ("$createdBy" | "$updatedBy")) = stored {
-                found(stored);
-            }
-        }
-        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
-            for part in parts {
-                author_columns(part, found);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn stored_provenance_columns() -> Vec<Column> {
     STORED_PROVENANCE
         .iter()
@@ -1437,25 +1413,6 @@ impl Schema {
                 .map(|column| vec![column.clone()])
                 .collect();
             indexes.extend(table.composite_indexes.iter().cloned());
-            // A read policy on who wrote a row (`$createdBy.account =
-            // session.user`) seeks the row's author code (see
-            // `compile::AuthorPart`): index it.
-            if let Some(public) = public {
-                for policy in [
-                    &public.policies.select.using,
-                    &public.policies.select.with_check,
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    author_columns(policy, &mut |stored| {
-                        let index = vec![stored.to_owned()];
-                        if !indexes.contains(&index) {
-                            indexes.push(index);
-                        }
-                    });
-                }
-            }
             indexes.sort();
             indexes.dedup();
             // An index that leads another serves no read the longer one

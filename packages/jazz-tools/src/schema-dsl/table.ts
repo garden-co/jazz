@@ -20,13 +20,21 @@ export type StoredColumnKeys<C> = {
 }[keyof C & string];
 
 /**
- * Provenance timestamps every row carries. A composite index may use them,
- * so a list's newest page (`roomId = ? ORDER BY $createdAt DESC`) is served
- * from the index instead of sorting the whole list.
+ * Authors every row carries. An index on one serves a permission that
+ * keeps rows to their creator (`$createdBy.account = session.user`): reads
+ * visit the reader's rows instead of every row in the table.
  */
-const PROVENANCE_INDEX_COLUMNS = ["$createdAt", "$updatedAt"] as const;
+const AUTHOR_INDEX_COLUMNS = ["$createdBy", "$updatedBy"] as const;
+type AuthorIndexColumn = (typeof AUTHOR_INDEX_COLUMNS)[number];
+/**
+ * Provenance every row carries. A composite index may use it, so a list's
+ * newest page (`roomId = ? ORDER BY $createdAt DESC`) is served from the
+ * index instead of sorting the whole list.
+ */
+const PROVENANCE_INDEX_COLUMNS = ["$createdAt", "$updatedAt", ...AUTHOR_INDEX_COLUMNS] as const;
 type ProvenanceIndexColumn = (typeof PROVENANCE_INDEX_COLUMNS)[number];
 type CompositeIndexColumn<C> = StoredColumnKeys<C> | ProvenanceIndexColumn;
+type IndexOnlyColumn<C> = StoredColumnKeys<C> | AuthorIndexColumn;
 
 interface TableOptions<TColumns> {
   readonly indexedColumns?: readonly (keyof TColumns & string)[];
@@ -64,28 +72,35 @@ export class DefinedTable<
   }
 
   private storedColumn(method: string, column: string): void {
+    if (method === "indexOnly" && (AUTHOR_INDEX_COLUMNS as readonly string[]).includes(column))
+      return;
     if (!Object.hasOwn(this.columns, column) || isComputedColumn(this.columns[column]!))
       throw new Error(`table.${method}(...) references unknown column "${column}".`);
   }
 
-  /** Index only these columns (by default every column has a single-column index). */
+  /**
+   * Index only these columns (by default every column has a single-column
+   * index). `$createdBy` and `$updatedBy` index the row's author, for a
+   * permission such as `$createdBy.account = session.user`.
+   */
   indexOnly<
     const TColumnsForIndex extends readonly [
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
+      IndexOnlyColumn<TColumns>,
+      ...IndexOnlyColumn<TColumns>[],
     ],
   >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
     for (const column of columns) this.storedColumn("indexOnly", column);
     return new DefinedTable(this.columns, this.relations, {
       ...this.options(),
-      indexedColumns: [...columns],
+      indexedColumns: [...columns] as (keyof TColumns & string)[],
     });
   }
 
   /**
    * An ordered index over two or more columns, e.g. `["roomId", "$createdAt"]`
    * for a room's messages newest first. Columns are declared, stored columns
-   * or the provenance timestamps `$createdAt` and `$updatedAt`.
+   * or provenance: `$createdAt`, `$updatedAt`, `$createdBy`, `$updatedBy`
+   * (e.g. `["$createdBy", "$createdAt"]` for a creator's rows newest first).
    */
   compositeIndex<
     const TColumnsForIndex extends readonly [
@@ -99,7 +114,7 @@ export class DefinedTable<
       (Object.hasOwn(this.columns, column) && !isComputedColumn(this.columns[column]!));
     if (new Set(columns).size !== columns.length || !columns.every(indexable)) {
       throw new Error(
-        "table.compositeIndex(...) requires distinct declared columns or provenance timestamps ($createdAt, $updatedAt).",
+        "table.compositeIndex(...) requires distinct declared columns or provenance columns ($createdAt, $updatedAt, $createdBy, $updatedBy).",
       );
     }
     const key = JSON.stringify(columns);

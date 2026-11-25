@@ -3287,3 +3287,70 @@ fn the_removed_local_first_auth_mode_is_refused_by_name() {
     // A claim may still hold the text: only `session.authMode` changed.
     read_policy("todos", "session.claims.mode = 'local-first'").unwrap();
 }
+
+/// #6378: a read policy that keeps rows to their creator, on a table with
+/// no index leading with that author, loads with a warning naming the
+/// table and the index to declare; declaring it (alone or leading a
+/// composite index) clears it.
+#[test]
+fn a_creator_policy_without_an_author_index_loads_with_a_warning() {
+    let with = |indexes: Option<(Vec<&str>, Vec<Vec<&str>>)>| {
+        let mut input = todo_server();
+        if let Some((single, composite)) = indexes {
+            let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+            todos.indexed_columns =
+                (!single.is_empty()).then(|| single.into_iter().map(Into::into).collect());
+            todos.composite_indexes = composite
+                .into_iter()
+                .map(|index| index.into_iter().map(Into::into).collect())
+                .collect();
+            input.current = SchemaHash::compute(&input.schemas[0]).to_string();
+        }
+        input
+            .permissions
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .select = OperationPolicy::using(
+            read_policy("todos", "$createdBy.account = session.user").unwrap(),
+        );
+        loaded(input).warnings().to_vec()
+    };
+    let warnings = with(None);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with(
+            "jazz.permissions.json: tables.todos: a read policy keeps rows to `$createdBy`"
+        ) && warnings[0].contains("add \"$createdBy\" to its `indexes`"),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        with(Some((vec!["$createdBy"], vec![]))),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        with(Some((
+            vec!["title"],
+            vec![vec!["$createdBy", "$createdAt"]]
+        ))),
+        Vec::<String>::new()
+    );
+    // A relation's scanned table is checked too, unless it's sought by id.
+    let relation = |source: &str| {
+        let mut input = shared_todos();
+        input
+            .permissions
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .select = OperationPolicy::using(read_policy("todos", source).unwrap());
+        loaded(input).warnings().to_vec()
+    };
+    let warnings = relation("exists shares($createdBy.account = session.user)");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("tables.shares: a read policy keeps rows to `$createdBy`"));
+    assert!(relation("exists todos(id = this.id, $createdBy.account = session.user)").is_empty());
+    // An index the author only follows doesn't serve it.
+    assert_eq!(
+        with(Some((vec![], vec![vec!["title", "$createdBy"]]))).len(),
+        1
+    );
+}

@@ -434,12 +434,14 @@ fn read_tables(
                 }
             }
         }
-        // An index names stored columns (a composite one also `$createdAt`
-        // or `$updatedAt`).
+        // An index names stored columns, or the author columns
+        // `$createdBy`/`$updatedBy` (a composite one also `$createdAt` or
+        // `$updatedAt`).
         let column_names: Vec<&str> = columns.iter().map(|c| c.name_str()).collect();
         let check_index =
             |column: &str, item_path: String, composite: bool| -> Result<(), Refusal> {
                 if column_names.contains(&column)
+                    || matches!(column, "$createdBy" | "$updatedBy")
                     || (composite && matches!(column, "$createdAt" | "$updatedAt"))
                 {
                     return Ok(());

@@ -67,7 +67,8 @@ ignore file) to keep the two in step.
   the rows of `chatMembers` whose `chat` relation points here. See
   [Relationships](/docs/schemas/relationships).
 - **Table options**: `indexes` (a column name declares a single-column index, an array of names a
-  composite one; relation columns are always indexed), `branchBy` (column names), and
+  composite one; relation columns are always indexed; `$createdBy` and `$updatedBy` may be indexed,
+  and a composite index may also use `$createdAt` and `$updatedAt`), `branchBy` (column names), and
   `"history": "latest"`.
 - **Computed fields**: a table's `computed`, `{ "<field>": { "type": <type>, "from": [<columns>] } }`,
   implemented in code. See [Computed Columns](/docs/schemas/column-types#computed-columns).
@@ -123,7 +124,7 @@ Expressions read like SQL. String literals use single quotes.
 | Null checks                | `joinCode = null`, `joinCode != null`                                                    |
 | Membership                 | `role in ['admin', 'owner']`, `teamId in session.claims.teams`, `tags contains 'urgent'` |
 | A claim                    | `session.claims.role = 'admin'`                                                          |
-| Who wrote the row          | `$createdBy.account = session.user`                                                      |
+| Who wrote the row          | `$createdBy.account = session.user` (index `$createdBy`, see below)                      |
 | Combine                    | `a and b`, `a or b`, `not a`, parentheses                                                |
 | Another row exists         | `exists chatMembers(chatId = this.id, userId = session.user)`                            |
 | Follow a relation          | `exists files(id = this.id).folder(ownerId = session.user)`                              |
@@ -133,6 +134,10 @@ Expressions read like SQL. String literals use single quotes.
 - A bare name is a column of the table the policy is about; inside `exists t(…)` it is a column
   of `t`. `this.col` always means the row being checked.
 - Conditions inside `exists t(…)` are separated by commas and all must hold.
+- A policy on who wrote the row reads only the reader's rows when the table (or the `exists`
+  table it searches) declares an index starting with `$createdBy` (`"indexes": ["$createdBy"]`);
+  otherwise it visits every row, and the backend warns at startup, naming the table. See
+  [Indexes](/docs/schemas/defining-tables#indexes-for-only-the-creator-permissions).
 - A literal takes its column's type: `'2026-01-01T00:00:00Z'` for a timestamp, a UUID string for
   a `uuid`.
 

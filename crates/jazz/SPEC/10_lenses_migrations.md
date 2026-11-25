@@ -332,6 +332,38 @@ before the schema bundle becomes Active. A variant missing an indexed field
 contributes no entry; later compatible variants extend the same physical index
 rather than creating a schema-version partition.
 
+**Author indexes (#6378).** `$createdBy` and `$updatedBy` may be declared as
+indexes (alone, or in a composite index with each other, declared columns,
+`$createdAt` and `$updatedAt`). Their physical index keys the row's stored
+author code, an integer into the store-local `_jazz_authors` table, not the
+account: `{table}__ix($createdBy)` on `("$createdBy", id)`, and
+`{table}__ix($updatedBy)` on `(COALESCE("$updatedBy", "$createdBy"), id)`,
+the expression an unchanged row's update author reads as; a branched table's
+index leads with `_branch`, as every index does. An author comparison with
+bound values (`$createdBy.account = session.user`, `.identity.*`, an `IN`
+list, inside `exists` too) compiles to `code IN (SELECT +n FROM
+_jazz_authors WHERE <field> IN (…))`: the authors are looked up once, then
+the index is sought. Compatibility:
+
+- Nothing new is persisted but the index: author codes, `_jazz_authors` and
+  the wire format are unchanged, and codes never leave their database.
+- A declaration is part of the schema hash, as any index is. A
+  single-column one keeps the lineage (a redeploy admits it without a
+  lens); a composite one is a schema change with an empty migration step,
+  as for any composite index.
+- An older core opening the store ignores an index it didn't declare;
+  downgrading leaves it in place and costs only its upkeep on writes.
+- The index is built by a blocking `CREATE INDEX` when a store first opens
+  (or admits) a schema declaring it: measured at 7.5 s for a 4.2M-row,
+  1.66 GB table on a warm cache, likely several times that on OPFS/wasm.
+  Like every physical index, it is not dropped when the declaration goes.
+- An `.identity.*` comparison looks its login up in `_jazz_authors` by
+  `issuer`/`subject`, which no index leads with: one scan of the authors per
+  read, growing with distinct logins, not with the table.
+- Loading permissions whose read policy compares a table's author (its own,
+  or an `exists` table not sought by id) when no declared index leads with
+  that author yields a warning naming the table.
+
 Publishing a non-genesis schema first derives its complete physical mapping
 from the bundled lineage lens: compatible unchanged/renamed tables and columns
 reuse source physical ids; added tables, added/copied columns, and incompatible

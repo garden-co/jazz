@@ -837,9 +837,9 @@ fn session_user_matches_the_account_and_session_identity_the_exact_login() {
 
 /// #6378: a read policy on who wrote a row (`$createdBy.account =
 /// session.user`) seeks the reader's rows by their author code, through
-/// an index the policy adds, instead of scanning the table and looking up
-/// each row's author: a read's work follows the rows it returns, not the
-/// rows the table holds.
+/// the table's declared `$createdBy` index, instead of scanning the table
+/// and looking up each row's author: a read's work follows the rows it
+/// returns, not the rows the table holds.
 #[test]
 fn creator_policies_seek_the_readers_rows_whatever_the_table_holds() {
     use jazz::tools::{CmpOp, PolicyExpr, PolicyValue};
@@ -872,6 +872,7 @@ fn creator_policies_seek_the_readers_rows_whatever_the_table_holds() {
                     .table(
                         TableSchemaBuilder::new("notes")
                             .column("body", ColumnType::Text)
+                            .index_only(["$createdBy"])
                             .policies(common::read_and_allow_all_writes(policy.clone())),
                     )
                     .build(),
@@ -930,7 +931,7 @@ fn creator_policies_seek_the_readers_rows_whatever_the_table_holds() {
 /// #6378, the other shapes of an author comparison: `$updatedBy`, an `IN`
 /// list, the exact login, and the same comparison inside a relation each
 /// look the matching authors up once (`LIST SUBQUERY`) instead of once
-/// per row; the policy's own table seeks its author index.
+/// per row; with the author indexes declared, each table seeks them.
 #[test]
 fn author_comparisons_look_their_authors_up_once() {
     use jazz::tools::public_schema::{
@@ -962,7 +963,7 @@ fn author_comparisons_look_their_authors_up_once() {
                 op: CmpOp::Eq,
                 value: session(&["user"]),
             },
-            Some("notes__ix($updatedBy)"),
+            "notes__ix($updatedBy)",
         ),
         (
             "in list",
@@ -972,7 +973,7 @@ fn author_comparisons_look_their_authors_up_once() {
                     jazz::tools::ObjectId::from_uuid(account(0x0a).0),
                 ))],
             },
-            Some("notes__ix($createdBy)"),
+            "notes__ix($createdBy)",
         ),
         (
             "exact login",
@@ -981,7 +982,7 @@ fn author_comparisons_look_their_authors_up_once() {
                 op: CmpOp::Eq,
                 value: session(&["identity"]),
             },
-            Some("notes__ix($createdBy)"),
+            "notes__ix($createdBy)",
         ),
         (
             "relation",
@@ -994,7 +995,7 @@ fn author_comparisons_look_their_authors_up_once() {
                     predicate: mine("$createdBy.account"),
                 },
             },
-            None,
+            "notes__ix($createdBy)",
         ),
     ];
     for (name, policy, index) in cases {
@@ -1003,6 +1004,7 @@ fn author_comparisons_look_their_authors_up_once() {
                 .table(
                     TableSchemaBuilder::new("notes")
                         .column("body", ColumnType::Text)
+                        .index_only(["$createdBy", "$updatedBy"])
                         .policies(common::read_and_allow_all_writes(policy)),
                 )
                 .build(),
@@ -1044,11 +1046,212 @@ fn author_comparisons_look_their_authors_up_once() {
             !plan.contains("CORRELATED SCALAR SUBQUERY"),
             "{name}: {plan}"
         );
-        if let Some(index) = index {
-            assert!(
-                plan.contains(&format!("SEARCH t USING INDEX {index}")),
-                "{name}: {plan}"
-            );
-        }
+        assert!(
+            plan.contains(&format!("USING INDEX {index}")),
+            "{name}: {plan}"
+        );
+        // Only the authors are scanned (once, for an identity part), and
+        // the outer table when a relation, not the row, decides.
+        let outer = if name == "relation" {
+            "SCAN t "
+        } else {
+            "_jazz_authors"
+        };
+        assert!(
+            !plan.split(" | ").any(|step| step.starts_with("SCAN ")
+                && !step.contains("_jazz_authors")
+                && !step.starts_with(outer)),
+            "{name}: {plan}"
+        );
     }
+}
+
+/// #6378 on a server: its store admits the structural schema, which
+/// declares the author indexes, while its permissions arrive as a
+/// published bundle. A session pinned to that bundle reads its own rows
+/// from the index: on its own table, and on another table its policy's
+/// relation scans. The work its reads take follows its rows, not the
+/// table's.
+#[test]
+fn a_bundle_governed_store_seeks_creator_rows_by_its_declared_index() {
+    use jazz::tools::public_schema::{
+        RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationValueRef,
+    };
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue};
+    let account = |n: u8| jazz::account_registry::AccountId(uuid::Uuid::from_bytes([n; 16]));
+    let login = |subject: &str, n: u8| {
+        AuthorSubject::authenticated("https://issuer.example", subject)
+            .unwrap()
+            .with_account(account(n))
+    };
+    let (alice, bob) = (login("alice", 0x0a), login("bob", 0x0b));
+    // `notes`: Alice's own. `drafts`: readable while Alice wrote any
+    // group (a relation over `groups`, by creator, not by id).
+    let schema = |policies: bool| {
+        let read = |policy: PolicyExpr| {
+            if policies {
+                common::read_and_allow_all_writes(policy)
+            } else {
+                common::allow_all_policies()
+            }
+        };
+        let mine = PolicyExpr::Cmp {
+            column: "$createdBy.account".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+        };
+        let any_group = PolicyExpr::ExistsRel {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "groups".into(),
+                    alias: Some("g".to_owned()),
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("g".to_owned()),
+                        column: "$createdBy.account".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::SessionRef(vec!["user".to_owned()]),
+                },
+            },
+        };
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .index_only(["$createdBy"])
+                    .policies(read(mine)),
+            )
+            .table(
+                TableSchemaBuilder::new("groups")
+                    .column("body", ColumnType::Text)
+                    .composite_index(["$createdBy", "$createdAt"])
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("drafts")
+                    .column("body", ColumnType::Text)
+                    .policies(read(any_group)),
+            )
+            .build()
+    };
+    let server_at = |others: u32| {
+        // The server's own schema carries no policies, as a deployment
+        // admits it; the creator policies come only in the bundle.
+        let server = block_on(Db::open(DbConfig::new(
+            compile_schema(&schema(false)),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        block_on(server.set_authority());
+        let bundle = block_on(server.publish_bundle(&schema(true))).unwrap();
+        for table in ["notes", "groups"] {
+            for n in 0..others + 2 {
+                let mut bytes = [0u8; 16];
+                bytes[..4].copy_from_slice(&n.to_be_bytes());
+                bytes[15] = if table == "notes" { 1 } else { 2 };
+                block_on(server.insert(
+                    table,
+                    body("x"),
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes(bytes)),
+                        identity: WriteIdentity::Session(if n < 2 {
+                            alice.clone()
+                        } else {
+                            bob.clone()
+                        }),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            }
+        }
+        block_on(server.insert(
+            "drafts",
+            body("d"),
+            InsertOptions {
+                row_id: Some(row(0xd0)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        (server, bundle)
+    };
+    // Alice's pinned reads of `notes` and `drafts`: rows seen, server work.
+    let read = |others: u32| {
+        let (server, bundle) = server_at(others);
+        let client = block_on(Db::open(DbConfig::new(
+            compile_schema(&schema(false)),
+            DbIdentity {
+                node: NodeUuid::from_bytes([2; 16]),
+                author: alice.clone(),
+            },
+        )))
+        .unwrap();
+        let (up, down) = duplex();
+        let _upstream = block_on(client.connect_upstream(up));
+        server
+            .accept_pinned_subscriber(down, alice.clone(), None, Some(bundle))
+            .unwrap();
+        let mut live = Vec::new();
+        for table in ["notes", "drafts"] {
+            let prepared = client.prepare_query(&Query::from(table)).unwrap();
+            live.push(block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap());
+        }
+        jazz::db::take_vm_steps_for_test();
+        for _ in 0..6 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        let steps = jazz::db::take_vm_steps_for_test();
+        let local = ReadOpts {
+            tier: jazz::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let seen = |table: &str| {
+            let prepared = client.prepare_query(&Query::from(table)).unwrap();
+            block_on(client.all(&prepared, local.clone()))
+                .unwrap()
+                .len()
+        };
+        // The indexes the structural schema declares, on the server.
+        let by_author = |table: &str| {
+            let prepared = server
+                .prepare_query(&Query::from(table).filter(eq(
+                    col("$createdBy.account"),
+                    lit(Value::Uuid(account(0x0a).0)),
+                )))
+                .unwrap();
+            block_on(server.explain_query_plan(&prepared, None))
+                .unwrap()
+                .1
+        };
+        (
+            seen("notes"),
+            seen("drafts"),
+            steps,
+            by_author("notes"),
+            by_author("groups"),
+        )
+    };
+    let (notes, drafts, few_steps, notes_plan, groups_plan) = read(8);
+    assert_eq!((notes, drafts), (2, 1));
+    assert!(
+        notes_plan.contains("SEARCH t USING INDEX notes__ix($createdBy)"),
+        "{notes_plan}"
+    );
+    assert!(
+        groups_plan.contains("USING INDEX groups__ix($createdBy,$createdAt)"),
+        "{groups_plan}"
+    );
+    let (notes, drafts, many_steps, _, _) = read(1000);
+    assert_eq!((notes, drafts), (2, 1));
+    assert!(
+        many_steps <= few_steps + few_steps / 4,
+        "{few_steps} server steps with 10 rows a table, {many_steps} with 1,002"
+    );
 }
