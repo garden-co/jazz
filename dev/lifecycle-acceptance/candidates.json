@@ -1,4 +1,4 @@
 [
   {"name":"beta1","sha":"9cf8b28defe13416fee986f0a0540a8a2149d50e","run":"45103742571","mustFail":["close.ends-waits","offline.bearer-open","android.offline.bearer-open"]},
-  {"name":"beta2","sha":"d5134f0f75dd3b1efea3c8690d94390e001edfb9","run":"45304190398"}
+  {"name":"beta3","sha":"d959da538f9fd700e9647364f7ad038cbf9a3e91","run":"45550210786"}
 ]
