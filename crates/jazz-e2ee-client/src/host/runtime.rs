@@ -39,7 +39,7 @@ pub struct RuntimeBuilder {
     account_id: String,
     environment: String,
     options: Rc<RefCell<Option<BuildOptions>>>,
-    building: Rc<Cell<bool>>,
+    building: BuildSlot,
     built: Rc<RefCell<Option<Built>>>,
     store: Rc<JsStore>,
     attached: RefCell<std::rc::Weak<Encryption>>,
@@ -67,7 +67,7 @@ impl RuntimeBuilder {
             environment,
             account_id,
             options: Rc::new(RefCell::new(Some(BuildOptions { bindings, secret }))),
-            building: Rc::default(),
+            building: BuildSlot::default(),
             built: Rc::default(),
             store: Rc::default(),
             attached: RefCell::default(),
@@ -75,11 +75,16 @@ impl RuntimeBuilder {
     }
 
     pub fn build_future(&self) -> Option<JsonFuture> {
-        if self.building.get() {
-            return None;
-        }
+        self.start_build().ok()
+    }
+
+    /// The build `ready()` drives, or why `ready()` is refused: the runtime
+    /// is built ([`ALREADY_BUILT`]), or an earlier build has not settled
+    /// ([`STILL_BUILDING`]).
+    pub fn start_build(&self) -> Result<JsonFuture, &'static str> {
         let options = self.options.borrow();
-        let source = options.as_ref()?;
+        let source = options.as_ref().ok_or(ALREADY_BUILT)?;
+        let held = self.building.take()?;
         let declarations = bound_declarations(
             source.bindings.as_bytes(),
             &self.app_id,
@@ -93,17 +98,15 @@ impl RuntimeBuilder {
         let account = self.account_id.clone();
         let store = self.store.clone();
         let options = Rc::downgrade(&self.options);
-        let building = self.building.clone();
         let slot = self.built.clone();
-        Some(Box::pin(async move {
-            building.set(true);
+        Ok(Box::pin(async move {
             let result = match declarations {
                 Ok(declarations) => {
                     build_client(declarations, account, store, recovery.as_ref()).await
                 }
                 Err(error) => Err(error),
             };
-            building.set(false);
+            drop(held);
             let built = result?;
             if let Some(options) = options.upgrade() {
                 options.borrow_mut().take();
@@ -328,6 +331,37 @@ impl Gate {
 /// A call that runs inside the loop, which owns the space watch: the
 /// delivery pass over every space this device holds keys of, answered here.
 type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
+
+/// The refusal of `ready()` once the runtime is built.
+pub const ALREADY_BUILT: &str = "the runtime is already built";
+/// The refusal of `ready()` while an earlier build has not settled.
+pub const STILL_BUILDING: &str = "the runtime is still being built: an earlier `ready()` is waiting for the private store to answer its requests";
+
+/// The one build a host runs at a time. A build holds it until its future
+/// settles or is dropped, so the slot frees on failure, on success and when
+/// the build is abandoned; a later `ready()` is refused with
+/// [`STILL_BUILDING`] only while a build is really running.
+#[derive(Clone, Default)]
+pub struct BuildSlot(Rc<Cell<bool>>);
+
+impl BuildSlot {
+    /// Takes the slot for one build, or refuses while another holds it.
+    pub fn take(&self) -> Result<BuildHeld, &'static str> {
+        if self.0.replace(true) {
+            return Err(STILL_BUILDING);
+        }
+        Ok(BuildHeld(Rc::clone(&self.0)))
+    }
+}
+
+/// A build's hold on its [`BuildSlot`]; dropping it frees the slot.
+pub struct BuildHeld(Rc<Cell<bool>>);
+
+impl Drop for BuildHeld {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
 
 /// Build the native device from the declarations admitted for its database.
 pub async fn build_native(
@@ -1753,6 +1787,42 @@ mod tests {
                 .and_then(|options| options.secret.as_ref())
                 .is_some_and(|secret| secret.as_bytes() == &[1; 32])
         );
+    }
+
+    /// Contract: a build that fails, succeeds or is abandoned frees the slot,
+    /// and a `ready()` while a build runs is told so, not that it is built.
+    #[test]
+    fn a_build_slot_frees_when_its_build_ends_or_is_dropped() {
+        let slot = BuildSlot::default();
+        let held = slot.take().unwrap();
+        assert_eq!(slot.take().err(), Some(STILL_BUILDING));
+        drop(held);
+
+        // A build whose store never answers, then abandoned.
+        let held = slot.take().unwrap();
+        let mut never = Box::pin(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        });
+        let waker = futures::task::noop_waker();
+        assert!(
+            never
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(slot.take().err(), Some(STILL_BUILDING));
+        drop(never);
+        assert!(slot.take().is_ok());
+
+        // A build that settles with an error.
+        let held = slot.take().unwrap();
+        let failed: Result<(), String> = run(async move {
+            let _held = held;
+            Err("store failed".to_owned())
+        });
+        assert!(failed.is_err());
+        assert!(slot.take().is_ok());
     }
 
     /// Contract: a call that waits on the loop gets an answer or `None` at

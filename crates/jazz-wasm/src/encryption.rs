@@ -80,9 +80,9 @@ impl WasmEncryptionRuntime {
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the store (answer its requests while waiting).
     pub fn ready(&self) -> js_sys::Promise {
-        match self.builder.build_future() {
-            Some(future) => json_promise(future),
-            None => js_sys::Promise::reject(&JsValue::from_str("the runtime is already built")),
+        match self.builder.start_build() {
+            Ok(future) => json_promise(future),
+            Err(refusal) => js_sys::Promise::reject(&JsValue::from_str(refusal)),
         }
     }
 

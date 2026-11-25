@@ -17,3 +17,34 @@ fn owned_device_account_text_is_wiped_on_success_and_failure() {
     );
     assert!(assert_zeroized("invalid".to_owned(), DeviceAccountSecret::parse_owned).is_err());
 }
+
+/// A secret in the earlier hexadecimal form, or without its prefix, is
+/// refused with the expected format, never echoing the text; a hexadecimal
+/// one names the likely package and build version mismatch.
+#[test]
+fn a_secret_in_another_format_is_refused_with_the_expected_format() {
+    use jazz_types::identity::{LEGACY_HEX_SECRET, UNPREFIXED_SECRET};
+
+    let hex = "ab".repeat(32);
+    assert_eq!(DeviceAccountSecret::parse(&hex), Err(LEGACY_HEX_SECRET));
+    assert!(LEGACY_HEX_SECRET.contains("jazz-auth-v1:"));
+    assert!(LEGACY_HEX_SECRET.contains("matching versions"));
+    assert!(!LEGACY_HEX_SECRET.contains(&hex));
+    for text in [
+        "",
+        "ab",
+        &"ab".repeat(31),
+        "jazz-auth-v2:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    ] {
+        assert_eq!(
+            DeviceAccountSecret::parse(text),
+            Err(UNPREFIXED_SECRET),
+            "{text}"
+        );
+    }
+    // The prefixed form keeps its plain refusal.
+    assert_eq!(
+        DeviceAccountSecret::parse("jazz-auth-v1:short"),
+        Err("invalid device account secret")
+    );
+}

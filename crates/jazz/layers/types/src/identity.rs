@@ -21,6 +21,13 @@ pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
 /// The portable text prefix for a device account or recovery secret.
 pub const SECRET_PREFIX: &str = "jazz-auth-v1:";
 
+/// The refusal of a device account secret given as 64 hexadecimal
+/// characters, the format hosts passed before `jazz-auth-v1:` text.
+pub const LEGACY_HEX_SECRET: &str = "invalid device account secret: got 64 hexadecimal characters, the format of earlier Jazz versions; this build expects `jazz-auth-v1:` followed by 43 unpadded base64url characters. The Jazz JavaScript package and its native or wasm build are probably different versions: install matching versions";
+
+/// The refusal of a device account secret without the `jazz-auth-v1:` prefix.
+pub const UNPREFIXED_SECRET: &str = "invalid device account secret: expected `jazz-auth-v1:` followed by 43 unpadded base64url characters";
+
 /// A 32-byte account or recovery secret, wiped on drop.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DeviceAccountSecret(Zeroizing<[u8; 32]>);
@@ -40,13 +47,22 @@ impl DeviceAccountSecret {
         &self.0
     }
 
-    /// Decode exactly 32 bytes of canonical, unpadded base64url.
+    /// Decode exactly 32 bytes of canonical, unpadded base64url. Text
+    /// without the prefix is refused with the format expected, and 64
+    /// hexadecimal characters (what hosts passed before this format) as a
+    /// likely version mismatch between the host package and this build.
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let invalid = "invalid device account secret";
-        let payload = text
-            .strip_prefix(SECRET_PREFIX)
-            .filter(|s| s.len() == 43)
-            .ok_or(invalid)?;
+        let Some(payload) = text.strip_prefix(SECRET_PREFIX) else {
+            return Err(
+                if text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    LEGACY_HEX_SECRET
+                } else {
+                    UNPREFIXED_SECRET
+                },
+            );
+        };
+        let payload = Some(payload).filter(|s| s.len() == 43).ok_or(invalid)?;
         let mut bytes = Zeroizing::new([0; 32]);
         URL_SAFE_NO_PAD
             .decode_slice(payload, &mut *bytes)
