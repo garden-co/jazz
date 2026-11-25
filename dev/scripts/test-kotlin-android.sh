@@ -40,7 +40,9 @@ rust_targets=(aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
 # Download $1 to $2 and check it has sha256 $3.
 fetch() {
-  curl -fsSL --retry 3 -o "$2.part" "$1"
+  # Retried like dev/scripts/kotlin-toolchain.sh: plain --retry skips a transient
+  # HTTP/2 reset (curl 92), which failed a release build's SDK/NDK download.
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$2.part" "$1"
   echo "$3  $2.part" | sha256sum -c --quiet -
   mv "$2.part" "$2"
 }
