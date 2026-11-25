@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
-          rust-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          rust-targets: ${{ matrix.target }}
           setup-node: "false"
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
@@ -93,7 +93,7 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
-          tool: cargo-zigbuild@0.20.1
+          tool: cargo-zigbuild@0.24.1
 
       - name: Build server binary
         run: cargo zigbuild -p jazz-tools --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}

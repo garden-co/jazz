@@ -680,7 +680,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     ["cargo-nextest@0.9.143", "cargo-nextest", "0.9.143", true],
     // cargo-zigbuild is needed only for hosted Linux package cross-builds;
     // the provisioned bundle intentionally does not include Zig.
-    ["cargo-zigbuild@0.20.1", "cargo-zigbuild", "0.20.1", false],
+    ["cargo-zigbuild@0.24.1", "cargo-zigbuild", "0.24.1", false],
     ["wasm-pack@0.13.1", "wasm-pack", "0.13.1", true],
   ]) {
     if (provisioned)
@@ -716,7 +716,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
   assert.doesNotMatch(installRustToolScript, /rm -rf/);
   assert.match(installRustToolScript, /echo "\$\{install_root\}\/bin" >> "\$\{GITHUB_PATH/);
   assert.match(setupBuildAction, /tool: sccache@0\.15\.0/);
-  assert.match(packageBuild, /tool: cargo-zigbuild@0\.20\.1/);
+  assert.match(packageBuild, /tool: cargo-zigbuild@0\.24\.1/);
   assert.throws(
     () => assert.match(installRustToolScript.replace(" --locked", ""), / --locked/),
     /--locked/,
