@@ -69,11 +69,29 @@ use tokio::sync::{oneshot, watch};
 /// Encoded frames exchanged with a host transport.
 pub type AbiBytes = Vec<u8>;
 
+/// Opens connections to the same host-managed SQLite database.
+#[derive(Clone)]
+pub struct ManagedStore(pub Arc<dyn Fn() -> jazz::storage::Storage + Send + Sync>);
+
+impl std::fmt::Debug for ManagedStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ManagedStore")
+    }
+}
+
+impl PartialEq for ManagedStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ManagedStore {}
+
 /// Where the runtime keeps its store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageConfig {
     /// A store that lives as long as the runtime (tests, dry runs, probes).
     InMemory,
+    Managed(ManagedStore),
     /// One SQLite file (WAL), holding the server's host tables too.
     SQLite {
         /// The database file.
@@ -139,7 +157,7 @@ impl StorageConfig {
     pub fn with_blobs(self, blobs: Blobs) -> Self {
         match self {
             Self::SQLite { path, .. } => Self::SQLite { path, blobs },
-            Self::InMemory => Self::InMemory,
+            other => other,
         }
     }
 }

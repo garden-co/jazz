@@ -62,6 +62,7 @@ enum ServerSchemaMode {
 /// registry in one SQLite file, `jazz.sqlite`, in the data directory.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
+    Managed(crate::runtime::ManagedStore),
     InMemory,
     Persistent { path: PathBuf },
 }
@@ -237,7 +238,7 @@ impl ServerBuilder {
                     },
                 )?)
             }
-            StorageBackend::InMemory => None,
+            StorageBackend::InMemory | StorageBackend::Managed(_) => None,
         };
         log_auth_config(&auth_config);
 
@@ -377,6 +378,16 @@ impl ServerBuilder {
         identity: Option<&super::identity::StoreIdentity>,
     ) -> Result<ShellStorage, String> {
         match &self.storage_backend {
+            StorageBackend::Managed(store) => {
+                if !matches!(self.blobs, BlobStore::Sqlite) {
+                    return Err("Managed storage requires SQLite blobs".into());
+                }
+                Ok(ShellStorage {
+                    config: StorageConfig::Managed(store.clone()),
+                    record: None,
+                    s3: None,
+                })
+            }
             StorageBackend::InMemory => Ok(ShellStorage {
                 config: StorageConfig::InMemory,
                 record: None,

@@ -279,15 +279,18 @@ impl HostReader {
             Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
         }
         .map_err(storage)?;
-        Self::with(conn)
+        Self::from_storage(conn)
     }
 
     /// Read the store [`StoreFile::shared_memory`] opened by `name`.
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
-        Self::with(Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?)
+        Self::from_storage(
+            Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
+        )
     }
 
-    fn with(conn: Storage) -> Result<Self, Error> {
+    /// Read host tables on an independently opened storage handle.
+    pub fn from_storage(conn: Storage) -> Result<Self, Error> {
         // A WAL reader waits only while another connection recovers the
         // log.
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;

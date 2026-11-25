@@ -73,12 +73,14 @@ pub(super) enum Source {
     File(PathBuf, Blobs),
     /// An in-memory store shared by name within this process.
     Memory(String),
+    Managed(ManagedStore),
 }
 
 impl Source {
     pub(super) fn new(storage: &StorageConfig) -> Self {
         static NEXT_MEMORY_STORE: AtomicU64 = AtomicU64::new(0);
         match storage {
+            StorageConfig::Managed(store) => Self::Managed(store.clone()),
             StorageConfig::InMemory => Self::Memory(format!(
                 "jazz-server-{}-{}",
                 std::process::id(),
@@ -90,6 +92,7 @@ impl Source {
 
     pub(super) fn open(&self) -> Result<StoreFile, String> {
         match self {
+            Self::Managed(store) => jazz::db::block_on(StoreFile::from_storage((store.0)())),
             Self::Memory(name) => jazz::db::block_on(StoreFile::shared_memory(name)),
             Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
@@ -132,6 +135,7 @@ impl Source {
 
     pub(super) fn reader(&self) -> Result<HostReader, String> {
         match self {
+            Self::Managed(store) => HostReader::from_storage((store.0)()),
             Self::Memory(name) => HostReader::shared_memory(name),
             Self::File(path, _) => HostReader::open(path, None),
         }

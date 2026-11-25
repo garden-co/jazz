@@ -21,6 +21,7 @@ members = [
   "crates/jazz-cli",
   "crates/jazz-codegen",
   "crates/jazz-server",
+  "crates/jazz-rivet",
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
