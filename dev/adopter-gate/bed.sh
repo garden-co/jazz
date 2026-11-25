@@ -15,7 +15,7 @@ body() {
       ( cd "$W/t5-expo" && V=$(ag_version) && node -e '
           const fs = require("fs"), [d, v] = process.argv.slice(1), p = JSON.parse(fs.readFileSync("package.json"));
           for (const n of ["jazz-tools", "jazz-wasm"]) if (p.dependencies[n]) p.dependencies[n] = `file:${d}/${n}-${v}.tgz`;
-          p.overrides = { "jazz-wasm": `file:${d}/jazz-wasm-${v}.tgz`, "jazz-napi": `file:${d}/jazz-napi-${v}.tgz` };
+          p.overrides = { "jazz-wasm": `file:${d}/jazz-wasm-${v}.tgz`, "jazz-napi": `file:${d}/jazz-napi-${v}.tgz`, "@garden-co/jazz-napi-linux-x64-gnu": `file:${d}/garden-co-jazz-napi-linux-x64-gnu-${v}.tgz` };
           fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' "$AG_TGZ" "$V"
         rm -rf node_modules package-lock.json; ag_retry 3 npm install > install-rc.log 2>&1 || echo "FAIL t5 npm install"
         npx expo export -p web --clear > export.log 2>&1 && echo "PASS t5 expo export" || { echo "FAIL t5 expo export"; tail -5 export.log; } )

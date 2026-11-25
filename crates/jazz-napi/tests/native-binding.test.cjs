@@ -158,3 +158,37 @@ test("all missing napi-rs candidates retain installation guidance", (t) => {
   `,
   );
 });
+
+test("missing binary names this platform's package and version", (t) => {
+  const suffix = {
+    "linux-x64": "linux-x64-gnu",
+    "linux-arm64": "linux-arm64-gnu",
+    "darwin-x64": "darwin-x64",
+    "darwin-arm64": "darwin-arm64",
+    "win32-x64": "win32-x64-msvc",
+  }[`${process.platform}-${process.arch}`];
+  const glibc =
+    process.platform !== "linux" || Boolean(process.report.getReport().header.glibcVersionRuntime);
+  const expected =
+    suffix && glibc
+      ? `Install @garden-co/jazz-napi-${suffix}@9.9.9-fixture:`
+      : "Jazz publishes no native binary for";
+  fixture(
+    t,
+    {
+      "package.json": JSON.stringify({ name: "jazz-napi", version: "9.9.9-fixture" }),
+      "native-loader.cjs": `
+      const local = Object.assign(new Error('Cannot find local binary'), { code: 'MODULE_NOT_FOUND' });
+      const pkg = Object.assign(new Error('Cannot find platform package', { cause: local }), { code: 'MODULE_NOT_FOUND' });
+      throw new Error('Cannot find native binding. Please try npm i again', { cause: pkg });
+    `,
+    },
+    `
+    assert.throws(() => require('./native-binding.cjs'), error => {
+      assert.ok(error.message.includes(${JSON.stringify(expected)}), error.message);
+      assert.equal(error.code, 'MODULE_NOT_FOUND');
+      return true;
+    });
+  `,
+  );
+});
