@@ -2079,10 +2079,14 @@ mod tests {
     }
 
     fn native_runtime_with_catalogue(include_notes: bool) -> Rc<Encryption> {
-        native_runtime(include_notes, true)
+        native_runtime(include_notes, true, None)
     }
 
-    fn native_runtime(include_notes: bool, observed: bool) -> Rc<Encryption> {
+    fn native_runtime(
+        include_notes: bool,
+        observed: bool,
+        bridge_store: Option<Rc<JsStore>>,
+    ) -> Rc<Encryption> {
         use jazz::db::{DbConfig, DbIdentity};
         use jazz::ids::{AuthorSubject, NodeUuid};
         use jazz::schema::JazzSchema;
@@ -2136,7 +2140,7 @@ mod tests {
         if observed {
             jazz::db::block_on(db.set_authority()).unwrap();
         }
-        Encryption::new_native(built, None, db, Rc::new(|| {}))
+        Encryption::new_native(built, bridge_store, db, Rc::new(|| {}))
     }
 
     /// A space's row answers from the local catalogue, even while the loop's
@@ -2167,7 +2171,7 @@ mod tests {
 
     #[test]
     fn a_space_address_preserves_not_observed_before_the_first_sync() {
-        let runtime = native_runtime(true, false);
+        let runtime = native_runtime(true, false, None);
         let expected = run(runtime.db.table_identity("projects")).unwrap_err();
         assert_eq!(expected.code, ErrorCode::NotObserved);
         assert_eq!(
@@ -2193,6 +2197,41 @@ mod tests {
         run(runtime.call("shutdown".into(), Value::Null)).unwrap();
         assert_eq!(use_space(), Ok(Value::Null));
         assert!(runtime.uses.borrow().is_empty());
+    }
+
+    /// Alice's write retry asks the host to wake both during the retry pause
+    /// and while key preparation is pending. Poll directly to observe each
+    /// timer request without running a host timer or waiting for it to fire.
+    #[test]
+    fn a_write_retry_arms_host_deadlines_for_pause_and_preparation() {
+        let store = Rc::new(JsStore::default());
+        let deadlines = Rc::new(RefCell::new(Vec::new()));
+        let announced = Rc::clone(&deadlines);
+        store.set_store_wake(Some(Box::new(move |wake| {
+            if let StoreWake::Deadline(delay) = wake {
+                announced.borrow_mut().push(delay);
+            }
+        })));
+        let runtime = native_runtime(true, true, Some(store));
+        let busy = run(runtime.gate.enter());
+        let space = SpaceAddress {
+            scope_id: uuid::Uuid::new_v4().to_string(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        for (repeated, wait) in [(true, "retry pause"), (false, "key preparation")] {
+            deadlines.borrow_mut().clear();
+            let deadline = Encryption::write_deadline(Duration::ZERO);
+            let mut retry = Box::pin(runtime.retry_write(&space, deadline, repeated));
+            assert!(retry.as_mut().poll(&mut context).is_pending(), "{wait}");
+            assert!(
+                matches!(deadlines.borrow().as_slice(), [Some(_)]),
+                "{wait} did not arm a host deadline: {:?}",
+                deadlines.borrow()
+            );
+        }
+        drop(busy);
+        runtime.stop();
     }
 
     /// Alice's write must return its refusal at the deadline even if preparation

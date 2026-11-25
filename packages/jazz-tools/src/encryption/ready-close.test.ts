@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { Encryption, EncryptionError, type EncryptionNative } from "./index.js";
 
 /** A native layer whose verification never answers: the server is out of reach. */
@@ -30,4 +30,15 @@ it("ends a native host's wait for readiness when the database closes", async () 
 
 it("ends a verified device's wait for readiness when the database closes", async () => {
   await closedPromptly(new Encryption(waitingNative("active")));
+});
+
+it("unsubscribes from host state notifications and wakes readability waiters on close", async () => {
+  const unsubscribe = vi.fn();
+  const encryption = new Encryption(waitingNative(null), { stateChanges: () => unsubscribe });
+  const readable = encryption.readable();
+
+  encryption.stop();
+
+  await expect(readable).rejects.toMatchObject({ code: "closed" });
+  expect(unsubscribe).toHaveBeenCalledOnce();
 });
