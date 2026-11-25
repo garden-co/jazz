@@ -130,6 +130,8 @@ impl StoreOwner<'_> {
     /// This device's binding: `{ application: Dₐ(self), device: deviceId,
     /// keys: <device hash> }`.
     pub fn binding(&self) -> ProtocolResult<Binding> {
+        #[cfg(test)]
+        BINDINGS_DERIVED.set(BINDINGS_DERIVED.get() + 1);
         Ok(Binding {
             application: self.scope()?.as_str().to_owned(),
             device: self.device.id.clone(),
@@ -172,7 +174,7 @@ impl StoreOwner<'_> {
             .get(&depth)
             .ok_or(ProtocolError::InvalidRecord("no key held at that depth"))?;
         let prefix = prefix_hash(&space.root, &space.successors[..depth])?;
-        self.seal_key_with_prefix(space, depth, entry, prefix, rng)
+        self.seal_key_with_prefix(space, depth, entry, prefix, self.binding()?, rng)
     }
 
     fn seal_key_with_prefix(
@@ -181,6 +183,7 @@ impl StoreOwner<'_> {
         depth: usize,
         entry: &HeldEntry,
         prefix: String,
+        binding: Binding,
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<HeldKeyRecord> {
         let (unpublished, refused) = match &entry.mark {
@@ -189,7 +192,7 @@ impl StoreOwner<'_> {
             KeyMark::Refused => (None, true),
         };
         let mut record = HeldKeyRecord {
-            binding: self.binding()?,
+            binding,
             root_id: space.root.id.clone(),
             epoch_id: space
                 .epoch_at(depth)
@@ -252,7 +255,14 @@ impl StoreOwner<'_> {
         let mut keys = Vec::with_capacity(carried.len() + space.keys.len());
         keys.extend_from_slice(carried);
         for ((&depth, entry), prefix) in space.keys.iter().zip(prefixes) {
-            keys.push(self.seal_key_with_prefix(space, depth, entry, prefix, rng)?);
+            keys.push(self.seal_key_with_prefix(
+                space,
+                depth,
+                entry,
+                prefix,
+                lineage.binding.clone(),
+                rng,
+            )?);
         }
         Ok(HeldDocument {
             revision,
@@ -317,20 +327,16 @@ impl StoreOwner<'_> {
         Some(cleared)
     }
 
-    pub(super) fn check_binding(&self, binding: &Binding) -> ProtocolResult<Checked<()>> {
-        Ok(if *binding == self.binding()? {
-            Ok(())
-        } else {
-            Err(Rejection::Binding)
-        })
-    }
-
     /// The lineage checks of §6.2: binding, signature, the root decodes and
     /// is a root of its address, and `successors` is a chain from the
     /// root's epoch with no epoch repeated.
-    fn check_lineage(&self, record: &LineageRecord) -> ProtocolResult<Checked<()>> {
-        if let Err(reason) = self.check_binding(&record.binding)? {
-            return Ok(Err(reason));
+    fn check_lineage(
+        &self,
+        record: &LineageRecord,
+        binding: &Binding,
+    ) -> ProtocolResult<Checked<()>> {
+        if &record.binding != binding {
+            return Ok(Err(Rejection::Binding));
         }
         if let Err(reason) = self.verify(&record.signed_bytes()?, &record.signature)? {
             return Ok(Err(reason));
@@ -359,6 +365,7 @@ impl StoreOwner<'_> {
         space: &HeldSpace,
         prefixes: &[String],
         record: &HeldKeyRecord,
+        binding: &Binding,
         verified_through: Option<usize>,
     ) -> ProtocolResult<Checked<(usize, HeldEntry)>> {
         let depth = usize::try_from(record.depth).unwrap_or(usize::MAX);
@@ -366,8 +373,8 @@ impl StoreOwner<'_> {
         if !verified {
             #[cfg(test)]
             KEY_RECORDS_VERIFIED.set(KEY_RECORDS_VERIFIED.get() + 1);
-            if let Err(reason) = self.check_binding(&record.binding)? {
-                return Ok(Err(reason));
+            if &record.binding != binding {
+                return Ok(Err(Rejection::Binding));
             }
             if let Err(reason) = self.verify(&record.signed_bytes()?, &record.signature)? {
                 return Ok(Err(reason));
@@ -487,13 +494,13 @@ impl StoreOwner<'_> {
         document: &DecodedDocument,
         verified_through: Option<usize>,
     ) -> ProtocolResult<Loaded> {
-        let lineage = match &document.lineage {
-            Some(lineage) => match self.check_lineage(lineage)? {
-                Ok(()) => lineage,
-                Err(reason) => return Ok(Self::skipped(document, reason)),
-            },
-            None => return Ok(Self::skipped(document, Rejection::Malformed)),
+        let Some(lineage) = &document.lineage else {
+            return Ok(Self::skipped(document, Rejection::Malformed));
         };
+        let binding = self.binding()?;
+        if let Err(reason) = self.check_lineage(lineage, &binding)? {
+            return Ok(Self::skipped(document, reason));
+        }
         let root = &lineage.root;
         let mut space = HeldSpace {
             application: self.domain.account(&root.creator_account_id)?,
@@ -519,7 +526,9 @@ impl StoreOwner<'_> {
         let mut unsupported = Vec::new();
         for (index, record) in document.keys.iter().enumerate() {
             let outcome = match record {
-                Some(record) => self.check_key(&space, &prefixes, record, verified_through)?,
+                Some(record) => {
+                    self.check_key(&space, &prefixes, record, &binding, verified_through)?
+                }
                 None => Err(Rejection::Malformed),
             };
             match outcome {
@@ -579,6 +588,7 @@ pub(super) fn verify_stored_signature(
 
 #[cfg(test)]
 std::thread_local! {
+    static BINDINGS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static KEY_RECORDS_VERIFIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -590,8 +600,8 @@ mod tests {
     use crate::conformance::FixedRandom;
     use crate::protocol::records::space::{SpaceRoot, SpaceSuccessor};
 
-    /// Alice reopens each held version of her rotated space. The prefix work
-    /// is counted here because the store's public API exposes only the keys.
+    /// Alice seals and reopens each held version of her rotated space.
+    /// The store's public API does not expose prefix or binding work.
     #[test]
     fn loading_rotations_encodes_each_prefix_row_once() {
         let id = |number: usize| format!("00000000-0000-4000-8000-{number:012x}");
@@ -648,6 +658,8 @@ mod tests {
             verified_through: None,
         };
         let mut encoded = Vec::new();
+        let mut seal_bindings = Vec::new();
+        let mut load_bindings = Vec::new();
         for depth in 1..=100 {
             let predecessor = space.epoch_at(depth - 1).unwrap().to_owned();
             let mut successor = SpaceSuccessor {
@@ -683,11 +695,15 @@ mod tests {
             );
 
             if depth == 10 || depth == 100 {
+                BINDINGS_DERIVED.set(0);
                 let mut document = owner.seal_document(&space, &[], 0, &mut rng).unwrap();
+                seal_bindings.push(BINDINGS_DERIVED.get());
                 document.keys.reverse();
                 let document = decode_document(&document.encode().unwrap()).unwrap();
                 PREFIX_ROWS_ENCODED.set(0);
+                BINDINGS_DERIVED.set(0);
                 let loaded = owner.load(&document).unwrap();
+                load_bindings.push(BINDINGS_DERIVED.get());
                 assert!(loaded.rejected.is_empty());
                 assert_eq!(loaded.space.unwrap().held().count(), depth + 1);
                 encoded.push(PREFIX_ROWS_ENCODED.get());
@@ -696,6 +712,8 @@ mod tests {
             }
         }
         assert_eq!(encoded, [11, 101]);
+        assert_eq!(seal_bindings, [1, 1], "one binding per sealed document");
+        assert_eq!(load_bindings, [1, 1], "one binding per opened document");
     }
 
     // The crypto count is internal. Exercise the same bytes, merge and

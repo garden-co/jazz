@@ -6,7 +6,7 @@
 //! rows and on account state as of each record's position, so every client
 //! reading the same rows reaches the same chain.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
@@ -286,7 +286,7 @@ impl SpaceChain {
                 || candidate.position <= tip.position
                 || used.contains(&successor.epoch_id)
                 || successor.validate(&chain.scope).is_err()
-                || chain.depth_of(&successor.history_epoch_id).is_none()
+                || !used.contains(&successor.history_epoch_id)
             {
                 continue;
             }
@@ -380,9 +380,21 @@ impl SpaceChain {
     /// The depth of `epoch_id` in the chain (root = 0), if it is a version
     /// of this space.
     pub fn depth_of(&self, epoch_id: &str) -> Option<usize> {
-        self.versions
-            .iter()
-            .position(|version| version.epoch_id == epoch_id)
+        self.versions.iter().position(|version| {
+            #[cfg(test)]
+            HISTORY_EPOCH_PROBES.set(HISTORY_EPOCH_PROBES.get() + 1);
+            version.epoch_id == epoch_id
+        })
+    }
+
+    /// A history walk borrows the current versions, so the index stays in
+    /// sync even if a caller edits the public versions between walks.
+    pub(super) fn epoch_depths(&self) -> BTreeMap<&str, usize> {
+        let mut depths = BTreeMap::new();
+        for (depth, version) in self.versions.iter().enumerate() {
+            depths.entry(version.epoch_id.as_str()).or_insert(depth);
+        }
+        depths
     }
 
     pub fn version(&self, depth: usize) -> Option<&SpaceVersion> {
@@ -393,17 +405,33 @@ impl SpaceChain {
     /// `depth` wraps: its predecessor's, except after a recovery rotation
     /// (§3.5). `None` for the root version.
     pub fn history_depth(&self, depth: usize) -> Option<usize> {
+        self.depth_of(self.history_epoch(depth)?)
+    }
+
+    pub(super) fn indexed_history_depth(
+        &self,
+        depth: usize,
+        depths: &BTreeMap<&str, usize>,
+    ) -> Option<usize> {
+        let epoch = self.history_epoch(depth)?;
+        #[cfg(test)]
+        HISTORY_EPOCH_PROBES.set(HISTORY_EPOCH_PROBES.get() + 1);
+        depths.get(epoch).copied()
+    }
+
+    fn history_epoch(&self, depth: usize) -> Option<&str> {
         let successor = self.versions.get(depth)?.successor.as_ref()?;
-        self.depth_of(&successor.row.history_epoch_id)
+        Some(&successor.row.history_epoch_id)
     }
 
     /// The depths whose keys the key of the version at `depth` opens
     /// through the `history` links, starting with `depth` itself and ending
     /// at the root.
     pub fn history_path(&self, depth: usize) -> Vec<usize> {
+        let depths = self.epoch_depths();
         let mut path = vec![depth];
         let mut at = depth;
-        while let Some(previous) = self.history_depth(at) {
+        while let Some(previous) = self.indexed_history_depth(at, &depths) {
             path.push(previous);
             at = previous;
         }
@@ -444,5 +472,90 @@ impl SpaceChain {
                 .filter_map(|version| version.successor.as_ref().map(|successor| &successor.row))
                 .collect(),
         ))
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static HISTORY_EPOCH_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::domain::AppDomain;
+
+    /// Alice follows the history of her rotated space. Count epoch lookups
+    /// here because the public API exposes only the resulting path.
+    #[test]
+    fn rotated_history_looks_up_each_link_once() {
+        let id = |number: usize| format!("00000000-0000-4000-8000-{number:012x}");
+        let root = SpaceRoot {
+            id: id(1),
+            scope_id: id(2),
+            identifier: id(3),
+            creator_account_id: id(4),
+            device_id: id(5),
+            account_epoch_id: id(6),
+            epoch_id: id(1000),
+            mechanism: "test".into(),
+            version: 1,
+            verification: Vec::new(),
+            account_envelope: Vec::new(),
+            signature: Vec::new(),
+        };
+        let scope = root.scope().unwrap();
+        let source = Source {
+            address: scope.address.clone(),
+            through: Position(101),
+        };
+        let versions = (0..=100)
+            .map(|depth: usize| {
+                let epoch_id = id(1000 + depth);
+                let position = Position(1 + depth as u64);
+                let successor = depth.checked_sub(1).map(|previous| {
+                    Accepted::new(
+                        position,
+                        SpaceSuccessor {
+                            id: id(100 + depth),
+                            scope_id: root.scope_id.clone(),
+                            identifier: root.identifier.clone(),
+                            predecessor: id(1000 + previous),
+                            history_epoch_id: id(1000 + previous),
+                            epoch_id: epoch_id.clone(),
+                            author_account_id: root.creator_account_id.clone(),
+                            author_device_id: root.device_id.clone(),
+                            author_epoch_id: root.account_epoch_id.clone(),
+                            verification: Vec::new(),
+                            history: Vec::new(),
+                            account_envelope: Vec::new(),
+                            signature: Vec::new(),
+                        },
+                    )
+                });
+                SpaceVersion {
+                    epoch_id,
+                    position,
+                    successor,
+                }
+            })
+            .collect();
+        let application = AppDomain::new(&id(7), None)
+            .unwrap()
+            .account(&root.creator_account_id)
+            .unwrap();
+        let chain = SpaceChain {
+            application,
+            scope,
+            root: Accepted::new(Position(1), root),
+            versions,
+            unresolved: None,
+            lost: Vec::new(),
+            source,
+        };
+
+        HISTORY_EPOCH_PROBES.set(0);
+        assert_eq!(chain.history_path(100), (0..=100).rev().collect::<Vec<_>>());
+        assert_eq!(HISTORY_EPOCH_PROBES.get(), 100);
     }
 }
