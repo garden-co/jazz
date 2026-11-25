@@ -332,11 +332,13 @@ jobs:
       - name: Verify
         run: dev/scripts/verify-swift-mirror.sh "$RUNNER_TEMP/jazz-swift" "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" "$RUNNER_TEMP/work" ${{ matrix.checks }}
 
-  # A release's XCFramework, rebuilt from scratch: the unchanged script, no
-  # cache, one runner. Its checksum must equal the cached, split build's, so
-  # the cache can't change what ships. In parallel with the verify jobs.
-  # A from-scratch build (no sccache, fresh runners) of each slice through
-  # the script, in parallel: one after another took 11 min (run 45322783390).
+  # A release's XCFramework, rebuilt from scratch: each slice by the script's
+  # own cargo line (JAZZ_FFI_TARGET) on a fresh runner with no sccache, then
+  # assembled by the script (JAZZ_FFI_SLICES). Its checksum must equal the
+  # cached, split build's, so the cache can't change what ships. In parallel
+  # with the verify jobs. Per slice: on one runner, one slice after another,
+  # it took 11 min (run 45322783390). The script's all-in-one path (no env)
+  # is now only run locally.
   reproduce-slices:
     name: reproduce (${{ matrix.target }})
     if: inputs.publish || inputs.reproduce
@@ -348,7 +350,14 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios]
+        target:
+          [
+            aarch64-apple-darwin,
+            x86_64-apple-darwin,
+            aarch64-apple-ios,
+            aarch64-apple-ios-sim,
+            x86_64-apple-ios,
+          ]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
