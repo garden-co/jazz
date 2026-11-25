@@ -197,7 +197,7 @@ describe("loadMigrationHistory", () => {
       expect(loaded.migrations).toEqual(main.migrations);
       expect(Object.keys(loaded.history)).toEqual(Object.keys(main.history));
       // The same version: Rust loads the app and finds the same hashes.
-      const app = JSON.stringify({ format: 1, tables, ...loaded });
+      const app = JSON.stringify({ format: 1, ...loaded });
       const files = (await loadAppFiles(
         JSON.stringify({
           format: 1,
