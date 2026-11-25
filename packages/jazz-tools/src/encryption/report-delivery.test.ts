@@ -113,3 +113,32 @@ it("keeps report order for established listeners in the tick that starts a repla
   expect(reasons(late)).toEqual(["older", "newer"]);
   encryption.stop();
 });
+
+it("skips a report that is not valid JSON, in polling and in a replay", async () => {
+  let snapshotQueue: string[] = [];
+  const { native, push } = fakeNative();
+  const call = native.encryptionCall.bind(native);
+  native.encryptionCall = (op, args) =>
+    snapshotQueue.length > 0
+      ? Promise.resolve(JSON.stringify({ active: [], queued: snapshotQueue.splice(0) }))
+      : call(op, args);
+  const take = native.takeEncryptionReports.bind(native);
+  let polled: string[] = [];
+  native.takeEncryptionReports = () => [...polled.splice(0), ...take()];
+  const encryption = new Encryption(native, { reportIntervalMs: 10 });
+
+  // A replay whose snapshot holds an invalid report.
+  snapshotQueue = [JSON.stringify(report("a")), "{not json", JSON.stringify(report("b"))];
+  const first: EncryptionReport[] = [];
+  encryption.onReport((seen) => first.push(seen));
+  await tick();
+  expect(reasons(first)).toEqual(["a", "b"]);
+
+  // Polling, with an invalid report in the middle of a batch.
+  polled = [JSON.stringify(report("c")), "{not json"];
+  push(report("d"));
+  await tick();
+  expect(reasons(first)).toEqual(["a", "b", "c", "d"]);
+  expect(logged).toHaveBeenCalledTimes(2);
+  encryption.stop();
+});
