@@ -201,6 +201,37 @@ impl Gate {
 /// delivery pass over every space this device holds keys of, answered here.
 type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
 
+/// The refusal of `ready()` once the runtime is built.
+pub const ALREADY_BUILT: &str = "the runtime is already built";
+/// The refusal of `ready()` while an earlier build has not settled.
+pub const STILL_BUILDING: &str = "the runtime is still being built: an earlier `ready()` is waiting for the private store to answer its requests";
+
+/// The one build a host runs at a time. A build holds it until its future
+/// settles or is dropped, so the slot frees on failure, on success and when
+/// the build is abandoned; a later `ready()` is refused with
+/// [`STILL_BUILDING`] only while a build is really running.
+#[derive(Clone, Default)]
+pub struct BuildSlot(Rc<Cell<bool>>);
+
+impl BuildSlot {
+    /// Takes the slot for one build, or refuses while another holds it.
+    pub fn take(&self) -> Result<BuildHeld, &'static str> {
+        if self.0.replace(true) {
+            return Err(STILL_BUILDING);
+        }
+        Ok(BuildHeld(Rc::clone(&self.0)))
+    }
+}
+
+/// A build's hold on its [`BuildSlot`]; dropping it frees the slot.
+pub struct BuildHeld(Rc<Cell<bool>>);
+
+impl Drop for BuildHeld {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 /// The runtime for an encrypted app, built from the app's own declarations
 /// over the private store the app supplied (a JavaScript store, see
 /// `js_store`), for the account of its session.
@@ -1428,6 +1459,42 @@ mod tests {
 
     fn run<T>(future: impl Future<Output = T>) -> T {
         jazz::db::block_on(future)
+    }
+
+    /// Contract: a build that fails, succeeds or is abandoned frees the slot,
+    /// and a `ready()` while a build runs is told so, not that it is built.
+    #[test]
+    fn a_build_slot_frees_when_its_build_ends_or_is_dropped() {
+        let slot = BuildSlot::default();
+        let held = slot.take().unwrap();
+        assert_eq!(slot.take().err(), Some(STILL_BUILDING));
+        drop(held);
+
+        // A build whose store never answers, then abandoned.
+        let held = slot.take().unwrap();
+        let mut never = Box::pin(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        });
+        let waker = futures::task::noop_waker();
+        assert!(
+            never
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(slot.take().err(), Some(STILL_BUILDING));
+        drop(never);
+        assert!(slot.take().is_ok());
+
+        // A build that settles with an error.
+        let held = slot.take().unwrap();
+        let failed: Result<(), String> = run(async move {
+            let _held = held;
+            Err("store failed".to_owned())
+        });
+        assert!(failed.is_err());
+        assert!(slot.take().is_ok());
     }
 
     /// Contract: a call that waits on the loop gets an answer or `None` at

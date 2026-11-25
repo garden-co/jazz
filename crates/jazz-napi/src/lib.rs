@@ -992,7 +992,7 @@ pub struct KeylessProof {
 pub struct EncryptionRuntime {
     store: Rc<js_store::JsStore>,
     options: Rc<RefCell<Option<encryption::Options>>>,
-    building: Rc<Cell<bool>>,
+    building: encryption::BuildSlot,
     account_id: String,
     app_id: String,
     built: Rc<RefCell<Option<encryption::Built>>>,
@@ -1066,29 +1066,30 @@ impl EncryptionRuntime {
                 app_id: app_id.clone(),
                 environment,
             }))),
-            building: Rc::default(),
+            building: encryption::BuildSlot::default(),
             account_id,
             app_id,
             built: Rc::default(),
         })
     }
 
+    #[cfg(test)]
     fn build_future(&self) -> Option<encryption::JsonFuture> {
-        if self.building.get() {
-            return None;
-        }
-        let build = encryption::build(
-            self.options.borrow().as_ref()?,
-            self.account_id.clone(),
-            Rc::clone(&self.store),
-        );
+        self.start_build().ok()
+    }
+
+    /// The build `ready` drives, or why `ready` is refused: the runtime is
+    /// built, or an earlier build has not settled.
+    fn start_build(&self) -> std::result::Result<encryption::JsonFuture, &'static str> {
+        let options = self.options.borrow();
+        let options = options.as_ref().ok_or(encryption::ALREADY_BUILT)?;
+        let held = self.building.take()?;
+        let build = encryption::build(options, self.account_id.clone(), Rc::clone(&self.store));
         let options = Rc::downgrade(&self.options);
-        let building = Rc::clone(&self.building);
         let slot = Rc::clone(&self.built);
-        Some(Box::pin(async move {
-            building.set(true);
+        Ok(Box::pin(async move {
             let result = build.await;
-            building.set(false);
+            drop(held);
             let built = result?;
             if let Some(options) = options.upgrade() {
                 options.borrow_mut().take();
@@ -1105,9 +1106,7 @@ impl EncryptionRuntime {
     /// takes the app's store (answer its requests while waiting).
     #[napi(ts_return_type = "Promise<string>")]
     pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
-        let future = self
-            .build_future()
-            .ok_or_else(|| napi::Error::from_reason("the runtime is already built"))?;
+        let future = self.start_build().map_err(napi::Error::from_reason)?;
         Ok(json_promise(env, future)?)
     }
 
@@ -4007,6 +4006,37 @@ mod encryption_tests {
     /// and Bob's refused open leaves the built runtime available to Alice.
     /// Rust drives the same build future as `ready` because its JS promise
     /// requires a Node environment.
+    /// A build whose store never answers refuses a second `ready` as still
+    /// running, not as built, and frees the slot once it is abandoned.
+    #[test]
+    fn encryption_startup_refuses_a_second_ready_while_the_store_is_silent() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let runtime = EncryptionRuntime::from_source(
+            app.to_vec(),
+            false,
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            None,
+        )
+        .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut silent = runtime.start_build().ok().unwrap();
+        assert!(silent.as_mut().poll(&mut context).is_pending());
+        assert!(!runtime.take_store_requests().is_empty());
+        assert_eq!(
+            runtime.start_build().err(),
+            Some(encryption::STILL_BUILDING)
+        );
+        drop(silent);
+        assert!(
+            runtime.start_build().is_ok(),
+            "an abandoned build frees the slot"
+        );
+    }
+
     #[test]
     fn encryption_startup_can_retry_after_store_failure_and_account_mismatch() {
         let app =

@@ -7,7 +7,7 @@
 //! make progress (a noop waker), as in the Node binding, so the store's
 //! requests are taken and answered by the same JavaScript that serves Node's.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
@@ -88,7 +88,7 @@ fn settle_promises() {
 pub struct WasmEncryptionRuntime {
     store: Rc<JsStore>,
     options: Rc<RefCell<Option<Options>>>,
-    building: Rc<Cell<bool>>,
+    building: runtime::BuildSlot,
     account_id: String,
     app_id: String,
     built: Rc<RefCell<Option<Built>>>,
@@ -122,7 +122,7 @@ impl WasmEncryptionRuntime {
                 app_id: app_id.clone(),
                 environment,
             }))),
-            building: Rc::default(),
+            building: runtime::BuildSlot::default(),
             account_id,
             app_id,
             built: Rc::default(),
@@ -132,20 +132,23 @@ impl WasmEncryptionRuntime {
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the store (answer its requests while waiting).
     pub fn ready(&self) -> js_sys::Promise {
-        let build = {
+        let (build, held) = {
             let options = self.options.borrow();
-            let Some(options) = options.as_ref().filter(|_| !self.building.get()) else {
-                return js_sys::Promise::reject(&JsValue::from_str("the runtime is already built"));
+            let Some(options) = options.as_ref() else {
+                return js_sys::Promise::reject(&JsValue::from_str(runtime::ALREADY_BUILT));
             };
-            runtime::build(options, self.account_id.clone(), Rc::clone(&self.store))
+            let held = match self.building.take() {
+                Ok(held) => held,
+                Err(refusal) => return js_sys::Promise::reject(&JsValue::from_str(refusal)),
+            };
+            let build = runtime::build(options, self.account_id.clone(), Rc::clone(&self.store));
+            (build, held)
         };
         let options = Rc::downgrade(&self.options);
-        let building = Rc::clone(&self.building);
         let slot = Rc::clone(&self.built);
         json_promise(Box::pin(async move {
-            building.set(true);
             let result = build.await;
-            building.set(false);
+            drop(held);
             let built = result?;
             if let Some(options) = options.upgrade() {
                 options.borrow_mut().take();
@@ -484,7 +487,7 @@ mod tests {
                     [1; 32],
                 )),
             }))),
-            building: Rc::default(),
+            building: runtime::BuildSlot::default(),
             account_id: alice.account_id().unwrap().0.to_string(),
             app_id: "test".into(),
             built: Rc::default(),
@@ -613,7 +616,7 @@ mod tests {
             let bridge = WasmEncryptionRuntime {
                 store,
                 options: Rc::default(),
-                building: Rc::default(),
+                building: runtime::BuildSlot::default(),
                 account_id,
                 app_id: "test".into(),
                 built: Rc::new(RefCell::new(Some(built))),
