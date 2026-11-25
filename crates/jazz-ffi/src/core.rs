@@ -1567,8 +1567,7 @@ impl Core {
             self.jazz.begin_stopping();
         }
         if self.jazz.on_client_thread() {
-            self.close_on_client_thread();
-            return Ok(());
+            return self.close_on_client_thread(timeout);
         }
         if !self.open.closed.close() {
             return Ok(());
@@ -1613,12 +1612,20 @@ impl Core {
     /// The handle is closed when this returns (later calls fail `Closed`, no
     /// new host callback starts); the clean-up and the stop are sent to the
     /// client, which runs them once the callback returns. A timeout is not
-    /// waited for: nothing drains.
-    fn close_on_client_thread(&self) {
+    /// waited for: nothing drains. The writes it asked for that are lost
+    /// fail it `Unsynced { pending }` at once, as a close that waited would
+    /// once its timeout ran out.
+    fn close_on_client_thread(&self, timeout: Option<std::time::Duration>) -> Result<()> {
         use futures_util::FutureExt as _;
         if !self.open.closed.close() {
-            return;
+            return Ok(());
         }
+        // Counted before the stop: a close that waited counts them as it ends.
+        let lost = if self.derived {
+            None
+        } else {
+            timeout.and_then(|timeout| self.jazz.unsynced_here(timeout))
+        };
         for gate in self.gates() {
             gate.shut();
         }
@@ -1640,6 +1647,10 @@ impl Core {
             let _ = self.jazz.shutdown().now_or_never();
         }
         self.end_subscriptions();
+        match lost {
+            Some(pending) => Err(jazz_app_support::Error::Unsynced { pending }.into()),
+            None => Ok(()),
+        }
     }
 
     /// Each open watch's last call: `None`, the app closed.
