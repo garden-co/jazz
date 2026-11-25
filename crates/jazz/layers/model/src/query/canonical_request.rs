@@ -506,7 +506,7 @@ fn canonical_relation_query_key(
                 out.push(b'{');
                 put_len(out, values.len());
                 let mut entries = values.iter().collect::<Vec<_>>();
-                entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                entries.sort_unstable_by_key(|(left, _)| *left);
                 for (key, value) in entries {
                     put_str(out, key);
                     write(value, out);

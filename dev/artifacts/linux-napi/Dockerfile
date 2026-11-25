@@ -1,5 +1,5 @@
 # Both digests identify multi-architecture indexes (x64 and ARM64).
-FROM rust:1.93.1-bullseye@sha256:fae8ebcb8eda28d37df2b965c87c15a572dac2b6d3893a72d6dea99d700d1786 AS rust
+FROM rust:1.100.0-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94 AS rust
 FROM node:24.13.0-bullseye@sha256:8036dbe5b1f465e3acb8b866031cd06e4f84c31b0e83dabbdc59397a40dbe288
 ARG TARGETARCH
 COPY --from=rust /usr/local/rustup/ /usr/local/rustup/

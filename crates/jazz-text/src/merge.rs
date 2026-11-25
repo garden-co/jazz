@@ -873,7 +873,7 @@ fn heaviest_increasing(
             if total.0 > tree[at].0 {
                 tree[at] = total;
             }
-            at += at & at.wrapping_neg();
+            at += at.isolate_lowest_one();
         }
     }
     let mut run = Vec::new();
