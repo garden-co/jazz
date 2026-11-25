@@ -62,3 +62,21 @@ test("a jazz-napi tarball with a .node file is refused by publish and the packed
     /must not contain native binaries/,
   );
 });
+
+test("only network failures count as retryable", async () => {
+  const { isNetworkFailure } = await import("./verify-backend-function-size.mjs");
+  assert.ok(isNetworkFailure("npm error code ECONNRESET\nnpm error network aborted"));
+  assert.ok(isNetworkFailure("npm error code EAI_AGAIN"));
+  assert.ok(
+    isNetworkFailure(
+      "npm error 503 Service Unavailable - GET https://registry.npmjs.org/x\nnpm error code E503",
+    ),
+  );
+  assert.ok(
+    !isNetworkFailure("npm error code ETARGET\nnpm error notarget No matching version found"),
+  );
+  assert.ok(
+    !isNetworkFailure("npm error code ENOENT\nnpm error enoent Could not read package.json"),
+  );
+  assert.ok(!isNetworkFailure("npm error code E404\nnpm error 404 Not Found"));
+});
