@@ -4,14 +4,18 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use jazz::tools::public_schema::E2eeDeclarations;
 use jazz::tools::{JazzClient, ObjectId, OpenTransactionId, ReadTier};
 
 use futures_util::FutureExt as _;
 
+use crate::AccountId;
 use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::include::Row;
+use crate::members::{NewSpaceMember, SpaceMember, require_space};
 use crate::query::Query;
 use crate::table::{Implementations, Insert, Table, Updatable, Update};
 
@@ -27,6 +31,7 @@ pub struct Transaction {
     id: OpenTransactionId,
     wrote: Rc<Cell<bool>>,
     implementations: Implementations,
+    declarations: Option<Arc<E2eeDeclarations>>,
 }
 
 impl Transaction {
@@ -56,6 +61,20 @@ impl Transaction {
         let (row, _) = insert(&self.client, new, &self.implementations)?;
         self.wrote.set(true);
         Ok(row)
+    }
+
+    /// Stages an admission alongside the transaction's other writes.
+    pub async fn add_member<T: Table>(
+        &self,
+        id: ObjectId,
+        account: AccountId,
+    ) -> Result<SpaceMember> {
+        require_space(self.declarations.as_deref(), T::NAME)?;
+        self.insert(NewSpaceMember {
+            scope_id: self.client.table_identity(T::NAME).await?,
+            identifier: id,
+            account,
+        })
     }
 
     pub fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
@@ -185,6 +204,7 @@ impl Jazz {
         R: Send + 'static,
     {
         let implementations = self.info.implementations.clone();
+        let declarations = self.info.declarations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let open = if mergeable {
@@ -197,6 +217,7 @@ impl Jazz {
                 id: open.transaction_id(),
                 wrote: Rc::new(Cell::new(false)),
                 implementations,
+                declarations,
             };
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
@@ -290,6 +311,7 @@ impl Jazz {
     async fn open_transaction(&self, mergeable: bool) -> Result<OpenTransaction> {
         let settle = self.settler()?;
         let implementations = self.info.implementations.clone();
+        let declarations = self.info.declarations.clone();
         let key = self
             .with_client(move |client| async move {
                 let open = if mergeable {
@@ -302,6 +324,7 @@ impl Jazz {
                     id: open.transaction_id(),
                     wrote: Rc::new(Cell::new(false)),
                     implementations,
+                    declarations,
                 };
                 Ok(OPEN.with(|open| {
                     let mut open = open.borrow_mut();
@@ -353,6 +376,16 @@ impl OpenTransaction {
 
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         self.on(move |tx| async move { tx.insert(new) }).await
+    }
+
+    /// Stages an admission alongside the transaction's other writes.
+    pub async fn add_member<T: Table>(
+        &self,
+        id: ObjectId,
+        account: AccountId,
+    ) -> Result<SpaceMember> {
+        self.on(move |tx| async move { tx.add_member::<T>(id, account).await })
+            .await
     }
 
     pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {

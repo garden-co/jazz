@@ -8,6 +8,32 @@ import kotlin.test.assertFailsWith
 
 class EncryptionTest {
     @Test
+    fun membership_rows_are_decoded_and_add_forwards_insert_durability() = runTest {
+        val row = """{"id":"member","scopeId":"scope","identifier":"project","accountId":"bob"}"""
+        val native = object : Native by FakeNative() {
+            override fun memberAdd(table: String, id: String, accountId: String, tier: String?): String {
+                assertEquals(listOf("projects", "project", "bob", "global"), listOf(table, id, accountId, tier))
+                return row
+            }
+
+            override fun memberList(table: String, id: String): String {
+                assertEquals(listOf("projects", "project"), listOf(table, id))
+                return "[$row]"
+            }
+
+            override fun memberRemove(table: String, id: String, accountId: String): ULong {
+                assertEquals(listOf("projects", "project", "bob"), listOf(table, id, accountId))
+                return 1UL
+            }
+        }
+        val encryption = Encryption(native) { it() }
+        val member = SpaceMember("member", "scope", "project", "bob")
+        assertEquals(member, encryption.addMember("projects", "project", "bob", WriteTier.Global))
+        assertEquals(listOf(member), encryption.listMembers("projects", "project"))
+        assertEquals(1UL, encryption.removeMember("projects", "project", "bob"))
+    }
+
+    @Test
     fun account_reset_forwards_the_operation_and_preserves_the_outcome() = runTest {
         var allowed = true
         val native = object : Native by FakeNative() {

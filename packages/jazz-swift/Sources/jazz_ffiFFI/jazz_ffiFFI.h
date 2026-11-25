@@ -488,6 +488,21 @@ RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_insert_at(uint64_t ptr, RustBuff
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_link(uint64_t ptr, RustBuffer bearer, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_ADD
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_ADD
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_member_add(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer account_id, RustBuffer tier, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_LIST
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_member_list(uint64_t ptr, RustBuffer table, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_REMOVE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_MEMBER_REMOVE
+uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_member_remove(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer account_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ONE
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ONE
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_one(uint64_t ptr, RustBuffer query_json, RustCallStatus *_Nonnull out_status
@@ -1287,6 +1302,24 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_insert_at(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_LINK
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_LINK
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_link(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_ADD
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_ADD
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_member_add(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_LIST
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_member_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_REMOVE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_MEMBER_REMOVE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_member_remove(void
     
 );
 #endif

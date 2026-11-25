@@ -130,6 +130,14 @@ public struct Device: Decodable, Hashable, Sendable {
     public var removalRequested: Bool
 }
 
+/// A row granting an account membership in a space.
+public struct SpaceMember: Decodable, Sendable {
+    public let id: ID
+    public let scopeId: ID
+    public let identifier: ID
+    public let accountId: ID
+}
+
 /// The deliveries written and the spaces whose delivery failed in one pass.
 public struct KeyDeliveryResult: Decodable, Sendable {
     public let delivered: UInt64
@@ -225,6 +233,33 @@ public struct Encryption: Sendable {
     /// Approves the device if `code` is the one `approvalCode` gave.
     public func approve(deviceId: String, code: String) async throws {
         _ = try await call("approve", ["deviceId": .string(deviceId), "code": .string(code)])
+    }
+
+    /// Admits an account to a space and returns its membership row, as an insert would.
+    @discardableResult
+    public func addMember(table: String, id: ID, accountId: ID, tier: WriteTier? = nil) async throws -> SpaceMember {
+        try await Client.typed {
+            let row = try await Client.run {
+                try self.client.handle.memberAdd(table: table, id: id, accountId: accountId, tier: tier?.rawValue)
+            }
+            return try Coding.decode(SpaceMember.self, row, self.client.userInfo)
+        }
+    }
+
+    /// Lists the space's membership rows visible to the caller.
+    public func listMembers(table: String, id: ID) async throws -> [SpaceMember] {
+        try await Client.typed {
+            let rows = try await Client.run { try self.client.handle.memberList(table: table, id: id) }
+            return try Coding.decode([SpaceMember].self, rows, self.client.userInfo)
+        }
+    }
+
+    /// Removes the account's visible membership rows. Returns the number the authority accepted.
+    @discardableResult
+    public func removeMember(table: String, id: ID, accountId: ID) async throws -> UInt64 {
+        try await Client.typed {
+            try await Client.run { try self.client.handle.memberRemove(table: table, id: id, accountId: accountId) }
+        }
     }
 
     /// Removes a device and rotates the account.

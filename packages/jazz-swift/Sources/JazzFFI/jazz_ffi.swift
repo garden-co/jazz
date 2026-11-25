@@ -714,6 +714,23 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func link(bearer: String) throws  -> String
     
     /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert.
+     */
+    func memberAdd(table: String, id: String, accountId: String, tier: String?) throws  -> String
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+    func memberList(table: String, id: String) throws  -> String
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+    func memberRemove(table: String, id: String, accountId: String) throws  -> UInt64
+    
+    /**
      * The first row the query matches.
      */
     func one(queryJson: String) throws  -> String?
@@ -1246,6 +1263,53 @@ open func link(bearer: String)throws  -> String  {
     uniffi_jazz_ffi_fn_method_jazzhandle_link(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(bearer),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert.
+     */
+open func memberAdd(table: String, id: String, accountId: String, tier: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_add(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),
+        FfiConverterOptionString.lower(tier),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+open func memberList(table: String, id: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_list(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+open func memberRemove(table: String, id: String, accountId: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_remove(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),uniffiCallStatus
     )
 })
 }
@@ -4343,6 +4407,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_add() != 10226) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_list() != 47296) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_remove() != 50047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one() != 37106) {

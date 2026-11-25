@@ -455,7 +455,7 @@ A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Number
 An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
 (the scope is not of that incarnation) or a message.
 
-Use `encryption_call(op, args_json)` for every operation. In C, pass `"encryptionCall"` to
+Use `encryption_call(op, args_json)` for the runtime operations below. In C, pass `"encryptionCall"` to
 `jazz_call` with `{"op", "args"?}`.
 
 | Operations                                                                                | Purpose                                                                                                                                                                     |
@@ -478,3 +478,22 @@ report with the space and reason.
 
 An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
 encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.
+
+### Space membership
+
+Pass the name of the table declared as the encryption scope and the space row's ID.
+Use `member_add(table, id, account_id, tier)`, `member_list(table, id)` and
+`member_remove(table, id, account_id)` on the UniFFI handle. In C, use these
+`jazz_call` methods:
+
+| Method         | Arguments                                 | Result                 |
+| -------------- | ----------------------------------------- | ---------------------- |
+| `memberAdd`    | `{ "table", "id", "accountId", "tier"? }` | Inserted member row    |
+| `memberList`   | `{ "table", "id" }`                       | Visible member rows    |
+| `memberRemove` | `{ "table", "id", "accountId" }`          | Number of rows removed |
+
+A member row contains `id`, `scopeId`, `identifier` (the space row ID) and `accountId`.
+Add settles like an insert, with optional `local` or `global` durability. Remove deletes
+the account's visible rows for the space in a serializable transaction and waits for
+the authority to accept it. A count of zero means there were no matching rows visible
+to the caller.

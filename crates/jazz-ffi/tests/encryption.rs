@@ -965,3 +965,66 @@ async fn key_refusal_on_transaction_write_and_edit() {
     .unwrap();
     app.stop().await;
 }
+
+/// Alice adds Bob through the UniFFI handle, sees his membership row, and
+/// removes him while retaining her own creator membership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_uniffi_handle_adds_lists_and_removes_space_members() {
+    let app = start().await;
+    let (alice_config, bob_config) = (app.config(), app.config());
+    tokio::task::spawn_blocking(move || {
+        let alice = JazzHandle::open_with_store(alice_config, Arc::new(HostStore::default()), None)
+            .unwrap();
+        let bob =
+            JazzHandle::open_with_store(bob_config, Arc::new(HostStore::default()), None).unwrap();
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        assert_eq!(wait_until_ready(&bob, 30_000).unwrap(), "active");
+        let alice_id = alice.account().unwrap().unwrap();
+        let bob_id = bob.account().unwrap().unwrap();
+        let project = parse(
+            &alice
+                .insert_at(
+                    "projects".into(),
+                    json!({ "name": "plans", "ownerId": alice_id }).to_string(),
+                    "global".into(),
+                )
+                .unwrap(),
+        );
+        let id = project["id"].as_str().unwrap().to_owned();
+        let members = || parse(&alice.member_list("projects".into(), id.clone()).unwrap());
+        let creator = members()[0].clone();
+        assert_eq!(creator["accountId"], alice_id);
+
+        let admitted = parse(
+            &alice
+                .member_add(
+                    "projects".into(),
+                    id.clone(),
+                    bob_id.clone(),
+                    Some("global".into()),
+                )
+                .unwrap(),
+        );
+        assert_eq!(admitted["scopeId"], creator["scopeId"]);
+        assert_eq!(admitted["identifier"], id);
+        assert_eq!(admitted["accountId"], bob_id);
+        assert_eq!(members().as_array().unwrap().len(), 2);
+        assert!(members().as_array().unwrap().contains(&admitted));
+
+        assert_eq!(
+            alice
+                .member_remove("projects".into(), id.clone(), bob_id.clone())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            alice
+                .member_remove("projects".into(), id.clone(), bob_id)
+                .unwrap(),
+            0
+        );
+        assert_eq!(members(), json!([creator]));
+    })
+    .await
+    .unwrap();
+}

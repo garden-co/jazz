@@ -11,7 +11,7 @@ use jazz_app_support::jazz::tools::{
     DurabilityTier, JazzClient, JazzTransaction, ReadTier, Schema, SubscriptionStreamItem,
     TableSchema, Value,
 };
-use jazz_app_support::{AppFiles, AppId, Backend, Config, Jazz, Storage};
+use jazz_app_support::{AccountId, AppFiles, AppId, Backend, Config, Jazz, Storage};
 use serde_json::Value as Json;
 
 use crate::JazzError;
@@ -1324,6 +1324,44 @@ impl Core {
         Ok(jazz
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
+    }
+
+    pub fn member_add(
+        &self,
+        table: &str,
+        id: &str,
+        account: &str,
+        tier: Option<DurabilityTier>,
+    ) -> Result<String> {
+        self.reachable(tier)?;
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let account = AccountId(*convert::parse_id(account, "the account id")?.uuid());
+        let durable;
+        let jazz = match tier {
+            Some(tier) => {
+                durable = jazz.durable(tier);
+                &durable
+            }
+            None => jazz,
+        };
+        let row = self.wait_answer(jazz.add_member_by_name(table, id, account))?;
+        Ok(serde_json::json!(row).to_string())
+    }
+
+    pub fn member_list(&self, table: &str, id: &str) -> Result<String> {
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let rows = self.wait(jazz.list_members_by_name(table, id))?;
+        Ok(serde_json::json!(rows).to_string())
+    }
+
+    pub fn member_remove(&self, table: &str, id: &str, account: &str) -> Result<u64> {
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let account = AccountId(*convert::parse_id(account, "the account id")?.uuid());
+        let count = self.wait_answer(jazz.remove_member_by_name(table, id, account))?;
+        Ok(count as u64)
     }
 
     /// One end-to-end encryption operation by name, with JSON arguments and result.
