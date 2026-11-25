@@ -289,6 +289,7 @@ mod plan {
                 'a,
                 jazz::tools::Result<jazz::db::StreamingValueUpload>,
             >,
+            ended: futures_util::future::LocalBoxFuture<'a, ()>,
         ) -> futures_util::future::LocalBoxFuture<
             'a,
             jazz::tools::Result<jazz::db::StreamingValueUpload>,
@@ -296,8 +297,8 @@ mod plan {
             Box::pin(retry_after_key(
                 async || begin().await,
                 |error| jazz::tools::JazzError::Write(error.to_string()),
-                std::future::pending(),
-                || unreachable!("a pending future never ends"),
+                ended,
+                || jazz::tools::JazzError::ChannelClosed,
             ))
         }
 

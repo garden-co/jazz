@@ -95,13 +95,16 @@ pub trait EncryptionRuntime {
     /// can without waiting, and asks for a tick if it owes one.
     fn after_tick(&self);
     /// Open an upload, preparing the space first when the hooks ask.
-    /// Await each attempt before starting another.
+    /// Await each attempt before starting another. A wait for the space's
+    /// key ends when `ended` does (the client closing):
+    /// [`JazzError::ChannelClosed`].
     fn begin_streaming_upload<'a>(
         &self,
         begin: &'a mut dyn FnMut() -> futures::future::LocalBoxFuture<
             'a,
             Result<crate::db::StreamingValueUpload>,
         >,
+        ended: futures::future::LocalBoxFuture<'a, ()>,
     ) -> futures::future::LocalBoxFuture<'a, Result<crate::db::StreamingValueUpload>>;
     /// Called when the client shuts down: ends the loop.
     fn stop(&self);
@@ -1718,7 +1721,7 @@ impl JazzClient {
         let upload = match &self.shared.encryption {
             Some(runtime) => {
                 runtime
-                    .begin_streaming_upload(&mut || Box::pin(begin()))
+                    .begin_streaming_upload(&mut || Box::pin(begin()), Box::pin(self.waits_ended()))
                     .await?
             }
             None => begin().await?,

@@ -1498,6 +1498,72 @@ async fn closing_ends_a_write_waiting_for_its_key() {
     app.stop().await;
 }
 
+/// Closing Alice's app ends her encrypted streaming upload that waits for
+/// its space's key: the upload fails `Stopped` (`closed` through jazz-ffi),
+/// and the close doesn't wait out the upload's 10 s deadline.
+///
+/// ```text
+/// alice ──insert_streaming──► key-pending ──prepare──► store (holds the space key)
+/// alice ──shutdown──► the upload ends Stopped ► closed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_ends_a_streaming_upload_waiting_for_its_key() {
+    use bindings::{NewTask, tasks};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let app = App::start().await;
+    let entered = Arc::new(Notify::new());
+    let store = store_with_hook({
+        let entered = entered.clone();
+        move |doc, _| {
+            let entered = entered.clone();
+            let held = doc.starts_with("held-");
+            Box::pin(async move {
+                if held {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            })
+        }
+    });
+    let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
+    let alice = Jazz::open(client_files(), config).await.unwrap();
+    ready(&alice).await;
+    let project = make_project(&alice, "plans").await;
+    let id = ObjectId::from_uuid(project.parse().unwrap());
+    let uploading = tokio::spawn({
+        let alice = alice.clone();
+        async move {
+            let chunks = futures::stream::iter([Ok::<_, Error>(b"unwritten label")]);
+            alice
+                .insert_streaming(NewTask::new(id, "unwritten"), tasks::label(), chunks)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(15), entered.notified())
+        .await
+        .expect("the upload's preparation reached the store");
+    let closing = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), alice.shutdown())
+        .await
+        .expect("the client closes")
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(60), uploading)
+        .await
+        .expect("the upload ends")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, Error::Stopped), "{error:?}");
+    assert!(
+        closing.elapsed() < Duration::from_secs(5),
+        "the close waited {:?} for the upload",
+        closing.elapsed()
+    );
+    app.stop().await;
+}
+
 /// Closing the phone's app ends its wait for readiness while startup still
 /// recovers the device: the wait fails `Stopped`, and the close doesn't wait
 /// out the wait's timeout (nor the 30 s drain).
