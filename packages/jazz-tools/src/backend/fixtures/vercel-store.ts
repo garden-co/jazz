@@ -109,6 +109,8 @@ export function fakeVercel(core: { appId: string; url: string }) {
     failLookups: 0,
     /** Called when a start brings the core up. */
     onStart: undefined as (() => void) | undefined,
+    /** The next `failStops` stops fail as Vercel's API does when it refuses one. */
+    failStops: 0,
     /** Called when the store stops the Sandbox's session. */
     onStop: undefined as (() => void) | undefined,
     /** The session (its start) in which a start last brought the core up. */
@@ -137,6 +139,12 @@ export function fakeVercel(core: { appId: string; url: string }) {
       const claimed = !recycleClaims.includes(session);
       if (claimed) recycleClaims.push(session);
       return { exitCode: claimed ? 0 : 1, stdout: async () => "" };
+    }
+    if (args[2] === "jazz-release-recycle") {
+      const at = recycleClaims.indexOf(Number(args[3]));
+      if (at >= 0) recycleClaims.splice(at, 1);
+      calls.push("release recycle");
+      return { exitCode: 0, stdout: async () => "" };
     }
     throw new Error(`unexpected command ${args.join(" ")}`);
   };
@@ -199,6 +207,11 @@ export function fakeVercel(core: { appId: string; url: string }) {
           : null
         : (files.get(path) ?? null),
     stop: async () => {
+      if (state.failStops > 0) {
+        state.failStops--;
+        calls.push("stop failed");
+        throw Object.assign(new Error("Status code 500 is not ok"), { response: { status: 500 } });
+      }
       calls.push("stop");
       state.status = "stopped";
       state.onStop?.();
