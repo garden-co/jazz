@@ -67,13 +67,14 @@ means nothing visible was removed. The account may still be a member if the call
 rows. Removing an already absent account also returns `0`.
 
 A conflicting admission triggers a retry, up to three attempts in all. A refusal reaches the caller.
-To rotate the key immediately after removing a member, call `keys.rotate`.
+Once Jazz sees that a removed member held the space's current key, it marks the space for rotation
+and tries to rotate the key before the next write. If a member removes one of their own devices,
+Jazz also marks the affected spaces for rotation.
 
-```ts
-const removed = await db.encryption.members.remove(space, otherAccountId);
-if (removed > 0) await db.encryption.keys.rotate(space);
-```
-
+Calling `db.encryption.keys.rotate(space)` is optional. Call it if you need to renew the key before the
+next write or if automatic rotation might fail. Each rotation adds to the key history that a new
+device verifies when it first loads the space. If you're removing several members, finish all the
+removals first, then call `keys.rotate` once or let the next write rotate the key.
 The new key and up to 100 deliveries commit together. `keys.rotate` returns the number of
 deliveries in that transaction. Subsequent writes use the new key while Jazz delivers it to
 the remaining members in the background.
@@ -81,7 +82,8 @@ the remaining members in the background.
 If you also need to delete your own app's rows atomically with the membership, use a single
 `db.serializableTransaction`. Inside its callback, read the matching rows with
 `tx.all(app.__e2ee_members.where(filter))` using the filter from `members.where(space, otherAccountId)`,
-then delete them and the related app rows. Await the transaction result's `wait()` before rotating.
+then delete them and the related app rows. Await the transaction result's `wait()` before calling
+`keys.rotate`.
 Retry the whole transaction on a serialization conflict.
 
 If the space has no key yet, nothing has been sealed. For an active member, `rotate` succeeds and
@@ -96,9 +98,8 @@ active member, just as it does for a space that has never had a key. See the
 
 If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
 
-Without an explicit rotation, the next pass notices that a key is held by an account that is no
-longer a member and rotates, once the device has observed the removal. A removed member keeps what
-they could already read; Jazz's permissions stop them reading any row after.
+A removed member keeps what they could already read. Jazz's permissions stop them from reading any
+rows after removal.
 
 Before reusing a space key, Jazz checks whether it needs rotation. If account verification or the
 check fails, `onReport` receives `rotation-check-failed` with the space and the original reason.
