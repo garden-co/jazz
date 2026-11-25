@@ -108,6 +108,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin",
     "test-kotlin-android",
     "test-kotlin-android-emulator",
     "warm-native-builds",
