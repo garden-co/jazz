@@ -69,7 +69,7 @@ version = "2.0.0-beta.3"
 license = "MIT"
 repository = "https://github.com/garden-co/jazz"
 homepage = "https://jazz.tools"
-rust-version = "1.93"
+rust-version = "1.100"
 
 [workspace.dependencies]
 jazz = { package = "jazz-core", version = "=2.0.0-beta.3", path = "crates/jazz", default-features = false }

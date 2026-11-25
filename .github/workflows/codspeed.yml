@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: true
@@ -110,9 +110,9 @@ jobs:
           # The suite is after the restore prefix: a nightly build restores a
           # merge build's outputs and saves its own, and neither overwrites
           # the other's key for the same SHA.
-          key: codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ env.JAZZ_CODSPEED_SUITE }}-${{ github.sha }}
+          key: codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.100.0-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ env.JAZZ_CODSPEED_SUITE }}-${{ github.sha }}
           restore-keys: |
-            codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.100.0-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
       - name: Test benchmark artifact handoff
         run: node --test dev/benchmarks/codspeed-artifact.test.mjs
       - name: Install cargo-codspeed
@@ -197,7 +197,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
       - name: Download this run's benchmark executables
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -232,7 +232,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

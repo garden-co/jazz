@@ -778,13 +778,13 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   assert.match(setupBuildAction, /steps\.provisioned-tools\.outputs\.active != 'true'/);
   assert.match(installRustTool, /steps\.provisioned-tool\.outputs\.active != 'true'/);
   assert.match(toolBundleValidator, /BUNDLE_ROOT = "\/opt\/jazz-ci\/toolchains\/v1"/);
-  for (const value of ["1.93.1", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
+  for (const value of ["1.100.0", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
     assert.match(toolBundleValidator, new RegExp(value.replaceAll(".", "\\.")));
   }
   assert.match(setupBuildAction, /sccache --show-stats/);
   assert.match(
     setupBuildAction,
-    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
+    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.100\.0-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
   );
   assert.match(setupBuildAction, /Jobs are clients only/);
   assert.match(

@@ -11,7 +11,7 @@ const expected = {
   // the fully resolved semantic version.
   node: "24.13.0",
   pnpm: "10.14.0",
-  rust: "1.93.1",
+  rust: "1.100.0",
   rustComponents: ["clippy", "rustfmt"],
   rustTargets: ["wasm32-unknown-unknown"],
   sccache: "0.15.0",
@@ -55,7 +55,7 @@ function commandVersion(command, args = ["--version"]) {
 export function validateActiveEnvironment(env = process.env, readVersion = commandVersion) {
   if (env.RUSTUP_HOME !== `${BUNDLE_ROOT}/rustup`)
     fail(`unexpected RUSTUP_HOME ${env.RUSTUP_HOME}`);
-  if (env.RUSTUP_TOOLCHAIN !== "1.93.1-x86_64-unknown-linux-gnu") {
+  if (env.RUSTUP_TOOLCHAIN !== "1.100.0-x86_64-unknown-linux-gnu") {
     fail(`unexpected RUSTUP_TOOLCHAIN ${env.RUSTUP_TOOLCHAIN}`);
   }
   if (env.SCCACHE_SERVER_PORT !== "4226")
