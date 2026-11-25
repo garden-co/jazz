@@ -401,7 +401,7 @@ export class Encryption {
   }
 
   private emit(report: EncryptionReport) {
-    for (const listener of this.listeners) listener(report);
+    for (const listener of this.listeners) notify(listener, report);
   }
 
   /** Listens to reports; returns the function that stops it. */
@@ -439,22 +439,29 @@ export class Encryption {
 
   private deliver() {
     if (!this.reportsDuringReplay && this.waitingListeners.size > 0) {
-      void this.replayReports();
+      // Deliver what is queued before taking the snapshot: the snapshot call
+      // drives the runtime, which can queue newer reports for the next tick.
+      // With no established listeners, leave the queue for the snapshot.
+      const beforeSnapshot = this.listeners.size > 0 ? this.emitQueued() : [];
+      void this.replayReports(beforeSnapshot);
+      return;
     }
-    // With no established listeners, leave the queue for the snapshot.
     if (this.listeners.size === 0) return;
-    for (const report of this.pendingReports.splice(0)) {
-      this.reportsDuringReplay?.push(report);
-      this.emit(report);
-    }
-    for (const text of this.native.takeEncryptionReports()) {
-      const report = JSON.parse(text) as EncryptionReport;
-      this.reportsDuringReplay?.push(report);
-      this.emit(report);
-    }
+    const delivered = this.emitQueued();
+    this.reportsDuringReplay?.push(...delivered);
   }
 
-  private readonly replayReports = async () => {
+  /** Emits the pending and native reports to established listeners; returns them. */
+  private readonly emitQueued = (): EncryptionReport[] => {
+    const reports = [
+      ...this.pendingReports.splice(0),
+      ...this.native.takeEncryptionReports().map((text) => JSON.parse(text) as EncryptionReport),
+    ];
+    for (const report of reports) this.emit(report);
+    return reports;
+  };
+
+  private readonly replayReports = async (beforeSnapshot: EncryptionReport[]) => {
     const reportsDuringReplay: EncryptionReport[] = [];
     this.reportsDuringReplay = reportsDuringReplay;
     try {
@@ -476,12 +483,16 @@ export class Encryption {
 
         // The native queue puts the overflow notice first.
         const dropped = queued[0]?.type === "reports-dropped" ? queued.splice(0, 1) : [];
-        // The active set already accounts for queued unreadables and withdrawals.
+        // The active set already accounts for unreadables and withdrawals
+        // taken before it.
+        const held = (report: EncryptionReport) =>
+          report.type === "unreadable" || report.type === "withdrawn";
         replay = [
           ...dropped,
           ...snapshot.active,
+          ...beforeSnapshot.filter((report) => !held(report)),
           ...pending,
-          ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+          ...queued.filter((report) => !held(report)),
           ...reportsDuringReplay,
         ];
       }
@@ -490,13 +501,22 @@ export class Encryption {
         this.listeners.add(listener);
         for (const report of replay) {
           if (!this.listeners.has(listener)) break;
-          listener(report);
+          notify(listener, report);
         }
       }
     } finally {
       this.reportsDuringReplay = undefined;
     }
   };
+}
+
+/** Calls one report listener; a throw is logged and the other listeners still run. */
+function notify(listener: (report: EncryptionReport) => void, report: EncryptionReport) {
+  try {
+    listener(report);
+  } catch (error) {
+    console.error("Jazz encryption report listener failed", error);
+  }
 }
 
 type Call = <T>(op: string, args?: Record<string, unknown>) => Promise<T>;
