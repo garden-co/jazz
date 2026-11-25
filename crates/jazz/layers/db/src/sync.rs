@@ -3835,11 +3835,74 @@ pub(crate) enum Support {
 }
 
 /// One equality of a composite [`Support::Array`]: the child's `inner`
-/// column holds the parent's `outer` cell.
+/// column holds `from`.
 #[derive(Debug)]
 pub(crate) struct Also {
     inner: String,
-    outer: String,
+    from: AlsoFrom,
+}
+
+/// Where the value an [`Also`] part follows comes from.
+#[derive(Debug)]
+pub(crate) enum AlsoFrom {
+    /// The parent's `outer` cell.
+    Outer(String),
+    /// The reading session's value at this path (see [`session_value`]):
+    /// the same for every parent the walk follows.
+    Session(Vec<String>),
+}
+
+/// The value of `session.<path>` an [`AlsoFrom::Session`] part follows, as
+/// a written row's cell would carry it, for a walk on `identity`'s behalf.
+/// `None` (leave the part out, which only widens the support) for a walk
+/// without a policy subject, which reads every row, or a session without
+/// that value.
+fn session_value(path: &[String], identity: Option<AuthorSubject>) -> Option<Sql> {
+    let identity = identity?;
+    let value = crate::compile::Session::for_author(identity, Default::default()).resolve(path)?;
+    crate::values::to_sql(&value).ok().flatten()
+}
+
+/// Whether support can follow `consulted.inner = session.<path>` by value:
+/// the account (`session.user`) meeting a `uuid` column, or the login
+/// (`session.identity.subject` or `.issuer`) a text one. Claims are left
+/// out: the policy compares a claim converted to its column's type, which
+/// the walk does not repeat, so they only widen the support.
+fn followable_by_session(consulted: &crate::values::Table, inner: &str, path: &[String]) -> bool {
+    use crate::records::ValueType;
+    let wanted = match path {
+        [user] if user == "user" => ValueType::Uuid,
+        [identity, part] if identity == "identity" && (part == "subject" || part == "issuer") => {
+            ValueType::String
+        }
+        _ => return false,
+    };
+    column_storage(consulted, inner) == Some((wanted, false))
+}
+
+/// A column's type, nullability aside (`id` is a `uuid`), and whether it
+/// is an enum column; `None` for an array, a real, or a column outside the
+/// stored application columns.
+fn column_storage(
+    table: &crate::values::Table,
+    column: &str,
+) -> Option<(crate::records::ValueType, bool)> {
+    use crate::records::ValueType;
+    if column == "id" {
+        return Some((ValueType::Uuid, false));
+    }
+    if crate::compile::is_array(table, column) {
+        return None;
+    }
+    let column = table.columns.iter().find(|c| c.name == column)?;
+    let mut ty = &column.ty;
+    while let ValueType::Nullable(inner) = ty {
+        ty = inner;
+    }
+    if matches!(ty, ValueType::F64) {
+        return None;
+    }
+    Some((ty.clone(), column.tags.is_some()))
 }
 
 /// Whether support can follow `consulted.inner = table.outer` by value:
@@ -3857,29 +3920,10 @@ fn followable_by_value(
     inner: &str,
 ) -> bool {
     use crate::records::ValueType;
-    /// A column's type, nullability aside (`id` is a `uuid`), and whether
-    /// it is an enum column; `None` for an array, a real, or a column
-    /// outside the stored application columns.
-    fn storage(table: &crate::values::Table, column: &str) -> Option<(ValueType, bool)> {
-        if column == "id" {
-            return Some((ValueType::Uuid, false));
-        }
-        if crate::compile::is_array(table, column) {
-            return None;
-        }
-        let column = table.columns.iter().find(|c| c.name == column)?;
-        let mut ty = &column.ty;
-        while let ValueType::Nullable(inner) = ty {
-            ty = inner;
-        }
-        if matches!(ty, ValueType::F64) {
-            return None;
-        }
-        Some((ty.clone(), column.tags.is_some()))
-    }
-    let (Some((outer_ty, outer_enum)), Some((inner_ty, inner_enum))) =
-        (storage(table, outer), storage(consulted, inner))
-    else {
+    let (Some((outer_ty, outer_enum)), Some((inner_ty, inner_enum))) = (
+        column_storage(table, outer),
+        column_storage(consulted, inner),
+    ) else {
         return false;
     };
     if !outer_enum && !inner_enum {
@@ -4768,21 +4812,28 @@ impl Store {
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
         /// The `(inner, outer)` columns each outer-row equality among an
-        /// `EXISTS` condition's conjuncts correlates, in order.
-        fn correlation<'p>(condition: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p str)>) {
+        /// `EXISTS` condition's conjuncts correlates, in order, and the
+        /// `(inner, path)` of each equality with the session.
+        fn correlation<'p>(
+            condition: &'p PolicyExpr,
+            out: &mut Vec<(&'p str, &'p str)>,
+            session: &mut Vec<(&'p str, &'p [String])>,
+        ) {
             match condition {
                 PolicyExpr::Cmp {
                     column,
                     op: CmpOp::Eq,
                     value: PolicyValue::SessionRef(path),
-                } => {
-                    if let [outer_row, outer] = path.as_slice()
-                        && outer_row == "__jazz_outer_row"
-                    {
-                        out.push((column, outer));
+                } => match path.as_slice() {
+                    [outer_row, outer] if outer_row == "__jazz_outer_row" => {
+                        out.push((column, outer))
                     }
-                }
-                PolicyExpr::And(parts) => parts.iter().for_each(|part| correlation(part, out)),
+                    [outer_row, ..] if outer_row == "__jazz_outer_row" => {}
+                    path => session.push((column, path)),
+                },
+                PolicyExpr::And(parts) => parts
+                    .iter()
+                    .for_each(|part| correlation(part, out, session)),
                 _ => {}
             }
         }
@@ -4805,23 +4856,25 @@ impl Store {
             clauses(policy, &mut exists);
         }
         for (consulted, condition) in exists {
-            let mut equalities = Vec::new();
-            correlation(condition, &mut equalities);
+            let (mut equalities, mut session) = (Vec::new(), Vec::new());
+            correlation(condition, &mut equalities, &mut session);
             // The first outer-row equality leads, as it always has.
             let Some((&(inner, outer), further)) = equalities.split_first() else {
                 continue;
             };
             let consulted = active_schema.table(consulted)?;
             // Every further equality narrows the children to one composite
-            // key, each followed by value as the lead is. One that cannot
-            // be (a different type, an array, a real, a provenance column)
-            // is left out, which only widens the support: the session's
-            // policies filter what it finds. A lead that cannot be keeps
-            // its single key.
+            // key, each followed by value as the lead is: with the parent's
+            // cell, or with the reading session's value, so a membership
+            // check follows the reader's own member row rather than every
+            // member's. One that cannot be (a different type, an array, a
+            // real, a provenance column, a claim) is left out, which only
+            // widens the support: the session's policies filter what it
+            // finds. A lead that cannot be keeps its single key.
             let part = |inner: &str, outer: &str| {
                 followable_by_value(table, outer, consulted, inner).then(|| Also {
                     inner: consulted.stored_name(inner).to_owned(),
-                    outer: table.stored_name(outer).to_owned(),
+                    from: AlsoFrom::Outer(table.stored_name(outer).to_owned()),
                 })
             };
             let mut composite = Vec::new();
@@ -4830,6 +4883,15 @@ impl Store {
                     further
                         .iter()
                         .filter_map(|&(inner, outer)| part(inner, outer)),
+                );
+                composite.extend(
+                    session
+                        .iter()
+                        .filter(|&&(inner, path)| followable_by_session(consulted, inner, path))
+                        .map(|&(inner, path)| Also {
+                            inner: consulted.stored_name(inner).to_owned(),
+                            from: AlsoFrom::Session(path.to_vec()),
+                        }),
                 );
                 if !composite.is_empty() {
                     composite.insert(0, lead);
@@ -5143,18 +5205,26 @@ impl Store {
                 } if !composite.is_empty() => {
                     // One composite key: the children equal to the row on
                     // every equality at once, each by the parent's cell as
-                    // its image carries it. A policy `=` is the null-safe
-                    // `IS`, so a part whose parent cell is NULL (or a
-                    // chunked value, which an image's cell does not show)
-                    // is left out: that only widens the support, and a
-                    // written child with a NULL there still matches the
-                    // key of the parts left. So no composite key holds a
-                    // NULL, as no written row's does ([`composite_keys`]).
+                    // its image carries it, or by the reading session's
+                    // value. A policy `=` is the null-safe `IS`, so a part
+                    // whose value is NULL or missing (a chunked cell, which
+                    // an image does not show, or a session without that
+                    // value, or a walk without a policy subject) is left
+                    // out: that only widens the support, and a written
+                    // child with a NULL there still matches the key of the
+                    // parts left. So no composite key holds a NULL, as no
+                    // written row's does ([`composite_keys`]).
                     let parts: Vec<(String, Sql)> = composite
                         .iter()
-                        .filter_map(|also| match image_cell(image, &also.outer) {
-                            Some(Sql::Null) | None => None,
-                            Some(value) => Some((also.inner.clone(), value)),
+                        .filter_map(|also| {
+                            let value = match &also.from {
+                                AlsoFrom::Outer(outer) => image_cell(image, outer),
+                                AlsoFrom::Session(path) => session_value(path, follow.identity),
+                            };
+                            match value {
+                                Some(Sql::Null) | None => None,
+                                Some(value) => Some((also.inner.clone(), value)),
+                            }
                         })
                         .collect();
                     // One part left is the single key of its column, as a

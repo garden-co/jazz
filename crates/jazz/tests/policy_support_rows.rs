@@ -357,7 +357,9 @@ fn rows(table: &str, ids: &[RowUuid]) -> BTreeSet<(String, RowUuid)> {
 /// Ada reads only `comments`. Everything else her replica holds is the
 /// support of their read: each comment's doc (inherited read) and what the
 /// doc's read rests on through its three arms, and through those, what
-/// each member row's read rests on.
+/// each member row's read rests on. A membership arm rests on the reader's
+/// own member row only (#6355): other members of a doc she reads are no
+/// support of it.
 ///
 /// ```text
 ///  doc  owner visibility  members         comments  ada reads the doc as
@@ -418,8 +420,9 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
     let first = expect(&[
         ("comments", &[c1, c2]),
         ("docs", &[d1, d2]),
-        // Not d2's members: Ada reads d2 as its owner, and can't read them.
-        ("members", &[m1_ada, m1_bo]),
+        // Not Bo's membership of d1: Ada reads d1 through her own. Not
+        // d2's members: Ada reads d2 as its owner, and can't read them.
+        ("members", &[m1_ada]),
     ]);
     let now = held(&ada, &tables);
     assert_eq!(ids(&now), first, "the first read");
@@ -427,13 +430,13 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
     let sent = Sent::take(&log);
     assert_eq!(
         distinct(&sent.images),
-        &(&rows("comments", &[c1, c2]) | &rows("docs", &[d1, d2]))
-            | &rows("members", &[m1_ada, m1_bo]),
+        &(&rows("comments", &[c1, c2]) | &rows("docs", &[d1, d2])) | &rows("members", &[m1_ada]),
         "the first read ships the result and its support, nothing else: {sent:?}"
     );
 
-    // Live: Ada joins d4, so c4 enters her result with its support; d2
-    // turns world, so d2's members become readable support of c2.
+    // Live: Ada joins d4, so c4 enters her result with its support (her
+    // own membership of d4, not Cy's); d2 turns world, which d2's members
+    // are no support of: Ada's read of d2 rests on her own membership.
     insert(
         &server,
         "members",
@@ -450,7 +453,7 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
     let live = expect(&[
         ("comments", &[c1, c2, c4]),
         ("docs", &[d1, d2, d4]),
-        ("members", &[m1_ada, m1_bo, m2_bo, m4_cy, m4_ada]),
+        ("members", &[m1_ada, m4_ada]),
     ]);
     let now = held(&ada, &tables);
     assert_eq!(ids(&now), live, "after joining d4 and d2 turning world");
@@ -476,24 +479,25 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
         [c2, c3, c4],
         "after reconnecting, c1 left the result and c3 entered it"
     );
-    // The support c3 rests on arrives with it, and nothing else ships.
+    // The support c3 rests on arrives with it (d3, which Ada reads as a
+    // world doc, not as a member), and nothing else ships.
     assert_eq!(
         distinct(&sent.images),
-        &(&rows("comments", &[c3]) | &rows("docs", &[d3])) | &rows("members", &[m3_cy]),
+        &rows("comments", &[c3]) | &rows("docs", &[d3]),
         "{sent:?}"
     );
     // c1 left the result (its listing drops it), and the support it alone
-    // rested on goes with it (#5097): d1, Bo's membership and Ada's deleted
-    // one, none of which she may read now, are each evicted.
+    // rested on goes with it (#5097): d1 and Ada's deleted membership,
+    // neither of which she may read now, are each evicted.
     assert_eq!(
         distinct(&sent.lost),
-        &rows("docs", &[d1]) | &rows("members", &[m1_ada, m1_bo]),
+        &rows("docs", &[d1]) | &rows("members", &[m1_ada]),
         "the reconnect evicts what Ada lost while offline: {sent:?}"
     );
     let resumed = expect(&[
         ("comments", &[c2, c3, c4]),
         ("docs", &[d2, d3, d4]),
-        ("members", &[m2_bo, m3_cy, m4_cy, m4_ada]),
+        ("members", &[m4_ada]),
     ]);
     assert_eq!(ids(&now), resumed, "after reconnecting");
     assert_current(&server, &now);
@@ -515,8 +519,8 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
 
 /// The other side of #5097: support the read stops holding across a
 /// reconnect, which the reader may still read, stays. While Ada is away c1
-/// is deleted, so nothing she reads rests on d1 or its members any more,
-/// but she is still d1's member and reads all three. The reconnect asks the
+/// is deleted, so nothing she reads rests on d1 or her membership any
+/// more, but she is still d1's member and reads both. The reconnect asks the
 /// server about them: it ships each as it is now, and evicts none.
 #[test]
 fn support_still_readable_after_a_reconnect_stays_current() {
@@ -552,11 +556,7 @@ fn support_still_readable_after_a_reconnect_stays_current() {
     pump(&server, &ada);
     assert_eq!(
         ids(&held(&ada, &tables)),
-        expect(&[
-            ("comments", &[c1]),
-            ("docs", &[d1]),
-            ("members", &[m1_ada, m1_bo]),
-        ])
+        expect(&[("comments", &[c1]), ("docs", &[d1]), ("members", &[m1_ada]),])
     );
 
     assert!(ada.detach_connection(&link));
@@ -568,11 +568,7 @@ fn support_still_readable_after_a_reconnect_stays_current() {
     let now = held(&ada, &tables);
     assert_eq!(
         ids(&now),
-        expect(&[
-            ("comments", &[]),
-            ("docs", &[d1]),
-            ("members", &[m1_ada, m1_bo]),
-        ]),
+        expect(&[("comments", &[]), ("docs", &[d1]), ("members", &[m1_ada]),]),
         "{sent:?}"
     );
     assert!(
@@ -706,7 +702,7 @@ fn bounded_inherits_and_one_shot_reads_ship_the_same_support() {
     let first = expect(&[
         ("comments", &[id(3, 1), id(3, 2)]),
         ("docs", &[id(1, 1), id(1, 2)]),
-        ("members", &[id(2, 1), id(2, 2)]),
+        ("members", &[id(2, 1)]),
     ]);
     let tables = ["comments", "docs", "members"];
     for max_depth in [None, Some(2)] {
@@ -749,37 +745,103 @@ fn bounded_inherits_and_one_shot_reads_ship_the_same_support() {
     }
 }
 
-/// While Ada is away, a comment is posted on d2, which she reads as its
-/// owner, and her membership of d2 is deleted, so Bo's membership of d2 is
-/// no longer hers to read; d2 itself doesn't change. On reconnect, d2's
-/// support is reached twice: below the new comment, which ships (so its
-/// support is followed whole, with no floor), and below the held one,
-/// which diffs against the resume floor. Only the second reports what she
-/// lost, so neither visit may hide it.
+/// `docs` an owner reads, and anyone once a review of it is approved; the
+/// `reviews` a doc's read consults, correlated by the doc alone, so every
+/// approved review of a doc is support of its read; and each review read
+/// through a share of it with the reader. Comments inherit read from their
+/// doc.
+fn reviews_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("owner", ColumnType::Text)
+                    .policies(all_writes(PolicyExpr::or(vec![
+                        exists("docs", vec![outer_eq("id", "id"), session_eq("owner", &ME)]),
+                        exists(
+                            "reviews",
+                            vec![
+                                outer_eq("doc_id", "id"),
+                                PolicyExpr::eq_literal(
+                                    "state",
+                                    PolicyLiteral::Text("approved".into()),
+                                ),
+                            ],
+                        ),
+                    ]))),
+            )
+            .table(
+                TableSchemaBuilder::new("reviews")
+                    .fk_column("doc_id", "docs")
+                    .column("state", ColumnType::Text)
+                    .policies(all_writes(exists(
+                        "shares",
+                        vec![outer_eq("review", "id"), session_eq("user_id", &ME)],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new("shares")
+                    .fk_column("review", "reviews")
+                    .column("user_id", ColumnType::Text)
+                    .policies(all_writes(PolicyExpr::True)),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .fk_column("doc", "docs")
+                    .column("body", ColumnType::Text)
+                    .policies(all_writes(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "doc".into(),
+                        max_depth: None,
+                    })),
+            )
+            .build(),
+    )
+}
+
+/// While Ada is away, a comment is posted on d2, which she owns, and the
+/// share of d2's approved review r2 with her is deleted, so r2 (support of
+/// d2's read, unchanged) is no longer hers to read; d2 itself doesn't
+/// change. On reconnect, d2's support is reached twice: below the new
+/// comment, which ships (so its support is followed whole, with no floor),
+/// and below the held one, which diffs against the resume floor. Only the
+/// second reports what she lost, so neither visit may hide it.
 #[test]
 fn support_reached_below_new_and_held_rows_reports_access_lost_offline() {
-    let (d2, m2_bo, m2_ada) = (id(1, 2), id(2, 3), id(2, 6));
+    let (d2, r2, s2) = (id(1, 2), id(2, 2), id(4, 2));
     // Sorts before c2, so the walk reaches d2 below it first.
     let (c_new, c2) = (id(3, 0), id(3, 2));
-    let server = open(docs_schema(), 0, AuthorSubject::SYSTEM);
-    seed_docs(&server);
+    let server = open(reviews_schema(), 0, AuthorSubject::SYSTEM);
+    seed(&server, "docs", d2, cells(&[("owner", subject(ADA))]));
     seed(
         &server,
-        "members",
-        m2_ada,
-        cells(&[("doc_id", uuid(d2)), ("user_id", subject(ADA))]),
+        "reviews",
+        r2,
+        cells(&[("doc_id", uuid(d2)), ("state", "approved".into())]),
     );
-    let tables = ["comments", "docs", "members"];
+    seed(
+        &server,
+        "shares",
+        s2,
+        cells(&[("review", uuid(r2)), ("user_id", subject(ADA))]),
+    );
+    seed(
+        &server,
+        "comments",
+        c2,
+        cells(&[("doc", uuid(d2)), ("body", "c".into())]),
+    );
+    let tables = ["comments", "docs", "reviews"];
 
-    let ada = open(docs_schema(), 1, user(ADA));
+    let ada = open(reviews_schema(), 1, user(ADA));
     let (link, _log) = connect(&server, &ada, user(ADA));
     let comments = ada.prepare_query(&Query::from("comments")).unwrap();
     let _live = block_on(ada.subscribe(&comments, ReadOpts::default())).unwrap();
     pump(&server, &ada);
     let now = ids(&held(&ada, &tables));
     assert!(
-        now["members"].contains(&m2_bo) && now["members"].contains(&m2_ada),
-        "Ada reads d2's members as one of them: {now:?}"
+        now["reviews"].contains(&r2),
+        "Ada reads d2's approved review through its share: {now:?}"
     );
 
     assert!(ada.detach_connection(&link));
@@ -789,7 +851,7 @@ fn support_reached_below_new_and_held_rows_reports_access_lost_offline() {
         c_new,
         cells(&[("doc", uuid(d2)), ("body", "c".into())]),
     );
-    block_on(server.delete("members", m2_ada, Default::default())).unwrap();
+    block_on(server.delete("shares", s2, Default::default())).unwrap();
     let (_link, log) = connect(&server, &ada, user(ADA));
     pump(&server, &ada);
     let sent = Sent::take(&log);
@@ -799,11 +861,11 @@ fn support_reached_below_new_and_held_rows_reports_access_lost_offline() {
         "{now:?}"
     );
     assert!(
-        sent.lost.contains(&("members".to_owned(), m2_bo)),
-        "the server reports Bo's membership of d2 lost: {sent:?}"
+        sent.lost.contains(&("reviews".to_owned(), r2)),
+        "the server reports d2's review lost: {sent:?}"
     );
     assert!(
-        !ids(&now)["members"].contains(&m2_bo),
+        !ids(&now)["reviews"].contains(&r2),
         "and the replica drops it: {now:?}"
     );
 }
