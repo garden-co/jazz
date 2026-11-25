@@ -472,7 +472,8 @@ impl E2eeClient {
                 .space
                 .as_ref()
                 .is_some_and(|space| space.root_id() == root_id)
-            && let Ok(revision) = self
+        {
+            match self
                 .store
                 .save(
                     &self.scope,
@@ -482,8 +483,11 @@ impl E2eeClient {
                     Some(stored.revision),
                 )
                 .await
-        {
-            state.revision = Some(revision);
+            {
+                Ok(revision) => state.revision = Some(revision),
+                Err(StoreError::Wiped) => return Err(self.close()),
+                Err(_) => {}
+            }
         }
         let space = match loaded.space {
             Some(space) if space.is_empty() => {
