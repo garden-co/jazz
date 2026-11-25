@@ -2867,6 +2867,16 @@ impl<'a> Ctx<'a> {
     }
 
     fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+        let src = self.resolve_src(rel, column)?;
+        Ok(match &src.table {
+            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
+            None if column.column == "id" => format!("{}.id", src.alias),
+            None => format!("{}.{}", src.alias, quote(&column.column)),
+        })
+    }
+
+    /// The source of `rel` a relation column names.
+    fn resolve_src<'r>(&self, rel: &'r Rel, column: &RelationColumnRef) -> Result<&'r Src, Error> {
         let has = |src: &Src| match &src.table {
             Some(table) => self.schema.tables[table].has_column(&column.column),
             None => column.column == "id",
@@ -2885,30 +2895,18 @@ impl<'a> Ctx<'a> {
                 "relation column {column:?} does not exist"
             )));
         }
-        Ok(match &src.table {
-            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
-            None if column.column == "id" => format!("{}.id", src.alias),
-            None => format!("{}.{}", src.alias, quote(&column.column)),
-        })
+        Ok(src)
     }
 
-    /// [`Self::resolve`] as an operand.
+    /// [`Self::resolve`] as an operand: a table's column as
+    /// [`Self::column_term`] makes it (an author part seeks by code, see
+    /// [`AuthorPart`]).
     fn resolve_term(&self, rel: &Rel, column: &RelationColumnRef) -> Result<Term, Error> {
-        let sql = self.resolve(rel, column)?;
-        let src = rel.from.iter().find(|src| {
-            src.table.as_ref().is_some_and(|table| {
-                sql.starts_with(&format!("{}.", src.alias))
-                    && self.schema.tables[table].has_column(&column.column)
-            })
-        });
-        Ok(match src.and_then(|src| Some((src, src.table.as_ref()?))) {
-            // The same SQL as `sql`, as the column's operand (an author
-            // part seeks by code, see [`AuthorPart`]).
-            Some((src, table)) => {
-                self.column_term(&self.schema.tables[table], &src.alias, &column.column)?
-            }
-            None => Term::Sql(sql),
-        })
+        let src = self.resolve_src(rel, column)?;
+        match &src.table {
+            Some(table) => self.column_term(&self.schema.tables[table], &src.alias, &column.column),
+            None => Ok(Term::Sql(self.resolve(rel, column)?)),
+        }
     }
 
     fn row_id(
@@ -3002,14 +3000,11 @@ impl<'a> Ctx<'a> {
     /// The type of relation column `column` (nullability removed), when it
     /// resolves to a table's column.
     fn rel_column_type(&self, rel: &Rel, column: &RelationColumnRef) -> Option<ValueType> {
-        let sql = self.resolve(rel, column).ok()?;
-        rel.from.iter().find_map(|src| {
-            let table = &self.schema.tables[src.table.as_ref()?];
-            (sql.starts_with(&format!("{}.", src.alias)) && table.has_column(&column.column))
-                .then(|| table.column_type(&column.column))
-                .flatten()
-                .map(|ty| unwrap_nullable_type(ty).clone())
-        })
+        let src = self.resolve_src(rel, column).ok()?;
+        let table = &self.schema.tables[src.table.as_ref()?];
+        table
+            .column_type(&column.column)
+            .map(|ty| unwrap_nullable_type(ty).clone())
     }
 
     fn rel_predicate(

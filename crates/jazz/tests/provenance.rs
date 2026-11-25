@@ -926,3 +926,129 @@ fn creator_policies_seek_the_readers_rows_whatever_the_table_holds() {
         );
     }
 }
+
+/// #6378, the other shapes of an author comparison: `$updatedBy`, an `IN`
+/// list, the exact login, and the same comparison inside a relation each
+/// look the matching authors up once (`LIST SUBQUERY`) instead of once
+/// per row; the policy's own table seeks its author index.
+#[test]
+fn author_comparisons_look_their_authors_up_once() {
+    use jazz::tools::public_schema::{
+        RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationValueRef,
+    };
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue};
+    let account = |n: u8| jazz::account_registry::AccountId(uuid::Uuid::from_bytes([n; 16]));
+    let login = |subject: &str, n: u8| {
+        AuthorSubject::authenticated("https://issuer.example", subject)
+            .unwrap()
+            .with_account(account(n))
+    };
+    let (alice, bob) = (login("alice", 0x0a), login("bob", 0x0b));
+    let session =
+        |path: &[&str]| PolicyValue::SessionRef(path.iter().map(|p| (*p).to_owned()).collect());
+    let mine = |column: &str| RelationPredicate::Cmp {
+        left: RelationColumnRef {
+            scope: Some("mine".to_owned()),
+            column: column.to_owned(),
+        },
+        op: RelationCmpOp::Eq,
+        right: RelationValueRef::SessionRef(vec!["user".to_owned()]),
+    };
+    let cases = [
+        (
+            "updatedBy",
+            PolicyExpr::Cmp {
+                column: "$updatedBy.account".to_owned(),
+                op: CmpOp::Eq,
+                value: session(&["user"]),
+            },
+            Some("notes__ix($updatedBy)"),
+        ),
+        (
+            "in list",
+            PolicyExpr::InList {
+                column: "$createdBy.account".to_owned(),
+                values: vec![PolicyValue::Literal(jazz::tools::Value::Uuid(
+                    jazz::tools::ObjectId::from_uuid(account(0x0a).0),
+                ))],
+            },
+            Some("notes__ix($createdBy)"),
+        ),
+        (
+            "exact login",
+            PolicyExpr::Cmp {
+                column: "$createdBy.identity".to_owned(),
+                op: CmpOp::Eq,
+                value: session(&["identity"]),
+            },
+            Some("notes__ix($createdBy)"),
+        ),
+        (
+            "relation",
+            PolicyExpr::ExistsRel {
+                rel: RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "notes".into(),
+                        alias: Some("mine".to_owned()),
+                    }),
+                    predicate: mine("$createdBy.account"),
+                },
+            },
+            None,
+        ),
+    ];
+    for (name, policy, index) in cases {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .policies(common::read_and_allow_all_writes(policy)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([3; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        for n in 0..12u8 {
+            block_on(db.insert(
+                "notes",
+                body("x"),
+                InsertOptions {
+                    row_id: Some(row(n + 1)),
+                    identity: WriteIdentity::Session(if n < 2 {
+                        alice.clone()
+                    } else {
+                        bob.clone()
+                    }),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+        let visible = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice.clone()))
+            .unwrap()
+            .len();
+        // The relation holds for every row once Alice wrote any.
+        let expected = if name == "relation" { 12 } else { 2 };
+        assert_eq!(visible, expected, "{name}");
+        let (_, plan) = block_on(db.explain_query_plan(&prepared, Some(alice.clone()))).unwrap();
+        assert!(plan.contains("LIST SUBQUERY"), "{name}: {plan}");
+        assert!(
+            !plan.contains("CORRELATED SCALAR SUBQUERY"),
+            "{name}: {plan}"
+        );
+        if let Some(index) = index {
+            assert!(
+                plan.contains(&format!("SEARCH t USING INDEX {index}")),
+                "{name}: {plan}"
+            );
+        }
+    }
+}
