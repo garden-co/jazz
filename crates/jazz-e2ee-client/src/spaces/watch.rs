@@ -31,6 +31,8 @@ pub struct SpaceWatch {
     watched: BTreeSet<SpaceAddress>,
     /// Spaces whose subscriptions or pending reports already had an acquisition pass.
     interest: BTreeSet<SpaceAddress>,
+    /// Spaces whose latest watch-triggered check did not complete a delivery pass.
+    unserved: BTreeSet<SpaceAddress>,
     /// The current versions whose deliveries the shared watch covers.
     epochs: BTreeSet<String>,
     /// How many open app subscriptions use each space.
@@ -38,6 +40,10 @@ pub struct SpaceWatch {
 }
 
 impl SpaceWatch {
+    pub(super) fn covers_delivery(&self, space: &SpaceAddress) -> bool {
+        self.interest.contains(space) && !self.unserved.contains(space)
+    }
+
     /// An app subscription on an encrypted table opened and its rows are of
     /// `space`: the space joins the watched set (counted). The runtime
     /// cannot see subscriptions open and close, so the binding that
@@ -169,9 +175,9 @@ impl E2eeClient {
             .collect()
     }
 
-    /// Opens the shared subscriptions of the spaces in `interest`, one per
-    /// system table, when the set, or a current version, changed since they
-    /// were opened; the new ones are open before the old ones close.
+    /// Updates the shared subscriptions when their space set changes, or
+    /// only the delivery subscription when the current versions change.
+    /// New streams open before the ones they replace close.
     pub(super) async fn refresh_shared(
         &self,
         db: &Db,
@@ -181,10 +187,9 @@ impl E2eeClient {
         let mut covered = self.shared.recent_writes();
         covered.extend(interest.iter().cloned());
         let epochs = self.current_epochs(&covered);
-        if covered == watch.watched
-            && epochs == watch.epochs
-            && self.shared.member_watch.borrow().covered == covered
-        {
+        let replace_all =
+            covered != watch.watched || self.shared.member_watch.borrow().covered != covered;
+        if !replace_all && epochs == watch.epochs {
             self.refresh_accounts(db, watch).await?;
             return Ok(());
         }
@@ -192,6 +197,9 @@ impl E2eeClient {
         let versions: Vec<String> = epochs.iter().cloned().collect();
         let mut streams = Vec::new();
         for (table, query) in space_queries(&spaces, &versions) {
+            if !replace_all && table != rows::SPACE_DELIVERIES {
+                continue;
+            }
             streams.push((
                 table,
                 WatchedRows::new(
@@ -203,11 +211,29 @@ impl E2eeClient {
         self.shared.notice_member_changes();
         {
             let mut members = self.shared.member_watch.borrow_mut();
-            for deps in members.spaces.values_mut() {
-                deps.version = None;
+            // Compare the new streams' openings to the last observed rows.
+            // A row at the same position is not a change in the ledger.
+            for (table, stream) in &mut streams {
+                if let Some((_, previous)) =
+                    members.space_streams.iter_mut().find(|(t, _)| t == table)
+                {
+                    stream.rows = std::mem::take(&mut previous.rows);
+                }
             }
-            members.space_streams = streams;
-            members.covered = covered.clone();
+            if replace_all {
+                for deps in members.spaces.values_mut() {
+                    deps.version = None;
+                }
+                members.space_streams.clear();
+                members.covered = covered.clone();
+            } else {
+                // A retained stream may have closed while the new stream
+                // opened. Leave its coverage invalidated for the next refresh.
+                members
+                    .space_streams
+                    .retain(|(table, _)| *table != rows::SPACE_DELIVERIES);
+            }
+            members.space_streams.extend(streams);
         }
         watch.watched = covered;
         watch.epochs = epochs;
@@ -279,13 +305,14 @@ impl E2eeClient {
             let query = db.prepare_query(&account_query(table, &listed))?;
             let stream = db.subscribe(&query, Default::default()).await?;
             self.shared.notice_member_changes();
-            self.shared.member_watch.borrow_mut().streams.insert(
-                table,
-                crate::state::AccountStream {
-                    accounts,
-                    rows: WatchedRows::new(stream),
-                },
-            );
+            let mut members = self.shared.member_watch.borrow_mut();
+            let mut rows = WatchedRows::new(stream);
+            if let Some(previous) = members.streams.remove(table) {
+                rows.rows = previous.rows.rows;
+            }
+            members
+                .streams
+                .insert(table, crate::state::AccountStream { accounts, rows });
         }
         Ok(())
     }
@@ -313,6 +340,7 @@ impl E2eeClient {
             own,
             watched: BTreeSet::new(),
             interest: BTreeSet::new(),
+            unserved: BTreeSet::new(),
             epochs: BTreeSet::new(),
             uses: Default::default(),
         })
@@ -450,6 +478,7 @@ impl E2eeClient {
         }
         served.extend(interest.difference(&watch.interest).cloned());
         watch.interest.clone_from(&interest);
+        watch.unserved.retain(|space| interest.contains(space));
         served.extend(members_changed.intersection(&interest).cloned());
         let mut results = Vec::new();
         for space in served {
@@ -502,6 +531,13 @@ impl E2eeClient {
                 && let Err(error) = self.repair_auto(db, &space).await
             {
                 state = Err(error);
+            }
+            if interest.contains(&space) {
+                if !needs_pass || state.is_err() {
+                    watch.unserved.insert(space.clone());
+                } else {
+                    watch.unserved.remove(&space);
+                }
             }
             results.push((db_address(&space), state));
         }

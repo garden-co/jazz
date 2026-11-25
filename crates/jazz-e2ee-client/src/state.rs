@@ -573,7 +573,7 @@ pub(crate) struct WatchedMembers {
 /// row so changes can be routed to the accounts or spaces they affect.
 pub(crate) struct WatchedRows<K> {
     pub stream: jazz::db::SubscriptionStream,
-    pub rows: BTreeMap<RowUuid, K>,
+    pub rows: BTreeMap<RowUuid, (K, jazz::db::Pos)>,
 }
 
 impl<K: Ord + Clone> WatchedRows<K> {
@@ -601,17 +601,29 @@ impl<K: Ord + Clone> WatchedRows<K> {
                     reset,
                     ..
                 } => {
-                    if reset {
-                        changed.extend(std::mem::take(&mut self.rows).into_values());
-                    }
+                    let mut previous = if reset {
+                        std::mem::take(&mut self.rows)
+                    } else {
+                        BTreeMap::new()
+                    };
                     for row in added.into_iter().chain(updated) {
                         if let Some(key) = owner(&row) {
-                            changed.insert(key.clone());
-                            changed.extend(self.rows.insert(row.row_uuid(), key));
+                            let entry = (key, row.seq());
+                            let before = if reset {
+                                previous.remove(&row.row_uuid())
+                            } else {
+                                self.rows.remove(&row.row_uuid())
+                            };
+                            if !reset || before.as_ref() != Some(&entry) {
+                                changed.insert(entry.0.clone());
+                                changed.extend(before.map(|(key, _)| key));
+                            }
+                            self.rows.insert(row.row_uuid(), entry);
                         }
                     }
+                    changed.extend(previous.into_values().map(|(key, _)| key));
                     for row in removed {
-                        changed.extend(self.rows.remove(&row.row_uuid));
+                        changed.extend(self.rows.remove(&row.row_uuid).map(|(key, _)| key));
                     }
                 }
                 SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => {
@@ -659,15 +671,21 @@ pub(crate) struct MemberWatch {
 }
 
 impl MemberWatch {
-    /// After a gap in coverage, a watched space needs fresh evidence before its next write.
-    pub(crate) fn invalidate_coverage(&mut self, keys: &mut KeyState) {
-        self.covered.clear();
+    /// After a gap, the next write must check the authority even if a
+    /// live subscription will eventually catch up.
+    pub(crate) fn invalidate_rotation_checks(&mut self, keys: &mut KeyState) {
         for (space, deps) in &mut self.spaces {
             deps.version = None;
             keys.rotation_evaluated.remove(space);
             keys.space_removals.remove(space);
-            self.changed.insert(space.clone());
         }
+    }
+
+    /// A closed stream must be reopened and its spaces checked again.
+    pub(crate) fn invalidate_coverage(&mut self, keys: &mut KeyState) {
+        self.covered.clear();
+        self.invalidate_rotation_checks(keys);
+        self.changed.extend(self.spaces.keys().cloned());
     }
 }
 

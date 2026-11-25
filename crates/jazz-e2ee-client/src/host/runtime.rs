@@ -1359,6 +1359,7 @@ async fn main_loop(this: Rc<Encryption>) {
     let mut backoff = RETRY_FIRST;
     let mut retry_at: Option<web_time::Instant> = None;
     let mut start = true;
+    let mut reconnect = false;
     let mut approval: Option<(String, _)> = None;
     let mut noticed = false;
     let mut retry_challenge_at = None;
@@ -1378,10 +1379,9 @@ async fn main_loop(this: Rc<Encryption>) {
             verify = true;
         }
         if this.reconnected.replace(false) {
-            // Back online: verify the account again and run the pass at the
-            // natural moment once the subscriptions have caught up.
+            // The retained subscriptions catch up through the normal sync path.
             verify = true;
-            start = true;
+            reconnect = true;
         }
         if retry_at.is_some_and(|at| web_time::Instant::now() >= at) {
             retry_at = None;
@@ -1580,7 +1580,9 @@ async fn main_loop(this: Rc<Encryption>) {
                         watch.release_space(&space);
                     }
                 }
-                if let Err(error) = Box::pin(client.sync_spaces(&db, watch)).await {
+                let synced = Box::pin(client.sync_spaces(&db, watch)).await;
+                let covered = synced.is_ok();
+                if let Err(error) = synced {
                     *this.last_error.borrow_mut() = Some(describe(error));
                 }
                 loop {
@@ -1601,11 +1603,11 @@ async fn main_loop(this: Rc<Encryption>) {
                     };
                     let _ = reply.send(outcome);
                 }
-                // At the natural moments only (start, reconnect, the app's
-                // call): a change a watch sees was served by `sync_spaces`.
-                if start {
+                if start || reconnect {
+                    let retained = (!start && covered).then_some(&*watch);
                     start = false;
-                    if let Err(error) = client.deliver_keys(&db).await {
+                    reconnect = false;
+                    if let Err(error) = client.deliver_keys_outside_watch(&db, retained).await {
                         *this.last_error.borrow_mut() = Some(describe(error));
                     }
                 }

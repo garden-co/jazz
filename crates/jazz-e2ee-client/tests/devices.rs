@@ -712,6 +712,168 @@ fn the_first_write_after_reconnecting_checks_a_subscribed_space() {
     });
 }
 
+/// Alice keeps her spaces open while her first device disconnects. Her
+/// second device rotates one space and adds Bob to another. The first
+/// device sees the new epoch and delivers the other space's key to Bob.
+/// A quiet reconnect needs no one-shot reads of the watched spaces.
+#[test]
+fn reconnect_reads_space_and_membership_changes() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let (alice, bob) = (account(0xa1), account(0xb0));
+        let client = open_account(memory(), alice, settings.clone(), None);
+        let (db, link, _) = recorded_session(&client, &server, alice, &settings, 1, None);
+        let first = Device {
+            client,
+            db,
+            notes: None,
+            _link: link,
+        };
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let mut second = device(&server, alice, memory(), 2, &settings);
+        second.status(&server, &[&first]);
+        approve(&server, &first, &second);
+        assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
+        let bob_device = device(&server, bob, memory(), 3, &settings);
+        assert_eq!(bob_device.status(&server, &[]), AccountStatus::Active);
+
+        let spaces: Vec<_> = (0..6)
+            .map(|_| space_with_a_note(&server, &first, &account_id(alice)))
+            .collect();
+        let rotate = space_address(&first, spaces[0]);
+        second.follow_notes(&server);
+        assert_eq!(notes_of(&server, &second, spaces[0]).len(), 1);
+
+        let client = Rc::new(first.client);
+        let db = Rc::new(first.db);
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: client.clone(),
+                reports: Rc::default(),
+            },
+            Rc::new(JsStore::default()),
+            db.clone(),
+        );
+        for space in &spaces {
+            runtime.use_space(true, "projects".to_owned(), space.to_string());
+        }
+        let settle = || {
+            for _ in 0..10 {
+                pump(&server, &db);
+                drive(&server, &[&db], async {
+                    loop {
+                        runtime.drive();
+                        let state = runtime.state();
+                        assert!(state["error"].is_null(), "{state}");
+                        if state["status"] == "active" && state["stage"] == "idle" {
+                            break;
+                        }
+                        futures::pending!();
+                    }
+                });
+            }
+        };
+        let reconnect = |label| {
+            let started = std::time::Instant::now();
+            let (link, wire) = link_as(&db, &server, alice);
+            runtime.set_online(true);
+            settle();
+            let elapsed = started.elapsed();
+            let wire = wire.borrow();
+            let mut remaining = wire.as_slice();
+            let (mut live, mut once, mut space_roots, mut unchanged_roots) = (0, 0, 0, 0);
+            while !remaining.is_empty() {
+                let (message, rest) = postcard::take_from_bytes::<SyncMessage>(remaining).unwrap();
+                if let SyncMessage::Read { query, span, .. } = message {
+                    match span {
+                        ReadSpan::Live => live += 1,
+                        ReadSpan::Once { .. } => {
+                            once += 1;
+                            if query.table == "__e2ee_spaces" {
+                                space_roots += 1;
+                                unchanged_roots += usize::from(spaces[2..].iter().any(|space| {
+                                    query
+                                        .filters
+                                        .contains(&eq(col("identifier"), lit(Value::Uuid(*space))))
+                                }));
+                            }
+                        }
+                    }
+                }
+                remaining = rest;
+            }
+            eprintln!(
+                "{label}: {live} live, {once} one-shot, {space_roots} space root reads ({unchanged_roots} unchanged), {elapsed:?}"
+            );
+            (link, space_roots, unchanged_roots)
+        };
+        settle();
+        runtime.set_online(false);
+        assert!(db.detach_connection(&first._link));
+        let (link, quiet_roots, _) = reconnect("quiet reconnect");
+
+        runtime.set_online(false);
+        assert!(db.detach_connection(&link));
+        drive(
+            &server,
+            &[&second.db],
+            second.client.rotate(&second.db, &rotate),
+        )
+        .unwrap();
+        let member = std::collections::BTreeMap::from([
+            (
+                "scopeId".to_owned(),
+                Value::Uuid(rotate.scope_id.parse().unwrap()),
+            ),
+            ("identifier".to_owned(), Value::Uuid(spaces[1])),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(account_id(bob).parse().unwrap()),
+            ),
+        ]);
+        block_on(
+            second
+                .db
+                .insert("__e2ee_members", member, Default::default()),
+        )
+        .unwrap();
+        pump(&server, &second.db);
+
+        let address = jazz_e2ee::protocol::records::space::SpaceAddress::new(
+            &rotate.scope_id,
+            &rotate.identifier,
+        )
+        .unwrap();
+        let epochs = || client.with_held(|keys| keys.known(&address).unwrap().epochs().len());
+        let deliveries = || {
+            all(
+                &server,
+                Query::from("__e2ee_space_deliveries")
+                    .filter(eq(col("identifier"), lit(Value::Uuid(spaces[1]))))
+                    .filter(eq(
+                        col("recipientAccountId"),
+                        lit(Value::Uuid(account_id(bob).parse().unwrap())),
+                    )),
+            )
+            .unwrap()
+            .len()
+        };
+        assert_eq!(epochs(), 1);
+        assert_eq!(deliveries(), 0);
+        let (_link, _, unchanged_roots) = reconnect("reconnect after offline changes");
+        assert_eq!(
+            (epochs(), deliveries()),
+            (2, 1),
+            "the first device sees the new space epoch and delivers Bob's key"
+        );
+        assert_eq!(quiet_roots, 0, "no watched space changed");
+        assert_eq!(unchanged_roots, 0, "only the changed spaces need a pass");
+        runtime.stop();
+    });
+}
+
 /// Alice's member subscription fails while her link stays online. Bob removes
 /// a device before she receives that change, so her first write must check
 /// the authority and rotate.

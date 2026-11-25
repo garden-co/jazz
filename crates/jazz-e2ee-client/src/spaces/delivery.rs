@@ -24,7 +24,7 @@ use jazz_e2ee::protocol::space::members::{
     DELIVERY_BATCH, lacking_held, rotation_mark, rotation_recipients,
 };
 
-use super::{ATTEMPTS, Replayed, SpaceReadPurpose, offline, protocol_address};
+use super::{ATTEMPTS, Replayed, SpaceReadPurpose, SpaceWatch, offline, protocol_address};
 use crate::account::has_removed_devices;
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
@@ -241,18 +241,30 @@ impl E2eeClient {
         Ok(total)
     }
 
-    /// The pass over every space this device holds keys of: what the host
-    /// calls at its natural moments (when the app starts or reconnects, and
-    /// when it wants new members served now). Each space's pass reads the
-    /// authority, so a member added to a space nothing was watching is
-    /// seen. One space's failure does not stop the others.
+    /// The pass over every held space when the app starts or asks to serve
+    /// new members now. Each pass reads the authority, so it can see members
+    /// added to an unwatched space. A failure in one space leaves the others
+    /// free to run.
     pub async fn deliver_keys(
         &self,
         db: &Db,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
+        self.deliver_keys_outside_watch(db, None).await
+    }
+
+    /// Retained watches catch up on reconnect. Read the authority for held
+    /// spaces without a watch-driven pass, including failed passes.
+    pub(crate) async fn deliver_keys_outside_watch(
+        &self,
+        db: &Db,
+        watch: Option<&SpaceWatch>,
+    ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
         let held: BTreeSet<SpaceAddress> = self.held_addresses().into_iter().collect();
         let mut results = Vec::new();
         for space in held {
+            if watch.is_some_and(|watch| watch.covers_delivery(&space)) {
+                continue;
+            }
             let mut outcome = self.deliver_pass(db, &space).await;
             if outcome.is_ok()
                 && self.holds_refused_key(&space)

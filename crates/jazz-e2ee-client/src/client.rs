@@ -525,7 +525,7 @@ impl E2eeClient {
             self.shared
                 .member_watch
                 .borrow_mut()
-                .invalidate_coverage(&mut keys);
+                .invalidate_rotation_checks(&mut keys);
         }
         keys.online = online;
     }
