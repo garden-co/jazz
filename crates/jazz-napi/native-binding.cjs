@@ -85,5 +85,6 @@ function missingPlatformPackageGuidance() {
     version = require("./package.json").version;
   } catch {}
   const name = `@garden-co/jazz-napi-${suffix}`;
-  return `Install ${name}${version ? `@${version}` : ""}: npm installs it as an optional dependency of jazz-napi, unless optional dependencies are omitted or node_modules (or the lockfile) was created on another platform.`;
+  const spec = `${name}${version ? `@${version}` : ""}`;
+  return `Install ${spec}: npm installs it as an optional dependency of jazz-napi, unless optional dependencies are omitted or node_modules (or the lockfile) was created on another platform. To keep it in a lockfile written on another platform, add "${name}": "${version || "<jazz-tools version>"}" to your app's optionalDependencies.`;
 }

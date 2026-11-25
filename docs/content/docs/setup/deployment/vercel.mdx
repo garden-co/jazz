@@ -83,6 +83,21 @@ their own OIDC token, and the core's secrets are generated inside the Sandbox, s
 environment variables of its own. Your auth may: Better Auth, for example, needs
 `BETTER_AUTH_SECRET` in each environment.
 
+Jazz's native module comes in one package per platform, `@garden-co/jazz-napi-linux-x64-gnu` on
+Vercel, which npm installs as an optional dependency of `jazz-napi`. npm 10 can leave it out of a
+`package-lock.json` written on a Mac, when the lockfile was regenerated over an existing
+`node_modules`. The deployment then fails with "Jazz NAPI artifact is missing. Install
+@garden-co/jazz-napi-linux-x64-gnu@…". To keep it in the lockfile whatever machine writes it, list
+it in your app's own optional dependencies, at your `jazz-tools` version:
+
+```json title="package.json"
+{
+  "optionalDependencies": {
+    "@garden-co/jazz-napi-linux-x64-gnu": "<your jazz-tools version>"
+  }
+}
+```
+
 On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
 `next dev`, which can't upgrade sockets, the browser
 switches to an HTTP stream on its own.
