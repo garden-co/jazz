@@ -1612,6 +1612,43 @@ fn watching_a_new_space_withdraws_the_space_pending_report() {
     });
 }
 
+/// Contract: an equality-filtered read of a space that has no root yet is
+/// refused, not answered with no rows: bob, a member, has no key to make
+/// the value's token with, so the read fails `key-pending` for that space
+/// (the refusal a binding acquires the key on).
+///
+/// ```text
+/// bob ──notes where projectId = P and body = SECRET──► ✗ key-pending for P (no root yet)
+/// ```
+#[test]
+fn an_equality_read_of_a_space_without_a_root_is_refused() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (_alice, bob, space) = two_members(&server);
+        let query = Query::from("notes")
+            .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+            .filter(eq(col("body"), lit(text(SECRET))));
+        let refused = drive(
+            &server,
+            &[&bob.db],
+            host_read(&bob.client, &bob.db, async || {
+                let prepared = bob.db.prepare_query(&query)?;
+                bob.db.all(&prepared, local()).await
+            }),
+        );
+        match refused {
+            Err(ClientError::Database(error)) => assert_eq!(
+                jazz::e2ee::E2eeRefusal::of(&error),
+                Some(jazz::e2ee::E2eeRefusal::NeedsKey {
+                    space: space_address(&bob, space)
+                }),
+                "{error:?}"
+            ),
+            other => panic!("expected a key-pending refusal, got {other:?}"),
+        }
+    });
+}
+
 /// Contract: a creation the authority refused as a whole (root and note
 /// together: neither exists on the server) is found refused after the
 /// device restarts, from its own store: the key is `refused` and never
@@ -3726,7 +3763,9 @@ fn deliver_space_sees_a_sealing_key_that_appeared_after_a_quiet_pass() {
 
 /// Contract: a member that holds only an older version (it was removed,
 /// the space was rotated, and it was added again) delivers nothing: the
-/// version new members lack is one it does not hold.
+/// version new members lack is one it does not hold. Not holding the
+/// current version, its pass doesn't check the rotation mark either; a
+/// holder's does.
 #[test]
 fn a_member_holding_only_an_older_version_does_not_deliver() {
     within(|| {
@@ -3773,13 +3812,21 @@ fn a_member_holding_only_an_older_version_does_not_deliver() {
         let before = count(&server, "__e2ee_space_deliveries");
 
         // Bob holds the first version only: he has nothing dave lacks.
+        let checks = bob.client.delivery_mark_checks();
         assert_eq!(deliver(&server, &bob, &[&alice], space), 0);
         assert_eq!(count(&server, "__e2ee_space_deliveries"), before);
+        assert_eq!(
+            bob.client.delivery_mark_checks(),
+            checks,
+            "bob lacks the current version"
+        );
+        let checks = alice.client.delivery_mark_checks();
         assert_eq!(
             deliver(&server, &alice, &[&bob], space),
             2,
             "alice serves dave and bob"
         );
+        assert!(alice.client.delivery_mark_checks() > checks);
     });
 }
 

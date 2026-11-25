@@ -365,10 +365,15 @@ mod tests {
             (ColumnType::Uuid, "Uuid"),
             (ColumnType::Bytea, "Bytea"),
         ] {
-            assert_eq!(
-                encoded(column_type, true),
-                format!(r#"{{"column_type":{{"type":"{name}"}},"nullable":true}}"#)
-            );
+            // Both nullabilities: a required column's cells (a Text
+            // `nullable:false`, say) bind `false`, and older cells keep opening
+            // only while that stays its spelling.
+            for nullable in [true, false] {
+                assert_eq!(
+                    encoded(column_type.clone(), nullable),
+                    format!(r#"{{"column_type":{{"type":"{name}"}},"nullable":{nullable}}}"#)
+                );
+            }
         }
         assert_eq!(
             encoded(
