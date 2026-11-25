@@ -756,26 +756,10 @@ impl Encryption {
         self: &Rc<Self>,
         space: &SpaceAddress,
         deadline: web_time::Instant,
-        mut repeated: bool,
+        repeated: bool,
         submit: impl Fn(LocalBoxFuture<'static, ()>),
     ) -> Result<WriteRetry, String> {
-        let remaining = || deadline.saturating_duration_since(web_time::Instant::now());
-        let fallback = |reason: &str| {
-            self.client
-                .retry_with_current_key(space, reason)
-                .map_err(describe)
-        };
-        loop {
-            if repeated {
-                within(
-                    std::future::pending::<()>(),
-                    remaining().min(Duration::from_millis(200)),
-                )
-                .await;
-            }
-            if remaining().is_zero() {
-                break;
-            }
+        self.retry_until(space, deadline, repeated, || {
             let runtime = self.clone();
             let address = space.clone();
             let (send, answer) = futures::channel::oneshot::channel();
@@ -783,7 +767,41 @@ impl Encryption {
                 let result = runtime.prepare_host_write(&address, Some(deadline)).await;
                 let _ = send.send(result);
             }));
-            match within(answer, remaining()).await {
+            answer
+        })
+        .await
+    }
+
+    /// The loop of [`Self::retry_write_with`]: `prepare` starts a
+    /// preparation and answers whether the write may be tried again (`Err`
+    /// when the preparation was dropped unanswered). While it answers "not
+    /// yet", ask again every 200 ms until the deadline.
+    async fn retry_until<A>(
+        &self,
+        space: &SpaceAddress,
+        deadline: web_time::Instant,
+        mut repeated: bool,
+        mut prepare: impl FnMut() -> A,
+    ) -> Result<WriteRetry, String>
+    where
+        A: Future<Output = Result<Result<bool, String>, futures::channel::oneshot::Canceled>>
+            + Unpin,
+    {
+        let remaining = || deadline.saturating_duration_since(self.client.shared.now());
+        let fallback = |reason: &str| {
+            self.client
+                .retry_with_current_key(space, reason)
+                .map_err(describe)
+        };
+        loop {
+            if repeated {
+                self.pause(remaining().min(Duration::from_millis(200)))
+                    .await;
+            }
+            if remaining().is_zero() {
+                break;
+            }
+            match within(prepare(), remaining()).await {
                 Some(Ok(Ok(true))) => return Ok(WriteRetry::Retry),
                 Some(Ok(Ok(false))) => repeated = true,
                 Some(Ok(Err(reason))) if fallback(&reason)? => return Ok(WriteRetry::Last),
@@ -797,6 +815,18 @@ impl Encryption {
         } else {
             WriteRetry::Stop
         })
+    }
+
+    /// Waits `duration` before a write asks for its key again. A test that
+    /// holds the runtime clock ([`E2eeClient::advance_settle_clock`]) has
+    /// the wait stepped on that clock instead of slept.
+    async fn pause(&self, duration: Duration) {
+        #[cfg(any(test, feature = "testing"))]
+        if self.client.shared.held_clock.get().is_some() {
+            self.client.advance_settle_clock(duration);
+            return;
+        }
+        within(std::future::pending::<()>(), duration).await;
     }
 
     /// Prepares a native write for which the device is still missing a key.
@@ -2099,6 +2129,47 @@ mod tests {
         drop(busy);
         runtime.drive();
         assert!(runtime.preparations.0.borrow().is_empty());
+        runtime.stop();
+    }
+
+    /// While preparation answers "not yet" (alice's device still waits for
+    /// the key), her write asks again every 200 ms until its deadline, then
+    /// stops. The runtime clock is held, so each wait is stepped on it, never
+    /// slept. A unit test: the preparation's answer is the test's to give.
+    ///
+    /// ```text
+    /// t=0 prepare: not yet ─200 ms─► t=200 not yet ─200 ms─► t=400 not yet
+    ///     ─100 ms (what is left)─► t=500 deadline: stop
+    /// ```
+    #[test]
+    fn a_write_not_yet_ready_asks_again_every_200_ms_until_its_deadline() {
+        let runtime = native_runtime_with_catalogue(true);
+        // An hour ahead of the real clock, so no real-time check expires.
+        runtime
+            .client
+            .advance_settle_clock(Duration::from_secs(3600));
+        let start = runtime.client.shared.now();
+        let deadline = start + Duration::from_millis(500);
+        let space = SpaceAddress {
+            scope_id: uuid::Uuid::new_v4().to_string(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let asked = RefCell::new(Vec::new());
+        let result = run(runtime.retry_until(&space, deadline, false, || {
+            asked.borrow_mut().push(runtime.client.shared.now() - start);
+            futures::future::ready(Ok(Ok(false)))
+        }));
+        assert_eq!(result, Ok(WriteRetry::Stop));
+        assert_eq!(
+            *asked.borrow(),
+            [0, 200, 400].map(Duration::from_millis),
+            "each attempt follows a 200 ms wait"
+        );
+        assert_eq!(
+            runtime.client.shared.now(),
+            deadline,
+            "the last wait ends at the deadline"
+        );
         runtime.stop();
     }
 
