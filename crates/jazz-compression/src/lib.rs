@@ -3,9 +3,6 @@
 //! Wire negotiation, feature bits, and logical message limits remain owned by
 //! `jazz`; this crate owns only codec-specific dependencies and byte transforms.
 
-#[cfg(all(not(feature = "zstd"), feature = "ruzstd"))]
-use ruzstd::io::Read as _;
-
 #[cfg(feature = "lz4")]
 pub fn compress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
     Ok(lz4_flex::compress_prepend_size(payload))
@@ -67,25 +64,18 @@ pub fn decompress_zstd(payload: &[u8], max_decoded_len: usize) -> Result<Vec<u8>
         .map_err(|error| format!("failed to decompress zstd payload: {error}"))
 }
 
-#[cfg(all(not(feature = "zstd"), feature = "ruzstd"))]
+#[cfg(all(not(feature = "zstd"), feature = "zrip"))]
 pub fn decompress_zstd(payload: &[u8], max_decoded_len: usize) -> Result<Vec<u8>, String> {
-    let decoder = ruzstd::decoding::StreamingDecoder::new(payload)
-        .map_err(|error| format!("failed to initialize ruzstd payload: {error}"))?;
-    let mut output = Vec::new();
-    decoder
-        .take(max_decoded_len.saturating_add(1) as u64)
-        .read_to_end(&mut output)
-        .map_err(|error| format!("failed to decompress ruzstd payload: {error}"))?;
-    validate_decoded_len(output.len(), max_decoded_len)?;
-    Ok(output)
+    zrip::decompress_with_limit(payload, max_decoded_len)
+        .map_err(|error| format!("failed to decompress zstd payload: {error}"))
 }
 
-#[cfg(not(any(feature = "zstd", feature = "ruzstd")))]
+#[cfg(not(any(feature = "zstd", feature = "zrip")))]
 pub fn decompress_zstd(_payload: &[u8], _max_decoded_len: usize) -> Result<Vec<u8>, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
-#[cfg(any(feature = "lz4", all(not(feature = "zstd"), feature = "ruzstd")))]
+#[cfg(feature = "lz4")]
 fn validate_decoded_len(len: usize, max_decoded_len: usize) -> Result<(), String> {
     if len > max_decoded_len {
         return Err(format!(
@@ -162,13 +152,13 @@ mod tests {
         assert!(super::decompress_zstd(b"not a zstd frame", 1024).is_err());
     }
 
-    #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
+    #[cfg(all(feature = "zrip", not(feature = "zstd")))]
     #[test]
     fn pure_rust_zstd_decoder_reads_native_zstd_frames() {
         let payload = b"canonical transport payload".repeat(32);
         let compressed = zstd::bulk::compress(&payload, 3).expect("compress fixture");
         assert_eq!(
-            super::decompress_zstd(&compressed, payload.len()).expect("decompress ruzstd"),
+            super::decompress_zstd(&compressed, payload.len()).expect("decompress zrip"),
             payload
         );
         assert!(super::decompress_zstd(&compressed, payload.len() - 1).is_err());

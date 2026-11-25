@@ -47,7 +47,7 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["console_error_panic_hook", "transport-compression-ruzstd"]
+default = ["console_error_panic_hook", "transport-compression-zrip"]
 bench-probes = []
 # A Durable Object's SQL (`ctx.storage.sql`) as a store
 # (`WasmDb.openDurableObject`), and the Jazz core a Durable Object hosts
@@ -63,7 +63,7 @@ durable-object-tests = ["durable-object"]
 browser-bench = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
-transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
+transport-compression-zrip = ["jazz/transport-compression-zrip"]
 
 # `wasm-opt` here REPLACES wasm-pack's defaults, so we must include `-O` ourselves
 # or optimization is silently disabled. `-g` preserves debug info for profiling builds.

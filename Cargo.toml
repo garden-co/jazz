@@ -47,10 +47,6 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
-  # The patched ruzstd fork, published as jazz-ruzstd. Not a member, since its
-  # upstream tests aren't vendored; dev/scripts/publish-crates.mjs adds it
-  # while packaging so it verifies with the crates that depend on it.
-  "vendor/ruzstd",
   "vendor/sqlite-wasm-rs",
 ]
 

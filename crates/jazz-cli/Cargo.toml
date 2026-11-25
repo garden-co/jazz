@@ -22,7 +22,7 @@ path = "src/lib.rs"
 default = ["transport-compression-zstd", "heap-profiling"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
-transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
+transport-compression-zrip = ["jazz/transport-compression-zrip"]
 otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "jazz-server/otel"]
 test = ["jazz/testing", "jazz-server/test"]
 # On Linux, sample `jazz-tools`'s heap all the time and serve it as a pprof

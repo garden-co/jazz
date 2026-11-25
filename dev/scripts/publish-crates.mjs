@@ -26,7 +26,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
-import { cargoMetadata, publishPlan, withVendoredMembers } from "./rust-crates.mjs";
+import { cargoMetadata, publishPlan } from "./rust-crates.mjs";
 
 const CRATES_IO = "https://crates.io/api/v1/crates";
 const USER_AGENT = "jazz-release (https://github.com/garden-co/jazz)";
@@ -218,7 +218,7 @@ async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  withVendoredMembers(main).catch((error) => {
+  main().catch((error) => {
     console.error(error.message);
     process.exit(1);
   });

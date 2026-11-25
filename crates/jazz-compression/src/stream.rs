@@ -203,7 +203,7 @@ impl StreamEncoder {
     }
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd", feature = "ruzstd"))]
+#[cfg(any(feature = "lz4", feature = "zstd", feature = "zrip"))]
 fn err(error: impl std::fmt::Display) -> String {
     format!("channel codec: {error}")
 }
@@ -233,8 +233,8 @@ enum Decoder {
     },
     #[cfg(feature = "zstd")]
     Zstd(zstd::stream::raw::Decoder<'static>),
-    #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
-    Ruzstd(Box<ruzstd::decoding::FrameDecoder>),
+    #[cfg(all(feature = "zrip", not(feature = "zstd")))]
+    Zrip(Box<zrip::push::PushDecoder>),
 }
 
 /// A decoder owns at most one encoded block and bounded codec history. The
@@ -271,8 +271,10 @@ impl StreamDecoder {
                     .map_err(err)?;
                 Decoder::Zstd(decoder)
             }
-            #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
-            Codec::Zstd => Decoder::Ruzstd(Box::default()),
+            #[cfg(all(feature = "zrip", not(feature = "zstd")))]
+            Codec::Zstd => Decoder::Zrip(Box::new(
+                zrip::push::PushDecoder::new().max_window(MAX_STREAM_CHUNK_BYTES as u64),
+            )),
             #[allow(unreachable_patterns)]
             _ => Decoder::Unavailable,
         };
@@ -437,7 +439,7 @@ impl StreamDecoder {
 
     fn process_packet(&mut self, output: &mut [u8]) -> Result<(usize, usize, bool), String> {
         let input = &self.packet[self.packet_position..];
-        #[cfg(not(any(feature = "lz4", feature = "zstd", feature = "ruzstd")))]
+        #[cfg(not(any(feature = "lz4", feature = "zstd", feature = "zrip")))]
         let _ = (input, &output);
         match &mut self.inner {
             Decoder::Unavailable => Err("channel decoder unavailable".into()),
@@ -477,25 +479,13 @@ impl StreamDecoder {
                     all_input && (status.bytes_written < output.len() || status.remaining == 0);
                 Ok((status.bytes_read, status.bytes_written, drained))
             }
-            #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
-            Decoder::Ruzstd(decoder) => {
-                if self.packet_position == 0 {
-                    if self.header {
-                        decoder.init(input).map_err(err)?;
-                        decoder
-                            .set_max_block_output(self.block_limit)
-                            .map_err(err)?;
-                    } else {
-                        decoder
-                            .decode_blocks(
-                                input,
-                                ruzstd::decoding::BlockDecodingStrategy::UptoBlocks(1),
-                            )
-                            .map_err(err)?;
-                    }
-                }
-                let written = decoder.read_streaming(output);
-                Ok((input.len(), written, decoder.streaming_available() == 0))
+            #[cfg(all(feature = "zrip", not(feature = "zstd")))]
+            Decoder::Zrip(decoder) => {
+                // zrip bounds each block's output by the frame window, which
+                // validate_header caps at 64KiB.
+                let progress = decoder.decode(input, output).map_err(err)?;
+                let drained = progress.consumed == input.len() && !decoder.has_pending_output();
+                Ok((progress.consumed, progress.produced, drained))
             }
         }
     }

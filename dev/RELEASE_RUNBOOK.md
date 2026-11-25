@@ -239,7 +239,7 @@ The published crates are exactly the dependency closure of `jazz-app-support`,
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
-jazz-ruzstd  jazz-compression  jazz-text  jazz-types
+jazz-compression  jazz-text  jazz-types
 jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
 jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 ```
@@ -247,9 +247,8 @@ jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 `jazz-core` is the engine (`crates/jazz`, the package formerly named `jazz`;
 `jazz` on crates.io is an unrelated project), and its library is still named `jazz`.
 `jazz-tools` is the CLI (`crates/jazz-cli`, formerly package `jazz-cli`), so `cargo install jazz-tools`
-installs the `jazz-tools` binary. `jazz-ruzstd` is the patched ruzstd fork in
-`vendor/ruzstd` and keeps its upstream version (0.8.3). Every other workspace
-crate has `publish = false`, except `jazz-wasm-tracing` (the wasm-tracing
+installs the `jazz-tools` binary. Every other workspace crate has
+`publish = false`, except `jazz-wasm-tracing` (the wasm-tracing
 fork jazz-wasm uses), which is published last, at its own version. Published crates resolve
 upstream `sqlite-wasm-rs`: the root `[patch.crates-io]` only applies inside
 this workspace (and only to wasm builds).
@@ -284,7 +283,7 @@ crates are published with a short-lived token the first time:
    for exactly the new crates. Store it as the `CRATES_IO_BOOTSTRAP_TOKEN`
    secret of the `publish` environment (Settings → Environments → publish).
    Don't paste it anywhere else. The new crates are:
-   jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
+   jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
 3. **Publish:** `release-publish.yml`'s crates leg; the summary at the end of
