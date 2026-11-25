@@ -332,14 +332,56 @@ jobs:
       - name: Verify
         run: dev/scripts/verify-swift-mirror.sh "$RUNNER_TEMP/jazz-swift" "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" "$RUNNER_TEMP/work" ${{ matrix.checks }}
 
-  # A release's XCFramework, rebuilt from scratch: the unchanged script, no
-  # cache, one runner. Its checksum must equal the cached, split build's, so
-  # the cache can't change what ships. In parallel with the verify jobs.
-  reproduce:
+  # A release's XCFramework, rebuilt from scratch: each slice by the script's
+  # own cargo line (JAZZ_FFI_TARGET) on a fresh runner with no sccache, then
+  # assembled by the script (JAZZ_FFI_SLICES). Its checksum must equal the
+  # cached, split build's, so the cache can't change what ships. In parallel
+  # with the verify jobs. Per slice: on one runner, one slice after another,
+  # it took 11 min (run 45322783390). The script's all-in-one path (no env)
+  # is now only run locally.
+  reproduce-slices:
+    name: reproduce (${{ matrix.target }})
     if: inputs.publish || inputs.reproduce
     needs: resolve
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          [
+            aarch64-apple-darwin,
+            x86_64-apple-darwin,
+            aarch64-apple-ios,
+            aarch64-apple-ios-sim,
+            x86_64-apple-ios,
+          ]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.93.1"
+          targets: ${{ matrix.target }}
+      - name: Build the slice from scratch
+        env:
+          JAZZ_FFI_TARGET: ${{ matrix.target }}
+        run: dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/slice"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-reproduce-slice-${{ matrix.target }}
+          path: ${{ runner.temp }}/slice
+          if-no-files-found: error
+
+  reproduce:
+    if: inputs.publish || inputs.reproduce
+    needs: [resolve, reproduce-slices]
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -349,14 +391,15 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          toolchain: "1.93.1"
-          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-      - name: Build JazzFFI.xcframework from scratch
+          pattern: swift-reproduce-slice-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/slices
+      - name: Assemble JazzFFI.xcframework from the from-scratch slices
         id: build
         run: |
-          dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
+          JAZZ_FFI_SLICES="$RUNNER_TEMP/slices" dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
           echo "checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")" >> "$GITHUB_OUTPUT"
 
   reproducible:

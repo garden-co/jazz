@@ -1,5 +1,6 @@
+import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { onVercelHost } from "./vercel-host.js";
@@ -11,8 +12,6 @@ import {
 } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, files, memory, remote, s3, vercel, vercelBlob } from "./index.js";
@@ -26,226 +25,25 @@ import {
   prepareSandboxBlobs,
   startScript,
   workloadOf,
-  type SandboxHandle,
   type SandboxSdk,
 } from "./vercel-store.js";
+import {
+  app,
+  AUDIENCE,
+  cleanups,
+  fakeVercel,
+  legacyNamespace,
+  oidcToken,
+  onVercel,
+  permissions,
+  runCleanupsAfterEach,
+  sleep,
+  startIssuer,
+  startTrustedCore,
+  SUBJECT,
+} from "./fixtures/vercel-store.js";
 
-const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
-// Updates and deletes are denied.
-const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
-
-// The cores earlier versions created by default, production's and one per
-// preview branch (see vercel-namespace.test.ts).
-const legacyNamespace = ({ environment, branch }: { environment: string; branch?: string }) =>
-  environment === "production" ? "production" : perBranch(branch);
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const cleanups: Array<() => Promise<unknown>> = [];
-afterEach(async () => {
-  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
-});
-
-const SIGNING_KEY = "synthetic-vercel-oidc-signing-key-0123456789";
-const AUDIENCE = "https://vercel.com/garden-co";
-const SUBJECT = "owner:garden-co:project:app:environment:production";
-
-/** A stand-in for Vercel's OIDC issuer: discovery plus one HS256 key. */
-async function startIssuer(): Promise<string> {
-  const server = createServer((request, response) => {
-    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    response.setHeader("content-type", "application/json");
-    if (request.url === "/.well-known/openid-configuration") {
-      response.end(JSON.stringify({ issuer: base, jwks_uri: `${base}/jwks` }));
-    } else {
-      const k = Buffer.from(SIGNING_KEY).toString("base64url");
-      response.end(JSON.stringify({ keys: [{ kty: "oct", kid: "v1", alg: "HS256", k }] }));
-    }
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}
-
-/** A function's OIDC token, as `getVercelOidcToken()` returns it. */
-function oidcToken(issuer: string, subject = SUBJECT): string {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const exp = Math.floor(Date.now() / 1000) + 600;
-  const unsigned = `${part({ alg: "HS256", kid: "v1", typ: "JWT" })}.${part({ iss: issuer, aud: AUDIENCE, sub: subject, exp })}`;
-  const signature = createHmac("sha256", SIGNING_KEY).update(unsigned).digest("base64url");
-  return `${unsigned}.${signature}`;
-}
-
-/** The core as the start script runs it: trusting only the function's workload. */
-async function startTrustedCore(appId: string) {
-  const issuer = await startIssuer();
-  const core = await startLocalJazzServer({
-    appId,
-    inMemory: true,
-    trustedWorkload: { issuer, audience: AUDIENCE, subject: SUBJECT },
-  });
-  cleanups.push(() => core.stop());
-  return { appId, url: core.url, issuer, credential: () => oidcToken(issuer) };
-}
-
-/**
- * `@vercel/sandbox` standing in for Vercel: one Sandbox whose port routes to a
- * local jazz-tools server, and whose Drive holds that server's app id.
- */
-function fakeVercel(core: { appId: string; url: string }) {
-  const calls: string[] = [];
-  const launches: Parameters<SandboxHandle["runCommand"]>[0][] = [];
-  const state = {
-    exists: false,
-    status: "stopped",
-    drive: false,
-    /** The Sandbox's region, and its Drive's: set when each is created. */
-    region: "iad1",
-    driveRegion: "iad1",
-    startedAt: new Date(),
-    timeout: 300_000,
-    /** What the core runs; a start script switches it to its own version. */
-    running: undefined as string | undefined,
-    /** The next `times` starts give up like the start script's `fail`. */
-    failStarts: undefined as
-      | { kind: "permanent" | "transient"; why: string; times: number }
-      | undefined,
-    /** Whether the last start gave up (its core then listens nowhere). */
-    failing: false,
-    /** The next `slowStarts` starts haven't run yet when the function looks. */
-    slowStarts: 0,
-    /**
-     * The next `failLookups` lookups of the Sandbox (not resumes) fail as
-     * Vercel's API does when it is briefly unavailable.
-     */
-    failLookups: 0,
-    /** Called when a start brings the core up. */
-    onStart: undefined as (() => void) | undefined,
-  };
-  const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
-  const handle = (): SandboxHandle => ({
-    get status() {
-      return state.status;
-    },
-    get region() {
-      return state.region;
-    },
-    domain: () => (state.failing ? "http://127.0.0.1:9" : core.url),
-    currentSession: () => ({
-      startedAt: state.startedAt,
-      timeout: state.timeout,
-      extendTimeout: async (ms: number) => {
-        calls.push(`extend ${ms}`);
-        state.timeout += ms;
-      },
-    }),
-    runCommand: async (command) => {
-      launches.push(command);
-      const { args } = command;
-      const scriptPath = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
-      const script = files.get(scriptPath)!.toString();
-      const startId = scriptPath.replace(/^.*\//, "").replace(/\.sh$/, "");
-      const version = /^version='(.*)'$/m.exec(script)![1]!;
-      // Like the real script: the first start pins the trust, others don't move it.
-      const trust = /^trust='(.*)'$/m.exec(script)![1]!;
-      const pinned = files.get("/data/trust")?.toString().trim();
-      if (pinned && pinned !== trust) return;
-      files.set("/data/trust", Buffer.from(`${trust}\n`));
-      calls.push(`start ${version}`);
-      if (state.slowStarts > 0) {
-        state.slowStarts--;
-        return;
-      }
-      const errorFile = `/tmp/jazz-${version}.error`;
-      files.delete(errorFile);
-      if (state.failStarts && state.failStarts.times > 0) {
-        state.failStarts.times--;
-        state.failing = true;
-        files.set(
-          errorFile,
-          Buffer.from(`${startId} ${state.failStarts.kind}: ${state.failStarts.why}\n`),
-        );
-        return;
-      }
-      state.failing = false;
-      state.onStart?.();
-      if (!state.running || newerVersion(version, state.running)) state.running = version;
-    },
-    writeFiles: async (written) => {
-      for (const file of written) files.set(file.path, file.content);
-    },
-    readFileToBuffer: async ({ path }) =>
-      path === "/tmp/jazz.version"
-        ? state.running
-          ? Buffer.from(`${state.running}\n`)
-          : null
-        : (files.get(path) ?? null),
-    stop: async () => {
-      calls.push("stop");
-      state.status = "stopped";
-    },
-  });
-  const sdk: SandboxSdk = {
-    Sandbox: {
-      async get(params) {
-        if (!params.resume && state.failLookups > 0) {
-          state.failLookups--;
-          calls.push("lookup failed");
-          throw Object.assign(new Error("Status code 503 is not ok"), {
-            response: { status: 503 },
-          });
-        }
-        if (!state.exists) throw new Error("404 sandbox not found");
-        if (params.resume) {
-          calls.push(`resume ${String(params.name)}`);
-          state.status = "running";
-          const sbx = handle();
-          await (params.onResume as (sbx: SandboxHandle) => Promise<void>)(sbx);
-          return sbx;
-        }
-        return handle();
-      },
-      async create(params) {
-        if (!state.drive) throw new Error("drive missing");
-        calls.push(`create ${String(params.name)} in ${String(params.region)}`);
-        state.region = String(params.region);
-        state.exists = true;
-        state.status = "running";
-        return handle();
-      },
-    },
-    Drive: {
-      async get() {
-        if (!state.drive) throw new Error("404 drive not found");
-        return { region: state.driveRegion };
-      },
-      async getOrCreate(params) {
-        calls.push(`drive ${String(params.name)} in ${String(params.region)}`);
-        // An existing Drive keeps its region, as Vercel's do.
-        if (!state.drive) state.driveRegion = String(params.region);
-        state.drive = true;
-        return { region: state.driveRegion };
-      },
-    },
-  };
-  return { sdk, calls, state, files, launches };
-}
-
-function onVercel(env: Record<string, string>) {
-  const before = {
-    VERCEL: process.env.VERCEL,
-    VERCEL_ENV: process.env.VERCEL_ENV,
-    VERCEL_PROJECT_ID: process.env.VERCEL_PROJECT_ID,
-    VERCEL_GIT_COMMIT_REF: process.env.VERCEL_GIT_COMMIT_REF,
-  };
-  Object.assign(process.env, env);
-  cleanups.push(async () => {
-    for (const [key, value] of Object.entries(before)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  });
-}
+runCleanupsAfterEach();
 
 describe("vercel() store", () => {
   it.each([
@@ -735,50 +533,6 @@ describe("vercel() store", () => {
     expect(fake.calls.filter((call) => call.startsWith("start")).length).toBe(starts + 1);
   }, 60_000);
 
-  it("stops the Sandbox of a core that can't start, and holds off retrying", async () => {
-    const appId = randomUUID();
-    const core = await startTrustedCore(appId);
-    const fake = fakeVercel({ ...core, appId });
-    const opened = await openVercelCore({
-      options: {
-        sdk: fake.sdk,
-        backendCredential: core.credential,
-        blobs: "sqlite",
-        namespace: "test",
-        region: "iad1",
-      },
-      openRemote: ({ url }) =>
-        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
-      version: "1.2.3",
-      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
-    });
-    cleanups.push(() => opened.close());
-
-    // The core stops (idle), and its next start can never succeed.
-    fake.state.status = "stopped";
-    fake.state.failStarts = {
-      kind: "permanent",
-      why: "could not download the core for 1.2.3 from https://registry.example/core.tgz (HTTP 404)",
-      times: Infinity,
-    };
-    // Past the window in which a wake is trusted without a check.
-    await new Promise((resolve) => setTimeout(resolve, 10_500));
-    const t0 = Date.now();
-    await expect(opened.handle("GET", "/health", [], new Uint8Array())).rejects.toThrow(
-      /core jazz-prj-test-test could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
-    );
-    // Reported within one health round, not after the minute-long wake deadline,
-    // and the Sandbox isn't kept awake.
-    expect(Date.now() - t0).toBeLessThan(15_000);
-    expect(fake.state.status).toBe("stopped");
-    // The next request fails at once, without waking the Sandbox again.
-    const calls = fake.calls.length;
-    await expect(opened.handle("GET", "/health", [], new Uint8Array())).rejects.toThrow(
-      /could not start/,
-    );
-    expect(fake.calls.length).toBe(calls);
-  }, 60_000);
-
   it("refuses a Blob store another environment claimed, before serving", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
@@ -819,37 +573,6 @@ describe("vercel() store", () => {
     expect(asked).toEqual([
       "https://shared1.private.blob.vercel-storage.com/.jazz-environment?cache=0",
     ]);
-  }, 60_000);
-
-  it("never reads an error file it didn't cause as its start's failure", async () => {
-    const appId = randomUUID();
-    const core = await startTrustedCore(appId);
-    const fake = fakeVercel({ ...core, appId });
-    // Left by an earlier session's start (say, before the URL was fixed),
-    // and not yet removed by this session's start script.
-    fake.files.set(
-      "/tmp/jazz-1.2.3.error",
-      Buffer.from("jazz-start-earlier permanent: could not download the core (HTTP 404)\n"),
-    );
-    fake.state.failing = true;
-    // This session's first starts come up slowly: the stale file is still
-    // there while the core isn't listening yet.
-    fake.state.slowStarts = 2;
-    const opened = await openVercelCore({
-      options: {
-        sdk: fake.sdk,
-        backendCredential: core.credential,
-        blobs: "sqlite",
-        namespace: "test",
-        region: "iad1",
-      },
-      openRemote: ({ url }) =>
-        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
-      version: "1.2.3",
-      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
-    });
-    cleanups.push(() => opened.close());
-    expect(fake.calls).not.toContain("stop");
   }, 60_000);
 
   it("creates a new core's Sandbox and Drive in the configured region", async () => {
@@ -992,34 +715,6 @@ describe("vercel() store", () => {
     expect(fake.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
   }, 60_000);
 
-  it("retries a start that failed for a transient reason, and keeps the Sandbox", async () => {
-    const appId = randomUUID();
-    const core = await startTrustedCore(appId);
-    const fake = fakeVercel({ ...core, appId });
-    fake.state.failStarts = {
-      kind: "transient",
-      why: "could not download the core for 1.2.3 from https://registry.example/core.tgz (fetch failed: ECONNRESET)",
-      times: 2,
-    };
-    const opened = await openVercelCore({
-      options: {
-        sdk: fake.sdk,
-        backendCredential: core.credential,
-        blobs: "sqlite",
-        namespace: "test",
-        region: "iad1",
-      },
-      openRemote: ({ url }) =>
-        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
-      version: "1.2.3",
-      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
-    });
-    cleanups.push(() => opened.close());
-    expect(fake.state.status).toBe("running");
-    expect(fake.calls).not.toContain("stop");
-    expect(fake.calls.filter((call) => call.startsWith("start ")).length).toBeGreaterThanOrEqual(3);
-  }, 60_000);
-
   it("answers a backend read made while its core restarts, instead of failing it with 1006", async () => {
     // A core that keeps its data on disk, so it can stop and start again
     // on the same address, as a Sandbox's core does across a restart.
@@ -1088,91 +783,6 @@ describe("vercel() store", () => {
       await restarting;
     }
   }, 60_000);
-  it("never stops the session it just woke for connections that were only waiting for the wake (#6028)", async () => {
-    // Vercel's router in front of the core. While the Sandbox is stopped it
-    // answers nothing. For a while after each start, the core answers
-    // `/health` but holds WebSocket upgrades (a busy core, slow to say hello).
-    const core = await startTrustedCore(randomUUID());
-    const target = new URL(core.url);
-    let fake!: ReturnType<typeof fakeVercel>;
-    let busyUntil = 0;
-    const passing = new Set<Socket>();
-    const router = createNetServer((client) => {
-      client.on("error", () => {});
-      client.once("data", (head) => {
-        const upgrade = /^upgrade:\s*websocket/im.test(head.toString("latin1"));
-        if (fake.state.status !== "running" || (upgrade && Date.now() < busyUntil)) {
-          // Held: never answered, never closed.
-          cleanups.push(async () => client.destroy());
-          return;
-        }
-        const upstream = connectTcp(Number(target.port), target.hostname, () => {
-          upstream.write(head);
-          client.pipe(upstream).pipe(client);
-        });
-        passing.add(client);
-        const end = () => {
-          passing.delete(client);
-          client.destroy();
-          upstream.destroy();
-        };
-        client.on("close", end);
-        upstream.on("error", end).on("close", end);
-      });
-    });
-    await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve));
-    cleanups.push(() => new Promise((resolve) => router.close(resolve)));
-    const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
-    fake = fakeVercel({ appId: core.appId, url });
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
-    const jazz = await createJazz({
-      app,
-      permissions,
-      store: vercel({
-        blobs: "sqlite",
-        namespace: legacyNamespace,
-        region: "iad1",
-        sdk: fake.sdk,
-        backendCredential: core.credential,
-      }),
-    }).ready();
-    cleanups.push(() => jazz.close());
-    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
-
-    // The Sandbox stops under the backend's live session, and resuming it
-    // takes longer than two handshake timeouts (reconnects used to give up
-    // while they waited for the wake; since #6294 they wait it out). Then the
-    // woken core is busy for a moment, so the first connection to it times out.
-    const get = fake.sdk.Sandbox.get;
-    fake.sdk.Sandbox.get = async (params) => {
-      if (params.resume) await sleep(25_000);
-      return get(params);
-    };
-    fake.state.onStart = () => {
-      busyUntil = Date.now() + 12_000;
-    };
-    fake.state.status = "stopped";
-    for (const socket of passing) socket.destroy();
-    fake.calls.length = 0;
-
-    // Reads fail through the outage, then succeed once the busy core
-    // answers, without this instance stopping the session it woke.
-    const deadline = Date.now() + 90_000;
-    let seen: string[] | undefined;
-    while (!seen && Date.now() < deadline) {
-      try {
-        const notes = await jazz.db.all(app.notes.where({ id: row.id }));
-        seen = notes.map((note) => note.text);
-      } catch {
-        await sleep(1_000);
-      }
-    }
-    expect(seen).toEqual(["kept"]);
-    expect(fake.calls.filter((call) => !call.startsWith("extend"))).toEqual([
-      "resume jazz-prj-test-production",
-      expect.stringMatching(/^start /),
-    ]);
-  }, 120_000);
   it("answers a backend read made while a wake takes longer than the handshake timeout (#6294)", async () => {
     // Vercel's router in front of the core: while the Sandbox is stopped it
     // answers nothing.
@@ -1241,82 +851,6 @@ describe("vercel() store", () => {
       expect.stringMatching(/^start /),
     ]);
   }, 60_000);
-  it("starts a fresh session when connections stop reaching a core that still answers /health", async () => {
-    // Vercel's router in front of the core. While `cut`, it passes plain
-    // HTTP (so `/health` answers) but holds every WebSocket upgrade without
-    // an answer, and it has dropped the connections it was passing: the
-    // core runs on, unreached. A fresh session routes again.
-    const core = await startTrustedCore(randomUUID());
-    const target = new URL(core.url);
-    let cut = false;
-    const passing = new Set<Socket>();
-    const router = createNetServer((client) => {
-      client.once("data", (head) => {
-        if (cut && /^upgrade:\s*websocket/im.test(head.toString("latin1"))) {
-          // Held: never answered, never closed.
-          cleanups.push(async () => client.destroy());
-          return;
-        }
-        const upstream = connectTcp(Number(target.port), target.hostname, () => {
-          upstream.write(head);
-          client.pipe(upstream).pipe(client);
-        });
-        passing.add(client);
-        const end = () => {
-          passing.delete(client);
-          client.destroy();
-          upstream.destroy();
-        };
-        client.on("error", end).on("close", end);
-        upstream.on("error", end).on("close", end);
-      });
-    });
-    await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve));
-    cleanups.push(() => new Promise((resolve) => router.close(resolve)));
-    const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
-    const fake = fakeVercel({ appId: core.appId, url });
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
-    const jazz = await createJazz({
-      app,
-      permissions,
-      store: vercel({
-        blobs: "sqlite",
-        namespace: legacyNamespace,
-        region: "iad1",
-        sdk: fake.sdk,
-        backendCredential: core.credential,
-      }),
-    }).ready();
-    cleanups.push(() => jazz.close());
-    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
-
-    cut = true;
-    for (const socket of passing) socket.destroy();
-    fake.state.onStart = () => {
-      cut = false;
-    };
-    fake.calls.length = 0;
-
-    // Reads fail while nothing gets through, then succeed once the
-    // instance has stopped the session no connection reaches and woken a
-    // fresh one, without anything else intervening.
-    const deadline = Date.now() + 90_000;
-    let seen: string[] | undefined;
-    while (!seen && Date.now() < deadline) {
-      try {
-        const notes = await jazz.db.all(app.notes.where({ id: row.id }), { tier: "remote" });
-        seen = notes.map((note) => note.text);
-      } catch {
-        await sleep(500);
-      }
-    }
-    expect(seen).toEqual(["kept"]);
-    expect(fake.calls.filter((call) => !call.startsWith("extend"))).toEqual([
-      "stop",
-      "resume jazz-prj-test-production",
-      expect.stringMatching(/^start /),
-    ]);
-  }, 120_000);
   it.each([400, 409, 422])(
     "opens every concurrent first request on a cold deploy: losing the race to create the Sandbox waits for the winner's (%i)",
     async (status) => {

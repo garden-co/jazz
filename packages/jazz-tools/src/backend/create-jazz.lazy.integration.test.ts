@@ -330,24 +330,19 @@ describe("createJazz, opened on first use", () => {
     expect(one).not.toBe(two);
     expect((await one.ready()).appId).not.toBe((await two.ready()).appId);
 
-    const path = await tempDir();
-    const previous = process.env.VERCEL;
-    process.env.VERCEL = "1";
-    const jazz = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
+    const store = sqlite({ path: await tempDir(), blobs: files() });
+    const failure = new Error("temporary core open failure");
+    const open = vi.spyOn(store, "open").mockRejectedValueOnce(failure);
+    const jazz = createJazz({ app, permissions, store });
     cleanups.push(() => jazz.close());
-    try {
-      await expect(jazz.ready()).rejects.toThrow(/or remote\(/);
-      // A write made meanwhile fails with the open's error, not unhandled.
-      const write = jazz.db.insert(app.todos, { title: "lost", owner: randomUUID() });
-      await expect(write.wait({ tier: "local" })).rejects.toThrow(/or remote\(/);
-    } finally {
-      if (previous === undefined) delete process.env.VERCEL;
-      else process.env.VERCEL = previous;
-    }
-    // Not at once: until its backoff passes, a use fails with the same error.
-    await expect(jazz.ready()).rejects.toThrow(/or remote\(/);
+    await expect(jazz.ready()).rejects.toThrow(failure.message);
+    const write = jazz.db.insert(app.todos, { title: "lost", owner: randomUUID() });
+    await expect(write.wait({ tier: "local" })).rejects.toThrow(failure.message);
+    await expect(jazz.ready()).rejects.toThrow(failure.message);
+    expect(open).toHaveBeenCalledTimes(1);
     later(2_000);
     await jazz.ready();
+    expect(open).toHaveBeenCalledTimes(2);
   }, 60_000);
 
   it("serves requests before it has opened, and leaves other routes alone", async () => {

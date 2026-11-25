@@ -23,7 +23,8 @@ export async function startDurableObjectCore(
   options: {
     /** The Worker module (default: the mock core). */
     script?: string;
-    secret?: string;
+    /** The Worker's `JAZZ_CORE_SECRET`; `null` for none (the object makes its own). */
+    secret?: string | null;
     /** A directory the object's storage outlives a restart in. */
     persist?: string;
     /** The app's backend object too (class `JazzBackend`, as `JAZZ_BACKEND`). */
@@ -34,7 +35,8 @@ export async function startDurableObjectCore(
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
-  const secret = options.secret ?? "do-test-core-secret-".repeat(2);
+  const secret =
+    options.secret === null ? "" : (options.secret ?? "do-test-core-secret-".repeat(2));
   const miniflare = new Miniflare({
     // Each module listed, as wrangler uploads a bundle: Miniflare's own
     // scan refuses the bundle's non-literal dynamic imports (Node-only
@@ -49,7 +51,7 @@ export async function startDurableObjectCore(
     compatibilityFlags: ["nodejs_compat"],
     ...(options.persist ? { durableObjectsPersist: options.persist } : {}),
     outboundService: options.outboundService,
-    bindings: { ...options.bindings, JAZZ_CORE_SECRET: secret },
+    bindings: { ...options.bindings, ...(secret && { JAZZ_CORE_SECRET: secret }) },
     host: "127.0.0.1",
     port: 0,
   });

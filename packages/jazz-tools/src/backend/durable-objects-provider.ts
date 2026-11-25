@@ -2,6 +2,7 @@ import { backendNative } from "./backend-native.js";
 import { cloudflareWebSocketUpgrade } from "./cloudflare-websocket.js";
 import {
   BINDING_ORIGIN,
+  bindingCredential,
   bindingTransport,
   networkTransport,
   refuseRedirect,
@@ -25,12 +26,15 @@ class DurableObjectsProvider implements JazzProvider {
     return cloudflareWebSocketUpgrade;
   }
   readonly kind = "durableObjects";
+  declare readonly secret?: string;
   constructor(
     readonly url: string,
-    readonly secret: string,
+    secret: string | undefined,
     readonly binding?: CoreBinding,
     readonly lifecycle?: DurableObjectLifecycle,
-  ) {}
+  ) {
+    if (secret !== undefined) this.secret = secret;
+  }
   open(context: JazzCoreOpenContext) {
     return durableObjectCore(this, context);
   }
@@ -58,6 +62,9 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * that stays the same across deployments. The object keeps its own app id,
  * which this backend asks it for when the store opens.
  *
+ * With a binding, the core can supply its persisted credential over RPC.
+ * URL connections require an explicit secret.
+ *
  * Large values' bytes go where the core's Worker puts them, so there is no
  * `blobs` option here: select SQLite, R2, S3 or Vercel Blob on the core Worker with `createJazzCore()`.
  *
@@ -72,7 +79,7 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
 export function durableObjects(
   options: { lifecycle?: DurableObjectLifecycle } & (
     | { url: string; secret: string; appId?: never }
-    | { binding: CoreBinding; secret: string; appId?: never }
+    | { binding: CoreBinding; secret?: string; appId?: never }
   ),
 ): DurableObjectsProvider {
   if (typeof options === "object" && options !== null && "appId" in options) {
@@ -96,7 +103,7 @@ export function durableObjects(
         "durableObjects(): binding must be the Worker's JazzCore Durable Object binding, e.g. env.JAZZ",
       );
     }
-    checkCoreSecret(secret);
+    if (secret !== undefined) checkCoreSecret(secret);
     return new DurableObjectsProvider(BINDING_ORIGIN, secret, binding, lifecycle);
   }
   const { url, secret } = (options ?? {}) as { url: string; secret: string };
@@ -147,11 +154,12 @@ function checkCoreSecret(secret: unknown): void {
  */
 async function durableObjectCore(store: DurableObjectsProvider, context: JazzCoreOpenContext) {
   const transport = store.binding ? bindingTransport(store.binding) : networkTransport();
+  const secret = store.secret ?? (await bindingCredential(store.binding!));
   let response: Response;
   let body: { appId?: unknown } | undefined;
   try {
     response = await transport.fetch(`${store.url}/app`, {
-      headers: { [CREDENTIAL_HEADER]: store.secret },
+      headers: { [CREDENTIAL_HEADER]: secret },
       redirect: "manual",
       signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
     });
@@ -180,7 +188,7 @@ async function durableObjectCore(store: DurableObjectsProvider, context: JazzCor
   const core = await remote({
     appId: body.appId,
     url: store.url,
-    secret: store.secret,
+    secret,
     transport:
       store.lifecycle === "hibernate"
         ? {

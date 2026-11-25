@@ -9,9 +9,9 @@
  * export default { fetch: routeJazzRequest };
  * ```
  *
- * with two bindings: `JAZZ`, a Durable Object namespace of class `JazzCore`
- * (SQLite-backed: `new_sqlite_classes`), and `JAZZ_CORE_SECRET`, a secret of
- * at least 32 characters that stays the same across deployments. Each Worker
+ * with a `JAZZ` namespace of class `JazzCore` (SQLite-backed: `new_sqlite_classes`).
+ * A backend holding its binding can obtain the core secret over RPC. For URL access,
+ * configure a stable `JAZZ_CORE_SECRET` of at least 32 characters. Each Worker
  * holds one app in one object, which keeps the app's id itself.
  *
  * Select R2 with `blobs: (env) => r2(env.JAZZ_BLOBS!)` to move large

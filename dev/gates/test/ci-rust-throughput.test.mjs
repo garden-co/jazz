@@ -101,12 +101,14 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-react-native",
     "test-go",
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin",
     "test-kotlin-android",
     "test-kotlin-android-emulator",
     "warm-native-builds",
@@ -194,6 +196,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -286,7 +289,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   );
   assert.equal(
     warm.if,
-    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'",
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true' && needs.main-coverage.outputs.head == 'true'",
   );
   assert.deepEqual(warm.needs, ["main-coverage"]);
   assert.deepEqual(warm.permissions, { contents: "read", "id-token": "write", packages: "read" });
@@ -397,7 +400,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     contents: "read",
     statuses: "read",
   });
-  assert.equal(mainCoverage.steps.length, 2);
+  assert.equal(mainCoverage.steps.length, 3);
   assert.equal(
     mainCoverage.steps[0].uses,
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
@@ -405,6 +408,10 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(mainCoverage.steps[0].with["persist-credentials"], false);
   assert.match(mainCoverage.steps[1].run, /dev\/ci\/main-push-coverage\.sh /);
   assert.match(mainCoverage.steps[1].run, /echo "covered=true" >> "\$\{GITHUB_OUTPUT\}"/);
+  // Only the push still at main's head warms, so a landed group's
+  // per-PR pushes do not race each other for one native cache key.
+  assert.match(mainCoverage.steps[2].run, /repos\/\$\{REPO\}\/git\/ref\/heads\/main/);
+  assert.match(mainCoverage.steps[2].run, /echo "head=true" >> "\$\{GITHUB_OUTPUT\}"/);
 
   // Only dispatched runs may write a commit status, and only test-rust's own.
   assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
@@ -432,14 +439,30 @@ const assertEntryCacheTrustBoundary = (source) => {
     "steps",
     "timeout-minutes",
   ]);
-  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  // full-suite reads the suite results directly (test-rust's own success per
+  // event), so the merge group's tail skips one job hop.
+  assert.match(fullSuiteStatus.if, /^always\(\) && \(\n/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\.result == 'success' && needs\.trusted\.result == 'skipped' \|\|\n/,
+  );
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'push' && needs\.trusted\.result == 'success' \|\|\n/,
+  );
   assert.match(
     fullSuiteStatus.if,
     /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
   );
   assert.doesNotMatch(fullSuiteStatus.if, /head_ref/);
-  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
-  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  // An untrusted suite result counts for dispatches only: a pull request's
+  // untrusted (fast-scope) run must never post full-suite.
+  assert.equal([...fullSuiteStatus.if.matchAll(/needs\.untrusted/g)].length, 1);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\./,
+  );
+  assert.deepEqual(fullSuiteStatus.needs, ["untrusted", "trusted"]);
   assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
   assert.equal(fullSuiteStatus.steps.length, 2);
   assert.equal(
@@ -963,6 +986,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -2193,6 +2217,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
@@ -2231,6 +2256,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-rust-workspace",
       "test-storage-compat",
       "test-ts",
+      "test-wasm-durable-object",
       "warm-native-builds",
     ],
     "a new suite job must declare which scope runs it",

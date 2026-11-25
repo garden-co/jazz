@@ -70,7 +70,7 @@ export const jazz = createJazz({
   // Where the data lives: one core per Vercel environment,
   // so production, each preview and development are apart.
   // On your own servers: sqlite({ path: "./data", blobs: files() }).
-  // On Cloudflare: durableObjects({ url, secret }).
+  // On Cloudflare, inside jazzWorker: durableObjects({ binding: env.JAZZ }).
   store: vercel({
     blobs: "sqlite",
     namespace: ({ environment }) => environment,
