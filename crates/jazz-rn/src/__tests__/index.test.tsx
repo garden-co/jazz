@@ -718,6 +718,25 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   );
 });
 
+it("decodes a subscription's open failure with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.from([4, 2, 4, 1, ...ascii("r"), 1, 1, ...ascii("c"), 0, 4, 1, ...ascii("s"), 0, 1, 1, ...ascii("n")]),
+    ),
+  ).toEqual({
+    type: "subscriptionEvents",
+    events: [
+      { type: "openFailed", reason: "r", code: "c" },
+      { type: "openFailed", reason: "s", reasonName: "n" },
+    ],
+  });
+  expect(() =>
+    relay.decodeNativeForegroundResponse(Uint8Array.from([4, 1, 4, 1, ...ascii("r"), 2])),
+  ).toThrow(/malformed subscription events/);
+});
+
 it("encodes and decodes the slow-query log commands with the native relay's pinned bytes", () => {
   const relay = loadRelay(null);
   const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));

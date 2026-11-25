@@ -792,6 +792,14 @@ pub enum ForegroundSubscriptionEvent {
         delta: Vec<u8>,
         terminal_operations_json: String,
     },
+    /// The subscription could not open. It carries what a failed command
+    /// carries: the display text and, for a core error, its stable code and
+    /// reason name, as [`ForegroundDbCommandResponse::CodedOperationError`].
+    OpenFailed {
+        reason: String,
+        code: Option<String>,
+        reason_name: Option<String>,
+    },
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
@@ -3106,7 +3114,7 @@ impl NativeRelayHost {
                     .clone();
                 let Response::MutationErrors { events_json } = self
                     .foreground_client(foreground)?
-                    .execute(Request::DrainMutationErrors)
+                    .drain_mutation_errors()
                     .map_err(foreground_engine_status)?
                 else {
                     return Err(JazzNativeRelayStatus::LifecycleFailure);

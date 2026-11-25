@@ -289,7 +289,9 @@ export type NativeForegroundSubscriptionEvent =
       terminalOperations?: unknown[];
     }
   | { type: "rejected"; reason: string }
-  | { type: "closed" };
+  | { type: "closed" }
+  /** The subscription could not open: a failed command's text, code and reason name. */
+  | { type: "openFailed"; reason: string; code?: string; reasonName?: string };
 
 function foregroundRuntimeInstallationError(): Error {
   return new Error(
@@ -1081,7 +1083,30 @@ function decodeForegroundSubscriptionEvents(
       offset += length;
       events.push({ type: "rejected", reason });
     } else if (tag === 2) events.push({ type: "closed" });
-    else throw new Error("Jazz native foreground returned unknown subscription event");
+    else if (tag === 4) {
+      const readString = (field: string): string => {
+        const length = readVarint();
+        const value = decodeForegroundUtf8(bytes, offset, length, field);
+        offset += length;
+        return value;
+      };
+      const readOptionalString = (field: string): string | undefined => {
+        const present = bytes[offset++];
+        if (present === 0) return undefined;
+        if (present !== 1)
+          throw new Error("Jazz native foreground returned malformed subscription events");
+        return readString(field);
+      };
+      const reason = readString("open failure");
+      const code = readOptionalString("open failure code");
+      const reasonName = readOptionalString("open failure reason");
+      events.push({
+        type: "openFailed",
+        reason,
+        ...(code === undefined ? {} : { code }),
+        ...(reasonName === undefined ? {} : { reasonName }),
+      });
+    } else throw new Error("Jazz native foreground returned unknown subscription event");
   }
   if (offset !== bytes.length)
     throw new Error("Jazz native foreground returned trailing subscription bytes");
