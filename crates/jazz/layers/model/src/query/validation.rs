@@ -2667,12 +2667,7 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     }
     let left = non_null_column_type(left);
     let right = non_null_column_type(right);
-    if matches!(left, ColumnType::EnumTag(_))
-        && matches!(right, ColumnType::String | ColumnType::Uuid)
-    {
-        return true;
-    }
-    false
+    matches!(left, ColumnType::EnumTag(_)) && matches!(right, ColumnType::String | ColumnType::Uuid)
 }
 
 fn array_correlation_types_compatible(parent: &ColumnType, child: &ColumnType) -> bool {

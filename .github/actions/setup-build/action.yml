@@ -11,7 +11,7 @@ inputs:
   rust-toolchain:
     description: "Rust toolchain version to install. Pass an empty string to skip Rust setup entirely."
     required: false
-    default: "1.93.1"
+    default: "1.100.0"
   rust-targets:
     description: "Comma-separated Rust targets to install (e.g. wasm32-unknown-unknown). Empty means no extra targets."
     required: false
@@ -176,7 +176,7 @@ runs:
           sccache --show-stats
           # The systemd-managed daemon does not inherit the runner's bundle
           # PATH. Give sccache an absolute compiler path for cache misses.
-          echo "RUSTC=/opt/jazz-ci/toolchains/v1/rustup/toolchains/1.93.1-x86_64-unknown-linux-gnu/bin/rustc" >> "${GITHUB_ENV}"
+          echo "RUSTC=/opt/jazz-ci/toolchains/v1/rustup/toolchains/1.100.0-x86_64-unknown-linux-gnu/bin/rustc" >> "${GITHUB_ENV}"
           echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         else
           # Hosted jobs retain a job-local daemon and cache mount.

@@ -26,7 +26,7 @@ sequence under a single CodSpeed session. Build latency, cache behavior and acce
 
 ## Invariants
 
-- Rust 1.93.1, cargo-codspeed 5.0.1, the default `bench` profile, full CodSpeed
+- Rust 1.100.0, cargo-codspeed 5.0.1, the default `bench` profile, full CodSpeed
   debug info, per-workload features (the mimalloc allocator for the native
   examples, `testing` for the two `jazz` benches) and benchmark commands remain
   unchanged. The measurement job keeps each workload's former environment:
