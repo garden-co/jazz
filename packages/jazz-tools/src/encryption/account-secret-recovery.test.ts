@@ -341,12 +341,12 @@ it("keeps polling established listeners while a new listener's snapshot fails", 
       code: "database",
       message: "snapshot unavailable",
     };
-    expect.soft(late).toHaveBeenCalledExactlyOnceWith(failed);
+    expect.soft(late.mock.calls).toEqual([[failed], [challenge]]);
 
     queued.push(JSON.stringify(challenge));
     await vi.advanceTimersByTimeAsync(25);
     expect(established.mock.calls).toEqual([[challenge], [challenge]]);
-    expect(late.mock.calls).toEqual([[failed], [challenge]]);
+    expect(late.mock.calls).toEqual([[failed], [challenge], [challenge]]);
   } finally {
     encryption.stop();
     vi.useRealTimers();

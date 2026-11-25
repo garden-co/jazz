@@ -482,7 +482,13 @@ export class Encryption {
       let replay: EncryptionReport[];
       if ("error" in snapshot) {
         const { code, message } = snapshot.error;
-        replay = [{ type: "report-replay-failed", code, message }];
+        // Without the active set this is no full replay: after the failure
+        // notice, the reports established listeners got meanwhile.
+        replay = [
+          { type: "report-replay-failed", code, message },
+          ...beforeSnapshot,
+          ...reportsDuringReplay,
+        ];
       } else {
         const queued = parseReports(snapshot.queued);
         const pending = this.pendingReports.splice(0);
