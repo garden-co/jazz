@@ -406,9 +406,11 @@ impl E2eeClient {
         kind: Rotation,
         deadline: Option<web_time::Instant>,
     ) -> Result<Option<(usize, Vec<String>)>, ClientError> {
-        let mut read = self
-            .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
-            .await?;
+        let purpose = match kind {
+            Rotation::Ordinary => SpaceReadPurpose::Rotate,
+            Rotation::Recovery => SpaceReadPurpose::RecoverRotation,
+        };
+        let mut read = self.read_space_of(db, tx, address, purpose).await?;
         let (
             Replayed {
                 chain,
@@ -427,6 +429,9 @@ impl E2eeClient {
             .await?;
         if !member {
             return Err(ProtocolError::Refused(RefusalCode::NotAMember).into());
+        }
+        if read.skipped_deliveries {
+            return Err(ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into());
         }
         if kind == Rotation::Ordinary && chain.is_none() {
             // A skipped row could be the root. A locally held key also
@@ -491,8 +496,11 @@ impl E2eeClient {
         accounts: &[String],
     ) -> Result<usize, ClientError> {
         let mut read = self
-            .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
+            .read_space_of(db, tx, address, SpaceReadPurpose::RotationBatch)
             .await?;
+        if read.skipped_deliveries {
+            return Err(ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into());
+        }
         let (
             Replayed {
                 chain, acquisition, ..

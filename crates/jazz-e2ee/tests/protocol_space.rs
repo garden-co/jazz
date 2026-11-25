@@ -2432,16 +2432,19 @@ fn a_member_whose_history_this_client_cannot_read_is_skipped_and_reported() {
     assert_eq!(missing.recipients.err(), inconsistent);
 }
 
-/// Alice's current-epoch read covers its holders and mark, but cannot
-/// stand in for a whole-space read or for the previous epoch's deliveries.
+/// Alice's current-epoch read covers its holders, mark and rotation
+/// recipients. A different epoch cannot cover those recipients, and the
+/// bounded read cannot stand in for the whole history.
 #[test]
 fn an_epoch_read_cannot_claim_whole_space_coverage() {
     let mut world = space(66, &[ALICE, BOB]);
+    let root = world.current();
     let epoch = world.rotate(ALICE);
     let whole = world.read();
     let directory = whole.directory(&world);
     let chain = whole.chain(&world).unwrap();
     let current = whole.space.clone().for_epochs([epoch].into());
+    let previous = whole.space.clone().for_epochs([root].into());
     let inconsistent = Some(ProtocolError::InconsistentEvidence);
     assert!(members::holders(&chain, &current, 1).is_ok());
     assert_eq!(
@@ -2450,17 +2453,111 @@ fn an_epoch_read_cannot_claim_whole_space_coverage() {
     );
     assert_eq!(members::holders(&chain, &current, 0).err(), inconsistent);
     assert_eq!(
+        members::envelopes(&chain, &current, 1, false).err(),
+        inconsistent
+    );
+    let recipients = |read| {
         rotation_recipients(
             &chain,
-            &current,
+            read,
             &directory,
             ALICE,
             BUILTIN,
-            &mut TestRandom(66)
+            &mut TestRandom(66),
         )
-        .err(),
-        inconsistent
+    };
+    assert_eq!(recipients(&current), recipients(&whole.space));
+    assert_eq!(recipients(&previous).err(), inconsistent);
+}
+
+/// Alice and Bob produce identical recipients and successor records when
+/// recipient selection reads only the current epoch, across membership and
+/// device changes and during Bob's recovery from an older key.
+#[test]
+fn rotation_records_agree_with_current_epoch_recipient_evidence() {
+    let mut world = space(67, &[ALICE, BOB]);
+    world.rotate(ALICE);
+    let compare = |world: &World, rotator, history: Option<&str>| {
+        let whole = world.read();
+        let mut bounded = world.read();
+        let chain = whole.chain(world).unwrap();
+        let directory = whole.directory(world);
+        bounded.space = bounded
+            .space
+            .for_epochs([chain.last().epoch_id.clone()].into());
+        let own = world.own(rotator);
+        let full_keys = acquire(&chain, &whole.space, &directory, &own.epoch_keys)
+            .unwrap()
+            .keys;
+        let mut own_deliveries =
+            SpaceLedger::one_account(whole.space.address.clone(), whole.space.through, rotator);
+        own_deliveries.deliveries.extend(
+            whole
+                .space
+                .deliveries
+                .iter()
+                .filter(|delivery| {
+                    let row = &delivery.row;
+                    row.recipient_account_id == rotator
+                        && (row.key_epoch_id == chain.last().epoch_id
+                            || history == Some(&row.key_epoch_id))
+                })
+                .cloned(),
+        );
+        let scoped_keys = acquire(&chain, &own_deliveries, &directory, &own.epoch_keys)
+            .unwrap()
+            .keys;
+        let candidates = |read| {
+            rotation_recipients(
+                &chain,
+                read,
+                &directory,
+                rotator,
+                BUILTIN,
+                &mut TestRandom(67),
+            )
+            .unwrap()
+        };
+        assert_eq!(candidates(&bounded.space), candidates(&whole.space));
+        let rotate = |read, keys| {
+            world
+                .build_rotation_with(
+                    rotator,
+                    read,
+                    &chain,
+                    keys,
+                    &directory,
+                    history.is_some(),
+                    &mut TestRandom(67),
+                )
+                .unwrap()
+        };
+        let full = rotate(&whole, &full_keys);
+        let scoped = rotate(&bounded, &scoped_keys);
+        assert_eq!(scoped.rest, full.rest);
+        assert_eq!(scoped.records.successor, full.records.successor);
+        assert_eq!(scoped.records.deliveries, full.records.deliveries);
+    };
+
+    world.account(CAROL);
+    world.add_member(CAROL);
+    compare(&world, ALICE, None);
+
+    let phone = world.approve_device(BOB);
+    world.remove_device(BOB, &phone.id);
+    compare(&world, ALICE, None);
+
+    world.remove_member(BOB);
+    compare(&world, ALICE, None);
+
+    let last_held = world.current();
+    world.rotate(ALICE);
+    world.add_member(BOB);
+    assert_eq!(
+        world.acquire(BOB).keys.newest().unwrap().epoch_id(),
+        last_held
     );
+    compare(&world, BOB, Some(&last_held));
 }
 
 /// A read filtered for one account (the space's roots and successors, that

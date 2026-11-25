@@ -95,6 +95,7 @@ pub(crate) struct SpaceRead {
     /// accounts' histories are not counted: they make an account invalid,
     /// not the space incomplete.
     pub(crate) skipped: usize,
+    skipped_deliveries: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,8 @@ pub(super) enum SpaceReadPurpose {
     WriteCheck,
     Deliver,
     Rotate,
+    RecoverRotation,
+    RotationBatch,
 }
 
 pub(crate) fn protocol_address(space: &DbSpaceAddress) -> Result<SpaceAddress, ClientError> {
@@ -208,7 +211,7 @@ impl E2eeClient {
     }
 
     /// Read the chain evidence first, then select deliveries by authenticated
-    /// epoch at the same serializable cut. Rotation needs the whole space.
+    /// epoch at the same serializable cut.
     pub(crate) async fn read_space_of(
         &self,
         db: &Db,
@@ -237,10 +240,13 @@ impl E2eeClient {
             )
             .await?;
         let mut members_query = space_query(rows::SPACE_MEMBERS, address)?;
-        let all_members = matches!(
+        let rotating = matches!(
             purpose,
-            SpaceReadPurpose::Deliver | SpaceReadPurpose::Rotate
+            SpaceReadPurpose::Rotate
+                | SpaceReadPurpose::RecoverRotation
+                | SpaceReadPurpose::RotationBatch
         );
+        let all_members = rotating || purpose == SpaceReadPurpose::Deliver;
         if !all_members {
             members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
         }
@@ -282,16 +288,51 @@ impl E2eeClient {
         )?;
         self.space_floors(&accounts, &directory).await?;
         let chain = ReplayedSpaceChain::replay(&ledger, &directory)?;
+        let acquire_read = |chain: &ReplayedSpaceChain, ledger: &SpaceLedger| {
+            let own = self.account.borrow();
+            let own = own.as_ref().ok_or(ClientError::NoAccount)?;
+            Ok::<_, ClientError>(acquire(chain, ledger, &directory, &own.epoch_keys)?)
+        };
         let mut acquisition = None;
-        if purpose == SpaceReadPurpose::Rotate {
-            (ledger.deliveries, _) = self
-                .read_rows(
-                    db,
-                    tx,
-                    &skipped,
-                    space_query(rows::SPACE_DELIVERIES, address)?,
-                )
-                .await?;
+        let mut skipped_deliveries = false;
+        let mut rotation_epochs = None;
+        if rotating {
+            let mut epochs = BTreeSet::new();
+            if let Some(chain) = &chain {
+                let before = skipped.get();
+                let current = &chain.last().epoch_id;
+                let batch = purpose == SpaceReadPurpose::RotationBatch;
+                let own = Some(self.shared.account_id.as_str());
+                let query =
+                    epoch_deliveries_query(address, current, if batch { own } else { None })?;
+                (ledger.deliveries, _) = self.read_rows(db, tx, &skipped, query).await?;
+                if !batch {
+                    epochs.insert(current.clone());
+                }
+                if purpose == SpaceReadPurpose::RecoverRotation {
+                    let acquired = acquire_read(chain, &ledger)?;
+                    let first = acquired
+                        .keys
+                        .newest()
+                        .map_or(0, |version| version.depth() + 1);
+                    let last = chain.versions.len() - 1;
+                    // Only a newer version can change which key recovery wraps.
+                    if first < last {
+                        for version in &chain.versions[first..last] {
+                            let query = epoch_deliveries_query(address, &version.epoch_id, own)?;
+                            let (found, _) = self.read_rows(db, tx, &skipped, query).await?;
+                            ledger.deliveries.extend(found);
+                        }
+                        acquisition = Some(acquire_read(chain, &ledger)?);
+                    } else {
+                        acquisition = Some(acquired);
+                    }
+                } else if batch {
+                    acquisition = Some(acquire_read(chain, &ledger)?);
+                }
+                skipped_deliveries = skipped.get() != before;
+            }
+            rotation_epochs = Some(epochs);
         } else {
             let mut epochs = BTreeSet::new();
             let epoch_deliveries = async |epochs: &BTreeSet<String>, own_only: bool| {
@@ -319,11 +360,7 @@ impl E2eeClient {
                 }
                 ledger.deliveries = epoch_deliveries(&epochs, true).await?;
                 if purpose != SpaceReadPurpose::WriteCheck {
-                    let acquired = {
-                        let own = self.account.borrow();
-                        let own = own.as_ref().ok_or(ClientError::NoAccount)?;
-                        acquire(chain, &ledger, &directory, &own.epoch_keys)?
-                    };
+                    let acquired = acquire_read(chain, &ledger)?;
                     let held: BTreeSet<_> = acquired.keys.epoch_ids().collect();
                     if purpose == SpaceReadPurpose::Deliver {
                         // Only held versions can be delivered or mark a rotation.
@@ -363,6 +400,8 @@ impl E2eeClient {
             ledger = ledger.for_epochs(epochs);
         }
         if all_members {
+            // Check floors for accounts named by the evidence used here. A refusal
+            // based only on unrelated historical deliveries protects none of it.
             let additional: BTreeSet<_> = ledger
                 .deliveries
                 .iter()
@@ -383,12 +422,17 @@ impl E2eeClient {
                 );
             }
         }
+        if let Some(epochs) = rotation_epochs {
+            // Only these epochs were read for every recipient.
+            ledger = ledger.for_epochs(epochs);
+        }
         Ok(SpaceRead {
             chain,
             acquisition,
             ledger,
             accounts,
             skipped: skipped.get(),
+            skipped_deliveries,
         })
     }
 

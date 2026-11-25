@@ -681,8 +681,8 @@ pub struct RotationRecipients {
 /// `mechanism` (§2.12), the members that held the current version first.
 /// A member whose account history needs a capability this client lacks is
 /// reported in [`RotationRecipients::unsupported`]. Needs the public ledger
-/// of every member, from the read of the whole space `chain` was replayed
-/// from.
+/// of every member and every delivery of the current version at the cut
+/// `chain` was replayed from.
 pub fn rotation_recipients(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
@@ -691,9 +691,9 @@ pub fn rotation_recipients(
     mechanism: Mechanism<'_>,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<RotationRecipients> {
-    check_whole_read(chain, ledger, Some(accounts))?;
+    chain.check_read(ledger, Some(accounts))?;
     let depth = chain.current_depth()?;
-    let held = version_holders(chain, ledger, depth)?;
+    let held = holders(chain, ledger, depth)?;
     let mut holding = Vec::new();
     let mut others = Vec::new();
     let mut waiting = Vec::new();

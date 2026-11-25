@@ -361,6 +361,38 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
     });
 }
 
+/// Alice rotates a deep space after adding enough members to require a follow-up batch.
+#[test]
+fn rotation_and_follow_up_read_only_current_deliveries() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    let address = space_address(&alice, space);
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    let add_accounts = |accounts: std::ops::RangeInclusive<u8>| {
+        for seed in accounts {
+            let member = device(&server, account(seed), MemoryStore::new(), seed);
+            member.activate(&server);
+            server_member(&server, &alice, space, &member.id());
+        }
+        pump(&server, &alice.db);
+    };
+    add_accounts(1..=49);
+    for _ in 0..6 {
+        assert_eq!(alice.rotate(&server, &address).unwrap(), 49);
+    }
+    add_accounts(50..=101);
+
+    alice.client.take_delivery_reads();
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 101);
+    // One current-epoch read for recipient selection and one each for
+    // acquisition after the first commit and the follow-up batch.
+    // Alice wrote the successor, so neither acquisition reads any rows.
+    assert_eq!(alice.client.take_delivery_reads(), (49, 0, 3));
+}
+
 /// Bob received the root key but had not opened it when Alice removed him
 /// and rotated. Rejoining lets him recover the first note from his old
 /// delivery while he still waits for a delivery of the new key.
@@ -2278,6 +2310,95 @@ fn explicit_rotation_refuses_when_a_root_row_is_skipped() {
     });
 }
 
+/// Alice refuses to rotate when the authority returns a delivery with an
+/// undecodable envelope column for the current epoch.
+#[test]
+fn rotation_refuses_an_undecodable_current_delivery() {
+    within(|| {
+        let table = "__e2ee_space_deliveries";
+        let settings = EncryptionSettings::default();
+        let mut schema = secure_schema_with(&settings).public_schema().clone();
+        // The normal schema cannot accept this row. Use a test schema to
+        // exercise the client against an authority that supplies it anyway.
+        let envelope = schema
+            .get_mut(&table.into())
+            .unwrap()
+            .columns
+            .columns
+            .iter_mut()
+            .find(|column| column.name.as_str() == "envelope")
+            .unwrap();
+        *envelope = envelope.clone().nullable();
+        let schema = jazz::schema::JazzSchema::new(&schema).unwrap();
+        let server = block_on(Db::open(jazz::db::DbConfig::new(
+            schema.clone(),
+            identity(0),
+        )))
+        .unwrap();
+        block_on(server.set_authority()).unwrap();
+
+        let who = account(0xa1);
+        let client = open_account(Rc::new(MemoryStore::new()), who, settings, None);
+        let config = jazz::db::DbConfig::new(
+            schema,
+            jazz::db::DbIdentity {
+                author: who,
+                ..identity(1)
+            },
+        )
+        .with_e2ee(client.hooks());
+        let db = block_on(Db::open(config)).unwrap();
+        let (link, _) = link_as(&db, &server, who);
+        pump(&server, &db);
+        assert!(block_on(client.prepare(&db)).unwrap());
+        let alice = Device {
+            who,
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+
+        let root = all(&server, Query::from(SPACES)).unwrap().remove(0);
+        let mut cells = BTreeMap::from([
+            ("keyEpochId".to_owned(), root.cell("epochId").unwrap()),
+            (
+                "senderAccountId".to_owned(),
+                root.cell("creatorAccountId").unwrap(),
+            ),
+            (
+                "recipientAccountId".to_owned(),
+                root.cell("creatorAccountId").unwrap(),
+            ),
+            (
+                "recipientAccountEpochId".to_owned(),
+                root.cell("accountEpochId").unwrap(),
+            ),
+        ]);
+        for name in ["scopeId", "identifier"] {
+            cells.insert(name.to_owned(), root.cell(name).unwrap());
+        }
+        block_on(server.insert(table, cells, Default::default())).unwrap();
+        let error = alice
+            .rotate(&server, &space_address(&alice, space))
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ClientError::Protocol(ProtocolError::Refused(
+                    RefusalCode::RotationKeyStateUnconfirmed
+                ))
+            ),
+            "{error}"
+        );
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+    });
+}
+
 /// Bob is a member, but Alice has yet to deliver the project's key to him.
 #[test]
 fn explicit_rotation_tells_a_member_to_wait_for_the_key() {
@@ -3925,6 +4046,94 @@ fn a_holder_of_a_skipped_version_delivers_it_without_the_current_one() {
         });
         // The skipped K1 and, through its history, K0; not the current K2.
         assert_eq!(depths, [0, 1], "dave holds the skipped version");
+    });
+}
+
+/// Carol's recovery wraps K1, even though Bob's recovery skipped it and Carol
+/// never received K2.
+///
+/// ```text
+/// K0 ── K1 (Alice, Bob out) ── K2 (Bob, history K0, Carol out)
+///                            └── K3 (Carol, predecessor K2, history K1)
+/// ```
+#[test]
+fn recovery_rotation_wraps_the_newest_key_in_skipped_history() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        let carol = device(&server, account(0xc0), MemoryStore::new(), 3);
+        carol.activate(&server);
+        add_member(&server, &alice, space, &carol.id());
+        assert_eq!(deliver(&server, &alice, &[&bob, &carol], space), 2);
+
+        let successors = "__e2ee_space_successors";
+        let remove = |device: &Device| {
+            block_on(server.delete(
+                MEMBERS,
+                member_row(&server, &device.id()),
+                Default::default(),
+            ))
+            .unwrap();
+        };
+        let recover = |device: &Device| {
+            drive(
+                &server,
+                &[&device.db],
+                device
+                    .client
+                    .recover_rotation(&device.db, &space_address(device, space)),
+            )
+            .unwrap()
+        };
+        remove(&bob);
+        assert_eq!(
+            alice
+                .rotate(&server, &space_address(&alice, space))
+                .unwrap(),
+            1
+        );
+        let k1 = all(&server, Query::from(successors))
+            .unwrap()
+            .remove(0)
+            .cell("epochId")
+            .unwrap();
+
+        remove(&carol);
+        server_member(&server, &alice, space, &bob.id());
+        assert_eq!(recover(&bob), 1);
+        let row = all(
+            &server,
+            Query::from(successors).filter(eq(col("predecessor"), lit(k1.clone()))),
+        )
+        .unwrap()
+        .remove(0);
+        let k2 = row.cell("epochId").unwrap();
+        assert_ne!(row.cell("historyEpochId"), Some(k1.clone()));
+
+        server_member(&server, &alice, space, &carol.id());
+        assert_eq!(recover(&carol), 2);
+        let row = all(
+            &server,
+            Query::from(successors).filter(eq(col("predecessor"), lit(k2))),
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(row.cell("historyEpochId"), Some(k1));
+        let deliveries = all(
+            &server,
+            Query::from("__e2ee_space_deliveries")
+                .filter(eq(col("keyEpochId"), lit(row.cell("epochId").unwrap()))),
+        )
+        .unwrap();
+        let mut recipients: Vec<_> = deliveries
+            .iter()
+            .map(|row| match row.cell("recipientAccountId").unwrap() {
+                Value::Uuid(id) => id.to_string(),
+                value => panic!("expected a recipient account: {value:?}"),
+            })
+            .collect();
+        recipients.sort();
+        assert_eq!(recipients, [alice.id(), bob.id()]);
     });
 }
 
