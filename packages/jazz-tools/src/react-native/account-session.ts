@@ -5,7 +5,6 @@ import { clientScope } from "../runtime/client-scope.js";
 import type { Session } from "../runtime/context.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
 import type { NativeForegroundFactory } from "./native-foreground-db.js";
-import { explainingSecretFormat } from "../encryption/secret-format.js";
 
 /** The same native account admission is used by contexts and device receipts. */
 export function beginNativeAccountSession(
@@ -41,19 +40,20 @@ export function beginNativeAccountSession(
     getTrustedReservedSession(config)?.user_id === session.user_id
       ? config.encryption?.accountSecret?.()
       : undefined;
-  const request = JSON.stringify({
-    registry: config.accountRegistryAuthority,
-    app_id: clientScope(config),
-    env: config.env ?? "dev",
-    account_id: config.accountId,
-    issuer: session.issuer,
-    subject: session.user_id,
-    ...credential,
-    device_account_secret: deviceAccountSecret,
-    claims: session.claims,
-    server_url: config.serverUrl ?? null,
-  });
-  return explainingSecretFormat(() => factory.beginAccountSession!(request));
+  return factory.beginAccountSession(
+    JSON.stringify({
+      registry: config.accountRegistryAuthority,
+      app_id: clientScope(config),
+      env: config.env ?? "dev",
+      account_id: config.accountId,
+      issuer: session.issuer,
+      subject: session.user_id,
+      ...credential,
+      device_account_secret: deviceAccountSecret,
+      claims: session.claims,
+      server_url: config.serverUrl ?? null,
+    }),
+  );
 }
 
 /** Schema attachment consumes the one-shot setup on success or failure. */

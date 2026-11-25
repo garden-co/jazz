@@ -20,6 +20,9 @@ it("explains an older build's refusal and passes other errors through", () => {
   expect(explained.message).toContain("matching versions");
   expect(explained.cause).toBe(olderBuild);
   expect(secretFormatExplained(new Error("a recovery secret is hexadecimal"))).not.toBe(olderBuild);
+  // That message needs 64 characters, which `jazz-auth-v1:` text never has.
+  const hex = new Error("a recovery secret is hexadecimal");
+  expect(secretFormatExplained(hex)).toBe(hex);
 
   const other = new Error("invalid device account secret");
   expect(secretFormatExplained(other)).toBe(other);
