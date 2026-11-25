@@ -843,3 +843,497 @@ fn a_deep_crawl_then_shrink_releases_subscription_state() {
         cold
     );
 }
+
+// ---- the commit seq row (jazz#6367) ----------------------------------------
+//
+// A store keeps the newest commit seq it numbered in one `_jazz_meta` row,
+// `commit_seq.v1`, raised by triggers on every table, history table and
+// `_jazz_transactions`. An open reads the row and scans only tables the row
+// does not cover yet. The raw SQLite reads below are white-box on purpose:
+// the row and its triggers are a durable encoding, and what an open reads is
+// not visible through the public API.
+
+const SEQ_KEY: &str = "commit_seq.v1";
+
+fn raw(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(path).unwrap()
+}
+
+/// The stored tables that carry a commit seq in `_clock`: each table and
+/// its history table.
+fn clocked_tables(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT m.name FROM sqlite_master AS m WHERE m.type = 'table' \
+             AND m.name NOT GLOB '_jazz_*' \
+             AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = '_clock') \
+             ORDER BY m.name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Every table the row covers, sorted.
+fn seq_targets(path: &Path) -> Vec<String> {
+    let mut targets = clocked_tables(&raw(path));
+    targets.push("_jazz_transactions".to_owned());
+    targets.sort();
+    targets
+}
+
+fn sorted(mut tables: Vec<String>) -> Vec<String> {
+    tables.sort();
+    tables
+}
+
+/// The row's raw value and SQLite type, if present.
+fn seq_row(path: &Path) -> Option<(String, String)> {
+    use rusqlite::OptionalExtension;
+    raw(path)
+        .query_row(
+            "SELECT quote(v), typeof(v) FROM _jazz_meta WHERE k = ?1",
+            [SEQ_KEY],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn seq_row_value(path: &Path) -> Option<u64> {
+    seq_row(path).map(|(value, kind)| {
+        assert_eq!(kind, "integer", "commit_seq.v1 is an SQLite INTEGER");
+        value.parse().unwrap()
+    })
+}
+
+/// The commit seq as opens recovered it before the row: the newest
+/// accepted `_clock` of every table and history table, and the newest `t`
+/// of `_jazz_transactions`, below the pending band.
+fn scanned_seq(path: &Path) -> u64 {
+    let conn = raw(path);
+    let mut seq = 0i64;
+    for table in clocked_tables(&conn) {
+        let max: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT MAX(_clock) FROM \"{table}\" WHERE _clock >= 0 AND _clock < {PENDING_BAND}"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        seq = seq.max(max.unwrap_or(0));
+    }
+    let settled: Option<i64> = conn
+        .query_row(
+            &format!("SELECT MAX(t) FROM _jazz_transactions WHERE t < {PENDING_BAND}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    seq.max(settled.unwrap_or(0)) as u64
+}
+
+/// Where the pending band of `_clock` starts (`band_start(PENDING)`, 1 <<
+/// 52); the accepted seqs are below it. Pinned in the triggers' text below.
+const PENDING_BAND: i64 = 4_503_599_627_370_496;
+
+fn insert_items(db: &Db, ns: std::ops::Range<u64>) {
+    for n in ns {
+        block_on(db.insert(
+            "items",
+            item(n),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+}
+
+/// What an older core's commit writes, as SQL that knows nothing of the
+/// row: a version of an existing row of `table` into its history table, at
+/// accepted seq `seq`; with `dedupe`, also an accepted upload's dedupe
+/// entry at `seq`.
+fn older_core_commit(conn: &rusqlite::Connection, table: &str, seq: i64, dedupe: bool) {
+    let history = format!("{table}__h");
+    let mut columns: Vec<String> = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{history}')"))
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    columns.sort();
+    let values: Vec<String> = columns
+        .iter()
+        .map(|c| match c.as_str() {
+            "_clock" => seq.to_string(),
+            other => format!("\"{other}\""),
+        })
+        .collect();
+    let columns: Vec<String> = columns.iter().map(|c| format!("\"{c}\"")).collect();
+    conn.execute_batch(&format!(
+        "INSERT INTO \"{history}\" ({}) SELECT {} FROM \"{table}\" LIMIT 1;",
+        columns.join(", "),
+        values.join(", "),
+    ))
+    .unwrap();
+    if dedupe {
+        conn.execute(
+            "INSERT INTO _jazz_transactions (n, tx, t, result) VALUES (987654, ?1, ?1, NULL)",
+            [seq],
+        )
+        .unwrap();
+    }
+}
+
+/// The stored name of `items` (its rows live there; history in `__h`).
+fn items_table(path: &Path) -> String {
+    clocked_tables(&raw(path))
+        .into_iter()
+        .find(|t| !t.ends_with("__h"))
+        .unwrap()
+}
+
+/// A store opened once records its commit seq; every later open resumes
+/// from the row and scans no table, and its next commit numbers above.
+///
+/// ```text
+/// open ─► scan (all tables, empty) ─► row = 0
+///   commits ─► triggers raise the row
+/// reopen ─► row only ─► resumes after the newest seq
+/// ```
+#[test]
+fn a_reopened_store_resumes_from_the_commit_seq_row_without_scanning() {
+    let path = scratch("seq-row");
+    let before = {
+        let db = open_file(&path, 1);
+        assert_eq!(
+            sorted(db.seq_scans_for_test()),
+            seq_targets(&path),
+            "a new store covers every table at its first open"
+        );
+        insert_items(&db, 0..20);
+        db.seq_high_water()
+    };
+    let recorded = seq_row_value(&path).expect("the row is written");
+    assert_eq!(recorded, scanned_seq(&path), "the row is what a scan finds");
+    assert!(recorded > 0 && recorded <= before);
+    for _ in 0..2 {
+        let db = open_file(&path, 1);
+        assert_eq!(db.seq_scans_for_test(), Vec::<String>::new(), "no scan");
+        assert!(db.seq_high_water() >= recorded);
+        let next = block_on(db.insert("items", item(500), Default::default()))
+            .unwrap()
+            .mergeable_tx_id();
+        assert!(
+            next > before,
+            "the commit seq continues above what it numbered"
+        );
+    }
+    assert_eq!(seq_row_value(&path), Some(scanned_seq(&path)));
+}
+
+/// Mixed versions on one store: after this build wrote the row, an older
+/// core that knows nothing of it commits; this build reopens and resumes
+/// above the older core's commit, still without a scan, because the
+/// triggers in the file raised the row inside the older core's commit.
+///
+/// ```text
+/// new ──open, commit──► row = s
+/// old ──commit at s + 1000 (no row write)──► trigger: row = s + 1000
+/// new ──reopen──► resumes after s + 1000, no scan
+/// ```
+#[test]
+fn an_older_cores_commit_raises_the_row_through_its_triggers() {
+    let path = scratch("seq-older-core");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..5);
+    }
+    let recorded = seq_row_value(&path).unwrap();
+    let older = recorded as i64 + 1000;
+    older_core_commit(&raw(&path), &items_table(&path), older, true);
+    assert_eq!(scanned_seq(&path), older as u64);
+    assert_eq!(seq_row_value(&path), Some(older as u64));
+    let db = open_file(&path, 1);
+    assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+    assert!(db.seq_high_water() >= older as u64);
+    let next = block_on(db.insert("items", item(99), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    let _ = next;
+    assert!(
+        seq_row_value(&path).unwrap() > older as u64,
+        "numbered above it"
+    );
+}
+
+/// A table without its triggers (one an older core created, or whose
+/// triggers are gone) is not covered by the row: the next open scans that
+/// table alone; the first write gives it its triggers and raises the row
+/// past what it holds, so the open after scans nothing.
+#[test]
+fn a_table_without_triggers_is_scanned_once_and_covered() {
+    let path = scratch("seq-uncovered");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..5);
+    }
+    let items = items_table(&path);
+    let history = format!("{items}__h");
+    let recorded = seq_row_value(&path).unwrap();
+    let older = recorded as i64 + 5000;
+    {
+        let conn = raw(&path);
+        conn.execute_batch(&format!(
+            "DROP TRIGGER \"{history}__seq_v1_ins\"; DROP TRIGGER \"{history}__seq_v1_upd\";"
+        ))
+        .unwrap();
+        older_core_commit(&conn, &items, older, false);
+    }
+    assert_eq!(
+        seq_row_value(&path),
+        Some(recorded),
+        "nothing raised the row"
+    );
+    assert_eq!(
+        scanned_seq(&path),
+        older as u64,
+        "only the history holds it"
+    );
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(db.seq_scans_for_test(), vec![history.clone()]);
+        assert!(db.seq_high_water() >= older as u64);
+        assert_eq!(
+            seq_row_value(&path),
+            Some(recorded),
+            "an open writes nothing"
+        );
+        // The first write covers it: scanned again, in its transaction.
+        insert_items(&db, 50..51);
+        assert_eq!(
+            db.seq_scans_for_test(),
+            vec![history.clone(), history.clone()]
+        );
+    }
+    assert!(seq_row_value(&path).unwrap() > older as u64);
+    let db = open_file(&path, 1);
+    assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+}
+
+/// A table a new schema version adds joins the row when it is created:
+/// the open that adds it scans only the new (empty) tables, and the next
+/// open scans nothing.
+#[test]
+fn a_table_a_new_schema_adds_is_covered_from_its_creation() {
+    let path = scratch("seq-new-table");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..3);
+    }
+    let with_notes = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("label", ColumnType::Text)
+                    .column("n", ColumnType::BigInt)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                with_notes.clone(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let before: Vec<String> = clocked_tables(&raw(&path));
+    {
+        let db = open();
+        let added: Vec<String> = clocked_tables(&raw(&path))
+            .into_iter()
+            .filter(|t| !before.contains(t))
+            .collect();
+        assert_eq!(added.len(), 2, "notes and its history");
+        assert_eq!(sorted(db.seq_scans_for_test()), added);
+        block_on(db.insert(
+            "notes",
+            BTreeMap::from([("body".to_owned(), Value::String("hi".to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    assert_eq!(seq_row_value(&path), Some(scanned_seq(&path)));
+    let db = open();
+    assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+}
+
+const SEQ_CRASH_CHILD: &str = "JAZZ_SEQ_CRASH_CHILD";
+
+/// Child process body: inside one SQLite transaction, write an accepted
+/// seq the way a commit does (a history version and a dedupe entry), check
+/// the row already moved with it, then either commit or abort the process
+/// before the transaction commits.
+fn seq_crash_child(path: &Path, seq: i64, commit: bool) -> ! {
+    let conn = raw(path);
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    older_core_commit(&conn, &items_table(path), seq, false);
+    let inside: i64 = conn
+        .query_row("SELECT v FROM _jazz_meta WHERE k = ?1", [SEQ_KEY], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(inside, seq, "the row moves in the commit's own transaction");
+    if commit {
+        conn.execute_batch("COMMIT").unwrap();
+        std::process::exit(0);
+    }
+    std::process::abort();
+}
+
+/// The row and the data it covers commit together: a process killed after
+/// a commit wrote its seq but before its transaction committed leaves
+/// neither, and the store resumes from the last committed seq; one that
+/// commits leaves both. There is no point between a commit's data write
+/// and its row write to crash at: the trigger runs inside the write.
+///
+/// ```text
+/// child: BEGIN ─► write seq s+77 (row = s+77 inside) ─► abort
+/// parent: reopen ─► row = s, data has no s+77, no scan
+/// child: BEGIN ─► write seq s+77 ─► COMMIT
+/// parent: reopen ─► row = s+77
+/// ```
+#[test]
+fn a_crash_between_a_commits_write_and_its_commit_keeps_row_and_data_together() {
+    if let Ok(spec) = std::env::var(SEQ_CRASH_CHILD) {
+        let mut parts = spec.split('|');
+        let path = PathBuf::from(parts.next().unwrap());
+        let seq = parts.next().unwrap().parse().unwrap();
+        let commit = parts.next().unwrap() == "commit";
+        seq_crash_child(&path, seq, commit);
+    }
+    let path = scratch("seq-crash");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..5);
+    }
+    let recorded = seq_row_value(&path).unwrap();
+    let crashed = recorded as i64 + 77;
+    let run = |mode: &str| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_crash_between_a_commits_write_and_its_commit_keeps_row_and_data_together",
+                "--nocapture",
+            ])
+            .env(
+                SEQ_CRASH_CHILD,
+                format!("{}|{crashed}|{mode}", path.display()),
+            )
+            .status()
+            .unwrap()
+    };
+    assert!(!run("abort").success(), "the child aborts");
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+        assert_eq!(scanned_seq(&path), recorded, "the data has no trace of it");
+        assert_eq!(seq_row_value(&path), Some(recorded), "nor has the row");
+    }
+    assert!(run("commit").success());
+    let db = open_file(&path, 1);
+    assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+    assert_eq!(seq_row_value(&path), Some(crashed as u64));
+    assert!(db.seq_high_water() >= crashed as u64);
+}
+
+/// The encoding `commit_seq.v1`, pinned byte for byte: the row is
+/// `('commit_seq.v1', <INTEGER>)` and the triggers' SQL as stored in the
+/// file. A store whose row holds anything else is refused with a storage
+/// error rather than resumed from.
+#[test]
+fn the_commit_seq_row_and_its_triggers_are_pinned() {
+    let path = scratch("seq-fixture");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..1);
+    }
+    let conn = raw(&path);
+    conn.execute_batch(&format!(
+        "UPDATE _jazz_meta SET v = 1234567890123 WHERE k = '{SEQ_KEY}';"
+    ))
+    .unwrap();
+    assert_eq!(
+        seq_row(&path),
+        Some(("1234567890123".to_owned(), "integer".to_owned()))
+    );
+    let trigger = |name: &str| -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let items = items_table(&path);
+    assert_eq!(
+        trigger(&format!("{items}__h__seq_v1_ins")),
+        format!(
+            "CREATE TRIGGER \"{items}__h__seq_v1_ins\" AFTER INSERT ON \"{items}__h\" \
+             WHEN NEW._clock >= 0 AND NEW._clock < {PENDING_BAND} BEGIN UPDATE _jazz_meta \
+             SET v = NEW._clock WHERE k = 'commit_seq.v1' AND v < NEW._clock; END"
+        )
+    );
+    assert_eq!(
+        trigger("_jazz_transactions__seq_v1_upd"),
+        format!(
+            "CREATE TRIGGER \"_jazz_transactions__seq_v1_upd\" AFTER UPDATE OF t ON \
+             \"_jazz_transactions\" WHEN NEW.t >= 0 AND NEW.t < {PENDING_BAND} BEGIN UPDATE \
+             _jazz_meta SET v = NEW.t WHERE k = 'commit_seq.v1' AND v < NEW.t; END"
+        )
+    );
+    drop(conn);
+    // A hand-written row in the pinned encoding is resumed from as is.
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+        assert!(db.seq_high_water() >= 1_234_567_890_123);
+    }
+    for corrupt in ["x'01'", "'12'", "-1", "1.5", &PENDING_BAND.to_string()] {
+        raw(&path)
+            .execute_batch(&format!(
+                "UPDATE _jazz_meta SET v = {corrupt} WHERE k = '{SEQ_KEY}';"
+            ))
+            .unwrap();
+        let error = block_on(Db::open_at(config(1), &path, FileOptions::default()))
+            .err()
+            .unwrap_or_else(|| panic!("{corrupt} is refused"));
+        assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{corrupt}");
+        assert!(
+            error.message.contains("corrupt commit seq"),
+            "{corrupt}: {}",
+            error.message
+        );
+    }
+}
