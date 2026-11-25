@@ -8,7 +8,7 @@ const manifest = {
   architecture: "x86_64",
   node: "24.13.0",
   pnpm: "10.14.0",
-  rust: "1.93.1",
+  rust: "1.100.0",
   rustComponents: ["clippy", "rustfmt"],
   rustTargets: ["wasm32-unknown-unknown"],
   sccache: "0.15.0",
@@ -19,7 +19,7 @@ const manifest = {
 
 const environment = {
   RUSTUP_HOME: "/opt/jazz-ci/toolchains/v1/rustup",
-  RUSTUP_TOOLCHAIN: "1.93.1-x86_64-unknown-linux-gnu",
+  RUSTUP_TOOLCHAIN: "1.100.0-x86_64-unknown-linux-gnu",
   SCCACHE_SERVER_PORT: "4226",
   SCCACHE_DIR: "/var/cache/jazz-sccache",
   SCCACHE_CACHE_SIZE: "100G",
@@ -29,7 +29,7 @@ const environment = {
 const versions = {
   node: "v24.13.0",
   pnpm: "10.14.0",
-  rustc: "rustc 1.93.1",
+  rustc: "rustc 1.100.0",
   sccache: "sccache 0.15.0",
   "cargo-nextest": "cargo-nextest 0.9.143",
   "wasm-pack": "wasm-pack 0.13.1",

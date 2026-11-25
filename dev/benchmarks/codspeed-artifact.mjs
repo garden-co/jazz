@@ -130,7 +130,7 @@ const format = "jazz-codspeed-benchmark-artifact-v2";
 // origin=unknown; match the absolute repository root uploaded by the runner.
 export const measurementWorkspace = "/actions-runner/_work/jazz/jazz";
 const baseContract = {
-  rust: "1.93.1",
+  rust: "1.100.0",
   codspeed: "5.0.1",
   target: "aarch64-unknown-linux-gnu",
   mode: "walltime",
@@ -263,7 +263,7 @@ async function platform() {
 function validateContext(value) {
   assert.match(value.source, /^[a-f0-9]{40}$/);
   assert.match(value.run, /^\d+$/);
-  assert.match(value.compiler, /^rustc 1\.93\.1 /);
+  assert.match(value.compiler, /^rustc 1\.100\.0 /);
   assert.match(value.compiler, /^host: aarch64-unknown-linux-gnu$/m);
 }
 

@@ -277,7 +277,7 @@ impl SlowLog {
     /// shapes did not fit; starts a new window.
     pub fn take(&mut self) -> (Vec<SlowQuery>, u64) {
         let mut shapes: Vec<SlowQuery> = self.shapes.drain().map(|(_, shape)| shape).collect();
-        shapes.sort_by(|a, b| b.total.cmp(&a.total));
+        shapes.sort_by_key(|shape| std::cmp::Reverse(shape.total));
         (shapes, std::mem::take(&mut self.dropped))
     }
 

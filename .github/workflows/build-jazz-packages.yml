@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
-          rust-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          rust-targets: ${{ matrix.target }}
           setup-node: "false"
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
@@ -93,7 +93,7 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
-          tool: cargo-zigbuild@0.20.1
+          tool: cargo-zigbuild@0.24.1
 
       - name: Build server binary
         run: cargo zigbuild -p jazz-tools --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}
@@ -1494,6 +1494,12 @@ jobs:
             fs.writeFileSync("rn-packages.json", JSON.stringify(receipt, null, 2) + "\n");'
           sha256sum *.tgz > NPM-SHA256SUMS
           cat NPM-SHA256SUMS
+
+      # A plain Vercel Function importing createJazz from jazz-tools/backend,
+      # traced as Vercel traces it, must stay under budget (Vercel refuses
+      # 250 MB; beta.3 traced to 414 MB). Fails, never warns.
+      - name: Budget a jazz-tools/backend function (linux-x64)
+        run: node dev/artifacts/verify-backend-function-size.mjs "${RUNNER_TEMP}/npm" "${VERSION}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

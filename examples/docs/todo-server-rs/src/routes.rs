@@ -175,6 +175,10 @@ async fn health() -> impl IntoResponse {
 
 /// Every todo, sent again whenever one changes: the subscription's deltas
 /// applied to the list it holds.
+#[allow(
+    clippy::result_large_err,
+    reason = "Axum handlers return the HTTP error response directly"
+)]
 async fn todos_live(
     State(state): State<AppState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {

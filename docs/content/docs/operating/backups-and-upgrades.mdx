@@ -92,6 +92,31 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
+## Upgrading from beta.2 to beta.3
+
+No code changes. A backend never follows a redirect from a remote core: if the URL you give
+`remote()` or `durableObjects()` answers with a redirect, the backend fails with a
+`CoreRedirectError` naming both URLs. Configure the store with the core's final URL.
+
+## Upgrading from beta.1 to beta.2
+
+TypeScript apps change nothing. These affect the experimental native clients:
+
+- **Kotlin, plain Maven builds:** depend on `tools.jazz:jazz-kotlin-jvm`. `tools.jazz:jazz-kotlin`
+  is now the Kotlin Multiplatform library, which Gradle resolves to `jazz-kotlin-jvm` or
+  `jazz-kotlin-android` on its own; Maven gets only its metadata, so the build fails to compile.
+  With Gradle, the jar on the classpath is now named `jazz-kotlin-jvm-<version>.jar`: update any
+  build step that refers to it by name. See [Kotlin](/docs/setup/kotlin#install).
+- **Kotlin:** `close()` returns before the native core has finished; call `closeAndWait()` if you
+  reopen the same directory right away. A transaction cancelled before its commit rolls back.
+- **Swift:** `JazzError` has a new case, `stillQueued`, for a write cancelled after it was saved
+  locally. A `switch` over `JazzError` that lists every case and has no `default` stops compiling:
+  add the case, or a `default`.
+- **Rust:** `shutdown` and `close` fail calls still waiting on the server with `Error::Stopped` at
+  once, and a closed session's `Jazz` reports `Stopped`, not `Replaced`.
+- **Cancelled writes may still apply** (Swift, Kotlin, Rust and Go): a cancel or timeout now ends
+  the wait, but a write already saved locally stays queued. Don't retry it.
+
 ## Upgrading from beta.0 to beta.1
 
 ### Kotlin (experimental): install from the GitHub release

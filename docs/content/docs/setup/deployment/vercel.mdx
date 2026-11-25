@@ -22,6 +22,12 @@ Install the Sandbox SDK next to `jazz-tools`:
 pnpm add @vercel/sandbox
 ```
 
+`@vercel/sandbox` 4.1.0 to 5.0.0 don't load in a function Vercel doesn't bundle, such as a plain
+Node function in `api/`: they `require()` an ES module (through `@vercel/drives`), which Vercel's
+Node runtime doesn't allow, so `vercel()` fails on the first request with "vercel() could not load
+the @vercel/sandbox package: it require()s an ES module…". Next.js bundles them and isn't affected.
+Outside Next.js, install `@vercel/sandbox@4.0.0`.
+
 Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
@@ -83,6 +89,21 @@ Then deploy as usual with `git push` or `vercel deploy`. Your functions authenti
 their own OIDC token, and the core's secrets are generated inside the Sandbox, so Jazz needs no
 environment variables of its own. Your auth may: Better Auth, for example, needs
 `BETTER_AUTH_SECRET` in each environment.
+
+Jazz's native module comes in one package per platform, `@garden-co/jazz-napi-linux-x64-gnu` on
+Vercel, which npm installs as an optional dependency of `jazz-napi`. npm 10 can leave it out of a
+`package-lock.json` written on a Mac, when the lockfile was regenerated over an existing
+`node_modules`. The deployment then fails with "Jazz NAPI artifact is missing. Install
+@garden-co/jazz-napi-linux-x64-gnu@…". To keep it in the lockfile whatever machine writes it, list
+it in your app's own optional dependencies, at your `jazz-tools` version:
+
+```json title="package.json"
+{
+  "optionalDependencies": {
+    "@garden-co/jazz-napi-linux-x64-gnu": "<your jazz-tools version>"
+  }
+}
+```
 
 On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
 `next dev`, which can't upgrade sockets, the browser

@@ -948,9 +948,21 @@ async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
     return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
-    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error, {
+      requireEsm: SANDBOX_REQUIRE_ESM_HINT,
+    });
   }
 }
+
+/**
+ * @vercel/sandbox 4.1.0 to 5.0.0 depend on @vercel/drives 1.0.0, whose
+ * CommonJS build require()s the ES-only @workflow/serde. A function Vercel
+ * bundles (Next.js) never runs that require(); a plain `api/` function, which
+ * Vercel only traces, does, and fails on Vercel's runtime.
+ */
+const SANDBOX_REQUIRE_ESM_HINT =
+  "@vercel/sandbox 4.1.0 to 5.0.0 do this through @vercel/drives in a function Vercel doesn't bundle " +
+  "(a plain Node function in api/; Next.js bundles it): install @vercel/sandbox@4.0.0.";
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<JazzCore> {
   const { options, openRemote } = params;

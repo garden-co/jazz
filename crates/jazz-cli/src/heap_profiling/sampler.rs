@@ -181,7 +181,7 @@ fn crossed_interval(ptr: usize, size: usize) {
     };
     let mut live = LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     live.get_or_insert_with(HashMap::new).insert(ptr, sample);
-    let _ = filter_slot(ptr).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    let _ = filter_slot(ptr).try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         count.checked_add(1)
     });
     drop(live);
@@ -344,7 +344,7 @@ fn forget(ptr: usize) {
     IN_SAMPLER.set(true);
     let mut live = LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if live.as_mut().and_then(|live| live.remove(&ptr)).is_some() {
-        let _ = filter_slot(ptr).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        let _ = filter_slot(ptr).try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             (count != u16::MAX).then(|| count - 1)
         });
     }

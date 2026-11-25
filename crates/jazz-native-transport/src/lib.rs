@@ -357,7 +357,7 @@ impl BoundedOutbound {
         let charge = bytes.len().max(16 * 1024);
         let reserve = || {
             self.queued_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     current
                         .checked_add(charge)
                         .filter(|next| *next <= WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES)
@@ -848,7 +848,7 @@ impl LinkActivity {
         let now = u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let _ = self
             .last
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 Some(last.saturating_add(gap).min(now))
             });
     }

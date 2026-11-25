@@ -51,15 +51,23 @@ teardown() {
     # gone and the Drive detached. Every wait is bounded (3 min) and a leftover still FAILs.
     gone() { ! t4_vercel sandbox ls --all --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; }
     drive() { t4_vercel sandbox drives ls --project "$VERCEL_PROJECT_ID" --name-prefix "$core-data" 2>/dev/null | grep "^$core-data "; }
-    # A core something resumed after its removal comes back listed (RC 45103746609 and proof run 45105741147): so
-    # remove, wait until it's gone, and check it stays gone for 30 s. At most 3 rounds.
-    for round in 1 2 3; do
-      gone && { sleep 30; gone && break; }
+    # Something can resume the core for minutes after its removal: in RC 45695884802 each round found a new, seconds-old
+    # session after the preview already answered DEPLOYMENT_NOT_FOUND (likely the removed deployment's warm function
+    # instances reconnecting). So keep stopping and removing until it has stayed gone for 60 s, for up to 10 min, and
+    # log every resume.
+    until_t=$(( $(date +%s) + 600 )); resumes=0
+    while :; do
+      if gone; then
+        stable=1; for i in $(seq 12); do sleep 5; gone || { stable=; break; }; done
+        [ -n "$stable" ] && break
+      fi
+      [ "$(date +%s)" -ge $until_t ] && break
+      resumes=$((resumes + 1)); echo "core $core listed (round $resumes): stop and remove" >> "$T4_WORK/teardown.log"
       t4_vercel sandbox stop --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
       t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
       for i in $(seq 24); do gone && break; sleep 5; done
     done
-    gone && echo "PASS teardown: sandbox $core removed, and still gone 30 s later" || { echo "FAIL teardown: sandbox $core still listed after 3 rounds of stop and remove (see teardown.log)"; FAIL=1; }
+    gone && echo "PASS teardown: sandbox $core removed, and still gone 60 s later ($resumes round(s) of stop and remove)" || { echo "FAIL teardown: sandbox $core still coming back 10 min after removal ($resumes rounds; see teardown.log)"; FAIL=1; }
     # A Drive can't be deleted while a session holds it: wait until it shows neither an attached sandbox nor session.
     row=$(drive)
     for i in $(seq 36); do [ -z "$row" ] || [ "$(echo "$row" | awk '{print $(NF-1) $NF}')" = -- ] && break; sleep 5; row=$(drive); done

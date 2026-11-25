@@ -1268,16 +1268,19 @@ fn my_membership(client: &Db, space: &str) -> jazz::db::SubscriptionStream {
 }
 
 /// A policy correlated on two columns follows one space's rows: support
-/// matches every outer-row equality of the `EXISTS`, not just the first.
-/// Alice, a member of two spaces of the same kind, reads her own member
-/// row of the first; her replica receives the first space's members (what
-/// the read rests on) and nothing of the second, then or later.
+/// matches every outer-row equality of the `EXISTS`, not just the first,
+/// and its equality with the session too. Alice, a member of two spaces of
+/// the same kind, reads her own member row of the first; that read rests
+/// on her own member row of that space, so her replica receives nothing
+/// else: not the other members (the session equality), and not her member
+/// row of the second space (the second outer equality), then or later.
 ///
 /// ```text
 /// server: project/p1 {alice, bob}, project/p2 {alice, carol}
 /// alice ──subscribe members(space = p1, account = alice)──► server
-///       ◄── alice@p1 (result), bob@p1 (support); not alice@p2, carol@p2
-/// server: + dave@p1, + erin@p2 ──► alice gets dave@p1 only
+///       ◄── alice@p1 (result and support); not bob@p1, alice@p2, carol@p2
+/// server: + alice'@p1, + dave@p1, + erin@p2, + alice'@p2
+///       ──► alice gets alice'@p1 only
 /// ```
 #[test]
 fn a_two_column_correlation_follows_one_space() {
@@ -1291,15 +1294,17 @@ fn a_two_column_correlation_follows_one_space() {
 
     let _stream = my_membership(&client, "p1");
     pump(&server, &client);
-    assert_eq!(local(&client, "members"), [id(7, 1), id(7, 2)]);
+    assert_eq!(local(&client, "members"), [id(7, 1)]);
 
     insert_member(&server, member(5, "p1", person("dave")));
     insert_member(&server, member(6, "p2", person("erin")));
+    insert_member(&server, member(7, "p1", me.clone()));
+    insert_member(&server, member(8, "p2", me.clone()));
     pump(&server, &client);
     assert_eq!(
         local(&client, "members"),
-        [id(7, 1), id(7, 2), id(7, 5)],
-        "a later member of the first space follows; the second space's does not"
+        [id(7, 1), id(7, 7)],
+        "alice's later row of the first space follows; other members' and the second space's do not"
     );
 }
 
@@ -1428,7 +1433,7 @@ fn composite_support_watches_go_with_their_subscriptions() {
     pump(&server, &client);
     let (one_space, sets) = server.composite_watches_for_test();
     assert!(one_space > 0, "following one space holds its key");
-    assert_eq!(sets, 1, "one column set: (kind, space)");
+    assert_eq!(sets, 1, "one column set: (account, kind, space)");
 
     let second = my_membership(&client, "p2");
     pump(&server, &client);
@@ -1487,7 +1492,10 @@ fn a_write_gathers_composite_sets_only_while_some_are_followed() {
         followed > before,
         "a followed table's write gathers the sets"
     );
-    assert!(local(&client, "members").contains(&id(7, 3)));
+    assert!(
+        !local(&client, "members").contains(&id(7, 3)),
+        "carol's row is no support for alice's read"
+    );
 
     drop(stream);
     pump(&server, &client);
@@ -1604,5 +1612,171 @@ fn a_later_null_further_equality_grant_reaches_the_relay() {
         local(&at.client, "documents"),
         [id(2, 1)],
         "the document stays readable"
+    );
+}
+
+/// `spaces`, their `members` (each an account by `session.user`) and two
+/// tables read-gated by membership of their space: `notes` and `tasks`.
+fn gated_schema() -> JazzSchema {
+    let member_of_space = || {
+        read_and_allow_all_writes(exists(
+            "members",
+            vec![outer_eq("space", "space"), session_eq("account", &["user"])],
+        ))
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("spaces")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("members")
+                    .fk_column("space", "spaces")
+                    .column("account", ColumnType::Uuid)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("space", "spaces")
+                    .column("body", ColumnType::Text)
+                    .policies(member_of_space()),
+            )
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .fk_column("space", "spaces")
+                    .column("title", ColumnType::Text)
+                    .policies(member_of_space()),
+            )
+            .build(),
+    )
+}
+
+/// The account `session.user` resolves to for `author`.
+fn account(author: AuthorSubject) -> Value {
+    Value::Uuid(author.account_id().expect("a test author has an account").0)
+}
+
+/// One space with `others` members besides alice (when `alice_in`), and a
+/// note and a task in it.
+fn seed_gated(at: &Relayed, others: u8, alice_in: bool) {
+    at.seed(
+        "spaces",
+        id(9, 1),
+        cells(&[("name", Value::String("s".into()))]),
+    );
+    let in_space = |extra: (&str, Value)| cells(&[("space", Value::Uuid(id(9, 1).0)), extra]);
+    if alice_in {
+        at.seed("members", id(7, 0), in_space(("account", account(alice()))));
+    }
+    for n in 1..=others {
+        // Not alice's bytes (0x55), nor 0xee, which a test adds later.
+        let other =
+            AuthorSubject::for_test_bytes([0xaa, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        at.seed("members", id(7, n), in_space(("account", account(other))));
+    }
+    at.seed(
+        "notes",
+        id(2, 1),
+        in_space(("body", Value::String("n".into()))),
+    );
+    at.seed(
+        "tasks",
+        id(3, 1),
+        in_space(("title", Value::String("t".into()))),
+    );
+}
+
+/// A membership check follows only the reader's own member row: support
+/// keeps the `EXISTS`'s equality with `session.user`, so what a replica
+/// receives (and the walk visits) does not grow with the space's members.
+/// Alice reads two membership-gated tables of a space with 200 other
+/// members, through a relay; the relay and her client hold her own member
+/// row, which both evaluate her reads with, and no other.
+///
+/// ```text
+/// server: space {alice, 200 others}, note, task
+/// alice ──subscribe notes, tasks──► relay ──► server
+///       ◄── note, task, alice's member row; no other member row
+/// server: + another member ──► nothing
+/// ```
+#[test]
+fn a_membership_check_follows_only_the_readers_member_row() {
+    let at = Relayed::open(gated_schema);
+    seed_gated(&at, 200, true);
+    let _notes = at.subscribe(Query::from("notes"));
+    let _tasks = at.subscribe(Query::from("tasks"));
+    assert_eq!(local(&at.client, "notes"), [id(2, 1)]);
+    assert_eq!(local(&at.client, "tasks"), [id(3, 1)]);
+    assert_eq!(local(&at.relay, "members"), [id(7, 0)], "the relay");
+    assert_eq!(local(&at.client, "members"), [id(7, 0)], "the client");
+
+    let other = AuthorSubject::for_test_bytes([0xee; 16]);
+    at.seed(
+        "members",
+        id(7, 0xee),
+        cells(&[
+            ("space", Value::Uuid(id(9, 1).0)),
+            ("account", account(other)),
+        ]),
+    );
+    at.pump();
+    assert_eq!(
+        local(&at.relay, "members"),
+        [id(7, 0)],
+        "another member's later row is no support for alice"
+    );
+}
+
+/// The narrowed support still watches the reader's own membership: alice,
+/// not a member at first, reads nothing; once her member row is written
+/// her reads open, and once it is deleted they close again.
+///
+/// ```text
+/// server: space {bob}, note, task
+/// alice ──subscribe notes, tasks──► relay ──► server     ◄── nothing
+/// server: + alice's member row ──► note, task, her member row
+/// server: - alice's member row ──► note and task leave
+/// ```
+#[test]
+fn the_readers_own_membership_still_opens_and_closes_the_read() {
+    let at = Relayed::open(gated_schema);
+    seed_gated(&at, 1, false);
+    let _notes = at.subscribe(Query::from("notes"));
+    let _tasks = at.subscribe(Query::from("tasks"));
+    assert!(local(&at.client, "notes").is_empty());
+    assert!(local(&at.client, "tasks").is_empty());
+
+    at.seed(
+        "members",
+        id(7, 0),
+        cells(&[
+            ("space", Value::Uuid(id(9, 1).0)),
+            ("account", account(alice())),
+        ]),
+    );
+    at.pump();
+    assert_eq!(
+        local(&at.client, "notes"),
+        [id(2, 1)],
+        "joining opens notes"
+    );
+    assert_eq!(
+        local(&at.client, "tasks"),
+        [id(3, 1)],
+        "joining opens tasks"
+    );
+    assert_eq!(local(&at.relay, "members"), [id(7, 0)]);
+
+    block_on(at.server.delete("members", id(7, 0), Default::default())).unwrap();
+    at.pump();
+    assert!(
+        local(&at.client, "notes").is_empty(),
+        "leaving closes notes"
+    );
+    assert!(
+        local(&at.client, "tasks").is_empty(),
+        "leaving closes tasks"
     );
 }

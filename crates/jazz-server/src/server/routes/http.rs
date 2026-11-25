@@ -111,6 +111,10 @@ pub(super) struct ShutdownResponse {
 /// Return the catalogue schema for the given hash plus its publish timestamp.
 ///
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
+#[allow(
+    clippy::result_large_err,
+    reason = "Axum handlers return the HTTP error response directly"
+)]
 pub(super) async fn schema_handler(
     State(state): State<Arc<ServerState>>,
     Path(params): Path<HashMap<String, String>>,
@@ -144,6 +148,10 @@ pub(super) async fn schema_handler(
 /// Return all known schema hashes from catalogue state.
 ///
 /// Requires a valid admin secret.
+#[allow(
+    clippy::result_large_err,
+    reason = "Axum handlers return the HTTP error response directly"
+)]
 pub(super) async fn schema_hashes_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -171,6 +179,10 @@ pub(super) async fn schema_hashes_handler(
 /// Return whether two known schema hashes are connected by non-draft uploaded migrations.
 ///
 /// Requires a valid admin secret.
+#[allow(
+    clippy::result_large_err,
+    reason = "Axum handlers return the HTTP error response directly"
+)]
 pub(super) async fn migration_graph_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -185,6 +197,10 @@ pub(super) async fn migration_graph_handler(
 
 /// Every bundle the core has published, with its permissions: what an
 /// admin reads to see what a session pinned to a bundle may do.
+#[allow(
+    clippy::result_large_err,
+    reason = "Axum handlers return the HTTP error response directly"
+)]
 pub(super) async fn published_bundles_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,

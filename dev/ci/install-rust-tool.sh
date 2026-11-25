@@ -30,9 +30,9 @@ case "${JAZZ_RUST_TOOL:?JAZZ_RUST_TOOL must name a pinned tool}" in
     version=0.9.143
     binary=cargo-nextest
     ;;
-  cargo-zigbuild@0.20.1)
+  cargo-zigbuild@0.24.1)
     crate=cargo-zigbuild
-    version=0.20.1
+    version=0.24.1
     binary=cargo-zigbuild
     ;;
   wasm-pack@0.13.1)

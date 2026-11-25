@@ -3017,7 +3017,7 @@ pub(crate) mod mock {
         let path = request.uri().path().to_owned();
         let throttled = state
             .fail_next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .is_ok();
         if throttled {
             return (StatusCode::SERVICE_UNAVAILABLE, Vec::new());

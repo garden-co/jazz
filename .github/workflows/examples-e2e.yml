@@ -98,7 +98,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: env.REUSE_PREVIEW != 'true'
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6

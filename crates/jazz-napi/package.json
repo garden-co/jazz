@@ -16,7 +16,6 @@
     "native-binding.cjs",
     "native-loader.cjs",
     "native-artifact-fingerprint.cjs",
-    "jazz-napi.*.node",
     "jazz-napi.*.manifest.json"
   ],
   "main": "index.cjs",
