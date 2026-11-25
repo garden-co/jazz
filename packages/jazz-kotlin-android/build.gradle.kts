@@ -135,6 +135,10 @@ tasks.withType<Jar>().configureEach { dependsOn(generateUniffi) }
 
 // Maven Central (dev/scripts/publish-kotlin.sh): the release AAR, sources, an
 // empty javadoc jar, signed; see packages/jazz-kotlin for the properties.
+// The javadoc jar is ours, empty: AGP's own (publishJavadocJar) runs its bundled
+// Dokka 1.4.32, which downloads the JDK's, Kotlin's, Android's and AndroidX's
+// package-lists while rendering and fails the build when a download breaks
+// off mid-response.
 mavenPublishing {
     publishToMavenCentral()
     signAllPublications()
@@ -142,7 +146,7 @@ mavenPublishing {
         com.vanniktech.maven.publish.AndroidSingleVariantLibrary(
             variant = "release",
             sourcesJar = true,
-            publishJavadocJar = true,
+            publishJavadocJar = false,
         ),
     )
     coordinates("tools.jazz", "jazz-kotlin-android", version.toString())
@@ -171,4 +175,13 @@ mavenPublishing {
             developerConnection.set("scm:git:ssh://git@github.com/garden-co/jazz.git")
         }
     }
+}
+
+val emptyJavadocJar by tasks.registering(Jar::class) {
+    archiveClassifier.set("javadoc")
+}
+// After the plugin's afterEvaluate, which creates the publication.
+afterEvaluate {
+    extensions.getByType<PublishingExtension>().publications
+        .named<MavenPublication>("maven") { artifact(emptyJavadocJar) }
 }
