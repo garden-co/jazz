@@ -1,7 +1,7 @@
 import XCTest
 @testable import Jazz
 
-struct Task: Row {
+struct Task: Updatable {
     static let table = "tasks"
     let id: Jazz.ID
     var title: String

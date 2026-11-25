@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::include::Row;
 use crate::query::Query;
-use crate::table::{Implementations, Insert, Table, Update};
+use crate::table::{Implementations, Insert, Table, Updatable, Update};
 
 /// A transaction in progress, handed to [`Jazz::transaction`]'s closure.
 ///
@@ -67,7 +67,10 @@ impl Transaction {
 
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -82,7 +85,7 @@ impl Transaction {
     }
 
     /// Brings back a deleted row, as [`Jazz::restore`].
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
         self.read_back(id).await
@@ -90,7 +93,10 @@ impl Transaction {
 
     /// Brings back a deleted row with `new`'s values, as
     /// [`Jazz::restore_with`].
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.implementations)?;
         self.client.restore(
             <N::Row as Table>::NAME,
@@ -354,7 +360,10 @@ impl OpenTransaction {
             .await
     }
 
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         self.on(move |tx| async move { tx.upsert(id, new).await })
             .await
     }
@@ -363,7 +372,7 @@ impl OpenTransaction {
         self.on(move |tx| async move { tx.delete::<T>(id) }).await
     }
 
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.on(move |tx| async move { tx.restore::<T>(id).await })
             .await
     }
@@ -371,7 +380,10 @@ impl OpenTransaction {
     /// Brings back a deleted row with `new`'s values. A restore replaces
     /// the whole row, so it takes the full insert, as TS's
     /// `restore(table, id, data)` does.
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         self.on(move |tx| async move {
             let cells = new.into_cells(&tx.implementations)?;
             tx.client.restore(
@@ -386,7 +398,7 @@ impl OpenTransaction {
     }
 
     /// [`Jazz::edit_text`] staged in the transaction.
-    pub async fn edit_text<T: Table, V: crate::TextColumn>(
+    pub async fn edit_text<T: Updatable, V: crate::TextColumn>(
         &self,
         id: ObjectId,
         column: crate::Column<T, V>,
@@ -400,7 +412,7 @@ impl OpenTransaction {
 
     /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
     /// bytes on a text column).
-    pub async fn splice<T: Table, V: crate::LargeColumn>(
+    pub async fn splice<T: Updatable, V: crate::LargeColumn>(
         &self,
         id: ObjectId,
         column: crate::Column<T, V>,

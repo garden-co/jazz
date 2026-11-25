@@ -23,7 +23,7 @@ use jazz::tools::{ObjectId, StreamingUpload, Value};
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
 use crate::query::Column;
-use crate::table::{Insert, Table, Update};
+use crate::table::{Insert, Table, Updatable, Update};
 use crate::value::{ColumnValue, Json};
 use crate::writes::read_back;
 
@@ -58,7 +58,7 @@ impl Jazz {
     ///     Splice::text(5, 0, " wörld"),
     /// ]).await?;
     /// ```
-    pub async fn splice<T: Table, V: LargeColumn>(
+    pub async fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -166,6 +166,7 @@ impl Jazz {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,
@@ -342,6 +343,7 @@ impl crate::transaction::Transaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]>,
@@ -409,7 +411,7 @@ impl crate::transaction::Transaction {
 
     /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
     /// bytes on a text column).
-    pub fn splice<T: Table, V: LargeColumn>(
+    pub fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -511,6 +513,7 @@ impl crate::transaction::OpenTransaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,

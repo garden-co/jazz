@@ -267,7 +267,7 @@ public class Jazz internal constructor(
      * completes; a cancellation after that may still write it.
      */
     public suspend fun <Row : Any, Insert : Any> insertStreaming(
-        table: Table<Row, Insert, *>,
+        table: BaseTable<Row, Insert>,
         row: Insert,
         column: Column<*>,
         data: Flow<ByteArray>,
@@ -295,7 +295,7 @@ public class Jazz internal constructor(
     ): Row = stream(table, column, "upsert", id, insertJson(table, row), data)
 
     private suspend fun <Row : Any> stream(
-        table: Table<Row, *, *>,
+        table: BaseTable<Row, *>,
         column: Column<*>,
         kind: String,
         id: String?,
@@ -314,7 +314,7 @@ public class Jazz internal constructor(
 
     /**
      * Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it.
-     * A restore is checked against the update policy.
+     * A restore is checked against the update policy, so it takes a [Table], not a [BaseTable].
      */
     public suspend fun <Row : Any, Insert : Any> restore(table: Table<Row, Insert, *>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
@@ -337,7 +337,7 @@ public class Jazz internal constructor(
      * and a refusal throws ([JazzException.Permission]).
      */
     public suspend fun <Row : Any, Insert : Any> insert(
-        table: Table<Row, Insert, *>,
+        table: BaseTable<Row, Insert>,
         row: Insert,
         tier: WriteTier? = null,
     ): Row = io {
@@ -358,7 +358,7 @@ public class Jazz internal constructor(
     }
 
     /** Deletes the row [id] of [table]. */
-    public suspend fun delete(table: Table<*, *, *>, id: String, tier: WriteTier? = null): Unit = io {
+    public suspend fun delete(table: BaseTable<*, *>, id: String, tier: WriteTier? = null): Unit = io {
         if (tier == null) native.delete(table.tableName, id) else native.deleteAt(table.tableName, id, tier.wire)
     }
 
@@ -385,10 +385,10 @@ public class Jazz internal constructor(
     }
 
     /** Whether this user may read row [id] of [table]: the server's advice, or `null` when it can't say. */
-    public suspend fun canRead(table: Table<*, *, *>, id: String): Boolean? = io { native.can(table.tableName, "read", idArgs(id)) }
+    public suspend fun canRead(table: BaseTable<*, *>, id: String): Boolean? = io { native.can(table.tableName, "read", idArgs(id)) }
 
     /** Whether this user may insert [row] into [table]; `null` when the server can't say. */
-    public suspend fun <Row : Any, Insert : Any> canInsert(table: Table<Row, Insert, *>, row: Insert): Boolean? = io {
+    public suspend fun <Row : Any, Insert : Any> canInsert(table: BaseTable<Row, Insert>, row: Insert): Boolean? = io {
         native.can(table.tableName, "insert", "{\"row\":${insertJson(table, row)}}")
     }
 
@@ -399,7 +399,7 @@ public class Jazz internal constructor(
     }
 
     /** Whether this user may delete row [id] of [table]. */
-    public suspend fun canDelete(table: Table<*, *, *>, id: String): Boolean? = io { native.can(table.tableName, "delete", idArgs(id)) }
+    public suspend fun canDelete(table: BaseTable<*, *>, id: String): Boolean? = io { native.can(table.tableName, "delete", idArgs(id)) }
 
     private fun idArgs(id: String): String = "{\"id\":${JsonPrimitive(id)}}"
 
@@ -466,7 +466,7 @@ public class Jazz internal constructor(
         public suspend fun <Row : Any> one(query: Query<Row>): Row? =
             run { tx.one(query.toJson())?.let { decode(query, jazzJson.parseToJsonElement(it) as JsonObject) } }
 
-        public suspend fun <Row : Any, Insert : Any> insert(table: Table<Row, Insert, *>, row: Insert): Row =
+        public suspend fun <Row : Any, Insert : Any> insert(table: BaseTable<Row, Insert>, row: Insert): Row =
             run { decodeStored(table, tx.insert(table.tableName, insertJson(table, row))) }
 
         public suspend fun <Row : Any, Insert : Any, P : Patch> update(
@@ -475,7 +475,7 @@ public class Jazz internal constructor(
             patch: P.() -> Unit,
         ): Unit = run { tx.update(table.tableName, id, patchJson(table, patch)) }
 
-        public suspend fun delete(table: Table<*, *, *>, id: String): Unit = run { tx.delete(table.tableName, id) }
+        public suspend fun delete(table: BaseTable<*, *>, id: String): Unit = run { tx.delete(table.tableName, id) }
 
         /** [Jazz.upsert], in the transaction. */
         public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
@@ -501,12 +501,12 @@ public class Jazz internal constructor(
     private fun <Row : Any> decodeAll(query: Query<Row>, json: String): List<Row> =
         (jazzJson.parseToJsonElement(json) as JsonArray).map { decode(query, it as JsonObject) }
 
-    private fun <Row : Any, Insert : Any> insertJson(table: Table<Row, Insert, *>, row: Insert): String {
+    private fun <Row : Any, Insert : Any> insertJson(table: BaseTable<Row, Insert>, row: Insert): String {
         val values = jazzJson.encodeToJsonElement(table.insertSerializer, row) as JsonObject
         return table.toStored(values, implementations).toString()
     }
 
-    private fun <Row : Any> decodeStored(table: Table<Row, *, *>, json: String): Row {
+    private fun <Row : Any> decodeStored(table: BaseTable<Row, *>, json: String): Row {
         val stored = jazzJson.parseToJsonElement(json) as JsonObject
         return jazzJson.decodeFromJsonElement(table.rowSerializer, table.fromStored(stored, implementations))
     }

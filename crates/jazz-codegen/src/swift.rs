@@ -499,7 +499,13 @@ impl<'a> Writer<'a> {
         let mut out = String::new();
         // The row.
         let _ = writeln!(out, "/// A row of `{}`.", table.name);
-        let _ = writeln!(out, "public struct {row}: {RT}.Row {{");
+        // Upserts and update advice take only rows that can change.
+        let updatable = if table.updatable {
+            format!(", {RT}.Updatable")
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "public struct {row}: {RT}.Row{updatable} {{");
         let _ = writeln!(out, "    public static let table = {table_lit}");
         let _ = writeln!(out, "    public let id: {RT}.ID");
         for f in &fields {
@@ -693,52 +699,54 @@ impl<'a> Writer<'a> {
         }
         out.push_str("}\n\n");
 
-        // Patches.
-        let _ = writeln!(
-            out,
-            "/// A change to a row of `{}`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.",
-            table.name
-        );
-        let _ = writeln!(out, "public struct {patch}: {RT}.Patch {{");
-        let _ = writeln!(out, "    public typealias Row = {row}");
-        for f in &fields {
-            f.doc(&mut out);
-            let _ = writeln!(out, "    public var {}: {RT}.Change<{}>", f.ident, f.ty);
-        }
-        out.push('\n');
-        let p = fields
-            .iter()
-            .map(|f| format!("{}: {RT}.Change<{}> = .unchanged", f.ident, f.ty))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(out, "    public init({p}) {{");
-        for f in &fields {
-            let _ = writeln!(out, "        self.{0} = {0}", f.ident);
-        }
-        out.push_str("    }\n\n");
-        coding_keys(&mut out, &fields, false);
-        out.push('\n');
-        out.push_str("    public func encode(to encoder: any Swift.Encoder) throws {\n");
-        out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
-        if fields.iter().any(|f| f.transform.is_some()) {
-            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
-        }
-        for f in &fields {
-            let value = match &f.transform {
-                None => format!("self.{}", f.ident),
-                Some(t) if f.column.ty.nullable => format!(
-                    "self.{}.map {{ $0.map {{ computed.{t}Stored($0) }} }}",
-                    f.ident
-                ),
-                Some(t) => format!("self.{}.map {{ computed.{t}Stored($0) }}", f.ident),
-            };
+        // Patches: none for a table whose rows never change.
+        if table.updatable {
             let _ = writeln!(
                 out,
-                "        try container.encodeChange({value}, forKey: .{})",
-                f.ident
+                "/// A change to a row of `{}`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.",
+                table.name
             );
+            let _ = writeln!(out, "public struct {patch}: {RT}.Patch {{");
+            let _ = writeln!(out, "    public typealias Row = {row}");
+            for f in &fields {
+                f.doc(&mut out);
+                let _ = writeln!(out, "    public var {}: {RT}.Change<{}>", f.ident, f.ty);
+            }
+            out.push('\n');
+            let p = fields
+                .iter()
+                .map(|f| format!("{}: {RT}.Change<{}> = .unchanged", f.ident, f.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "    public init({p}) {{");
+            for f in &fields {
+                let _ = writeln!(out, "        self.{0} = {0}", f.ident);
+            }
+            out.push_str("    }\n\n");
+            coding_keys(&mut out, &fields, false);
+            out.push('\n');
+            out.push_str("    public func encode(to encoder: any Swift.Encoder) throws {\n");
+            out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
+            if fields.iter().any(|f| f.transform.is_some()) {
+                out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+            }
+            for f in &fields {
+                let value = match &f.transform {
+                    None => format!("self.{}", f.ident),
+                    Some(t) if f.column.ty.nullable => format!(
+                        "self.{}.map {{ $0.map {{ computed.{t}Stored($0) }} }}",
+                        f.ident
+                    ),
+                    Some(t) => format!("self.{}.map {{ computed.{t}Stored($0) }}", f.ident),
+                };
+                let _ = writeln!(
+                    out,
+                    "        try container.encodeChange({value}, forKey: .{})",
+                    f.ident
+                );
+            }
+            out.push_str("    }\n}\n\n");
         }
-        out.push_str("    }\n}\n\n");
 
         // Queries and columns.
         let _ = writeln!(out, "/// Queries of `{}` and its columns.", table.name);
@@ -1300,7 +1308,7 @@ mod tests {
             br#"{ "format": 1, "tables": { "tasks": { "columns": { "title": "string" } } } }"#;
         let generated = crate::generate(crate::Lang::Swift, file).unwrap();
         assert!(generated.contains("\npublic enum JazzApp {\n"));
-        assert!(generated.contains("\n    public struct Task: Jazz.Row {\n"));
+        assert!(generated.contains("\n    public struct Task: Jazz.Row, Jazz.Updatable {\n"));
         assert!(generated.contains("\n    public struct NewTask: Jazz.Insert {\n"));
         assert!(generated.contains("\n    public enum tasks {\n"));
         assert!(generated.ends_with("    }\n}\n"));
