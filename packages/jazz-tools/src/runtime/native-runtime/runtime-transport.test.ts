@@ -723,6 +723,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("pumps the first frame after a data frame and retry-later error retire the previous link", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const previousTransport = new FakeTransport([]);
+    const successorTransport = new FakeTransport([]);
+    const transports = [previousTransport, successorTransport];
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transports.shift()!, tick: () => undefined }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const retry = new PostcardWriter();
+      retry.u64(1); // WireFrame::Error
+      retry.u64(6); // NotReady
+      retry.u64(3); // Later
+      retry.string("account registry unavailable");
+      const stale = Uint8Array.of(2, 10);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([stale, retry.finish()]));
+
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await runtime.waitForUpstreamServerConnection();
+      expect(previousTransport.closed).toBe(true);
+      expect(previousTransport.received).toEqual([]);
+      const fresh = Uint8Array.of(2, 11);
+      sockets[1]!.emitMessage(encodeWebSocketFrameBatch([fresh]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(successorTransport.received).toEqual([fresh]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("drops outbound frames a dropped connection produced instead of sending them on its reconnect", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -4020,6 +4063,41 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.receivedBatches).toEqual([[first, second]]);
     expect(transport.received).toEqual([first, second]);
     expect(transport.tickCount).toBe(1);
+  });
+
+  it("pumps websocket messages on separate host turns promptly and in order", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transport, tick: () => undefined }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const batches = [[Uint8Array.of(2, 10)], [Uint8Array.of(2, 11)], [Uint8Array.of(2, 12)]];
+      const ticks = transport.tickCount;
+      for (const [index, batch] of batches.entries()) {
+        sockets[0]!.emitMessage(encodeWebSocketFrameBatch(batch));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(transport.receivedBatches).toEqual(batches.slice(0, index + 1));
+        expect(transport.tickCount).toBe(ticks + index + 1);
+      }
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
   });
 
   it("drives incoming server work promptly and stops ticking when idle", async () => {

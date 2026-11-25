@@ -1350,6 +1350,10 @@ async fn main_loop(this: Rc<Encryption>) {
                 this.set_background_deadline(None);
                 break;
             }
+            Ok(false) => {
+                // The host drives the loop after sync applies the catalogue.
+                this.set_background_deadline(None);
+            }
             Err(error) => {
                 if let Some(native) = &this.native {
                     if !native_may_retry(&error) {
@@ -1359,11 +1363,11 @@ async fn main_loop(this: Rc<Encryption>) {
                     }
                     *native.result.borrow_mut() = Verification::Retry(error);
                 }
+                this.set_background_deadline(Some(
+                    web_time::Instant::now() + Duration::from_millis(100),
+                ));
             }
-            _ => {}
         }
-        // The host still uses a noop waker while initial preparation is pending.
-        this.set_background_deadline(Some(web_time::Instant::now() + Duration::from_millis(100)));
         yield_now().await;
     }
     let mut account = None;
