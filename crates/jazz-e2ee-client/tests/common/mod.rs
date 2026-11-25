@@ -472,6 +472,16 @@ pub fn hold_new_space(client: &E2eeClient, db: &Db, space: uuid::Uuid) -> String
     root_id
 }
 
+/// Reads the stored verification depth of a fixture's held document.
+pub fn stored_verified_depth(store: &MemoryStore, root: &str) -> Option<u64> {
+    let name = format!("held-{root}");
+    store.scopes().into_iter().find_map(|scope| {
+        let stored = block_on(store.load(&scope, &name)).unwrap()?;
+        let value: serde_json::Value = serde_json::from_slice(&stored.bytes).unwrap();
+        value["verification"][0].as_u64()
+    })
+}
+
 /// A memory store whose protection of secrets stands in for an operating
 /// system key store: it scrambles them with a key held only in this
 /// process, so what the store keeps cannot be unprotected without it.

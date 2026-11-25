@@ -652,18 +652,36 @@ fn a_device_left_out_of_a_reset_enrols_again() {
     let root = space_key_of_account(&first, &first_db, space);
     let root_id = root.root_id().to_owned();
     block_on(first.keep(root)).unwrap();
+    drop(open_account(
+        Rc::new(first_store.clone()),
+        alice,
+        settings.clone(),
+        None,
+    ));
+    assert_eq!(stored_verified_depth(&first_store, &root_id), Some(0));
     let mut watch = drive(&server, &[&first_db], first.watch_account(&first_db)).unwrap();
     pump(&server, &first_db);
     assert!(watch.changed(), "the rows already there");
     assert!(!watch.changed());
     let old_device = first.device().unwrap().id.clone();
 
-    let second = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let second_store = MemoryStore::new();
+    let second = open_account(Rc::new(second_store.clone()), alice, settings.clone(), None);
     let (second_db, _second_link) = session(&second, &server, alice, &settings, 2, None);
     assert_eq!(
         drive(&server, &[&second_db], second.ensure_account(&second_db)).unwrap(),
         AccountStatus::AwaitingApproval
     );
+    let second_held = new_space_key(&second.device().unwrap(), &address(&first_db, space));
+    let second_root = second_held.root_id().to_owned();
+    block_on(second.keep(second_held)).unwrap();
+    drop(open_account(
+        Rc::new(second_store.clone()),
+        alice,
+        settings.clone(),
+        None,
+    ));
+    assert_eq!(stored_verified_depth(&second_store, &second_root), Some(0));
     assert_eq!(
         drive(&server, &[&second_db], second.reset_account(&second_db)).unwrap(),
         AccountStatus::Active
@@ -672,6 +690,10 @@ fn a_device_left_out_of_a_reset_enrols_again() {
         second.with_account(|account| account.state.generation),
         Some(1)
     );
+    assert_eq!(stored_verified_depth(&second_store, &second_root), None);
+    let reopened = open_account(Rc::new(second_store.clone()), alice, settings.clone(), None);
+    assert!(reopened.with_held(|keys| keys.space(&second_root).is_some()));
+    assert_eq!(stored_verified_depth(&second_store, &second_root), Some(0));
 
     pump(&server, &first_db);
     assert!(watch.changed(), "the reset reached the first device");
@@ -681,6 +703,7 @@ fn a_device_left_out_of_a_reset_enrols_again() {
     );
     assert_ne!(first.device().unwrap().id, old_device);
     assert!(first.with_held(|held| held.space(&root_id).is_none()));
+    assert_eq!(stored_verified_depth(&first_store, &root_id), None);
     assert!(first.with_account(|_| ()).is_none());
     assert_eq!(
         drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),

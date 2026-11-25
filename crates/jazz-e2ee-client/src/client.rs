@@ -18,9 +18,7 @@ use jazz_e2ee::protocol::content::HeldSpace;
 use jazz_e2ee::protocol::content::local::{
     DeviceSecrets, FLOOR_FORMAT, FloorRecord, StoredApproval, StoredDevice, decode_device_document,
 };
-use jazz_e2ee::protocol::content::store::{
-    HeldKeyRecord, Rejected, RejectedRecord, StoreOwner, decode_document,
-};
+use jazz_e2ee::protocol::content::store::{HeldKeyRecord, Rejected, RejectedRecord, StoreOwner};
 use jazz_e2ee::protocol::derive;
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::AppDomain;
@@ -373,7 +371,7 @@ impl E2eeClient {
         let mut documents = self.documents.lock().await;
         for name in self.store.list(&self.scope).await? {
             if let Some(root_id) = name.strip_prefix(HELD_PREFIX) {
-                if let Some(space) = self.read_held(&mut documents, &name, root_id).await? {
+                if let Some(space) = self.read_held(&mut documents, &name, root_id, true).await? {
                     self.shared.keys.borrow_mut().held.hold(space)?;
                 }
             } else if let Some(account_id) = name.strip_prefix(FLOOR_PREFIX) {
@@ -397,21 +395,22 @@ impl E2eeClient {
         documents: &mut Documents,
         name: &str,
         root_id: &str,
+        advance_verification: bool,
     ) -> Result<Option<HeldSpace>, ClientError> {
         let Some(stored) = self.store.load(&self.scope, name).await? else {
             return Ok(None);
         };
-        let Ok(decoded) = decode_document(&stored.bytes) else {
+        let loaded = {
+            let device = self.shared.device()?;
+            Self::owner_of(&self.shared, &device).load_stored_document(&stored.bytes)?
+        };
+        let Some(loaded) = loaded else {
             documents.unrecognised.insert(name.to_owned());
             self.skipped(
                 name,
                 "a held-key document of a format this runtime does not read",
             );
             return Ok(None);
-        };
-        let loaded = {
-            let device = self.shared.device()?;
-            Self::owner_of(&self.shared, &device).load(&decoded)?
         };
         for rejected in &loaded.rejected {
             self.skipped(name, rejection(rejected));
@@ -422,6 +421,25 @@ impl E2eeClient {
             carried: loaded.unsupported,
             lineage: None,
         };
+        if advance_verification
+            && let Some(bytes) = loaded.updated_document
+            && loaded
+                .space
+                .as_ref()
+                .is_some_and(|space| space.root_id() == root_id)
+            && let Ok(revision) = self
+                .store
+                .save(
+                    &self.scope,
+                    self.incarnation.get(),
+                    name,
+                    &bytes,
+                    Some(stored.revision),
+                )
+                .await
+        {
+            state.revision = Some(revision);
+        }
         let space = match loaded.space {
             Some(space) if space.is_empty() => {
                 state.lineage = (space.root_id() == root_id).then_some(space);
@@ -804,14 +822,12 @@ impl E2eeClient {
             let state = documents.held.entry(root_id.clone()).or_default();
             let bytes = {
                 let device = self.shared.device()?;
-                Self::owner_of(&self.shared, &device)
-                    .seal_document(
-                        &staged,
-                        &state.carried,
-                        state.removals,
-                        &mut **self.shared.random.borrow_mut(),
-                    )?
-                    .encode()?
+                Self::owner_of(&self.shared, &device).seal_stored_document(
+                    &staged,
+                    &state.carried,
+                    state.removals,
+                    &mut **self.shared.random.borrow_mut(),
+                )?
             };
             match retry_save(
                 self.store
@@ -835,7 +851,9 @@ impl E2eeClient {
                     // Another writer saved this root's document: take its
                     // keys too, then write both.
                     documents.held.remove(&root_id);
-                    let theirs = self.read_held(&mut documents, &name, &root_id).await?;
+                    let theirs = self
+                        .read_held(&mut documents, &name, &root_id, false)
+                        .await?;
                     if documents.unrecognised.contains(&name) {
                         return Err(ClientError::UnrecognisedDocument(name));
                     }
@@ -852,6 +870,59 @@ impl E2eeClient {
             }
         }
         Err(StoreError::Conflict.into())
+    }
+
+    /// Removes verification hints before publishing an account reset or
+    /// recovering an account with the same local device.
+    pub(crate) async fn clear_verified_history(&self) -> Result<(), ClientError> {
+        let mut documents = self.documents.lock().await;
+        self.ensure_open()?;
+        self.shared.keys.borrow_mut().held.clear_verified_history();
+        for name in self.store.list(&self.scope).await? {
+            let Some(root) = name.strip_prefix(HELD_PREFIX) else {
+                continue;
+            };
+            let mut cleared = false;
+            for _ in 0..SAVE_ATTEMPTS {
+                self.ensure_open()?;
+                let Some(stored) = self.store.load(&self.scope, &name).await? else {
+                    cleared = true;
+                    break;
+                };
+                let Some(bytes) = StoreOwner::clear_document_verification(&stored.bytes) else {
+                    cleared = true;
+                    break;
+                };
+                let saved = self
+                    .store
+                    .save(
+                        &self.scope,
+                        self.incarnation.get(),
+                        &name,
+                        &bytes,
+                        Some(stored.revision),
+                    )
+                    .await;
+                match retry_save(saved) {
+                    Ok(Some(revision)) => {
+                        if let Some(state) = documents.held.get_mut(root)
+                            && state.revision == Some(stored.revision)
+                        {
+                            state.revision = Some(revision);
+                        }
+                        cleared = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(StoreError::Wiped) => return Err(self.close()),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if !cleared {
+                return Err(StoreError::Conflict.into());
+            }
+        }
+        Ok(())
     }
 
     /// The newest state of `account_id` this device verified, if any

@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! held-key document: { format: "jazz-e2ee-held-space-v1", revision: n,
-//!                      lineage: <lineage record>, keys: [held-key record …] }
+//!                      lineage: <lineage record>, keys: [held-key record …],
+//!                      verification?: [depth, tag] }
 //! lineage record:    { format: "jazz-e2ee-held-lineage-v1", binding, root,
 //!                      successors: [ … ], signature }
 //! held-key record:   { format: "jazz-e2ee-held-key-v3", binding, rootId,
@@ -427,7 +428,7 @@ impl HeldKeyRecord {
     }
 }
 
-/// One held-key document: `{ format, revision, lineage, keys }`.
+/// The records and removal counter of one held-key document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldDocument {
     /// Advanced by the store on every removal, so in-flight reads notice
@@ -489,14 +490,40 @@ pub struct UnrecognisedDocument;
 /// The document itself must be canonical around its records: text that is
 /// not JSON of the store's shapes, an envelope in another form (whitespace,
 /// key order, number form), another format, or fields other than
-/// `format`, `revision`, `lineage` and `keys`, is [`UnrecognisedDocument`].
+/// `format`, `revision`, `lineage`, `keys` and optional `verification`, is
+/// [`UnrecognisedDocument`]. This entry point does not trust verification.
 pub fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, UnrecognisedDocument> {
+    decode_stored_document(bytes).map(|(document, _, _)| document)
+}
+
+pub(super) fn encode_verified_document(
+    body: &[u8],
+    depth: u64,
+    tag: &[u8; 32],
+) -> ProtocolResult<Vec<u8>> {
+    let verification = Value::Array(vec![Value::Number(depth), Value::bytes(tag)]).encode()?;
+    let mut bytes = Vec::with_capacity(body.len() + verification.len() + 17);
+    bytes.extend_from_slice(body);
+    bytes.extend_from_slice(b",\"verification\":");
+    bytes.extend_from_slice(&verification);
+    bytes.push(b'}');
+    Ok(bytes)
+}
+
+pub(super) type DocumentVerification = (u64, [u8; 32]);
+
+/// Returns the canonical body without its final brace, the bytes covered by
+/// the device authenticator together with the verified depth.
+pub(super) fn decode_stored_document(
+    bytes: &[u8],
+) -> Result<(DecodedDocument, &[u8], Option<DocumentVerification>), UnrecognisedDocument> {
     let fields = canonical::parse_object_parts(bytes).map_err(|_| UnrecognisedDocument)?;
     let [
         (format_name, format, _),
         (keys_name, _, keys),
         (lineage_name, _, lineage),
         (revision_name, revision, _),
+        rest @ ..,
     ] = fields.as_slice()
     else {
         return Err(UnrecognisedDocument);
@@ -532,16 +559,40 @@ pub fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, UnrecognisedDocu
             .encode()
             .map_err(|_| UnrecognisedDocument)?,
     );
+    let body_len = envelope.len();
+    let verification = match rest {
+        [] => None,
+        [(name, value, raw)] if name == "verification" => {
+            envelope.extend_from_slice(b",\"verification\":");
+            envelope.extend_from_slice(raw);
+            (value.encode().ok().as_deref() == Some(*raw))
+                .then_some(value)
+                .and_then(|value| {
+                    let [depth, tag] = value.as_array().ok()? else {
+                        return None;
+                    };
+                    Some((
+                        depth.as_number().ok()?,
+                        tag.as_bytes().ok()?.try_into().ok()?,
+                    ))
+                })
+        }
+        _ => return Err(UnrecognisedDocument),
+    };
     envelope.push(b'}');
     if envelope != bytes {
         return Err(UnrecognisedDocument);
     }
-    Ok(DecodedDocument {
-        revision,
-        lineage: LineageRecord::decode(lineage).ok(),
-        keys: keys
-            .iter()
-            .map(|(_, key)| HeldKeyRecord::decode(key).ok())
-            .collect(),
-    })
+    Ok((
+        DecodedDocument {
+            revision,
+            lineage: LineageRecord::decode(lineage).ok(),
+            keys: keys
+                .iter()
+                .map(|(_, key)| HeldKeyRecord::decode(key).ok())
+                .collect(),
+        },
+        &bytes[..body_len],
+        verification,
+    ))
 }

@@ -962,6 +962,7 @@ impl E2eeClient {
             }
             Some(Attempt::Ready(None)) => {}
             Some(Attempt::Ready(Some(records))) => {
+                self.clear_verified_history().await?;
                 self.mark_nonce_spent().await?;
                 self.publish_recovery(db, &records).await?;
             }

@@ -19,9 +19,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::error::Error;
+use crate::mechanisms::signature;
+use crate::primitives::{hash, sign};
 use crate::random::RandomSource;
 use crate::registry::Registry;
 
@@ -31,11 +34,11 @@ use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::space::keys::{Outcome, marker};
 use super::super::{key_crypto, signing};
 use super::held::{HeldEntry, HeldSpace, KeyMark};
-use super::stored::prefix_hashes;
 pub use super::stored::{
     Binding, DecodedDocument, HeldDocument, HeldKeyRecord, LineageRecord, UnrecognisedDocument,
     decode_document, device_hash, prefix_hash,
 };
+use super::stored::{decode_stored_document, encode_verified_document, prefix_hashes};
 
 /// Why a stored record was skipped on load (§6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,6 +103,9 @@ pub struct Loaded {
     /// the next rewrite of this document carries them over unchanged
     /// ([`StoreOwner::seal_document`]). Empty when the lineage was skipped.
     pub unsupported: Vec<HeldKeyRecord>,
+    /// The same document with an advanced verification depth, if any.
+    /// The store must save it only against the revision that was loaded.
+    pub updated_document: Option<Vec<u8>>,
 }
 
 /// The device whose store this is: its application, account and keys.
@@ -263,6 +269,62 @@ impl StoreOwner<'_> {
         })
     }
 
+    /// Encodes the held space for the private store, authenticating the
+    /// records, removal counter and previously checked depth together.
+    pub fn seal_stored_document(
+        &self,
+        space: &HeldSpace,
+        carried: &[HeldKeyRecord],
+        revision: u64,
+        rng: &mut dyn RandomSource,
+    ) -> ProtocolResult<Vec<u8>> {
+        let bytes = self
+            .seal_document(space, carried, revision, rng)?
+            .encode()?;
+        let verified = space
+            .verified_through
+            .filter(|&verified| carried.iter().all(|record| record.depth > verified as u64));
+        match (verified, self.document_key()) {
+            (Some(depth), Some(key)) => {
+                Self::authenticate_document(&bytes[..bytes.len() - 1], depth, &key)
+            }
+            _ => Ok(bytes),
+        }
+    }
+
+    fn document_key(&self) -> Option<Zeroizing<[u8; 32]>> {
+        // Record authentication already depends on the signing key.
+        // The built-in signer stores its seed; custom signers may hold
+        // an opaque handle instead of key material.
+        let signing = &self.device.signing;
+        if signing.public.mechanism != signature::MECHANISM {
+            return None;
+        }
+        let secret: &[u8; sign::SECRET_KEY_BYTES] = signing.secret.as_bytes().try_into().ok()?;
+        let seed = secret.first_chunk::<{ sign::SEED_BYTES }>()?;
+        Some(hash::keyed_hash(
+            seed,
+            b"jazz.e2ee.held-document-authentication.v1\0",
+        ))
+    }
+
+    fn authenticate_document(body: &[u8], depth: usize, key: &[u8; 32]) -> ProtocolResult<Vec<u8>> {
+        let depth = depth as u64;
+        let tag = hash::keyed_hash_parts(key, &[&depth.to_be_bytes(), body]);
+        encode_verified_document(body, depth, &tag)
+    }
+
+    /// Removes the verification hint without changing any of the records.
+    pub fn clear_document_verification(bytes: &[u8]) -> Option<Vec<u8>> {
+        let (_, body, _) = decode_stored_document(bytes).ok()?;
+        if body.len() + 1 == bytes.len() {
+            return None;
+        }
+        let mut cleared = body.to_vec();
+        cleared.push(b'}');
+        Some(cleared)
+    }
+
     pub(super) fn check_binding(&self, binding: &Binding) -> ProtocolResult<Checked<()>> {
         Ok(if *binding == self.binding()? {
             Ok(())
@@ -305,12 +367,19 @@ impl StoreOwner<'_> {
         space: &HeldSpace,
         prefixes: &[String],
         record: &HeldKeyRecord,
+        verified_through: Option<usize>,
     ) -> ProtocolResult<Checked<(usize, HeldEntry)>> {
-        if let Err(reason) = self.check_binding(&record.binding)? {
-            return Ok(Err(reason));
-        }
-        if let Err(reason) = self.verify(&record.signed_bytes()?, &record.signature)? {
-            return Ok(Err(reason));
+        let depth = usize::try_from(record.depth).unwrap_or(usize::MAX);
+        let verified = verified_through.is_some_and(|verified| depth <= verified);
+        if !verified {
+            #[cfg(test)]
+            KEY_RECORDS_VERIFIED.set(KEY_RECORDS_VERIFIED.get() + 1);
+            if let Err(reason) = self.check_binding(&record.binding)? {
+                return Ok(Err(reason));
+            }
+            if let Err(reason) = self.verify(&record.signed_bytes()?, &record.signature)? {
+                return Ok(Err(reason));
+            }
         }
         let mark = match (&record.unpublished, record.refused) {
             (None, false) => KeyMark::Published,
@@ -323,11 +392,10 @@ impl StoreOwner<'_> {
         if record.root_id != space.root.id {
             return Ok(Err(Rejection::RootMismatch));
         }
-        let depth = match usize::try_from(record.depth) {
-            Ok(depth) if depth < prefixes.len() => depth,
-            _ => return Ok(Err(Rejection::Depth)),
-        };
-        if prefixes[depth] != record.prefix {
+        if depth > space.successors.len() {
+            return Ok(Err(Rejection::Depth));
+        }
+        if !verified && prefixes[depth] != record.prefix {
             return Ok(Err(Rejection::Prefix));
         }
         if space.epoch_at(depth) != Some(record.epoch_id.as_str()) {
@@ -344,17 +412,24 @@ impl StoreOwner<'_> {
             Err(_) => return Ok(Err(Rejection::Envelope)),
         };
         let successor = depth.checked_sub(1).map(|at| &space.successors[at]);
-        match marker(
-            self.registry,
-            &key,
-            &space.application,
-            &space.scope,
-            &space.root,
-            successor,
-        )? {
-            Outcome::Ok(()) => {}
-            Outcome::Invalid => return Ok(Err(Rejection::Marker)),
-            Outcome::Unsupported => return Ok(Err(Rejection::Unsupported)),
+        if verified {
+            let verification = successor.map_or(&space.root.verification, |row| &row.verification);
+            if self.registry.key_wrapper_for(verification).is_err() {
+                return Ok(Err(Rejection::Unsupported));
+            }
+        } else {
+            match marker(
+                self.registry,
+                &key,
+                &space.application,
+                &space.scope,
+                &space.root,
+                successor,
+            )? {
+                Outcome::Ok(()) => {}
+                Outcome::Invalid => return Ok(Err(Rejection::Marker)),
+                Outcome::Unsupported => return Ok(Err(Rejection::Unsupported)),
+            }
         }
         Ok(Ok((
             depth,
@@ -371,6 +446,55 @@ impl StoreOwner<'_> {
     /// except that a `refused` mark is final. A provider failure fails the
     /// load.
     pub fn load(&self, document: &DecodedDocument) -> ProtocolResult<Loaded> {
+        self.load_with_verification(document, None)
+    }
+
+    /// Reopens the stored bytes. A missing or invalid authenticator uses
+    /// the same per-record checks as an unmarked document.
+    pub fn load_stored_document(&self, bytes: &[u8]) -> ProtocolResult<Option<Loaded>> {
+        let Ok((document, body, verification)) = decode_stored_document(bytes) else {
+            return Ok(None);
+        };
+        let key = self.document_key();
+        let verified = verification
+            .zip(key.as_ref())
+            .and_then(|((depth, tag), key)| {
+                let expected = hash::keyed_hash_parts(key, &[&depth.to_be_bytes(), body]);
+                bool::from(expected.ct_eq(&tag)).then_some(usize::try_from(depth).ok()?)
+            })
+            .filter(|&depth| {
+                document
+                    .lineage
+                    .as_ref()
+                    .is_some_and(|lineage| depth <= lineage.successors.len())
+            });
+        let mut loaded = self.load_with_verification(&document, verified)?;
+        if let (Some(space), Some(key)) = (&mut loaded.space, key)
+            && loaded.rejected.is_empty()
+        {
+            space.verified_through = space
+                .held()
+                .enumerate()
+                .take_while(|(expected, (depth, mark))| {
+                    *expected == *depth && **mark == KeyMark::Published
+                })
+                .last()
+                .map(|(_, (depth, _))| depth);
+            if let Some(depth) = space
+                .verified_through
+                .filter(|&depth| Some(depth) > verified)
+            {
+                loaded.updated_document = Some(Self::authenticate_document(body, depth, &key)?);
+            }
+        }
+        Ok(Some(loaded))
+    }
+
+    fn load_with_verification(
+        &self,
+        document: &DecodedDocument,
+        verified_through: Option<usize>,
+    ) -> ProtocolResult<Loaded> {
         let lineage = match &document.lineage {
             Some(lineage) => match self.check_lineage(lineage)? {
                 Ok(()) => lineage,
@@ -385,6 +509,7 @@ impl StoreOwner<'_> {
             root: root.clone(),
             successors: lineage.successors.clone(),
             keys: BTreeMap::new(),
+            verified_through: None,
         };
         // Hash the lineage once, then check keys in document order so
         // duplicate and refused records keep their existing precedence.
@@ -394,6 +519,7 @@ impl StoreOwner<'_> {
             .flatten()
             .filter_map(|record| usize::try_from(record.depth).ok())
             .filter(|&depth| depth <= space.successors.len())
+            .filter(|&depth| verified_through.is_none_or(|verified| depth > verified))
             .max()
             .map_or(0, |depth| depth + 1);
         let prefixes = prefix_hashes(&space.root, &space.successors, 0..prefix_count)?;
@@ -401,7 +527,7 @@ impl StoreOwner<'_> {
         let mut unsupported = Vec::new();
         for (index, record) in document.keys.iter().enumerate() {
             let outcome = match record {
-                Some(record) => self.check_key(&space, &prefixes, record)?,
+                Some(record) => self.check_key(&space, &prefixes, record, verified_through)?,
                 None => Err(Rejection::Malformed),
             };
             match outcome {
@@ -425,6 +551,7 @@ impl StoreOwner<'_> {
             space: Some(space),
             rejected,
             unsupported,
+            updated_document: None,
         })
     }
 
@@ -437,8 +564,14 @@ impl StoreOwner<'_> {
                 reason,
             }],
             unsupported: Vec::new(),
+            updated_document: None,
         }
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static KEY_RECORDS_VERIFIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -460,7 +593,7 @@ mod tests {
         let registry = Registry::builtin();
         let suite = registry.select(&MechanismConfig::default()).unwrap();
         let mechanism = suite.key_wrap.mechanism();
-        let mut rng = FixedRandom((0..=255).cycle().take(16_384).collect());
+        let mut rng = FixedRandom((0..=255).cycle().take(65_536).collect());
         let device = LocalDevice::generate(&suite, &registry, &application, &mut rng).unwrap();
         let owner = StoreOwner {
             registry: &registry,
@@ -504,6 +637,7 @@ mod tests {
                     mark: KeyMark::Published,
                 },
             )]),
+            verified_through: None,
         };
         let mut encoded = Vec::new();
         for depth in 1..=100 {
@@ -549,8 +683,181 @@ mod tests {
                 assert!(loaded.rejected.is_empty());
                 assert_eq!(loaded.space.unwrap().held().count(), depth + 1);
                 encoded.push(PREFIX_ROWS_ENCODED.get());
+
+                assert_verified_history(&owner, &space, depth, &mut rng);
             }
         }
         assert_eq!(encoded, [11, 101]);
+    }
+
+    // The crypto count is internal. Exercise the same bytes, merge and
+    // reopen paths as the client, without requiring its database fixture.
+    fn assert_verified_history(
+        owner: &StoreOwner<'_>,
+        space: &HeldSpace,
+        depth: usize,
+        rng: &mut dyn RandomSource,
+    ) {
+        let mut earlier = space.clone();
+        earlier.keys.remove(&depth);
+        earlier.successors.pop();
+        let bytes = owner.seal_stored_document(&earlier, &[], 0, rng).unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&bytes).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), depth);
+        let mut earlier = reopened.space.unwrap();
+        assert!(reopened.updated_document.is_some());
+
+        earlier.keep(space.clone()).unwrap();
+        let bytes = owner.seal_stored_document(&earlier, &[], 0, rng).unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&bytes).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 1, "only the new key");
+        assert_eq!(reopened.space.unwrap().held().count(), depth + 1);
+        let verified = reopened.updated_document.unwrap();
+
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&verified).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 0);
+        assert!(reopened.updated_document.is_none());
+
+        let (_, body, authentication) = decode_stored_document(&verified).unwrap();
+        let (_, tag) = authentication.unwrap();
+        let tampered = encode_verified_document(body, depth as u64 - 1, &tag).unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&tampered).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), depth + 1);
+        assert!(reopened.rejected.is_empty());
+        assert_eq!(reopened.updated_document.unwrap(), verified);
+
+        // A damaged key fails the whole-document check. The individual
+        // record check still identifies the damaged depth and keeps the rest.
+        let mut damaged = body.to_vec();
+        let signature = b"\"signature\":[";
+        let position = damaged
+            .windows(signature.len())
+            .enumerate()
+            .filter(|(_, value)| *value == signature)
+            .nth(depth)
+            .unwrap()
+            .0
+            + signature.len();
+        let end = position
+            + damaged[position..]
+                .iter()
+                .position(|&byte| byte == b']')
+                .unwrap();
+        let start = position
+            + damaged[position..end]
+                .iter()
+                .rposition(|&byte| byte == b',')
+                .unwrap()
+            + 1;
+        let replacement = if &damaged[start..end] == b"0" {
+            b'1'
+        } else {
+            b'0'
+        };
+        damaged.splice(start..end, [replacement]);
+        damaged.extend_from_slice(&verified[body.len()..]);
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&damaged).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), depth + 1);
+        assert_eq!(
+            reopened.rejected,
+            [Rejected {
+                record: RejectedRecord::Key {
+                    index: depth,
+                    epoch_id: space.epoch_at(depth).map(str::to_owned),
+                },
+                reason: Rejection::Signature,
+            }]
+        );
+        assert_eq!(reopened.space.unwrap().held().count(), depth);
+        assert!(reopened.updated_document.is_none());
+
+        let mut sparse = space.clone();
+        sparse.keys.remove(&(depth - 1));
+        let mut base = sparse.clone();
+        base.keys.remove(&depth);
+        let bytes = owner.seal_stored_document(&base, &[], 0, rng).unwrap();
+        let mut base = owner
+            .load_stored_document(&bytes)
+            .unwrap()
+            .unwrap()
+            .space
+            .unwrap();
+        assert_eq!(base.verified_through, Some(depth - 2));
+        base.keep(sparse).unwrap();
+        let bytes = owner.seal_stored_document(&base, &[], 0, rng).unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&bytes).unwrap().unwrap();
+        assert_eq!(
+            KEY_RECORDS_VERIFIED.get(),
+            depth,
+            "the gap clears the marker"
+        );
+        assert_eq!(reopened.space.unwrap().verified_through, Some(depth - 2));
+
+        if depth == 10 {
+            // Refused and lost creations retain their key for reads but
+            // cannot advance the marker, even after repeated reopens.
+            for (fate, winning_root) in [
+                (super::super::held::CreationFate::NotAccepted, None),
+                (
+                    super::super::held::CreationFate::Accepted,
+                    Some("another root"),
+                ),
+            ] {
+                let mut creation = space.clone();
+                creation.successors.clear();
+                creation.keys.retain(|&depth, _| depth == 0);
+                creation.keys.get_mut(&0).unwrap().mark = KeyMark::Unpublished {
+                    transaction: "alice's pending creation".into(),
+                };
+                let bytes = owner.seal_stored_document(&creation, &[], 0, rng).unwrap();
+                let opened = owner.load_stored_document(&bytes).unwrap().unwrap();
+                assert!(opened.updated_document.is_none());
+                let mut creation = opened.space.unwrap();
+                creation.settle(fate, winning_root);
+                let bytes = owner.seal_stored_document(&creation, &[], 0, rng).unwrap();
+                KEY_RECORDS_VERIFIED.set(0);
+                let opened = owner.load_stored_document(&bytes).unwrap().unwrap();
+                assert_eq!(KEY_RECORDS_VERIFIED.get(), 1);
+                assert_eq!(opened.space.unwrap().mark(0), Some(&KeyMark::Refused));
+                assert!(opened.updated_document.is_none());
+            }
+        }
+    }
+
+    /// The byte fixture pins the optional field, domain, depth framing and
+    /// tag without needing a full lineage or access to real device secrets.
+    #[test]
+    fn verified_document_bytes_are_pinned() {
+        let domain = AppDomain::new("00000000-0000-4000-8000-000000000001", None).unwrap();
+        let alice = "a11ce000-0000-5000-8000-00000000a11c";
+        let registry = Registry::builtin();
+        let suite = registry.select(&MechanismConfig::default()).unwrap();
+        let mut rng = FixedRandom(vec![19; 512]);
+        let mut device =
+            LocalDevice::generate(&suite, &registry, &domain.account(alice).unwrap(), &mut rng)
+                .unwrap();
+        device.signing = suite.signature.derive_key_pair(&[7; 32]).unwrap();
+        let owner = StoreOwner {
+            registry: &registry,
+            domain: &domain,
+            account_id: alice,
+            device: &device,
+        };
+        let body = br#"{"format":"jazz-e2ee-held-space-v1","keys":[],"lineage":null,"revision":0"#;
+        assert_eq!(
+            StoreOwner::authenticate_document(body, 0, &owner.document_key().unwrap()).unwrap(),
+            concat!(
+                r#"{"format":"jazz-e2ee-held-space-v1","keys":[],"lineage":null,"revision":0,"verification":["#,
+                "0,[193,177,106,141,188,19,163,212,90,200,125,173,69,7,199,145,248,24,30,14,",
+                "228,30,126,194,72,236,214,26,184,242,190,55]]}"
+            )
+            .as_bytes()
+        );
     }
 }

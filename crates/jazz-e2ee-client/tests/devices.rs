@@ -2014,11 +2014,27 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
             Some(1)
         );
 
-        let mut recovered = device(&server, alice, memory(), 2, &settings);
+        let recovered_store = MemoryStore::new();
+        let mut recovered = device(
+            &server,
+            alice,
+            Rc::new(recovered_store.clone()),
+            2,
+            &settings,
+        );
         assert_eq!(
             recovered.status(&server, &[&first]),
             AccountStatus::AwaitingApproval
         );
+        let other_space = project(&first.db, "previous private space");
+        let held = hold_new_space(&recovered.client, &recovered.db, other_space);
+        drop(open_account(
+            Rc::new(recovered_store.clone()),
+            alice,
+            settings.clone(),
+            None,
+        ));
+        assert_eq!(stored_verified_depth(&recovered_store, &held), Some(0));
         let status = drive(
             &server,
             &[&recovered.db, &first.db],
@@ -2026,6 +2042,15 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
         )
         .unwrap();
         assert_eq!(status, AccountStatus::Active);
+        assert_eq!(stored_verified_depth(&recovered_store, &held), None);
+        let reopened = open_account(
+            Rc::new(recovered_store.clone()),
+            alice,
+            settings.clone(),
+            None,
+        );
+        assert!(reopened.with_held(|keys| keys.space(&held).is_some()));
+        assert_eq!(stored_verified_depth(&recovered_store, &held), Some(0));
         recovered.follow_notes(&server);
         let rows = notes_of(&server, &recovered, space);
         assert_eq!(rows[0].cell("body"), Some(text(SECRET)));

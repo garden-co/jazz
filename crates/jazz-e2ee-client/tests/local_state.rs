@@ -9,6 +9,7 @@ mod common;
 #[path = "../../jazz-e2ee/tests/common/mechanisms.rs"]
 mod mechanisms;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use common::*;
@@ -21,6 +22,7 @@ use jazz_e2ee::protocol::account::AccountFloor;
 use jazz_e2ee::protocol::records::KeyColumns;
 use jazz_e2ee::protocol::{Position, ProtocolError};
 use jazz_e2ee::registry::Registry;
+use jazz_e2ee_client::testing::StoreWithSaveHook;
 use jazz_e2ee_client::{ClientConfig, ClientError, E2eeClient, MemoryStore, PrivateStore, Report};
 
 fn scope() -> String {
@@ -352,7 +354,9 @@ fn a_wipe_removes_everything_and_nothing_recreates_it() {
     let client = open_client(Rc::new(store.clone()));
     let (db, _link, _) = online(&client, &server, None);
     let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let root = hold_new_space(&client, &db, space);
+    drop(open_client(Rc::new(store.clone())));
+    assert_eq!(stored_verified_depth(&store, &root), Some(0));
     let keys = {
         let device = client.device().unwrap();
         KeyColumns::new(&device.sealing.public, &device.signing.public)
@@ -381,8 +385,9 @@ fn a_wipe_removes_everything_and_nothing_recreates_it() {
         "a late operation recreated the store"
     );
 
-    let fresh = open_client(Rc::new(store));
+    let fresh = open_client(Rc::new(store.clone()));
     assert_ne!(fresh.device().unwrap().id, old_device);
+    assert_eq!(stored_verified_depth(&store, &root), None);
 }
 
 /// Contract: two runtimes on one store (two tabs) that keep keys of the
@@ -409,6 +414,56 @@ fn two_writers_of_one_document_merge() {
     let third = open_client(Rc::new(store));
     assert!(third.with_held(|held| held.space(&root).is_some()));
     assert!(skipped(&third).is_empty());
+}
+
+/// Alice's reopen verifies a stored key while a second writer replaces
+/// its document. A losing metadata save cannot mark the replacement,
+/// so the next reopen checks and reports its damaged key.
+#[test]
+fn a_lost_verification_save_leaves_the_concurrent_document_alone() {
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    drop((db, client));
+    let name = format!("held-{root}");
+    let scope = scope();
+    let original = block_on(store.load(&scope, &name)).unwrap().unwrap();
+    let damaged = String::from_utf8(original.bytes)
+        .unwrap()
+        .replace(r#""depth":"0""#, r#""depth":"1""#)
+        .into_bytes();
+    let racing = Rc::new(Cell::new(false));
+    let wrapped = StoreWithSaveHook::new(store.clone(), {
+        let (store, racing, damaged, name) =
+            (store.clone(), racing.clone(), damaged.clone(), name.clone());
+        move |scope, doc, _, expected| {
+            let (store, damaged) = (store.clone(), damaged.clone());
+            let replace = doc == name && !racing.replace(true);
+            Box::pin(async move {
+                if replace {
+                    let incarnation = store.open_scope(scope).await.unwrap();
+                    store
+                        .save(scope, incarnation, doc, &damaged, expected)
+                        .await
+                        .unwrap();
+                }
+                Ok(())
+            })
+        }
+    });
+
+    let reopened = open_client(Rc::new(wrapped));
+    assert!(racing.get());
+    assert!(reopened.with_held(|held| held.space(&root).is_some()));
+    drop(reopened);
+    let winner = block_on(store.load(&scope, &name)).unwrap().unwrap();
+    assert_eq!(winner.revision, original.revision + 1);
+    assert_eq!(winner.bytes, damaged);
+    let reopened = open_client(Rc::new(store));
+    assert_eq!(skipped(&reopened), [name]);
+    assert!(reopened.with_held(|held| held.space(&root).is_none()));
 }
 
 /// Contract: the runtime refuses at open what it cannot honour: mechanism

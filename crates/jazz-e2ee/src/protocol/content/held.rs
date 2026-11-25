@@ -87,6 +87,8 @@ pub struct HeldSpace {
     pub(crate) root: SpaceRoot,
     pub(crate) successors: Vec<SpaceSuccessor>,
     pub(crate) keys: BTreeMap<usize, HeldEntry>,
+    /// The inclusive depth of the published prefix checked on reopen.
+    pub(super) verified_through: Option<usize>,
 }
 
 impl core::fmt::Debug for HeldSpace {
@@ -138,6 +140,7 @@ impl HeldSpace {
             root: root.clone(),
             successors: successors.into_iter().cloned().collect(),
             keys: held,
+            verified_through: None,
         }))
     }
 
@@ -177,6 +180,7 @@ impl HeldSpace {
                     },
                 },
             )]),
+            verified_through: None,
         })
     }
 
@@ -249,6 +253,22 @@ impl HeldSpace {
 
     pub(super) fn keep_entry(&mut self, depth: usize, entry: HeldEntry) {
         if self.mark(depth) != Some(&KeyMark::Refused) {
+            if let Some(verified) = self.verified_through {
+                if self
+                    .keys
+                    .last_key_value()
+                    .is_some_and(|(&last, _)| depth > last + 1)
+                {
+                    self.verified_through = None;
+                } else if depth <= verified
+                    && self
+                        .keys
+                        .get(&depth)
+                        .is_none_or(|held| held.key != entry.key || held.mark != entry.mark)
+                {
+                    self.verified_through = depth.checked_sub(1);
+                }
+            }
             self.keys.insert(depth, entry);
         }
     }
@@ -296,8 +316,14 @@ impl HeldSpace {
             (_, Some(root_id)) if root_id == self.root.id => KeyMark::Published,
             (_, Some(_)) => KeyMark::Refused,
         };
-        for entry in self.keys.values_mut() {
+        for (&depth, entry) in &mut self.keys {
             if matches!(entry.mark, KeyMark::Unpublished { .. }) {
+                if self
+                    .verified_through
+                    .is_some_and(|verified| depth <= verified)
+                {
+                    self.verified_through = depth.checked_sub(1);
+                }
                 entry.mark = next.clone();
             }
         }
@@ -477,6 +503,13 @@ impl HeldKeys {
 
     pub fn spaces(&self) -> &[HeldSpace] {
         &self.spaces
+    }
+
+    /// Discards reopen verification after an account lifecycle change.
+    pub fn clear_verified_history(&mut self) {
+        for space in &mut self.spaces {
+            space.verified_through = None;
+        }
     }
 
     pub fn space(&self, root_id: &str) -> Option<&HeldSpace> {

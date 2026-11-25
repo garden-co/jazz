@@ -671,6 +671,7 @@ impl E2eeClient {
             refused,
             source: Box::new(source),
         };
+        self.clear_verified_history().await?;
         async { self.stage_root(db, tx, &records).await }
             .await
             .map_err(|error| publication_error(error, true))?;

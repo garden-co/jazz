@@ -2672,7 +2672,8 @@ approval (the device's approval nonce, §2.2):
 
 held-key document (one per space root):
 { "format": "jazz-e2ee-held-space-v1", "revision": n,
-  "lineage": <lineage record>, "keys": [ held-key record … ] }
+  "lineage": <lineage record>, "keys": [ held-key record … ],
+  "verification"?: [depth, tag] }
 
 ```
 
@@ -2763,6 +2764,36 @@ keys and the space is acquired again. When the device rewrites the document,
 a held-key record skipped as unsupported is carried over unchanged, since it
 may hold a key only this device has, such as a `refused` key written by a
 newer client; a record that failed any other check may be dropped.
+
+The optional `verification` field records the inclusive depth of a
+consecutive prefix of published keys checked by the device on reopen.
+For the built-in Ed25519 device signing mechanism, let `k` be
+BLAKE2b-256 keyed with the device's 32-byte signing seed over
+`UTF8("jazz.e2ee.held-document-authentication.v1") ‖ 00`. The tag is
+BLAKE2b-256 keyed with `k` over `u64be(depth) ‖ body`, where `body`
+is the exact canonical document bytes without the verification field and
+without the final right brace. Depth is a JSON number and the 32-byte tag
+is a JSON byte array.
+
+If the tag verifies, the device still checks the lineage, opens the
+envelopes, and checks for a supported marker mechanism. At covered depths
+it can reuse the prior check of each key record signature, prefix and
+epoch marker. A missing or failed tag uses all the per-record checks
+above, so damage to one record does not discard the others. Each save of
+an advanced depth names the store revision of the bytes checked. A save
+that fails or loses a race may be tried on the next reopen. A new or
+changed key must pass the per-record checks on its first reopen, and a gap,
+refused key or unpublished key bounds the verified prefix.
+Reset and recovery clear the stored depth when the device retains its
+keys. Wipe and re-enrolment remove the document with the device. Sign-out
+keeps the depth when it keeps the held keys.
+
+This pre-release addition retains the local document's format name.
+Readers with this field accept older documents and check every record on
+first reopen. Older readers reject documents containing the new field as
+unrecognised. The lineage and held-key record bytes and the sync protocol
+are unchanged.
+
 Unsupported here means a record of this format whose envelope or signature
 uses a mechanism this client lacks. A newer client that changes the
 record's encoding uses a new document format, which older clients refuse

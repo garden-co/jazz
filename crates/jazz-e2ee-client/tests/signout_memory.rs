@@ -70,6 +70,8 @@ fn assert_shutdown(
     );
     assert_eq!(client.has_device_account_identity(), has_identity);
     let first = hold_new_space(&client, &db, project(&db, "first"));
+    drop(open_account(store.clone(), who, settings.clone(), None));
+    assert_eq!(stored_verified_depth(&memory, &first), Some(0));
     let late = new_space_key(
         &client.device().unwrap(),
         &address(&db, project(&db, "late")),
@@ -138,6 +140,13 @@ fn assert_shutdown(
     let documents = block_on(memory.list(scope)).unwrap();
     assert!(documents.contains(&format!("held-{first}")));
     assert!(documents.contains(&format!("held-{late_root}")));
+    assert_eq!(stored_verified_depth(&memory, &first), Some(0));
+
+    // An opted-in sign-out deletes this scope after closing the runtime.
+    block_on(memory.delete(scope)).unwrap();
+    let fresh = open_account(memory.clone(), who, settings, None);
+    assert!(fresh.with_held(|held| held.spaces().is_empty()));
+    assert_eq!(stored_verified_depth(&memory, &first), None);
 }
 
 /// Alice stops her host after challenging a waiting device and queueing a
