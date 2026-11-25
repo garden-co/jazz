@@ -313,12 +313,12 @@ impl E2eeClient {
     }
 
     /// Rotates `space` now (protocol §3.5): one successor and the first
-    /// batch of deliveries in one transaction, the rest of the members in
-    /// batches of up to 100 right after, whether or not a delivery to them
-    /// exists. Call it right after removing a member. A refusal by the
-    /// authority stops the automatic rotation of the space while the client
-    /// runs; an explicit call always attempts. How many deliveries were
-    /// written, or zero if the space has no key yet. Needs the authority.
+    /// batch of deliveries in one transaction. The runtime delivers to
+    /// the remaining members in the background. Call it right after removing
+    /// a member. A refusal by the authority stops automatic rotation of
+    /// the space while the client runs; an explicit call always attempts.
+    /// Returns the number of deliveries in the first transaction, or zero
+    /// if the space has no key yet. Needs the authority.
     pub async fn rotate(&self, db: &Db, space: &DbSpaceAddress) -> Result<usize, ClientError> {
         self.ensure_open()?;
         self.rotate_with(db, &protocol_address(space)?, Rotation::Ordinary, None)
@@ -370,8 +370,15 @@ impl E2eeClient {
             }
             Err(error) => return Err(self.forget_account_on(error)),
         };
-        // Learn and keep the new version, then deliver it to the rest. The
-        // mark is cleared once the new version is held: until then a write
+        if kind == Rotation::Ordinary && !rest.is_empty() {
+            self.shared
+                .member_watch
+                .borrow_mut()
+                .pending_deliveries
+                .insert(space.clone());
+        }
+        // Learn and keep the new version before returning. The mark is
+        // cleared once the new version is held: until then a write
         // to the space waits for it instead of sealing under the version the
         // removed member holds.
         self.acquire_full(db, space).await?;
@@ -384,6 +391,9 @@ impl E2eeClient {
             if self.shared.member_watch.borrow().spaces.contains_key(space) {
                 keys.rotation_evaluated.insert(space.clone());
             }
+        }
+        if kind == Rotation::Ordinary {
+            return Ok(first);
         }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {

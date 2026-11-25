@@ -1847,6 +1847,9 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
         Report::RotationCheckFailed { space: at, reason } => {
             json!({ "type": "rotation-check-failed", "space": space(at), "reason": reason })
         }
+        Report::DeliveryFailed { space: at, reason } => {
+            json!({ "type": "delivery-failed", "space": space(at), "reason": reason })
+        }
         Report::RotationFailed { space: at, reason } => {
             json!({ "type": "rotation-failed", "space": space(at), "reason": reason })
         }

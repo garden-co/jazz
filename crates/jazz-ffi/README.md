@@ -468,5 +468,10 @@ Use `encryption_call(op, args_json)` for every operation. In C, pass `"encryptio
 | `prepareSpace`, `retryWithCurrentKey`                                                     | Prepare a space for a write or retry the write with the current key.                                                                                                        |
 | `retryWrite`                                                                              | Wait for the refused write’s space. Returns `"retry"`, `"last"` (one attempt with the current key), or `"stop"`.                                                            |
 
+`keysRotate` returns `{"delivered": number}` with the number of deliveries in the
+transaction that commits the new key, up to 100. The runtime delivers the key to the
+remaining members in the background. A failure in this pass produces a `delivery-failed`
+report with the space and reason.
+
 An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
 encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.

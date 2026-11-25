@@ -361,9 +361,10 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
     });
 }
 
-/// Alice rotates a deep space after adding enough members to require a follow-up batch.
+/// Alice rotates a deep space. The first transaction reads only the
+/// deliveries of the outgoing version, even with another batch to send.
 #[test]
-fn rotation_and_follow_up_read_only_current_deliveries() {
+fn rotation_reads_only_current_deliveries() {
     let server = secure_authority_with(&EncryptionSettings::default(), None);
     let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
     alice.activate(&server);
@@ -386,24 +387,23 @@ fn rotation_and_follow_up_read_only_current_deliveries() {
     add_accounts(50..=101);
 
     alice.client.take_delivery_reads();
-    assert_eq!(alice.rotate(&server, &address).unwrap(), 101);
-    // One current-epoch read for recipient selection and one each for
-    // acquisition after the first commit and the follow-up batch.
-    // Alice wrote the successor, so neither acquisition reads any rows.
-    assert_eq!(alice.client.take_delivery_reads(), (49, 0, 3));
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 100);
+    // One current-epoch read for selection and one for acquisition.
+    // Alice wrote the successor, so her acquisition reads no delivery rows.
+    assert_eq!(alice.client.take_delivery_reads(), (49, 0, 2));
 }
 
-/// Alice rotates for 101 other members. The follow-up transaction reads
-/// only Alice's history and that of its one remaining recipient.
+/// Alice rotates for eight other members. Selection reads everyone's
+/// public history in one batch, and acquiring the new key reads hers.
 #[test]
-fn rotation_follow_up_reads_only_the_accounts_it_uses() {
+fn rotation_batches_its_initial_account_history_queries() {
     let server = secure_authority_with(&EncryptionSettings::default(), None);
     let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
     alice.activate(&server);
     let space = new_project(&server, &alice, "plans");
     write_note(&server, &alice, space, SECRET).unwrap();
 
-    for seed in 1..=101 {
+    for seed in 1..=8 {
         let member = device(&server, account(seed), MemoryStore::new(), seed);
         member.activate(&server);
         server_member(&server, &alice, space, &member.id());
@@ -411,15 +411,26 @@ fn rotation_follow_up_reads_only_the_accounts_it_uses() {
     pump(&server, &alice.db);
 
     alice.client.take_public_account_reads();
+    server.take_slow_queries();
+    server.set_slow_query_threshold(Some(std::time::Duration::ZERO));
     assert_eq!(
         alice
             .rotate(&server, &space_address(&alice, space))
             .unwrap(),
-        101
+        8
     );
-    // Everyone for selection, Alice for acquisition, and Alice and
-    // the final recipient for the follow-up.
-    assert_eq!(alice.client.take_public_account_reads(), 102 + 1 + 2);
+    server.set_slow_query_threshold(None);
+    let root_queries: u64 = server
+        .take_slow_queries()
+        .0
+        .into_iter()
+        .filter(|query| query.table == "__e2ee_account_roots")
+        .map(|query| query.runs)
+        .sum();
+    // Selection and acquisition read roots. The authority also checks
+    // the account-root read set when it commits the rotation.
+    assert_eq!(root_queries, 3);
+    assert_eq!(alice.client.take_public_account_reads(), 9 + 1);
 }
 
 /// Bob received the root key but had not opened it when Alice removed him

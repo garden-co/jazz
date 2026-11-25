@@ -20,7 +20,9 @@ use super::{SpaceKeyState, space_query};
 use crate::account::rows::{self, account_id_cell, row_account_id, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
-use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, db_address, row_space, unchecked_address};
+use crate::state::{
+    MEMBER_CHANGE_WAIT, Report, WatchedRows, db_address, row_space, unchecked_address,
+};
 
 /// Live subscriptions to the rows that bring this device its keys: always
 /// its own member rows and the deliveries addressed to it, and, for the
@@ -447,9 +449,10 @@ impl E2eeClient {
     /// [`E2eeClient::watch_spaces`]) when something the device watches
     /// changed, or a space joined the watch: a delivery or a new version
     /// that synced in is acquired without waiting for a read (protocol
-    /// §4.2). One space's failure does not stop the others; each result is
-    /// returned with its space. Retrying a failed acquisition with backoff
-    /// is the caller's.
+    /// §4.2). Also delivers after a rotation this device committed, even
+    /// for unwatched spaces. One space's failure does not stop the others.
+    /// Each result is returned with its space. The caller can retry a failed
+    /// acquisition with backoff.
     pub async fn sync_spaces(
         &self,
         db: &Db,
@@ -480,6 +483,12 @@ impl E2eeClient {
         watch.interest.clone_from(&interest);
         watch.unserved.retain(|space| interest.contains(space));
         served.extend(members_changed.intersection(&interest).cloned());
+        let pending_deliveries = if self.shared.keys.borrow().online {
+            std::mem::take(&mut self.shared.member_watch.borrow_mut().pending_deliveries)
+        } else {
+            BTreeSet::new()
+        };
+        served.extend(pending_deliveries.iter().cloned());
         let mut results = Vec::new();
         for space in served {
             // Interest may include malformed coordinates registered by a
@@ -523,6 +532,14 @@ impl E2eeClient {
             // The pass: members that lack a version this device holds.
             if needs_pass && let Err(error) = self.deliver_pass(db, &space).await {
                 state = Err(error);
+            }
+            if (needs_pass || pending_deliveries.contains(&space))
+                && let Err(error) = &state
+            {
+                self.shared.flush(vec![Report::DeliveryFailed {
+                    space: db_address(&space),
+                    reason: error.to_string(),
+                }]);
             }
             // Rows written under a refused creation's key, now that the real
             // key may be held (protocol §3.2).

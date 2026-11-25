@@ -137,6 +137,11 @@ pub enum Report {
         space: DbSpaceAddress,
         reason: String,
     },
+    /// A background pass could not deliver keys to members of the space.
+    DeliveryFailed {
+        space: DbSpaceAddress,
+        reason: String,
+    },
     /// A rotation the runtime tried before a write to `space`, which failed
     /// or was refused, with its reason. The write is sealed under the
     /// space's current version all the same (protocol §3.5), which a
@@ -669,6 +674,8 @@ pub(crate) struct MemberWatch {
     pub streams: BTreeMap<&'static str, AccountStream>,
     pub spaces: BTreeMap<SpaceAddress, WatchedMembers>,
     pub changed: BTreeSet<SpaceAddress>,
+    /// Rotations with more deliveries to send, including in unwatched spaces.
+    pub pending_deliveries: BTreeSet<SpaceAddress>,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 

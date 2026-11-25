@@ -1,5 +1,6 @@
 mod common;
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -10,22 +11,48 @@ use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
-use jazz_e2ee_client::{AccountStatus, MemoryStore};
+use jazz_e2ee::{OsRandom, RandomSource};
+use jazz_e2ee_client::{AccountStatus, ClientConfig, E2eeClient, MemoryStore, Report};
+
+struct FailingDeliveryIds(Rc<Cell<bool>>);
+
+impl RandomSource for FailingDeliveryIds {
+    fn fill(&mut self, destination: &mut [u8]) -> jazz_e2ee::Result<()> {
+        // Fail the 16-byte delivery ID draw. The pass can still save held
+        // keys, whose HPKE envelopes use 32-byte randomness.
+        if destination.len() == 16 && self.0.get() {
+            return Err(jazz_e2ee::Error::RandomUnavailable);
+        }
+        OsRandom.fill(destination)
+    }
+}
 
 /// Alice rotates a space with one more member than fits in the first batch.
-/// The client commits the successor with the first deliveries, then sends
-/// the remaining member's delivery in its own transaction.
+/// The call returns after the first batch and Alice can immediately write
+/// under the new key. The background pass serves the remaining member in
+/// this unwatched space. A failure on the next rotation reaches her once.
 ///
 /// ```text
-/// alice ──successor + first batch──► authority ──accepts
-/// alice ──remaining delivery──────► authority ──accepts
+/// alice ──successor + first batch──► authority ──accepts──► rotate returns
+/// alice ──write under new key──────► authority
+/// background ──remaining delivery─► authority
+/// next rotation ──background failure──► alice's report listener
 /// ```
 #[test]
 fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     let settings = EncryptionSettings::default();
     let server = secure_authority_with(&settings, None);
     let alice = account(0xa1);
-    let client = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let fails = Rc::new(Cell::new(false));
+    let client = block_on(E2eeClient::open(ClientConfig {
+        store: Rc::new(MemoryStore::new()),
+        declarations: declarations_with(settings.clone()),
+        account_id: account_id(alice),
+        registry: jazz_e2ee::registry::Registry::builtin(),
+        random: Box::new(FailingDeliveryIds(fails.clone())),
+        device_account: None,
+    }))
+    .unwrap();
     let (db, _link) = session(&client, &server, alice, &settings, 0xa1, None);
     assert_eq!(
         drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
@@ -36,7 +63,7 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     let scope = block_on(db.table_identity("projects")).unwrap().unwrap().0;
     let add_member = |who: AuthorSubject| {
         let id = who.account_id().unwrap().0;
-        block_on(db.insert(
+        block_on(server.insert(
             "__e2ee_members",
             BTreeMap::from([
                 ("scopeId".to_owned(), Value::Uuid(scope)),
@@ -61,6 +88,7 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     .unwrap();
     pump(&server, &db);
     drive(&server, &[&db], client.reconcile(&db)).unwrap();
+    client.advance_settle_clock(std::time::Duration::ZERO);
 
     let mut members = BTreeSet::new();
     let schema = secure_schema_with(&settings);
@@ -93,6 +121,7 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
         identifier: space.to_string(),
     };
     let written = drive(&server, &[&db], client.rotate(&db, &address)).unwrap();
+    assert_eq!(written, DELIVERY_BATCH);
 
     let successors = all(
         &server,
@@ -105,13 +134,40 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     let epoch = successor.cell("epochId").unwrap();
     let rotation_at = successor.seq();
     assert!(rotation_at.accepted());
-    let deliveries = all(
+    let deliveries = || {
+        all(
+            &server,
+            Query::from("__e2ee_space_deliveries")
+                .filter(eq(col("keyEpochId"), lit(epoch.clone()))),
+        )
+        .unwrap()
+    };
+    let first = deliveries();
+    assert_eq!(first.len(), DELIVERY_BATCH);
+    assert!(first.iter().all(|delivery| delivery.seq() == rotation_at));
+
+    let written =
+        block_on(db.insert("notes", note(space, "after rotation"), Default::default())).unwrap();
+    pump(&server, &db);
+    let rows = all(
         &server,
-        Query::from("__e2ee_space_deliveries").filter(eq(col("keyEpochId"), lit(epoch))),
+        Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(written.row_uuid().0)))),
     )
     .unwrap();
-    let mut first = 0;
-    for delivery in deliveries {
+    let Some(Value::Bytes(bytes)) = rows[0].cell("body") else {
+        panic!("expected a sealed note");
+    };
+    let sealed = jazz_e2ee::records::read_stored_record(&bytes).unwrap();
+    assert_eq!(Value::Uuid(sealed.epoch_id.parse().unwrap()), epoch);
+
+    let mut watch = block_on(client.watch_spaces(&db)).unwrap();
+    let mut sync = || drive(&server, &[&db], client.sync_spaces(&db, &mut watch)).unwrap();
+    assert!(matches!(
+        sync().as_slice(),
+        [(served, Ok(jazz_e2ee_client::SpaceKeyState::Held))] if *served == address
+    ));
+    let mut later = 0;
+    for delivery in deliveries() {
         let Some(Value::Uuid(recipient)) = delivery.cell("recipientAccountId") else {
             panic!("a delivery has no recipient");
         };
@@ -121,16 +177,35 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
         );
         let delivered_at = delivery.seq();
         assert!(delivered_at.accepted());
-        if delivered_at == rotation_at {
-            first += 1;
-        } else {
-            assert!(delivered_at > rotation_at);
+        if delivered_at > rotation_at {
+            later += 1;
         }
     }
-    assert_eq!(first, DELIVERY_BATCH);
+    assert_eq!(later, 1);
     assert!(
         members.is_empty(),
         "members missing a delivery: {members:?}"
     );
-    assert_eq!(written, DELIVERY_BATCH + 1);
+    let reports = Rc::new(RefCell::new(Vec::new()));
+    client.on_report({
+        let reports = reports.clone();
+        move |report| {
+            if let Report::DeliveryFailed { space, reason } = report {
+                reports.borrow_mut().push((space.clone(), reason.clone()));
+            }
+        }
+    });
+    assert_eq!(
+        drive(&server, &[&db], client.rotate(&db, &address)).unwrap(),
+        DELIVERY_BATCH
+    );
+    fails.set(true);
+    let failed = sync();
+    let [(failed_space, Err(error))] = failed.as_slice() else {
+        panic!("expected a background delivery failure, got {failed:?}");
+    };
+    assert_eq!(failed_space, &address);
+    assert_eq!(*reports.borrow(), [(address, error.to_string())]);
+    assert!(sync().is_empty());
+    assert_eq!(reports.borrow().len(), 1);
 }

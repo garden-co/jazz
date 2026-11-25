@@ -74,6 +74,10 @@ const removed = await db.encryption.members.remove(space, otherAccountId);
 if (removed > 0) await db.encryption.keys.rotate(space);
 ```
 
+The new key and up to 100 deliveries commit together. `keys.rotate` returns the number of
+deliveries in that transaction. Subsequent writes use the new key while Jazz delivers it to
+the remaining members in the background.
+
 If you also need to delete your own app's rows atomically with the membership, use a single
 `db.serializableTransaction`. Inside its callback, read the matching rows with
 `tx.all(app.__e2ee_members.where(filter))` using the filter from `members.where(space, otherAccountId)`,
@@ -104,7 +108,10 @@ Automatic rotation happens just before a write. If rotation fails, the write can
 under the current key, which the removed member may hold. The runtime sends `onReport` a
 `rotation-failed` report with the space and the `reason`.
 
-The next write can retry after a transient failure. After a permission denial, this client stops
+If background delivery after a rotation fails, `onReport` receives a `delivery-failed` report
+with the space and the reason.
+
+The next write can retry after a transient rotation failure. After a permission denial, this client stops
 trying to rotate that space automatically for the rest of the session. A member with permission can
 still call `db.encryption.keys.rotate(space)`. See the
 [rotation refusal handling](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/spaces/delivery.rs#L380-L403).
@@ -115,6 +122,8 @@ db.encryption.onReport((report) => {
     console.warn("rotation check failed", report.space, report.reason);
   if (report.type === "rotation-failed")
     console.warn("key not rotated", report.space, report.reason);
+  if (report.type === "delivery-failed")
+    console.warn("key delivery failed", report.space, report.reason);
 });
 ```
 

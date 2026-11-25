@@ -115,6 +115,8 @@ export type EncryptionReport =
    * per failed attempt; the next write tries again.
    */
   | { type: "rotation-failed"; space: ReportSpace; reason: string }
+  /** A background pass could not deliver keys to members of the space. */
+  | { type: "delivery-failed"; space: ReportSpace; reason: string }
   /**
    * Reports Jazz kept for the app while nothing took them, past its limit:
    * `count` reports were dropped. Ordinary reports go first. If all queued
@@ -799,7 +801,9 @@ export class Keys {
   /**
    * Rotates a space's key at once (whoever may update the space's row can).
    * Call it right after removing a member: rotation is otherwise lazy.
-   * Returns how many deliveries it wrote, or zero if the space has no key yet.
+   * Returns the number of deliveries committed with the new key (up to 100),
+   * or zero if the space has no key yet. The runtime delivers to the
+   * remaining members in the background.
    */
   async rotate(space: SpaceRef): Promise<number> {
     const done = await this.call<{ delivered: number }>("keysRotate", { ...space });
