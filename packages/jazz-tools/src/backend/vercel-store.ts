@@ -467,6 +467,21 @@ mkdir "$run/jazz-recycled-$1" 2>/dev/null
 }
 
 /**
+ * Gives back the claim on the recycle of the session started at `$1`, after
+ * a stop that failed, so another waiter can try.
+ *
+ * @internal
+ */
+export function releaseRecycleScript(
+  /** @internal Prefix for /tmp, for tests. */
+  root = "",
+): string {
+  return `set -u
+rmdir ${shellQuote(`${root}/tmp`)}/"jazz-recycled-$1" 2>/dev/null || true
+`;
+}
+
+/**
  * Start the core: install the core addon for `version` on the Drive,
  * generate the app id once, and run the newest core version
  * this Drive has seen, so an instance from an older deployment never
@@ -1283,13 +1298,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   /**
    * Stop the session `sbx` belongs to, so the next wake starts a fresh one.
    * Other instances may be watching the same session; only the session this
-   * one saw fail is stopped, never a newer one.
+   * one saw fail is stopped, never a newer one. Says how it went: `gone`
+   * when that session no longer runs (stopped, or replaced by a newer one),
+   * and the error when Vercel refused to stop it.
    */
-  const stopSession = async (sbx: SandboxHandle) => {
+  const stopSession = async (
+    sbx: SandboxHandle,
+  ): Promise<{ stopped: true } | { gone: true } | { failed: unknown }> => {
     const watched = sbx.currentSession().startedAt.getTime();
     const now = await getRunning();
-    if (now && now.currentSession().startedAt.getTime() === watched) {
-      await now.stop().catch(() => {});
+    if (!now || now.currentSession().startedAt.getTime() !== watched) return { gone: true };
+    try {
+      await now.stop();
+      return { stopped: true };
+    } catch (error) {
+      return { failed: error };
     }
   };
 
@@ -1333,7 +1356,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     console.warn(
       `jazz: vercel(): stopping core ${name}'s session, whose core listens, so the next wake starts a fresh one: ${why}`,
     );
-    await stopSession(sbx);
+    const stop = await stopSession(sbx);
+    if ("failed" in stop) {
+      // Left claimed, the session could never be recycled again: every
+      // later waiter would wait out its deadline. Give the claim back.
+      await sbx
+        .runCommand({
+          cmd: "bash",
+          args: ["-c", releaseRecycleScript(), "jazz-release-recycle", String(session)],
+        })
+        .catch(() => undefined);
+      console.warn(
+        `jazz: vercel(): could not stop core ${name}'s session (${String(stop.failed)}); released its recycle for the next waiter`,
+      );
+      return false;
+    }
     return true;
   };
 
