@@ -58,6 +58,7 @@ type RelayExports = {
     abiVersion: number;
     openAttached(capability: Uint8Array): {
       readonly supportsSnapshotCapture?: boolean;
+      readonly supportsStoreWake?: boolean;
       execute(command: Uint8Array): Uint8Array;
       tick(): void;
       setWakeTrace?(enabled: boolean): void;
@@ -198,6 +199,22 @@ it.each([undefined, false, true])(
     expect(foreground.execute).toHaveBeenCalledWith(Uint8Array.of(0));
   },
 );
+
+it.each([undefined, true])("forwards native store wake support %s", (supportsStoreWake) => {
+  const foreground = { ...foregroundFixture(), supportsStoreWake, setTickScheduler: jest.fn() };
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: NATIVE_RELAY_ABI_V1,
+    openAttached: jest.fn(() => foreground),
+  };
+  const runtime = loadRelay({
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    execute: jest.fn(),
+  })
+    .installNativeForegroundRuntime()
+    .openAttached(new Uint8Array(32));
+
+  expect(runtime.supportsStoreWake).toBe(supportsStoreWake === true);
+});
 
 it("forwards the private wake trace switch only when the native handle provides it", () => {
   const setWakeTrace = jest.fn();
