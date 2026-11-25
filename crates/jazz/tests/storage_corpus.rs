@@ -894,6 +894,41 @@ fn opening_the_pinned_client_store_creates_no_schema_objects() {
     assert_eq!(schema_objects(&client_path), before);
 }
 
+/// A pinned client store that is opened, read and ticked, but not written,
+/// gains no commit seq row and no triggers (jazz#6367): only a write covers
+/// a store, so a store this build only reads keeps its file (the browser's
+/// pinned corpus checks its bytes).
+#[test]
+fn reading_and_ticking_the_pinned_client_store_writes_no_commit_seq_row() {
+    let dir = scratch("seq-readonly-client");
+    let client_path = install(CLIENT_FILE, CLIENT_SHA256, &dir);
+    let before = schema_objects(&client_path);
+    {
+        let client = open_client(&client_path);
+        assert_eq!(
+            rows(&client, Query::from("projects"), local()).unwrap(),
+            expected_projects(true)
+        );
+        for _ in 0..3 {
+            block_on(client.tick()).unwrap();
+        }
+    }
+    assert_eq!(schema_objects(&client_path), before);
+    let row: Option<i64> = {
+        use rusqlite::OptionalExtension;
+        rusqlite::Connection::open(&client_path)
+            .unwrap()
+            .query_row(
+                "SELECT v FROM _jazz_meta WHERE k = 'commit_seq.v1'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    assert_eq!(row, None);
+}
+
 #[test]
 fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     let dir = scratch("reopen");

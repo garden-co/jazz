@@ -11116,7 +11116,8 @@ impl Db {
             return Ok(());
         }
         // Everything one tick applies commits together.
-        self.inner.without_overlay().cover_commit_seq().await?;
+        // Not covered here (`Store::cover_commit_seq`): a replica ticks
+        // when it only reads, and must leave its file as it was.
         let conn = self.inner.without_overlay().conn.clone();
         conn.db_scope("sync_tick", async || self.client_apply().await)
             .await?;

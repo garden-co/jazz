@@ -4626,9 +4626,13 @@ impl Store {
 
     /// Give every table the commit seq row does not cover yet its
     /// triggers, and raise the row past what they hold (see
-    /// `commit_seq`), in a scope of its own. Each write scope calls this
-    /// first; it does nothing once the store is covered. An open only
-    /// reads, so a store that is opened but never written keeps its file.
+    /// `commit_seq`), in a scope of its own. The scopes of the store's own
+    /// writes (`w`, `commit_batch`) and of the authority's accepted
+    /// uploads call this first; it does nothing once the store is covered.
+    /// Neither an open nor a replica's sync tick calls it: a store that is
+    /// opened, read and ticked but never written keeps its file. Missing a
+    /// write path only costs a scan at the next open, never a wrong seq:
+    /// an uncovered table is always scanned.
     pub(crate) async fn cover_commit_seq(&self) -> Result<(), Error> {
         if !self.seq_uncovered.get() {
             return Ok(());
