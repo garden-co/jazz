@@ -1012,6 +1012,115 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
 
 /// The server stores `documents.status` as tags in the order the variants
 /// were declared, and the client mirrored the same tags.
+/// A store written before the commit seq row (jazz#6367) upgrades: an
+/// open still recovers its seq by scanning every table, history table and
+/// `_jazz_transactions`, and writes nothing (a store only read keeps its
+/// file); its first write covers those tables, recording the seq in
+/// `_jazz_meta`; every later open resumes from the row without a scan, and
+/// new commits number above.
+///
+/// ```text
+/// server.sqlite (no row) ──open──► scan all, file unchanged
+///                        ──open──► scan all ─► commit ─► row > seq
+///                        ──open──► row only, no scan
+/// ```
+#[test]
+fn pinned_server_corpus_gains_its_commit_seq_row_on_first_write() {
+    let dir = scratch("commit-seq");
+    let path = install(SERVER_FILE, SERVER_SHA256, &dir);
+    let raw = || rusqlite::Connection::open(&path).unwrap();
+    let row = || -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        raw()
+            .query_row(
+                "SELECT v FROM _jazz_meta WHERE k = 'commit_seq.v1'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    assert_eq!(row(), None, "the corpus predates the row");
+    // Every table the old recovery scanned: each stored table with a
+    // `_clock`, and `_jazz_transactions`; and the seq it found.
+    let (mut targets, scanned): (Vec<String>, i64) = {
+        let conn = raw();
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT m.name FROM sqlite_master AS m WHERE m.type = 'table' \
+                 AND m.name NOT GLOB '_jazz_*' \
+                 AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = '_clock')",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let mut seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(t), 0) FROM _jazz_transactions WHERE t < (1 << 52)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        for table in &tables {
+            let max: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COALESCE(MAX(_clock), 0) FROM \"{table}\" \
+                         WHERE _clock >= 0 AND _clock < (1 << 52)"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            seq = seq.max(max);
+        }
+        let mut targets = tables;
+        targets.push("_jazz_transactions".to_owned());
+        (targets, seq)
+    };
+    targets.sort();
+    assert!(scanned > 0, "the corpus numbered commits");
+    {
+        let server = open_server(&path).unwrap();
+        let mut scans = server.seq_scans_for_test();
+        scans.sort();
+        assert_eq!(scans, targets, "an open scans every table, as before");
+        assert!(server.seq_high_water() >= scanned as u64);
+    }
+    assert_eq!(row(), None, "an open writes no row");
+    let committed = {
+        let server = open_server(&path).unwrap();
+        let mut scans = server.seq_scans_for_test();
+        scans.sort();
+        assert_eq!(scans, targets, "still uncovered: scanned again");
+        assert_server_corpus(&server, false);
+        insert_as(
+            &server,
+            "projects",
+            project(9),
+            user(1),
+            40,
+            &[("name", string("After the row"))],
+        );
+        let mut scans = server.seq_scans_for_test();
+        scans.sort();
+        let twice: Vec<String> = targets
+            .iter()
+            .flat_map(|t| [t.clone(), t.clone()])
+            .collect();
+        assert_eq!(scans, twice, "the first write covers every table, once");
+        server.seq_high_water()
+    };
+    let recorded = row().unwrap();
+    assert!(recorded > scanned, "a new commit raises the row");
+    assert!(recorded as u64 <= committed);
+    let server = open_server(&path).unwrap();
+    assert_eq!(server.seq_scans_for_test(), Vec::<String>::new());
+    assert!(server.seq_high_water() >= recorded as u64);
+}
+
 #[test]
 fn pinned_corpus_stores_enum_tags() {
     let dir = scratch("enum-tags");

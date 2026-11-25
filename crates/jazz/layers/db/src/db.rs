@@ -2033,35 +2033,16 @@ impl Db {
             .await.map_err(storage)?;
         // The commit seq resumes after the newest version the store
         // numbered as the authority (a replica's own counter resumes in
-        // `load_client`).
-        let mut seq = 0u64;
-        for table in physical.tables.keys() {
-            for name in [table.clone(), format!("{table}__h")] {
-                let max: Option<i64> = conn
-                    .cached_row(
-                        &format!(
-                            "SELECT MAX(_clock) FROM {} WHERE _clock >= 0 AND _clock < ?1",
-                            quote(&name)
-                        ),
-                        [sync::band_start(sync::PENDING)],
-                        |r| r.get(0),
-                    )
-                    .await
-                    .map_err(storage)?;
-                seq = seq.max(max.unwrap_or(0) as u64);
-            }
-        }
-        // An accepted upload that wrote no rows still took a seq: its
-        // dedupe entry records it.
-        let settled: Option<i64> = conn
-            .cached_row(
-                "SELECT MAX(t) FROM _jazz_transactions WHERE t < ?1",
-                [sync::band_start(sync::PENDING)],
-                |r| r.get(0),
-            )
-            .await
-            .map_err(storage)?;
-        seq = seq.max(settled.unwrap_or(0) as u64);
+        // `load_client`), read from its `_jazz_meta` row: only tables the
+        // row does not cover yet are scanned (`commit_seq`, jazz#6367).
+        let recovered = crate::commit_seq::recover(
+            &conn,
+            physical.tables.keys(),
+            crate::commit_seq::Cover::Read,
+        )
+        .await?;
+        let seq = recovered.seq;
+        let seq_uncovered = !recovered.scanned.is_empty();
         let version = config.schema.version_id();
         admitted.retain(|(id, _)| *id != version);
         admitted.push((version, config.schema.clone()));
@@ -2079,6 +2060,9 @@ impl Db {
 
                 #[cfg(any(test, feature = "testing"))]
                 composite_scans: Default::default(),
+                #[cfg(any(test, feature = "testing"))]
+                seq_scans: RefCell::new(recovered.scanned),
+                seq_uncovered: Cell::new(seq_uncovered),
                 accepted: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
                 overlay_replays: Default::default(),
@@ -3988,6 +3972,7 @@ impl Db {
                     inner.own_order.borrow_mut().remove(&seq);
                 }
             };
+            inner.cover_commit_seq().await?;
             let applied = conn
                 .db_scope("w", async || {
                     let handle = apply(inner, seq, origin).await?;
@@ -4639,6 +4624,42 @@ impl Store {
         written
     }
 
+    /// Give every table the commit seq row does not cover yet its
+    /// triggers, and raise the row past what they hold (see
+    /// `commit_seq`), in a scope of its own. Each write scope calls this
+    /// first; it does nothing once the store is covered. An open only
+    /// reads, so a store that is opened but never written keeps its file.
+    pub(crate) async fn cover_commit_seq(&self) -> Result<(), Error> {
+        if !self.seq_uncovered.get() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        conn.db_scope("jazz_seq_cover", async || self.cover_commit_seq_now().await)
+            .await
+    }
+
+    /// [`Store::cover_commit_seq`] inside the caller's write transaction.
+    /// It scans again rather than trust the open's scan: what was written
+    /// since is covered too. The in-memory seq is left alone: it already
+    /// counts every seq this store handed out, and a replica's counter is
+    /// its own (`load_client`).
+    async fn cover_commit_seq_now(&self) -> Result<(), Error> {
+        let recovered = crate::commit_seq::recover(
+            &self.conn,
+            self.physical().tables.keys(),
+            crate::commit_seq::Cover::Write,
+        )
+        .await?;
+        #[cfg(any(test, feature = "testing"))]
+        self.seq_scans.borrow_mut().extend(recovered.scanned);
+        #[cfg(not(any(test, feature = "testing")))]
+        let _ = recovered;
+        // A scope that rolls back takes the triggers with it; the next
+        // open finds those tables uncovered and scans them again.
+        self.seq_uncovered.set(false);
+        Ok(())
+    }
+
     async fn write_admission_steps(
         &self,
         target: &Schema,
@@ -4663,6 +4684,8 @@ impl Store {
         }
         let ddl = Rc::make_mut(&mut *self.physical.borrow_mut()).union(target)?;
         execute_script(&self.conn, &ddl).await?;
+        // New tables join the commit seq row before anything writes to them.
+        self.cover_commit_seq_now().await?;
         // A new copy holds its source's values, in every row version.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -10496,6 +10519,14 @@ struct Store {
     /// `Db::composite_scans_for_test`).
     #[cfg(any(test, feature = "testing"))]
     composite_scans: Cell<usize>,
+    /// The tables commit seq recovery scanned since the store opened (see
+    /// `Db::seq_scans_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    seq_scans: RefCell<Vec<String>>,
+    /// Whether some table may lack the commit seq row's triggers: the open
+    /// scanned it, and the next write scope covers it
+    /// ([`Store::cover_commit_seq`]).
+    seq_uncovered: Cell<bool>,
     /// Subscribers accepted so far (each one's generation).
     accepted: Cell<u64>,
     /// Staged writes replayed into a transaction overlay so far: what tests
@@ -11782,6 +11813,7 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
+            inner.cover_commit_seq().await?;
             inner.start_unit_heads();
             let applied = conn
                 .db_scope("commit_batch", async || {

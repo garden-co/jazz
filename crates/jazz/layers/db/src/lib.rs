@@ -36,6 +36,7 @@ pub mod binding_codec;
 pub mod binding_host;
 pub mod catalogue;
 pub mod chunk_store;
+pub(crate) mod commit_seq;
 pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
