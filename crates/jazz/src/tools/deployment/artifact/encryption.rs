@@ -771,6 +771,26 @@ pub fn check_space_matches(
     Ok(())
 }
 
+/// A plaintext type as the app file writes it, for messages: `"string?"`,
+/// or a type object such as `{ "enum": ["a", "b"] }` followed by
+/// `(nullable)` when null is a value of it.
+fn plain_type_text(plain: &crate::tools::public_schema::PlainType) -> String {
+    match super::app_file::type_spec(&plain.column_type) {
+        Ok(super::json::Json::String(name)) => {
+            format!("\"{name}{}\"", if plain.nullable { "?" } else { "" })
+        }
+        Ok(spec) => {
+            let text = super::json::print(&spec).trim_end().to_owned();
+            if plain.nullable {
+                format!("{text} (nullable)")
+            } else {
+                text
+            }
+        }
+        Err(_) => format!("{:?}", plain.column_type),
+    }
+}
+
 /// Whether a new declaration can read the values of a previously declared
 /// encrypted column with the same stored identity.
 pub fn check_stored_column_type(
@@ -781,11 +801,11 @@ pub fn check_stored_column_type(
 ) -> Result<(), String> {
     if !declared.cell_type().same_type(previous.cell_type()) {
         return Err(format!(
-            "{path}: the encrypted column's type changes from {:?} to {:?}, \
-             which its cells were sealed under; only append-only enum widening can pin \
-             the old type with sealedType; to encrypt existing data, copy it {COPY_GUIDE}",
-            previous.cell_type(),
-            declared.cell_type()
+            "{path}: the encrypted column's type changes from {}, which its cells were \
+             sealed under, to {}; only append-only enum widening can pin the old type with \
+             sealedType; to encrypt existing data, copy it {COPY_GUIDE}",
+            plain_type_text(previous.cell_type()),
+            plain_type_text(declared.cell_type())
         ));
     }
     // Rows older than the column read its default: another

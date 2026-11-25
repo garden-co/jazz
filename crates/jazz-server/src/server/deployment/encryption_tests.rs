@@ -1413,6 +1413,227 @@ async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_ca
     );
 }
 
+/// Declarations kept for a version are never replaced. Alice's deploy keeps
+/// v1's; a later deployment that keeps them again, with the catalogue
+/// change it applies, is accepted and changes nothing, and one that keeps
+/// different ones for v1 is refused, and the kept ones stay.
+///
+/// ```text
+/// v1 deployed ── kept: D
+/// keep D again ──► ✓ kept: D
+/// keep E       ──► ✗ refused, kept: D
+/// ```
+#[tokio::test]
+async fn kept_declarations_are_never_replaced() {
+    let (router, state) = router_and_state().await;
+    let app = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let version = app.current_hash();
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let first = kept
+        .get(&version.0)
+        .unwrap()
+        .expect("v1's declarations are kept");
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+    let keep = |stored: Vec<u8>| {
+        runtime.apply_catalogue_keeping(
+            Default::default(),
+            None,
+            vec![(super::DECLARATIONS, version.0.to_vec(), stored)],
+        )
+    };
+
+    keep(first.clone())
+        .await
+        .expect("the same declarations again");
+    assert_eq!(kept.get(&version.0).unwrap(), Some(first.clone()));
+
+    let mut entries = app
+        .encryption()
+        .entries(&version.to_string())
+        .unwrap()
+        .clone();
+    entries
+        .get_mut("tasks")
+        .unwrap()
+        .columns
+        .get_mut("title")
+        .unwrap()
+        .plain
+        .column_type = ColumnType::Integer;
+    let other = jazz::tools::deployment::artifact::encryption::encode_stored(&entries).unwrap();
+    assert_ne!(other, first);
+    let refused = keep(other)
+        .await
+        .expect_err("other declarations for a kept version");
+    assert!(
+        matches!(refused, crate::runtime::CatalogueApplyError::Rejected(_)),
+        "{refused}"
+    );
+    assert_eq!(kept.get(&version.0).unwrap(), Some(first));
+}
+
+/// Two instances share a store. Alice's deploy of v2 checks the kept
+/// declarations (none for v2 yet) over the real route; before its change
+/// applies, Bob's instance keeps different declarations for v2. Alice's
+/// deploy is refused with the catalogue untouched: the declarations are
+/// kept in the transaction that commits the change, where keeping them
+/// after the commit would leave v2 live and the deploy erroring.
+///
+/// ```text
+/// alice deploys v2: checked (nothing kept) ─┐ paused before it applies
+///                                           │  bob keeps v2's declarations
+///                                           └─ the change applies ──✗ refused, v2 not live
+/// ```
+///
+/// The deployment's testing hook pauses it between its check and its apply.
+#[tokio::test]
+async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
+    let (router, state) = router_and_state().await;
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+
+    // Bob's declarations for v2: well formed, and different from Alice's
+    // (the title's type).
+    let v2_hash = v2.current_hash();
+    let mut bobs = v2
+        .encryption()
+        .entries(&v2_hash.to_string())
+        .unwrap()
+        .clone();
+    bobs.get_mut("tasks")
+        .unwrap()
+        .columns
+        .get_mut("title")
+        .unwrap()
+        .plain
+        .column_type = ColumnType::Integer;
+    let bobs = jazz::tools::deployment::artifact::encryption::encode_stored(&bobs).unwrap();
+
+    let (checked, resume) = state.deploy_hooks.pause_before_apply();
+    let deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    checked.await.expect("Alice's deploy reaches its apply");
+    assert_eq!(kept.get(&v2_hash.0).unwrap(), None, "her check saw none");
+    assert_eq!(kept.put_if_absent(&v2_hash.0, &bobs).unwrap(), None);
+    resume.send(()).unwrap();
+
+    let (status, refusal) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    state.catalogue_store.refresh().unwrap();
+    let schemas = state
+        .catalogue_store
+        .index()
+        .unwrap()
+        .deployment_catalogue()
+        .schemas
+        .len();
+    assert_eq!(schemas, 1, "v2 is not live: only v1 is in the catalogue");
+    assert_eq!(kept.get(&v2_hash.0).unwrap(), Some(bobs));
+}
+
+/// On a memory store, a second connection to the shared in-memory database
+/// is locked out while the store's connection holds a write, so the
+/// deployment reads the kept declarations on the store's own thread. Alice's
+/// deploy, arriving while the store is inside a write, waits for it and
+/// succeeds, instead of failing with a locked database.
+///
+/// ```text
+/// store thread: write in progress ─────────────────────┐ released once
+/// alice deploys v2: read of kept declarations queued ──┘ the read waits behind it ─► ✓ deployed
+/// ```
+///
+/// The deployment's testing hook says when its read is queued on the
+/// store's thread. A read made on another connection never queues there:
+/// the deploy then fails as locked once SQLite's busy timeout passes, with
+/// the write still open, and the test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
+    use jazz::host::HostTables;
+    use std::sync::mpsc;
+    let (router, state) = router_and_state().await;
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+
+    // The store's connection is inside a write (a host write's savepoint).
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let held = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    jazz::db::block_on(db.host_sql(&mut async |conn: &jazz::storage::Storage| {
+                        conn.execute_batch(
+                            "CREATE TABLE IF NOT EXISTS _jazz_host_e2ee_declarations \
+                             (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID; \
+                             INSERT OR REPLACE INTO _jazz_host_e2ee_declarations \
+                             VALUES (x'01', x'02')",
+                        )
+                        .await
+                        .map_err(|error| {
+                            jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string())
+                        })?;
+                        entered_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        Ok(())
+                    }))
+                    .map_err(|error| error.to_string())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+
+    let queued = state.deploy_hooks.signal_kept_read_queued();
+    let mut deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    tokio::select! {
+        signalled = queued => signalled.expect("the deploy reads the kept declarations"),
+        finished = &mut deploying => panic!(
+            "the deploy finished while the write was open, without reading on the store's \
+             thread: {finished:?}"
+        ),
+    }
+    release_tx.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    let (status, deployed) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
 /// An app whose current version declares no encryption but follows one that
 /// does keeps Jazz's system tables: the loader appends them, the server's
 /// check requires them, and the client and the server compute the same

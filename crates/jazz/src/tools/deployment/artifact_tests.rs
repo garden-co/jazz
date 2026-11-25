@@ -3570,3 +3570,48 @@ fn a_missing_space_table_is_worded_for_own_or_inherited_entries() {
     );
     assert!(encryption::check_space_tables(&schema, &encryption::Entries::new(), false).is_ok());
 }
+
+/// A retyped encrypted column is refused naming both types as the app
+/// file writes them, the sealed one first, never their Rust debug form.
+#[test]
+fn a_retyped_encrypted_column_names_both_types_as_the_file_writes_them() {
+    use crate::tools::public_schema::{EncryptedColumn, PlainType};
+    let column = |column_type, nullable| EncryptedColumn {
+        plain: PlainType {
+            column_type,
+            nullable,
+            default: None,
+        },
+        sealed_type: None,
+    };
+    let refusal = |from: &EncryptedColumn, to: &EncryptedColumn| {
+        encryption::check_stored_column_type("messages.text", from, to, false).unwrap_err()
+    };
+    assert_eq!(
+        refusal(
+            &column(ColumnType::Text, false),
+            &column(ColumnType::Integer, false)
+        ),
+        "messages.text: the encrypted column's type changes from \"string\", which its cells \
+         were sealed under, to \"int\"; only append-only enum widening can pin the old type \
+         with sealedType; to encrypt existing data, copy it into a new encrypted table \
+         (docs/e2ee/encrypting-existing-data)"
+    );
+    let retyped = refusal(
+        &column(ColumnType::Text, true),
+        &column(
+            ColumnType::Enum {
+                variants: vec!["a".to_owned(), "b".to_owned()],
+            },
+            true,
+        ),
+    );
+    assert!(
+        retyped.starts_with(
+            "messages.text: the encrypted column's type changes from \"string?\", which its \
+             cells were sealed under, to { \"enum\": [\"a\", \"b\"] } (nullable);"
+        ),
+        "{retyped}"
+    );
+    assert!(!retyped.contains("PlainType"), "{retyped}");
+}
