@@ -1,6 +1,6 @@
 import { createOpenTransactionId, StreamingPublicationTimeoutError } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
-import type { Encryption, EncryptionNative } from "../../encryption/index.js";
+import { EncryptionError, type Encryption, type EncryptionNative } from "../../encryption/index.js";
 import {
   servePrivateStore,
   type PrivateStore,
@@ -1249,15 +1249,45 @@ export class NativeRuntimeAdapter implements Runtime {
     this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
   }
 
-  /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */
+  /**
+   * Runs a write, and again once the space's key is ready if it failed
+   * `key-pending`. Closing the database ends the wait for the key
+   * (`EncryptionError` `closed`); the key's preparation goes on.
+   */
   retryAfterKey<T>(operation: () => T): T | Promise<T> {
-    const state = this.ownerRuntime.encryptionState;
+    const owner = this.ownerRuntime;
+    const state = owner.encryptionState;
     if (!state) return operation();
     return retryAfterKey(operation, async (space, startedAt, repeated) =>
       JSON.parse(
-        await state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated }),
+        await owner.untilClosed(
+          state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated }),
+        ),
       ),
     );
+  }
+
+  /** Ends each write's wait for a key, as this (owner) runtime closes. */
+  private readonly keyWaits = new Set<(error: EncryptionError) => void>();
+
+  /** `waiting`, unless this runtime closes first: then `closed`. */
+  private async untilClosed<T>(waiting: Promise<T>): Promise<T> {
+    if (this.phase === "closing" || this.phase === "closed") throw keyWaitClosed();
+    let leave!: (error: EncryptionError) => void;
+    const closed = new Promise<never>((_, reject) => {
+      leave = reject;
+    });
+    this.keyWaits.add(leave);
+    try {
+      return await Promise.race([waiting, closed]);
+    } finally {
+      this.keyWaits.delete(leave);
+    }
+  }
+
+  private endKeyWaits(): void {
+    for (const leave of this.keyWaits) leave(keyWaitClosed());
+    this.keyWaits.clear();
   }
 
   /**
@@ -2154,6 +2184,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // until the evaluator future that may currently borrow it has unwound.
     this.advancePhase("closing");
     this.encryptionState?.handle?.stop();
+    this.endKeyWaits();
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -2198,6 +2229,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.phase !== "open") return;
     this.advancePhase("closed");
     this.encryptionState?.handle?.stop();
+    this.endKeyWaits();
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -8173,4 +8205,9 @@ function reportAsyncRuntimeError(error: unknown): void {
   queueMicrotask(() => {
     throw error;
   });
+}
+
+/** A write's wait for its space's key, ended by the database closing. */
+function keyWaitClosed(): EncryptionError {
+  return new EncryptionError("closed", "The database closed while a write waited for its key");
 }
