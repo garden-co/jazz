@@ -28,7 +28,7 @@ use jazz::tools::public_schema::E2eeDeclarations;
 use jazz_e2ee::OsRandom;
 use jazz_e2ee::protocol::derive::RecoverySecret;
 
-use super::bridge::JsStore;
+use super::bridge::{JsStore, StoreWake};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -147,6 +147,10 @@ impl RuntimeBuilder {
         runtime
     }
 
+    pub fn set_store_wake(&self, wake: Option<Box<dyn Fn(StoreWake)>>) {
+        self.store.set_store_wake(wake);
+    }
+
     pub fn take_requests(&self) -> Vec<String> {
         self.store.take_requests()
     }
@@ -156,11 +160,13 @@ impl RuntimeBuilder {
     }
 
     pub fn drive(&self, settle: impl FnOnce()) {
+        self.store.check_clock();
         let runtime = self.attached.borrow().upgrade();
         if let Some(runtime) = &runtime {
             runtime.drive();
         }
         settle();
+        self.store.refresh_deadline();
         if let Some(runtime) = runtime {
             runtime.wake_if_owed();
         }
@@ -572,6 +578,8 @@ impl Encryption {
     pub fn stop(&self) {
         *self.main.borrow_mut() = None;
         self.preparations.settle();
+        // After the last poll, which may have asked for one.
+        self.set_background_deadline(None);
         self.preparations.0.borrow_mut().clear();
         self.client.close();
         self.approvals.borrow_mut().clear();
@@ -597,6 +605,7 @@ impl Encryption {
     /// (`false`); `space` is `table` identity and row of the space.
     pub fn use_space(&self, open: bool, table: String, id: String) {
         self.uses.borrow_mut().push_back((open, table, id));
+        (self.wake)();
     }
 
     /// The connection to the server went away (`false`) or came back
@@ -607,6 +616,7 @@ impl Encryption {
         if online {
             self.reconnected.set(true);
         }
+        (self.wake)();
     }
 
     /// The address of the space `id` of the space table `table`.
@@ -730,6 +740,21 @@ impl Encryption {
         }
     }
 
+    fn set_background_deadline(&self, at: Option<web_time::Instant>) {
+        if let Some(store) = &self.bridge_store {
+            store.set_background_deadline(at);
+        }
+    }
+
+    async fn within<F: Future + Unpin>(&self, future: F, limit: Duration) -> Option<F::Output> {
+        let deadline = web_time::Instant::now() + limit;
+        let _wake = self
+            .bridge_store
+            .as_ref()
+            .map(|store| store.operation_deadline(deadline));
+        within_at(future, deadline).await
+    }
+
     /// The same window covers every key a single host write asks for.
     pub fn write_deadline(elapsed: Duration) -> web_time::Instant {
         web_time::Instant::now() + Duration::from_secs(10).saturating_sub(elapsed)
@@ -801,7 +826,7 @@ impl Encryption {
             if remaining().is_zero() {
                 break;
             }
-            match within(prepare(), remaining()).await {
+            match self.within(prepare(), remaining()).await {
                 Some(Ok(Ok(true))) => return Ok(WriteRetry::Retry),
                 Some(Ok(Ok(false))) => repeated = true,
                 Some(Ok(Err(reason))) if fallback(&reason)? => return Ok(WriteRetry::Last),
@@ -1189,7 +1214,7 @@ impl Encryption {
                 self.commands.borrow_mut().push_back(reply);
                 // The pass belongs to the loop; if it cannot run (its watch
                 // keeps failing) the caller gets the loop's error, not a hang.
-                match within(answer, DELIVER_WITHIN).await {
+                match self.within(answer, DELIVER_WITHIN).await {
                     Some(done) => done.map_err(|_| describe(ClientError::Closed))??,
                     None => {
                         let why = self.last_error.borrow().clone();
@@ -1291,6 +1316,7 @@ async fn main_loop(this: Rc<Encryption>) {
         match Box::pin(client.prepare(&db)).await {
             Ok(true) => {
                 this.readable.set(true);
+                this.set_background_deadline(None);
                 break;
             }
             Err(error) => {
@@ -1305,6 +1331,8 @@ async fn main_loop(this: Rc<Encryption>) {
             }
             _ => {}
         }
+        // The host still uses a noop waker while initial preparation is pending.
+        this.set_background_deadline(Some(web_time::Instant::now() + Duration::from_millis(100)));
         yield_now().await;
     }
     let mut account = None;
@@ -1528,6 +1556,9 @@ async fn main_loop(this: Rc<Encryption>) {
             }
         }
         this.stage.set("idle");
+        let probe = (this.status.get() == Some(AccountStatus::AwaitingApproval))
+            .then(|| looked + Duration::from_secs(2));
+        this.set_background_deadline(retry_at.into_iter().chain(probe).min());
         drop(turn);
         yield_now().await;
     }
@@ -1537,8 +1568,15 @@ async fn main_loop(this: Rc<Encryption>) {
 const DELIVER_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `future`'s output, or `None` once `limit` has passed.
-async fn within<F: Future + Unpin>(mut future: F, limit: std::time::Duration) -> Option<F::Output> {
-    let deadline = web_time::Instant::now() + limit;
+#[cfg(test)]
+async fn within<F: Future + Unpin>(future: F, limit: Duration) -> Option<F::Output> {
+    within_at(future, web_time::Instant::now() + limit).await
+}
+
+async fn within_at<F: Future + Unpin>(
+    mut future: F,
+    deadline: web_time::Instant,
+) -> Option<F::Output> {
     std::future::poll_fn(|context| {
         if let Poll::Ready(value) = Pin::new(&mut future).poll(context) {
             return Poll::Ready(Some(value));

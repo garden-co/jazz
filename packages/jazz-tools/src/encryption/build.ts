@@ -25,11 +25,7 @@ export interface EncryptionRuntimeClass {
     environment: string,
     accountId: string,
     deviceAccountSecret?: string,
-  ): {
-    ready(): Promise<unknown>;
-    takeStoreRequests(): string[];
-    replyStore(id: string, ok: boolean, payload: string): boolean;
-  };
+  ): StoreTarget & { ready(): Promise<unknown> };
 }
 
 /**

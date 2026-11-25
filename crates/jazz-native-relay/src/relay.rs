@@ -321,7 +321,7 @@ impl NativeRelayWire {
 
 use crate::encryption::Declarations;
 use crate::encryption::{Built as BuiltDevice, ForegroundEncryption};
-use jazz_e2ee_client::host::bridge::JsStore;
+use jazz_e2ee_client::host::bridge::{JsStore, StoreWake};
 
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
 
@@ -828,12 +828,26 @@ impl NativeRelayClient {
     ) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            if let Some(open) = worker.encrypted_opens.get_mut(&id) {
-                open.wake = wake.map(|wake| (foreground, wake));
-                return Ok(());
+            let store = if let Some(open) = worker.encrypted_opens.get_mut(&id) {
+                open.wake = wake.clone().map(|wake| (foreground, wake));
+                Some(open.store.as_ref())
+            } else {
+                let client = worker.client_mut(id)?;
+                client.wake = wake.clone().map(|wake| (foreground, wake));
+                client
+                    .encryption
+                    .as_ref()
+                    .map(|runtime| runtime.bridge_store())
+            };
+            if let Some(store) = store {
+                store.set_store_wake(wake.map(|wake| {
+                    Box::new(move |event| {
+                        if matches!(event, StoreWake::Request) {
+                            wake.wake(foreground, FOREGROUND_WAKE_IMMEDIATE, 0);
+                        }
+                    }) as Box<dyn Fn(_)>
+                }));
             }
-            let client = worker.client_mut(id)?;
-            client.wake = wake.map(|wake| (foreground, wake));
             Ok(())
         })
     }
@@ -1286,15 +1300,36 @@ impl RelayWorker {
     }
 
     fn run(&mut self, receiver: mpsc::Receiver<RelayCommand>) {
+        let mut clock_checked = Instant::now();
         loop {
+            let deadline = self
+                .clients
+                .values()
+                .filter_map(|client| {
+                    client
+                        .encryption
+                        .as_ref()?
+                        .bridge_store()
+                        .next_deadline_after(clock_checked)
+                })
+                .min();
+            let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+            let wait = if self.awaits_time() {
+                Some(
+                    wait.unwrap_or(NATIVE_RELAY_POLL_INTERVAL)
+                        .min(NATIVE_RELAY_POLL_INTERVAL),
+                )
+            } else {
+                wait
+            };
             let command = if self.redrive {
                 match receiver.try_recv() {
                     Ok(command) => Some(command),
                     Err(mpsc::TryRecvError::Empty) => None,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
-            } else if self.awaits_time() {
-                match receiver.recv_timeout(NATIVE_RELAY_POLL_INTERVAL) {
+            } else if let Some(wait) = wait {
+                match receiver.recv_timeout(wait) {
                     Ok(command) => Some(command),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1326,6 +1361,7 @@ impl RelayWorker {
                 }
                 self.persistent_dirty.set(true);
             }
+            clock_checked = Instant::now();
             self.drive();
         }
         self.shutdown();

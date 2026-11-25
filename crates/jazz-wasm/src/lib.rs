@@ -1843,10 +1843,20 @@ impl WasmDb {
             Ok(binding) => binding,
             Err(error) => return js_sys::Promise::reject(&error),
         };
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", feature = "e2ee-client"))]
         let inner = self.open_inner().ok();
         future_to_promise(async move {
-            binding.tick().await.map_err(host_error)?;
+            let result = binding.tick().await;
+            #[cfg(feature = "e2ee-client")]
+            if let Some(runtime) = inner
+                .as_ref()
+                .and_then(|inner| inner.host.encryption.borrow().clone())
+            {
+                runtime.drive();
+                encryption::settle_promises();
+                runtime.wake_if_owed();
+            }
+            result.map_err(host_error)?;
             // The tick may have held acks for commits it applied.
             #[cfg(target_arch = "wasm32")]
             if let Some(inner) = inner {

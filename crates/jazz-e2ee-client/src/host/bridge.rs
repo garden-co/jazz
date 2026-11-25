@@ -19,7 +19,7 @@
 //! it and wipes it ([`serve`] does); what crosses into JavaScript cannot be.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -49,6 +49,23 @@ pub struct Request {
     pub text: String,
 }
 
+pub enum StoreWake {
+    Request,
+    Deadline(Option<Duration>),
+}
+
+impl StoreWake {
+    pub fn urgency(&self) -> String {
+        match self {
+            Self::Request => "immediate".to_owned(),
+            Self::Deadline(Some(delay)) => format!("after:{}", delay.as_millis() + 1),
+            Self::Deadline(None) => "cancel".to_owned(),
+        }
+    }
+}
+
+type StoreScheduler = Box<dyn Fn(StoreWake)>;
+
 #[derive(Default)]
 pub struct JsStore {
     next: Cell<u64>,
@@ -61,6 +78,11 @@ pub struct JsStore {
     timeout: Cell<Option<Duration>>,
     /// Called when a request is queued, so the host polls the queue soon.
     wake: RefCell<Option<Box<dyn Fn()>>>,
+    store_wake: RefCell<Option<StoreScheduler>>,
+    background_deadline: Cell<Option<Instant>>,
+    operation_deadlines: RefCell<BTreeMap<Instant, usize>>,
+    announced_deadline: Cell<Option<Instant>>,
+    clock_checked: Cell<Option<Instant>>,
     /// Answers requests instead of the queue (see [`JsStore::served_by`]).
     handler: Option<Handler>,
 }
@@ -77,6 +99,70 @@ impl JsStore {
 
     pub fn set_wake(&self, wake: Box<dyn Fn()>) {
         *self.wake.borrow_mut() = Some(wake);
+    }
+
+    pub fn set_store_wake(&self, wake: Option<StoreScheduler>) {
+        self.store_wake.replace(wake);
+        self.announced_deadline.set(None);
+        self.refresh_deadline();
+    }
+
+    fn notify_store(&self, event: StoreWake) {
+        if let Some(wake) = self.store_wake.borrow().as_ref() {
+            wake(event);
+        }
+    }
+
+    pub fn next_deadline_after(&self, now: Instant) -> Option<Instant> {
+        self.background_deadline
+            .get()
+            .filter(|at| *at > now)
+            .into_iter()
+            .chain(
+                self.operation_deadlines
+                    .borrow()
+                    .range((std::ops::Bound::Excluded(now), std::ops::Bound::Unbounded))
+                    .next()
+                    .map(|(at, _)| *at),
+            )
+            .min()
+    }
+
+    pub fn check_clock(&self) {
+        self.clock_checked.set(Some(Instant::now()));
+    }
+
+    pub fn refresh_deadline(&self) {
+        let at = self.next_deadline_after(self.clock_checked.get().unwrap_or_else(Instant::now));
+        if self.announced_deadline.replace(at) != at {
+            self.notify_store(StoreWake::Deadline(
+                at.map(|at| at.saturating_duration_since(Instant::now())),
+            ));
+        }
+    }
+
+    pub fn set_background_deadline(&self, at: Option<Instant>) {
+        self.background_deadline.set(at);
+        self.refresh_deadline();
+    }
+
+    pub fn operation_deadline(&self, at: Instant) -> impl Drop + '_ {
+        struct Deadline<'a>(&'a JsStore, Instant);
+        impl Drop for Deadline<'_> {
+            fn drop(&mut self) {
+                let mut deadlines = self.0.operation_deadlines.borrow_mut();
+                let count = deadlines.get_mut(&self.1).expect("registered deadline");
+                *count -= 1;
+                if *count == 0 {
+                    deadlines.remove(&self.1);
+                }
+                drop(deadlines);
+                self.0.refresh_deadline();
+            }
+        }
+        *self.operation_deadlines.borrow_mut().entry(at).or_default() += 1;
+        self.refresh_deadline();
+        Deadline(self, at)
     }
 
     /// Asks the host to tick now (the same call as when a request is queued).
@@ -153,8 +239,10 @@ impl JsStore {
         });
         wipe(&mut args);
         let _abandon = Abandon(self, id);
-        self.request_wake();
         let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
+        let _timer = self.operation_deadline(deadline);
+        self.notify_store(StoreWake::Request);
+        self.request_wake();
         std::future::poll_fn(|_| match self.replies.borrow_mut().remove(&id) {
             Some(result) => Poll::Ready(result),
             None if Instant::now() >= deadline => Poll::Ready(Err(late(op))),

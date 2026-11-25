@@ -96,6 +96,115 @@ async function addMember(owner: Device, project: string, account: string) {
   await owner.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
 }
 
+function observeStoreClock() {
+  const armed: number[] = [];
+  const fired: number[] = [];
+  const timeout = globalThis.setTimeout;
+  const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (callback.name !== "wakeAtDeadline" || delay === undefined) {
+      return timeout(callback, delay, ...args);
+    }
+    armed.push(delay);
+    return timeout(
+      (...values) => {
+        fired.push(delay);
+        callback(...values);
+      },
+      delay,
+      ...args,
+    );
+  });
+  cleanups.push(async () => {
+    spy.mockRestore();
+  });
+  return { armed, fired };
+}
+
+it("arms verification backoff after a transient private-store error", async () => {
+  const { armed, fired } = observeStoreClock();
+  const host = await serve(undefined, permissions, "memory");
+  const store = memoryPrivateStore();
+  const save = store.save.bind(store);
+  let failures = 0;
+  store.save = async (...args) => {
+    if (args[2].startsWith("floor-") && failures < 2) {
+      failures++;
+      throw new Error("the disk is busy");
+    }
+    return save(...args);
+  };
+  const alice = await device(host, { privateStore: store, wait: false });
+  expect(await alice.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
+  expect(failures).toBe(2);
+  expect(armed.some((delay) => delay >= 240 && delay <= 251)).toBe(true);
+  expect(armed.some((delay) => delay >= 490 && delay <= 501)).toBe(true);
+  expect(fired.some((delay) => delay >= 240 && delay <= 501)).toBe(true);
+}, 60_000);
+
+it("arms the next two-second approval probe and detects a challenge", async () => {
+  const { armed, fired } = observeStoreClock();
+  const schema = testApp(appFile);
+  const host = await startTestJazz({
+    app: schema,
+    permissions,
+    coreOptions: { appId: crypto.randomUUID() },
+  });
+  cleanups.push(() => host.stop());
+  const login = await host.as("alice");
+  const open = async () => {
+    const session = await createJazzClient({
+      app: schema,
+      permissions,
+      appId: host.appId,
+      serverUrl: login.serverUrl,
+      driver: { type: "memory" },
+      store: memoryStore(),
+      encryption: { store: memoryPrivateStore() },
+    });
+    cleanups.push(() => session.close());
+    await session.refresh();
+    return session.db.encryption;
+  };
+  const first = await open();
+  expect(await first.ready()).toBe("active");
+  const waiting = await open();
+  expect(await waiting.ready()).toBe("awaiting-approval");
+  const challenge = vi.fn();
+  const stop = waiting.onChallenge(challenge);
+  try {
+    await first.devices.challenge(await waiting.deviceId());
+    await expect.poll(() => challenge.mock.calls.length, { timeout: 6_000 }).toBe(1);
+    expect(
+      armed.some((delay) => delay > 500 && delay <= 2001),
+      JSON.stringify({ armed, fired }),
+    ).toBe(true);
+    await expect
+      .poll(() => fired.some((delay) => delay > 500 && delay <= 2001), { timeout: 8_000 })
+      .toBe(true);
+  } finally {
+    stop();
+  }
+}, 60_000);
+
+it("wakes for a write deadline while the active device is offline", async () => {
+  const { fired } = observeStoreClock();
+  const host = await serve(undefined, permissions, "memory");
+  const alice = await device(host);
+  const id = await makeProject(alice, "plans");
+  const scopeId = (alice.db.currentRuntime() as NativeRuntimeAdapter).tableIdentity("projects");
+  await alice.db.disconnect();
+  fired.length = 0;
+  const started = Date.now();
+  await alice.db.encryption["native"].encryptionCall("retryWrite", {
+    scopeId,
+    identifier: id,
+    startedAt: started - 9_800,
+    repeated: true,
+  });
+  expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+  expect(fired.filter((delay) => delay > 0 && delay <= 201)).toHaveLength(1);
+}, 60_000);
+
 describe("encryption on Node, end to end", () => {
   it.each([false, true])(
     "enforces the account reset opt-in (%s)",
@@ -1009,6 +1118,7 @@ describe("encryption on Node, end to end", () => {
     const back = await serve({ dir, port });
     expect(back.jazz.appId).toBe(appId);
     expect(await offline.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
+    await offline.session.close();
   }, 120_000);
 
   it("a returning device reads its encrypted rows offline, and its live query goes on once the server is back", async () => {

@@ -1,6 +1,10 @@
 import { expect, it, vi } from "vitest";
 import type { NativeForegroundCommand, NativeForegroundResponse } from "jazz-rn/relay";
-import { servePrivateStore, type PrivateStore } from "../encryption/private-store.js";
+import {
+  memoryPrivateStore,
+  servePrivateStore,
+  type PrivateStore,
+} from "../encryption/private-store.js";
 import { NativeForegroundDb } from "./native-foreground-db.js";
 
 function fixture(
@@ -236,4 +240,69 @@ it("fails an operation that was pending when the held tick failure happened", as
   await expect(waiting).resolves.toBe(failure);
   // It was the operation's to see, once.
   db.tick();
+});
+
+it("opens a native foreground from its store wake without an opening poll timer", async () => {
+  let command: NativeForegroundCommand;
+  let response: NativeForegroundResponse;
+  let wake: ((urgency: "immediate") => void) | undefined;
+  let answered = false;
+  const requests: string[] = [];
+  const db = new NativeForegroundDb(
+    {
+      setTickScheduler(callback) {
+        wake = callback;
+      },
+      execute(bytes) {
+        if (typeof command !== "object") throw new Error("expected a command");
+        switch (command.type) {
+          case "encryptionOpen":
+            if (!answered) {
+              requests.push(JSON.stringify({ id: "1", op: "openScope", scope: "alice" }));
+              wake?.("immediate");
+            }
+            response = { type: "encryptionOpen", ready: answered };
+            break;
+          case "takeStoreRequests":
+            response = { type: "storeRequests", requests: requests.splice(0) };
+            break;
+          case "replyStore":
+            expect(command.payload).toBe('"1"');
+            answered = true;
+            response = { type: "storeReply", accepted: true };
+            break;
+          default:
+            throw new Error("unexpected foreground command");
+        }
+        return bytes;
+      },
+      tick() {},
+      close: () => true,
+    },
+    {
+      encodeNativeForegroundCommand(value) {
+        command = value;
+        return new Uint8Array();
+      },
+      decodeNativeForegroundResponse: () => response,
+      installNativeForegroundRuntime() {
+        throw new Error("fixture uses an already open handle");
+      },
+    },
+  );
+  vi.useFakeTimers();
+  const store = servePrivateStore(db, memoryPrivateStore());
+  try {
+    let ready = false;
+    const opened = db.openEncryption().then(() => {
+      ready = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ready).toBe(true);
+    await opened;
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    store.stop({ cancelPending: true });
+    vi.useRealTimers();
+  }
 });

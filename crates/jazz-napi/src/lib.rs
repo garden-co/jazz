@@ -1024,6 +1024,26 @@ impl EncryptionRuntime {
         Ok(json_promise(env, future)?)
     }
 
+    /// Subscribe to new store requests and deadlines while serving the store.
+    #[napi(js_name = "setStoreWake")]
+    pub fn set_store_wake(&self, callback: Option<Function<'_, String, ()>>) -> napi::Result<()> {
+        let callback = callback
+            .map(|callback| {
+                callback
+                    .build_threadsafe_function::<String>()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()
+            })
+            .transpose()?;
+        self.builder.set_store_wake(callback.map(|callback| {
+            Box::new(move |wake: jazz_e2ee_client::host::bridge::StoreWake| {
+                let _ = callback.call(wake.urgency(), ThreadsafeFunctionCallMode::NonBlocking);
+            }) as Box<dyn Fn(_)>
+        }));
+        Ok(())
+    }
+
     /// The store requests queued since the last call, each a JSON text.
     #[napi(js_name = "takeStoreRequests")]
     pub fn take_store_requests(&self) -> Vec<String> {

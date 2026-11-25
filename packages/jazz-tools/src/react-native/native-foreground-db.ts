@@ -92,19 +92,39 @@ export class NativeForegroundDb {
     private readonly commands: NativeForegroundModule,
   ) {}
 
+  private tickScheduler: ((first: Error | string | null, second?: string) => void) | undefined;
+  private storeWake: ((wake: string) => void) | null = null;
+  private wakeRegistered = false;
+  private encryptionOpening: Promise<void> | undefined;
+  private advanceEncryptionOpen: (() => void) | undefined;
+
   setTickScheduler(callback: (first: Error | string | null, second?: string) => void): void {
+    this.tickScheduler = callback;
+    this.registerWakeScheduler();
+  }
+
+  get setStoreWake(): ((callback: ((wake: string) => void) | null) => void) | undefined {
+    if (!this.runtime.setTickScheduler) return undefined;
+    return (callback) => {
+      this.storeWake = callback;
+      if (callback) this.registerWakeScheduler();
+    };
+  }
+
+  private registerWakeScheduler(): void {
+    if (this.wakeRegistered) return;
     if (!this.runtime.setTickScheduler) {
       throw new Error(
         "React Native native foreground runtime does not expose owner wake scheduling",
       );
     }
     this.runtime.setTickScheduler((urgency) => {
-      // Native invalidation clears the JSI registration first, but a
-      // CallInvoker task may already have crossed into JS when close races
-      // teardown. Do not let that stale task re-enter the adapter after its
-      // foreground facade has become unusable.
-      if (!this.closed) callback(urgency);
+      // A CallInvoker task can already have crossed into JS at teardown.
+      if (this.closed) return;
+      if (urgency === "immediate") this.storeWake?.(urgency);
+      this.tickScheduler?.(urgency);
     });
+    this.wakeRegistered = true;
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -265,6 +285,7 @@ export class NativeForegroundDb {
     if (this.phase === "closed") return false;
     const storeDeleted = this.phase === "storeDeleted";
     this.phase = "closed";
+    this.advanceEncryptionOpen?.();
     this.transactions.clear();
     if (storeDeleted) {
       // The relay already closed this foreground with its store: only the
@@ -412,18 +433,31 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
-  async openEncryption(): Promise<void> {
-    for (;;) {
-      const response = this.execute({ type: "encryptionOpen" });
-      if (response.type === "operationError") throw foregroundOperationError(response);
-      if (response.type !== "encryptionOpen") return unexpected("encryptionOpen", response.type);
-      if (response.ready) return;
-      await new Promise<void>((resolve) => setTimeout(resolve, 2));
-    }
+  openEncryption(): Promise<void> {
+    return (this.encryptionOpening ??= new Promise((resolve, reject) => {
+      this.advanceEncryptionOpen = () => {
+        try {
+          const response = this.execute({ type: "encryptionOpen" });
+          if (response.type === "operationError") throw foregroundOperationError(response);
+          if (response.type !== "encryptionOpen")
+            return unexpected("encryptionOpen", response.type);
+          if (!response.ready) return;
+          this.advanceEncryptionOpen = undefined;
+          resolve();
+        } catch (error) {
+          this.advanceEncryptionOpen = undefined;
+          reject(error);
+        }
+      };
+      this.advanceEncryptionOpen();
+    }));
   }
 
   takeStoreRequests(): string[] {
-    if (this.closed || this.runtime.isClosed?.()) return [];
+    if (this.closed || this.runtime.isClosed?.()) {
+      this.advanceEncryptionOpen?.();
+      return [];
+    }
     const response = this.execute({ type: "takeStoreRequests" });
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "storeRequests") return unexpected("takeStoreRequests", response.type);
@@ -431,10 +465,14 @@ export class NativeForegroundDb {
   }
 
   replyStore(id: string, ok: boolean, payload: string): boolean {
-    if (this.closed || this.runtime.isClosed?.()) return false;
+    if (this.closed || this.runtime.isClosed?.()) {
+      this.advanceEncryptionOpen?.();
+      return false;
+    }
     const response = this.execute({ type: "replyStore", id, ok, payload });
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "storeReply") return unexpected("replyStore", response.type);
+    if (response.accepted) this.advanceEncryptionOpen?.();
     return response.accepted;
   }
 

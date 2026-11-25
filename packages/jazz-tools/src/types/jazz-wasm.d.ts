@@ -54,6 +54,7 @@ declare module "jazz-wasm" {
       deviceAccountSecret?: string | null,
     ): EncryptionRuntime;
     ready(): Promise<string>;
+    setStoreWake(callback: ((wake: string) => void) | null): void;
     takeStoreRequests(): string[];
     replyStore(id: string, ok: boolean, payload: string): boolean;
   }

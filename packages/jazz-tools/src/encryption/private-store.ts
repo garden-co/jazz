@@ -106,6 +106,8 @@ export function memoryPrivateStore(): PrivateStore {
 
 /** The native side: the store's requests and where its answers go. */
 export interface StoreTarget {
+  /** Wakes the store now, replaces its deadline, or cancels the deadline. */
+  setStoreWake?(callback: ((wake: string) => void) | null): void;
   takeStoreRequests(): string[];
   /** `false`: no such request is outstanding, and the answer was dropped. */
   replyStore(id: string, ok: boolean, payload: string): boolean;
@@ -122,6 +124,12 @@ const encode = (bytes: Uint8Array) => {
 const decode = (text: string) => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 
 type StoreRequest = Record<string, string | null> & { id: string; op: string };
+type QueuedRequest = {
+  request: StoreRequest;
+  timer: ReturnType<typeof setTimeout>;
+  expired: boolean;
+  expire?: () => void;
+};
 
 async function answer(store: PrivateStore, request: StoreRequest): Promise<unknown> {
   const text = (name: string) => request[name] as string;
@@ -166,30 +174,32 @@ function refused(request: StoreRequest) {
 /**
  * Runs the app's store for the native runtime: takes its requests as they
  * arise, runs each against `store` (one at a time, in order) and answers.
- * `stop()` stops polling. A host closing its runtime can also cancel answers
- * already in flight. The timer never keeps the process alive.
+ * `stop()` stops taking new requests. A host closing its runtime can also cancel answers
+ * already in flight. Timers do not keep the process alive.
  */
 export function servePrivateStore(
   target: StoreTarget,
   store: PrivateStore,
   intervalMs = 2,
 ): { stop(options?: { cancelPending?: boolean }): void; drain(): Promise<void> } {
-  const queue: StoreRequest[] = [];
+  const queue: QueuedRequest[] = [];
   const stop = new AbortController();
   const { signal } = stop;
   let running: Promise<void> | undefined;
+  let servicing = true;
+  let scheduled = false;
+  let clock: ReturnType<typeof setTimeout> | undefined;
   const drain = async () => {
-    for (let request = queue.shift(); request; request = queue.shift()) {
+    for (let entry = queue.shift(); entry; entry = queue.shift()) {
+      const { request, timer } = entry;
+      if (entry.expired) continue;
       try {
-        // A store that never answers must not hold the others back: the
-        // runtime fails that call after the same time, and its late answer
-        // is refused.
-        const payload = JSON.stringify(await withinAnswerTime(answer(store, request), signal));
+        const payload = JSON.stringify(await untilExpired(answer(store, request), signal, entry));
         if (signal.aborted) return;
-        if (!target.replyStore(request.id, true, payload)) refused(request);
+        if (!entry.expired && !target.replyStore(request.id, true, payload)) refused(request);
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof StoreAnswerTimeout) continue;
+        if (entry.expired) continue;
         const reason =
           error instanceof PrivateStoreConflictError
             ? "conflict"
@@ -199,26 +209,82 @@ export function servePrivateStore(
                 ? error.message
                 : String(error);
         if (!target.replyStore(request.id, false, reason)) refused(request);
+      } finally {
+        clearTimeout(timer);
       }
     }
   };
   const tick = () => {
     if (signal.aborted) return Promise.resolve();
-    // Taking the requests is also how the runtime's clock runs (a request
-    // nobody answers times out there), so it never waits for the store.
-    for (const text of target.takeStoreRequests()) queue.push(JSON.parse(text) as StoreRequest);
+    for (const text of target.takeStoreRequests()) {
+      const request = JSON.parse(text) as StoreRequest;
+      const entry = {
+        request,
+        expired: false,
+        timer: setTimeout(function expireStoreRequest() {
+          entry.expired = true;
+          try {
+            target.replyStore(
+              request.id,
+              false,
+              `the private store did not answer \`${request.op}\` in time`,
+            );
+          } finally {
+            entry.expire?.();
+          }
+        }, STORE_ANSWER_MS),
+      } as QueuedRequest;
+      (entry.timer as { unref?: () => void }).unref?.();
+      queue.push(entry);
+    }
     if (queue.length > 0)
       running ??= drain().finally(() => {
         running = undefined;
+        if (queue.length > 0) void tick();
       });
     return running ?? Promise.resolve();
   };
-  const timer = setInterval(() => void tick(), intervalMs);
-  (timer as { unref?: () => void }).unref?.();
+  const wake = (urgency: string) => {
+    if (!servicing) return;
+    if (urgency === "immediate") {
+      if (scheduled) return;
+      scheduled = true;
+      // Rust may call this in the middle of polling a future.
+      queueMicrotask(() => {
+        scheduled = false;
+        if (servicing) void tick();
+      });
+      return;
+    }
+    clearTimeout(clock);
+    if (urgency === "cancel") return;
+    clock = setTimeout(
+      function wakeAtDeadline() {
+        void tick();
+      },
+      Number(urgency.slice("after:".length)),
+    );
+    (clock as { unref?: () => void }).unref?.();
+  };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  if (target.setStoreWake) {
+    target.setStoreWake(wake);
+    wake("immediate");
+  } else {
+    // Older bindings and custom store targets have no wake export.
+    timer = setInterval(() => void tick(), intervalMs);
+    (timer as { unref?: () => void }).unref?.();
+  }
   return {
     stop({ cancelPending = false } = {}) {
+      if (servicing) {
+        servicing = false;
+        target.setStoreWake?.(null);
+      }
       clearInterval(timer);
+      clearTimeout(clock);
       if (cancelPending) {
+        for (const entry of queue) clearTimeout(entry.timer);
         queue.length = 0;
         stop.abort();
       }
@@ -232,18 +298,17 @@ const STORE_ANSWER_MS = 30_000;
 
 class StoreAnswerTimeout extends Error {}
 
-function withinAnswerTime<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+function untilExpired<T>(work: Promise<T>, signal: AbortSignal, entry: QueuedRequest): Promise<T> {
   return new Promise((resolve, reject) => {
     const expire = () => {
       cleanup();
       reject(new StoreAnswerTimeout());
     };
-    const timer = setTimeout(expire, STORE_ANSWER_MS);
-    (timer as { unref?: () => void }).unref?.();
     const cleanup = () => {
-      clearTimeout(timer);
+      entry.expire = undefined;
       signal.removeEventListener("abort", expire);
     };
+    entry.expire = expire;
     signal.addEventListener("abort", expire);
     if (signal.aborted) expire();
     work.then(

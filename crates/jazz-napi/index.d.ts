@@ -18,6 +18,8 @@ export declare class EncryptionRuntime {
    * takes the app's store (answer its requests while waiting).
    */
   ready(): Promise<string>
+  /** Subscribe to new store requests and deadlines while serving the store. */
+  setStoreWake(callback?: ((arg: string) => void) | undefined | null): void
   /** The store requests queued since the last call, each a JSON text. */
   takeStoreRequests(): Array<string>
   /**

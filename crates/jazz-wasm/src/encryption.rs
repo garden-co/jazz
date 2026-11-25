@@ -38,7 +38,7 @@ fn json_promise(future: JsonFuture) -> js_sys::Promise {
     promise
 }
 
-fn settle_promises() {
+pub(crate) fn settle_promises() {
     PENDING.with(|queue| queue.settle());
 }
 
@@ -84,6 +84,16 @@ impl WasmEncryptionRuntime {
             Ok(future) => json_promise(future),
             Err(refusal) => js_sys::Promise::reject(&JsValue::from_str(refusal)),
         }
+    }
+
+    /// Subscribe to new store requests and deadlines while serving the store.
+    #[wasm_bindgen(js_name = setStoreWake)]
+    pub fn set_store_wake(&self, callback: Option<js_sys::Function>) {
+        self.builder.set_store_wake(callback.map(|callback| {
+            Box::new(move |wake: jazz_e2ee_client::host::bridge::StoreWake| {
+                let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&wake.urgency()));
+            }) as Box<dyn Fn(_)>
+        }));
     }
 
     /// The store requests queued since the last call, each a JSON text.
