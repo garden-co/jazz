@@ -374,7 +374,8 @@ describe("later versions of an encrypted app", () => {
   });
 
   // Rust's refusal of a retyped encrypted column, which keeps its stored bytes.
-  const TYPE_CHANGE = /messages\.text/;
+  const TYPE_CHANGE =
+    /messages\.text: the encrypted column's type changes from .*Text.* to .*Integer.*, which its cells were sealed under/;
 
   it("refuses an encrypted column's new plaintext type, which stores the same bytes", async () => {
     const root = await firstVersion();
