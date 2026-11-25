@@ -2907,8 +2907,16 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 
 `conflicting-account-key` is a report, not a contradiction: a valid sealing
 key record of the device's own account that does not derive from the
-account key is ignored by that device and reported (§2.12). The app event
-includes `recordId`, `signerId` and `epochId` and is deduplicated by record.
+account key is reported (§2.12). The device does not ignore the record: it
+stays the account's selected sealing key, which other senders keep sealing
+to (Limits, below), and deliveries sealed to it are reported against it.
+The device's own envelopes do not use it: a root's or successor's envelope
+for the author's account is sealed to the key the account key derives
+(`seal_to_self`, `crates/jazz-e2ee/src/protocol/space/build.rs`), even when
+the non-derived record is the first valid one
+(`a_root_self_envelope_skips_an_earlier_non_derived_sealing_key`). The app
+event includes `recordId`, `signerId` and `epochId` and is deduplicated by
+record.
 See the [account verification test](../../jazz-e2ee-client/tests/accounts.rs#L110).
 
 The missing-key contradictions: `missing-root-key` (an accepted account
