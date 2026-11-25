@@ -5022,10 +5022,11 @@ impl Store {
             created.extend(dropped.clone());
             created
         };
-        let created = match op {
+        let mut created = match op {
             StagedOp::Insert(_, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => created(cells),
             _ => BTreeMap::new(),
         };
+        self.chunk_large_defaults(table, &mut created).await?;
         let mut stored = op.clone();
         match &mut stored {
             StagedOp::Insert(_, cells, _) => cells.extend(created),
@@ -5033,6 +5034,51 @@ impl Store {
             _ => {}
         }
         Ok(stored)
+    }
+
+    /// Chunk the defaults a creation write fills in above their column's
+    /// inline threshold, as [`Self::chunk_large_cells`] chunks the values a
+    /// write gives: each travels as a reference to its tree, whose nodes are
+    /// stored here and marked unpushed, so they go up as chunks ahead of the
+    /// op rather than whole inside it with every row created (jazz#6329).
+    /// Storing is idempotent: the row's own cell (see [`Self::bind_cell`])
+    /// usually stored the same tree already. A store that uploads nothing
+    /// (not a replica) and a latest-only table (which holds inline values
+    /// only, and refuses a value this large) keep the default as it is.
+    /// `created` is keyed by stored column; dropped columns' backwards
+    /// defaults, stored as the lens gave them, are left as they are.
+    async fn chunk_large_defaults(
+        &self,
+        table: &Table,
+        created: &mut BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        if self.client().is_none() || self.latest_only(&table.stored) {
+            return Ok(());
+        }
+        for column in &table.columns {
+            if !crate::large::large_capable(column) {
+                continue;
+            }
+            let Some(mut value) = created.get_mut(&column.stored) else {
+                continue;
+            };
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            let logical = match &*value {
+                Value::String(text) => text.as_bytes(),
+                Value::Bytes(bytes) => bytes.as_slice(),
+                _ => continue,
+            };
+            if logical.len() <= crate::large::inline_max(column) {
+                continue;
+            }
+            let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
+                .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
+            crate::large::store(&self.conn, &self.chunks, &prepared, true).await?;
+            *value = Value::Large(Box::new(prepared.value_ref));
+        }
+        Ok(())
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy

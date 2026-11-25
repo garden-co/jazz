@@ -11,7 +11,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   expectedManifest,
   manifestPath,
@@ -120,6 +121,27 @@ process.env.JAZZ_ARTIFACT_TOOL_WASM_PACK = "wasm-pack test";
 process.env.JAZZ_ARTIFACT_TOOL_WASM_BINDGEN = "wasm-bindgen test";
 process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT = "wasm-opt test";
 process.env.JAZZ_ARTIFACT_TOOL_NAPI = "napi test";
+
+// Keep the host's rustup state out of these tests. The fixtures'
+// rust-toolchain.toml files ('stable', then 'beta') are only hashed into the
+// manifest; without a pin, every `cargo` run inside a fixture makes rustup
+// resolve that channel, and install it if it is missing (which fails where
+// RUSTUP_HOME is read-only). Pin cargo to the repository's own toolchain, the
+// one any checkout that runs these tests already has.
+const repoToolchain = /^\s*channel\s*=\s*"([^"]+)"/m.exec(
+  readFileSync(fileURLToPath(new URL("../../rust-toolchain.toml", import.meta.url)), "utf8"),
+)?.[1];
+assert.ok(repoToolchain, "rust-toolchain.toml names a channel");
+process.env.RUSTUP_TOOLCHAIN = repoToolchain;
+
+// A directory whose `wasm-opt` always fails, to put in front of PATH: the
+// direct lookup then misses whatever wasm-opt the host has installed.
+function failingWasmOptPath() {
+  const bin = mkdtempSync(join(tmpdir(), "jazz-provenance-no-wasm-opt-"));
+  writeFileSync(join(bin, "wasm-opt"), "#!/bin/sh\nexit 127\n", { mode: 0o755 });
+  writeFileSync(join(bin, "wasm-opt.cmd"), "@exit /b 127\r\n");
+  return `${bin}${delimiter}${process.env.PATH ?? ""}`;
+}
 
 test("provenance rejects stale tree, lock, toolchain, and profile", () => {
   const root = fixture();
@@ -624,14 +646,20 @@ test("provenance rejects tool and root-package configuration drift", () => {
 
 test("missing optional tools have an explicit remediation value", () => {
   const root = fixture();
+  const path = process.env.PATH;
   delete process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT;
   process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE = "1";
-  assert.match(
-    expectedManifest(root, "wasm", "fast").tools.wasmOpt,
-    /unavailable: wasm-opt is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build/,
-  );
-  process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT = "wasm-opt test";
-  delete process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE;
+  process.env.PATH = failingWasmOptPath();
+  try {
+    assert.match(
+      expectedManifest(root, "wasm", "fast").tools.wasmOpt,
+      /unavailable: wasm-opt is supplied by wasm-pack; rebuild via pnpm --filter jazz-wasm build/,
+    );
+  } finally {
+    process.env.PATH = path;
+    process.env.JAZZ_ARTIFACT_TOOL_WASM_OPT = "wasm-opt test";
+    delete process.env.JAZZ_ARTIFACT_DISABLE_WASM_PACK_CACHE;
+  }
 });
 
 test("release NAPI CI builds use the manifest-producing wrapper", () => {

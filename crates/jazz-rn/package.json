@@ -102,7 +102,6 @@
     "react-native": "0.81.5",
     "react-native-builder-bob": "^0.40.14",
     "release-it": "^19.0.4",
-    "turbo": "^2.5.6",
     "typescript": "catalog:default",
     "vite-plus": "catalog:default"
   },

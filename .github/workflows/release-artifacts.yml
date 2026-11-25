@@ -180,30 +180,32 @@ jobs:
       TREE: ${{ needs.resolve.outputs.tree }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # One step: download-artifact fetches several artifacts in parallel
+      # (one after another, these took 130 s once the artifacts doubled).
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: dl
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 5
         with:
-          name: language-artifacts
-          path: out/release-languages
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+          pattern: "{language-artifacts,JazzFFI.xcframework,jazz-swift-mirror,release-server,release-npm,jazz-kotlin-maven}"
+          path: out
+      - if: steps.dl.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 8
         with:
-          name: JazzFFI.xcframework
-          path: out/release-swift
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-swift-mirror
-          path: out/release-swift-mirror
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-server
-          path: out/release-server
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-npm
-          path: out/release-npm
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-kotlin-maven
-          path: out/release-maven
+          pattern: "{language-artifacts,JazzFFI.xcframework,jazz-swift-mirror,release-server,release-npm,jazz-kotlin-maven}"
+          path: out
+      - name: Name the directories as the manifest lists them
+        run: |
+          set -euo pipefail
+          cd out
+          mv language-artifacts release-languages
+          mv JazzFFI.xcframework release-swift
+          mv jazz-swift-mirror release-swift-mirror
+          mv jazz-kotlin-maven release-maven
+          test -d release-server && test -d release-npm
+          ls
 
       - name: Check and write manifest.json
         run: |

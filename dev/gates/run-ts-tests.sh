@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# The test-ts runner has 16 CPUs. Turbo gets at most three package test tasks.
+# The test-ts runner has 16 CPUs. Vite+ runs at most three package test tasks.
 # Jazz Tools retains its eight-worker Node cap; its separate Chromium lane
 # uses four file workers. All suites reuse the admitted artifact build.
 #
@@ -20,7 +20,7 @@ ts_shards="all tools-node-1 tools-node-2 tools-other browser-1 browser-2 package
 # run jazz-tools' Durable Object suite alone, on the -Oz host that ships.
 # Merge groups run the same suite inside tools-other.
 release_ts_shards="durable-objects"
-all_node_tests_command="pnpm test --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!jazz-rn --concurrency=3"
+workspace_tests="pnpm exec vp run --parallel --concurrency-limit=3 --ignore-depends-on --no-cache --filter=!. --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!jazz-rn"
 all_browser_tests_command="pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"
 
 # Two lanes per shard, run concurrently as the node and browser suites always
@@ -30,7 +30,7 @@ all_browser_tests_command="pnpm --parallel --filter jazz-tools --filter inspecto
 shard_lanes() {
   case "$1" in
     all)
-      shard_node_command=${all_node_tests_command}
+      shard_node_command="${workspace_tests} test"
       shard_browser_command=${all_browser_tests_command} ;;
     tools-node-1)
       shard_node_command="pnpm --filter jazz-tools run test:node --shard=1/2"
@@ -51,7 +51,7 @@ shard_lanes() {
       shard_node_command=":"
       shard_browser_command="pnpm --filter jazz-tools run test:browser:vitest --shard=2/2 && pnpm --filter jazz-tools run test:browser:storage-quota && pnpm --filter jazz-tools run test:browser:transport" ;;
     packages)
-      shard_node_command="${all_node_tests_command} --filter=!jazz-tools"
+      shard_node_command="${workspace_tests} --filter=!jazz-tools test"
       shard_browser_command=":" ;;
     # The examples partition's own commands (typecheck, bindings, browser
     # corpus) follow this runner; the shard only admits the prepared surface.
@@ -122,7 +122,7 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
   done
 fi
 
-# Every workspace package's `test` target belongs to this Node/Turbo partition.
+# Every workspace package's `test` target belongs to this Node partition.
 # Browser-only receipts keep their topology out of that target and run through
 # `test:browser` below, where their Vitest projects own the Jazz server commands.
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-${shard_node_command}}
@@ -221,7 +221,7 @@ terminate_children() {
   for child_pid in "${node_tests_pid}" "${browser_tests_pid}"; do
     if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
       # Each suite starts in its own session, so this reaches pnpm and every
-      # descendant it spawned instead of leaving Vitest/Turbo processes behind.
+      # descendant it spawned instead of leaving test processes behind.
       kill -TERM -- "-${child_pid}" 2>/dev/null || true
     fi
   done
@@ -246,14 +246,15 @@ trap 'interrupt 143' TERM
 
 # Job control gives each background suite its own process group on both the
 # macOS system Bash and GNU Bash. `terminate_children` can therefore still
-# terminate each complete Turbo/Vitest tree without relying on Linux `setsid`.
+# terminate each complete test process tree without relying on Linux `setsid`.
 echo "Node test live log: ${node_tests_log}"
 echo "Browser test live log: ${browser_tests_log}"
 
 set -m
-bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
+test_env="$(dirname "${BASH_SOURCE[0]}")/with-test-env.sh"
+bash "$test_env" bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
-bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
+bash "$test_env" bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
 browser_tests_pid=$!
 (trap - INT TERM; monitor_logs) &
 log_monitor_pid=$!
@@ -267,7 +268,7 @@ browser_tests_status=$?
 stop_log_monitor
 trap - INT TERM
 
-# GitHub's live log pipe can be nonblocking. Two concurrent Turbo/Vitest trees
+# GitHub's live log pipe can be nonblocking. Two concurrent test process trees
 # writing directly to it can fail with EAGAIN even though the tests themselves
 # are healthy. Give each suite a blocking regular file, then replay both logs
 # after both process trees have terminated. Only the bounded monitor writes

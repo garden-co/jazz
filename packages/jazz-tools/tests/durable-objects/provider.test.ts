@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazz, durableObjects } from "../../src/backend/index.js";
+import { CoreRedirectError, createJazz, durableObjects } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/index.js";
 import { startDurableObjectCore, type DurableObjectCore } from "./harness.js";
 
@@ -183,8 +183,12 @@ describe("createJazz with durableObjects()", () => {
       }),
     );
     const error = await openFailure(durableObjects({ url: redirecting, secret: "s".repeat(40) }));
-    expect(error.message).toMatch(
-      /did not answer as a Jazz Durable Object core \(GET \/app: 307\)/,
+    // A redirect is refused with a named error, not followed or read as a
+    // core that isn't Jazz: configure the core's final URL instead.
+    expect(error).toBeInstanceOf(CoreRedirectError);
+    expect(error).toMatchObject({ url: redirecting, location: `${elsewhere}/app` });
+    expect(error.message).toBe(
+      `the Jazz core at ${redirecting} redirected to ${elsewhere}/app; Jazz never follows a core's redirects, since they would carry the backend credential along: configure durableObjects() with the core's final URL`,
     );
     expect(reached).toEqual([]);
   });

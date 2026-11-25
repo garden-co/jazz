@@ -5,7 +5,9 @@
 # Needs macOS with Xcode and the Rust targets below. Output: $1 (default
 # target/swift-xcframework). With JAZZ_FFI_SLICES set, builds nothing and
 # assembles prebuilt staticlibs instead, $JAZZ_FFI_SLICES/<target>/libjazz_ffi.a
-# (each built as below, e.g. by a parallel CI job per target).
+# (each built as below, e.g. by a parallel CI job per target). With
+# JAZZ_FFI_TARGET=<target>, builds that one slice as below into
+# $1/<target>/libjazz_ffi.a and stops: a from-scratch build split by target.
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 out=${1:-$root/target/swift-xcframework}
@@ -13,11 +15,20 @@ export MACOSX_DEPLOYMENT_TARGET=13.0
 export IPHONEOS_DEPLOYMENT_TARGET=16.0
 targets=(aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios)
 cd "$root"
+if [[ -n "${JAZZ_FFI_TARGET:-}" ]]; then
+  [[ " ${targets[*]} " == *" $JAZZ_FFI_TARGET "* ]] || { echo "not a slice target: $JAZZ_FFI_TARGET" >&2; exit 1; }
+  targets=("$JAZZ_FFI_TARGET")
+fi
 for target in "${targets[@]}"; do
   [[ -z "${JAZZ_FFI_SLICES:-}" ]] || break
   cargo rustc -p jazz-ffi --release --lib --target "$target" --crate-type staticlib -- --print native-static-libs 2>&1 \
     | grep -E "native-static-libs|error" || true
 done
+if [[ -n "${JAZZ_FFI_TARGET:-}" ]]; then
+  mkdir -p "$out/$JAZZ_FFI_TARGET"
+  cp "$root/target/$JAZZ_FFI_TARGET/release/libjazz_ffi.a" "$out/$JAZZ_FFI_TARGET/"
+  exit 0
+fi
 if [[ -n "${JAZZ_FFI_SLICES:-}" ]]; then
   lib() { echo "$JAZZ_FFI_SLICES/$1/libjazz_ffi.a"; }
   for target in "${targets[@]}"; do [[ -f "$(lib "$target")" ]] || { echo "no $(lib "$target")" >&2; exit 1; }; done

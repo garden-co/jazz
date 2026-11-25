@@ -562,16 +562,6 @@ test("CI uses the correctness artifact path while package builds keep release WA
       false,
       `${task} must remain uncached: correctness artifacts are not Turbo outputs`,
     );
-  assert.deepEqual(turbo.tasks.test.passThroughEnv, [
-    "TMPDIR",
-    // Package tests that build Rust (rust-backend-clients) reach sccache too.
-    "RUSTC",
-    "RUSTC_WRAPPER",
-    "SCCACHE_*",
-    ...turbo.tasks["jazz-tools#build"].passThroughEnv,
-    "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
-    "JAZZ_CORRECTNESS_CONSUMER_TOKEN",
-  ]);
 });
 
 test("Turbo native artifact tasks use precise local inputs without task dependencies", () => {

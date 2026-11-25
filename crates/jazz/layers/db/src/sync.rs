@@ -7307,19 +7307,28 @@ impl Store {
         let mut size = 0;
         let mut absent = Vec::new();
         for op in ops {
-            let (row, cells) = match &op.write {
+            // An upsert's created cells (the defaults it fills in when it
+            // creates the row, chunked as written values are) need their
+            // nodes too: the authority may create the row from them.
+            let none = BTreeMap::new();
+            let (row, cells, created) = match &op.write {
+                WireWrite::Upsert {
+                    row,
+                    cells,
+                    created,
+                    ..
+                } => (RowUuid::from_bytes(*row), cells, created),
                 WireWrite::Insert { row, cells, .. }
                 | WireWrite::Update { row, cells, .. }
-                | WireWrite::Upsert { row, cells, .. }
                 | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
-                } => (RowUuid::from_bytes(*row), cells),
+                } => (RowUuid::from_bytes(*row), cells, &none),
                 _ => continue,
             };
             let mut values = Vec::new();
-            for value in cells.values() {
+            for value in cells.values().chain(created.values()) {
                 large(value, &mut values);
             }
             if values.is_empty() {
