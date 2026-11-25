@@ -676,7 +676,9 @@ export class PostcardWriter {
   bytes(value: Uint8Array, withLength = true): void {
     if (withLength) this.u64(value.length);
     if (value.length < POSTCARD_WHOLE_BYTES) {
-      for (const byte of value) this.chunks.push(byte);
+      // An indexed loop: Hermes runs `for...of` over a typed array through the iterator protocol.
+      const chunks = this.chunks;
+      for (let index = 0; index < value.length; index += 1) chunks.push(value[index]);
       return;
     }
     // A large value (a large-value leaf, a frame in a batch) is copied
@@ -721,6 +723,26 @@ export class PostcardReader {
   constructor(private readonly bytesValue: Uint8Array) {}
 
   u64(): number {
+    // Up to 7 bytes (49 bits) fit a Number exactly, so the common case reads without BigInt;
+    // anything longer takes the canonical path. Same refusals as that path: eof, and a
+    // last byte of 0 after the first (not minimally encoded).
+    const bytes = this.bytesValue;
+    let offset = this.offset;
+    let result = 0;
+    let scale = 1;
+    for (let byteIndex = 0; byteIndex < 7; byteIndex += 1) {
+      if (offset >= bytes.length) throw new Error("postcard eof");
+      const byte = bytes[offset++];
+      result += (byte & 0x7f) * scale;
+      if ((byte & 0x80) === 0) {
+        if (byteIndex !== 0 && byte === 0) {
+          throw new Error("postcard u64 is not minimally encoded");
+        }
+        this.offset = offset;
+        return result;
+      }
+      scale *= 128;
+    }
     const value = this.readCanonicalU64();
     if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw new Error(`postcard u64 exceeds Number.MAX_SAFE_INTEGER: ${value}`);
