@@ -23,7 +23,7 @@ import {
   openVercelCore,
   onVercelDeployment,
   refuseOtherEnvironment,
-  resolveCoreBlobs,
+  prepareSandboxBlobs,
   startScript,
   workloadOf,
   type SandboxHandle,
@@ -332,7 +332,7 @@ describe("vercel() store", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const issuer = await startIssuer();
     const appId = randomUUID();
-    const blobs = resolveCoreBlobs({ region: "iad1", blobs: files() }, {});
+    const { destination: blobs } = prepareSandboxBlobs({ region: "iad1", blobs: files() }, {});
     const script = startScript(
       "1.0.0",
       "unused",

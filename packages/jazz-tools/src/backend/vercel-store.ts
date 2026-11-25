@@ -454,20 +454,6 @@ function blobsSetup(blobs: SandboxBlobs | undefined, q: (s: string) => string): 
   return `\nexport S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)}${role}`;
 }
 
-/** Only the launch environment carries secrets, including when waking a stopped Sandbox. */
-function blobCredentialEnv(blobs: BlobStore): Record<string, string> | undefined {
-  if (blobs === "sqlite" || blobs.kind === "files" || !blobs.credentials) return undefined;
-  if (blobs.kind === "vercel-blob") {
-    // The native resolver prefers ambient OIDC to BLOB_READ_WRITE_TOKEN.
-    return { BLOB_READ_WRITE_TOKEN: blobs.credentials.readWriteToken, VERCEL_OIDC_TOKEN: "" };
-  }
-  return {
-    AWS_ACCESS_KEY_ID: blobs.credentials.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: blobs.credentials.secretAccessKey,
-    AWS_SESSION_TOKEN: blobs.credentials.sessionToken ?? "",
-  };
-}
-
 /**
  * The Vercel environment (`production`, `preview` or a custom one's slug)
  * whose functions this core trusts, from the token's subject.
@@ -513,23 +499,42 @@ function coreOptions(
   };
 }
 
-export function resolveCoreBlobs(
+/** Prepare the public script input separately from the command environment carrying secrets. */
+export function prepareSandboxBlobs(
   options: Pick<VercelStoreOptions, "blobs" | "region">,
   env: Record<string, string | undefined>,
   warn: (message: string) => void = console.warn,
-): SandboxBlobs | undefined {
+): { destination?: SandboxBlobs; credentialEnv?: Record<string, string> } {
   const { blobs } = options;
   if (!blobs) throw new Error("vercel(): blobs is required");
-  if (blobs === "sqlite") return undefined;
+  if (blobs === "sqlite") return {};
   if (blobs.kind === "files") {
-    if (blobs.dir === undefined) return { kind: "files" };
+    if (blobs.dir === undefined) return { destination: { kind: "files" } };
     const dir = posix.resolve("/data/store", blobs.dir);
     if (!dir.startsWith("/data/"))
       throw new Error("vercel(): the blob directory must be on the /data Drive");
-    return { kind: "files", dir };
+    return { destination: { kind: "files", dir } };
   }
-  if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
-  if (blobs.kind === "s3") return resolveVercelS3(blobs, options.region, env, warn);
+  if (blobs.kind === "vercel-blob") {
+    return {
+      destination: resolveVercelBlob(blobs, env),
+      // Empty OIDC selects the supplied read-write token in the native resolver.
+      credentialEnv: blobs.credentials && {
+        BLOB_READ_WRITE_TOKEN: blobs.credentials.readWriteToken,
+        VERCEL_OIDC_TOKEN: "",
+      },
+    };
+  }
+  if (blobs.kind === "s3") {
+    return {
+      destination: resolveVercelS3(blobs, options.region, env, warn),
+      credentialEnv: blobs.credentials && {
+        AWS_ACCESS_KEY_ID: blobs.credentials.accessKeyId,
+        AWS_SECRET_ACCESS_KEY: blobs.credentials.secretAccessKey,
+        AWS_SESSION_TOKEN: blobs.credentials.sessionToken ?? "",
+      },
+    };
+  }
   throw new Error('vercel(): blobs must be files(), s3(), vercelBlob() or "sqlite"');
 }
 
@@ -977,8 +982,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Jaz
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
-  const blobs = resolveCoreBlobs(options, env);
-  const credentialEnv = blobCredentialEnv(options.blobs);
+  const { destination: blobs, credentialEnv } = prepareSandboxBlobs(options, env);
   if (blobs && !("kind" in blobs) && environmentOf(trust) === undefined) {
     console.warn(
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,

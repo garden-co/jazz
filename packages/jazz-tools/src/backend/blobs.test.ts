@@ -7,7 +7,7 @@ import {
   s3,
   vercelBlob,
 } from "./blobs.js";
-import { environmentOf, resolveCoreBlobs } from "./vercel-store.js";
+import { environmentOf, prepareSandboxBlobs } from "./vercel-store.js";
 import { vercel } from "./vercel-provider.js";
 
 describe("Sandbox blob credentials", () => {
@@ -84,16 +84,18 @@ describe("vercelBlob()", () => {
   it("requires an explicit destination even with a connected Blob store", () => {
     const env = { BLOB_STORE_ID: "abc" };
     // @ts-expect-error JavaScript callers can omit blobs.
-    expect(() => resolveCoreBlobs({ region: "iad1" }, env)).toThrow(/blobs is required/);
-    expect(resolveCoreBlobs({ blobs: "sqlite", region: "iad1" }, env)).toBeUndefined();
-    expect(resolveCoreBlobs({ blobs: vercelBlob(), region: "iad1" }, env)).toEqual({
+    expect(() => prepareSandboxBlobs({ region: "iad1" }, env)).toThrow(/blobs is required/);
+    expect(
+      prepareSandboxBlobs({ blobs: "sqlite", region: "iad1" }, env).destination,
+    ).toBeUndefined();
+    expect(prepareSandboxBlobs({ blobs: vercelBlob(), region: "iad1" }, env).destination).toEqual({
       storeId: "abc",
     });
   });
 
   it("keeps Sandbox blob directories on its persistent Drive", () => {
     const destination = (dir: string) =>
-      resolveCoreBlobs({ region: "iad1", blobs: files({ dir }) }, {});
+      prepareSandboxBlobs({ region: "iad1", blobs: files({ dir }) }, {}).destination;
     expect(destination("chunks")).toEqual(files({ dir: "/data/store/chunks" }));
     expect(destination("/data/shared/chunks")).toEqual(files({ dir: "/data/shared/chunks" }));
     expect(() => destination("../../tmp")).toThrow(/persistent|Drive/);
@@ -106,9 +108,9 @@ describe("vercelBlob()", () => {
       AWS_REGION: "eu-central-1",
       AWS_ROLE_ARN: "arn:aws:iam::1:role/vercel",
     };
-    resolveCoreBlobs({ blobs: s3(), region: "fra1" }, env, warn);
+    prepareSandboxBlobs({ blobs: s3(), region: "fra1" }, env, warn);
     expect(warn).not.toHaveBeenCalled();
-    resolveCoreBlobs({ blobs: s3(), region: "iad1" }, env, warn);
+    prepareSandboxBlobs({ blobs: s3(), region: "iad1" }, env, warn);
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/eu-central-1.*iad1 \(us-east-1\)/));
   });
 });

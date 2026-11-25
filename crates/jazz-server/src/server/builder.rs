@@ -382,61 +382,7 @@ impl ServerBuilder {
             }),
             StorageBackend::Persistent { path } => {
                 let identity = identity.ok_or("a persistent store opens with its identity")?;
-                let store_id = identity.store_id.clone();
-                let blobs = match &self.blobs {
-                    // A bucket's default prefix is this store's own.
-                    BlobStore::S3(options) if options.prefix.is_empty() => {
-                        let mut options = options.clone();
-                        options.prefix = format!("jazz/{store_id}/");
-                        BlobStore::S3(options)
-                    }
-                    BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
-                        let mut options = options.clone();
-                        options.prefix = format!("jazz/{store_id}/");
-                        BlobStore::VercelBlob(options)
-                    }
-                    blobs => blobs.clone(),
-                };
-                let plan = plan_blob_store(path, identity.blob_store.as_deref(), &blobs)?;
-                let mut s3 = None;
-                let config = match (&plan.blob_dir, &blobs) {
-                    (Some(dir), _) => {
-                        claim_blob_dir(&store_id, dir)?;
-                        StorageConfig::data_dir(path).with_blob_dir(dir.clone())
-                    }
-                    (None, BlobStore::S3(options)) => {
-                        warn_on_distant_bucket(options);
-                        let store = Arc::new(crate::s3::S3ChunkStore::new(
-                            options.clone(),
-                            store_id.clone(),
-                        )?);
-                        s3 = Some(Arc::clone(&store));
-                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
-                            crate::runtime::NetworkChunkStore {
-                                store,
-                                name: options.describe(),
-                            },
-                        ))
-                    }
-                    (None, BlobStore::VercelBlob(options)) => {
-                        let store = crate::vercel_blob::VercelBlobChunkStore::new(
-                            options.clone(),
-                            store_id.clone(),
-                        )?;
-                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
-                            crate::runtime::NetworkChunkStore {
-                                store: Arc::new(store),
-                                name: options.describe(),
-                            },
-                        ))
-                    }
-                    (None, _) => StorageConfig::data_dir(path),
-                };
-                Ok(ShellStorage {
-                    config,
-                    record: plan.record,
-                    s3,
-                })
+                self.blobs.clone().open(path, identity)
             }
         }
     }
@@ -444,6 +390,64 @@ impl ServerBuilder {
     #[cfg(test)]
     fn local_durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Global
+    }
+}
+
+impl BlobStore {
+    /// Open the destination for this data directory. Validate the persisted
+    /// choice before contacting a store or claiming a directory. The caller
+    /// writes the new record only after the database opens successfully.
+    fn open(
+        mut self,
+        path: &Path,
+        identity: &super::identity::StoreIdentity,
+    ) -> Result<ShellStorage, String> {
+        let owner = &identity.store_id;
+        let prefix = match &mut self {
+            Self::S3(options) => Some(&mut options.prefix),
+            Self::VercelBlob(options) => Some(&mut options.prefix),
+            _ => None,
+        };
+        if let Some(prefix) = prefix
+            && prefix.is_empty()
+        {
+            *prefix = format!("jazz/{owner}/");
+        }
+        let plan = plan_blob_store(path, identity.blob_store.as_deref(), &self)?;
+        let base = StorageConfig::data_dir(path);
+        let mut s3 = None;
+        let config = match self {
+            Self::Sqlite => base,
+            Self::Files { .. } => {
+                let dir = plan.blob_dir.expect("plan resolves a files destination");
+                claim_blob_dir(owner, &dir)?;
+                base.with_blob_dir(dir)
+            }
+            Self::S3(options) => {
+                warn_on_distant_bucket(&options);
+                let name = options.describe();
+                let store = Arc::new(crate::s3::S3ChunkStore::new(options, owner.clone())?);
+                s3 = Some(Arc::clone(&store));
+                base.with_blobs(crate::runtime::Blobs::Network(
+                    crate::runtime::NetworkChunkStore { store, name },
+                ))
+            }
+            Self::VercelBlob(options) => {
+                let name = options.describe();
+                let store = Arc::new(crate::vercel_blob::VercelBlobChunkStore::new(
+                    options,
+                    owner.clone(),
+                )?);
+                base.with_blobs(crate::runtime::Blobs::Network(
+                    crate::runtime::NetworkChunkStore { store, name },
+                ))
+            }
+        };
+        Ok(ShellStorage {
+            config,
+            record: plan.record,
+            s3,
+        })
     }
 }
 

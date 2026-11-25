@@ -39,76 +39,8 @@ enum CoreStorage {
     Sqlite {
         path: PathBuf,
         app_id: Option<String>,
-        blobs: CoreBlobs,
+        blobs: jazz_server::BlobDestination,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "kebab-case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-enum CoreBlobs {
-    Sqlite {},
-    Files {
-        dir: Option<PathBuf>,
-    },
-    S3 {
-        bucket: Option<String>,
-        region: Option<String>,
-        endpoint: Option<String>,
-        prefix: Option<String>,
-        credentials: Option<jazz_server::s3::Keys>,
-    },
-    VercelBlob {
-        store_id: Option<String>,
-        prefix: Option<String>,
-        credentials: Option<BlobToken>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BlobToken {
-    read_write_token: String,
-}
-
-impl CoreBlobs {
-    fn resolve(self) -> std::result::Result<BlobStore, String> {
-        use jazz_server::{s3, vercel_blob};
-        match self {
-            Self::Sqlite {} => Ok(BlobStore::Sqlite),
-            Self::Files { dir } => Ok(BlobStore::Files { dir }),
-            Self::S3 {
-                bucket,
-                region,
-                endpoint,
-                prefix,
-                credentials,
-            } => s3::S3Options::with_credentials(
-                bucket,
-                region,
-                endpoint,
-                prefix,
-                credentials.map(s3::S3Credentials::Static),
-            )
-            .map(BlobStore::S3),
-            Self::VercelBlob {
-                store_id,
-                prefix,
-                credentials,
-            } => vercel_blob::VercelBlobOptions::from_env(
-                store_id,
-                prefix,
-                credentials.map(|c| {
-                    vercel_blob::VercelBlobCredentials::ReadWriteToken(c.read_write_token)
-                }),
-            )
-            .map(BlobStore::VercelBlob),
-        }
-    }
 }
 
 #[napi(object)]
@@ -165,7 +97,7 @@ impl JazzCore {
                 app_id,
                 blobs,
             } => {
-                let blobs = blobs.resolve().map_err(napi::Error::from_reason)?;
+                let blobs = blobs.resolve(None).map_err(napi::Error::from_reason)?;
                 dir_lock = Some(lock_data_dir(&path)?);
                 let identity = jazz_server::open_store_identity(
                     &path,

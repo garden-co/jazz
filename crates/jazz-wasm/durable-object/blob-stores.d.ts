@@ -40,3 +40,17 @@ export interface VercelBlobStore {
    */
   readonly prefix?: string;
 }
+
+/** An opened DO transport. Keys include the prefix claimed by the host. */
+export type OpenedBlobStore = {
+  readonly prefixOption?: string;
+  /** Return null for a missing object and reject bodies larger than limit. */
+  get(key: string, limit: number): Promise<Uint8Array | null>;
+  /** Create the ownership marker with overwrites disabled. The caller reads it back. */
+  createOwner(key: string, bytes: Uint8Array): Promise<unknown>;
+  /** Resolve only after storage accepts these bytes under their SHA-256. */
+  put(key: string, bytes: Uint8Array, sha256: string): Promise<unknown>;
+} & (
+  | { deleteMany(keys: string[]): Promise<void>; remove?: never }
+  | { remove(key: string): Promise<void>; deleteMany?: never }
+);

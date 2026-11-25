@@ -96,6 +96,7 @@ export class LargeValueBucket {
    * `claimed` records the prefix this store claimed, in its own SQL:
    * `claimed.get()` is it (or `null` before the first claim), and
    * `claimed.set(prefix)` records it.
+   * @param {import("./blob-stores.js").OpenedBlobStore} bucket
    */
   constructor(bucket, prefix, appId, claimed) {
     this.bucket = bucket;
@@ -212,7 +213,7 @@ export class LargeValueBucket {
     return { fetched, put, deleted };
   }
 
-  /** One bulk delete (a batch holds at most 256): every key's result is its call's. */
+  /** Bulk stores share one result across the batch. Single deletes report per key. */
   async deleteAll(keys) {
     if (keys.length === 0) return [];
     const names = keys.map((key) => this.prefix + key);

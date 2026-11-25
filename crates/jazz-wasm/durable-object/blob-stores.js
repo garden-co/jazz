@@ -15,6 +15,7 @@ function headerCredential(value, field) {
   return value;
 }
 
+/** @returns {import("./blob-stores.js").OpenedBlobStore} */
 function r2Store(bucket) {
   if (!bucket) throw new Error("r2(): expected an R2 bucket binding");
   return {
@@ -94,6 +95,7 @@ async function read(response, limit) {
   return bytes;
 }
 
+/** @returns {import("./blob-stores.js").OpenedBlobStore} */
 function s3Store(options, env, sign) {
   const bucket = required(options.bucket ?? env.S3_BUCKET_NAME, "S3 bucket");
   const region = required(
@@ -151,7 +153,9 @@ function s3Store(options, env, sign) {
       );
     },
     async put(key, bytes, hash) {
-      const checksum = btoa(String.fromCharCode(...hash.match(/../g).map((v) => parseInt(v, 16))));
+      const pairs = hash.match(/../g);
+      if (!pairs) throw new Error("S3 upload requires a SHA-256 checksum");
+      const checksum = btoa(String.fromCharCode(...pairs.map((v) => parseInt(v, 16))));
       await finish(
         await request("PUT", key, bytes, hash, { "x-amz-checksum-sha256": checksum }),
         "S3 upload",
@@ -163,6 +167,7 @@ function s3Store(options, env, sign) {
   };
 }
 
+/** @returns {import("./blob-stores.js").OpenedBlobStore} */
 function vercelStore(options, env) {
   const explicit = options.credentials !== undefined;
   const token = headerCredential(
