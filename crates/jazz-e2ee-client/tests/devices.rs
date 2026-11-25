@@ -3582,3 +3582,237 @@ fn an_open_space_stays_ready_to_write_between_messages() {
         assert!(reports.borrow().is_empty());
     });
 }
+
+const FIRST_LOAD_TABLES: [&str; 26] = [
+    "__e2ee_account_identities",
+    "__e2ee_device_requests",
+    "__e2ee_device_challenges",
+    "__e2ee_device_proofs",
+    "__e2ee_device_approvals",
+    "__e2ee_device_deliveries",
+    "__e2ee_account_successors",
+    "__e2ee_recovery_deliveries",
+    "__e2ee_account_roots",
+    "__e2ee_public_device_approvals",
+    "__e2ee_public_account_successors",
+    "__e2ee_recovery_roots",
+    "__e2ee_account_keys",
+    "__e2ee_device_removal_requests",
+    "__e2ee_device_keys",
+    "__e2ee_spaces",
+    "__e2ee_space_successors",
+    "__e2ee_members",
+    "__e2ee_account_roots",
+    "__e2ee_public_device_approvals",
+    "__e2ee_public_account_successors",
+    "__e2ee_recovery_roots",
+    "__e2ee_account_keys",
+    "__e2ee_device_removal_requests",
+    "__e2ee_device_keys",
+    "__e2ee_space_deliveries",
+];
+
+fn take_first_load_reads(wire: &std::cell::RefCell<Vec<u8>>) -> Vec<(Box<Query>, Option<u64>)> {
+    // This fixture's messages each fit in one frame.
+    let bytes = std::mem::take(&mut *wire.borrow_mut());
+    let mut remaining = bytes.as_slice();
+    let mut reads = Vec::new();
+    while !remaining.is_empty() {
+        let (message, rest) = postcard::take_from_bytes::<SyncMessage>(remaining).unwrap();
+        if let SyncMessage::Read {
+            query,
+            span: ReadSpan::Once { at },
+            ..
+        } = message
+            && query.table.starts_with("__e2ee_")
+        {
+            reads.push((query, at));
+        }
+        remaining = rest;
+    }
+    reads
+}
+
+fn approved_reader_test(
+    test: impl FnOnce(
+        &Db,
+        &mut Device,
+        uuid::Uuid,
+        &std::cell::RefCell<Vec<u8>>,
+        &std::cell::RefCell<std::collections::BTreeMap<String, &'static str>>,
+    ) + Send
+    + 'static,
+) {
+    within(move || {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let space = space_with_a_note(&server, &first, &account_id(alice));
+
+        let client = open_account(memory(), alice, settings.clone(), None);
+        let config = jazz::db::DbConfig::new(
+            secure_schema_with(&settings),
+            jazz::db::DbIdentity {
+                node: jazz::ids::NodeUuid::from_bytes([2; 16]),
+                author: alice,
+            },
+        )
+        .with_e2ee(client.hooks());
+        let db = block_on(Db::open(config)).unwrap();
+        let refusals = Rc::default();
+        let (link, wire) = link_as_refusing_reads(&db, &server, alice, Some(Rc::clone(&refusals)));
+        pump(&server, &db);
+        assert!(block_on(client.prepare(&db)).unwrap());
+        let mut second = Device {
+            notes: None,
+            client,
+            db,
+            _link: link,
+        };
+        assert_eq!(
+            second.status(&server, &[&first]),
+            AccountStatus::AwaitingApproval
+        );
+        approve(&server, &first, &second);
+        wire.borrow_mut().clear();
+        test(&server, &mut second, space, &wire, &refusals);
+    });
+}
+
+fn first_load(
+    server: &Db,
+    second: &Device,
+    space: uuid::Uuid,
+    wire: &std::cell::RefCell<Vec<u8>>,
+) -> Vec<Vec<(Box<Query>, Option<u64>)>> {
+    let mut waves = Vec::new();
+    let mut load = std::pin::pin!(async {
+        assert_eq!(
+            second.client.ensure_account(&second.db).await.unwrap(),
+            AccountStatus::Active
+        );
+        assert_eq!(
+            second
+                .client
+                .acquire(&second.db, &space_address(second, space))
+                .await
+                .unwrap(),
+            jazz_e2ee_client::SpaceKeyState::Held
+        );
+    });
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..100 {
+        if load.as_mut().poll(&mut cx).is_ready() {
+            return waves;
+        }
+        // One round trip: flush the newly issued requests before the
+        // authority answers any of them.
+        block_on(second.db.tick()).unwrap();
+        let reads = take_first_load_reads(wire);
+        if !reads.is_empty() {
+            waves.push(reads);
+        }
+        block_on(server.tick()).unwrap();
+        block_on(second.db.tick()).unwrap();
+    }
+    panic!("first load did not finish");
+}
+
+/// Alice's approved second device fetches all account and space evidence
+/// in eight authority round trips before opening the first note.
+#[test]
+fn approved_device_first_load_takes_eight_authority_waves() {
+    approved_reader_test(|server, second, space, wire, _| {
+        let waves = first_load(server, second, space, wire);
+        let widths: Vec<_> = waves.iter().map(Vec::len).collect();
+        assert_eq!(widths, [1, 13, 1, 1, 2, 6, 1, 1]);
+    });
+}
+
+/// Alice's approved second device requests the same tables at the same
+/// transaction cuts as a serial first load and opens the same plaintext.
+/// If the authority refuses two reads in one wave, the earlier read's
+/// error wins and the account must still be verified before it can read.
+#[test]
+fn approved_device_first_load_keeps_its_reads_plaintext_and_refusal() {
+    approved_reader_test(|server, second, space, wire, refusals| {
+        refusals.borrow_mut().extend([
+            ("__e2ee_device_requests".into(), "device requests refused"),
+            ("__e2ee_device_proofs".into(), "device proofs refused"),
+        ]);
+        let error = drive(
+            server,
+            &[&second.db],
+            second.client.ensure_account(&second.db),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Database(error) if error.message == "device requests refused"
+        ));
+        let refused_reads = take_first_load_reads(wire);
+        assert_eq!(refused_reads[0].0.table, FIRST_LOAD_TABLES[0]);
+        assert_eq!(refused_reads[1].0.table, FIRST_LOAD_TABLES[1]);
+        assert!(
+            !refused_reads
+                .iter()
+                .any(|(query, _)| query.table == "__e2ee_device_keys")
+        );
+        assert!(second.client.with_account(|_| ()).is_none());
+
+        refusals.borrow_mut().clear();
+        let reads: Vec<_> = first_load(server, second, space, wire)
+            .into_iter()
+            .flatten()
+            .collect();
+        let tables: Vec<_> = reads
+            .iter()
+            .map(|(query, _)| query.table.as_str())
+            .collect();
+        assert_eq!(tables, FIRST_LOAD_TABLES);
+        let filtered_columns = |read: usize| {
+            use jazz::query::{Operand, Predicate};
+            reads[read]
+                .0
+                .filters
+                .iter()
+                .map(|filter| match filter {
+                    Predicate::Eq(Operand::Column(name), _)
+                    | Predicate::In(Operand::Column(name), _) => name.as_str(),
+                    other => panic!("unexpected ledger filter {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        for read in [0, 1, 2, 3, 4, 5, 7] {
+            assert!(filtered_columns(read).is_empty());
+        }
+        for read in [6].into_iter().chain(8..14).chain(18..24) {
+            assert_eq!(filtered_columns(read), ["accountId"]);
+        }
+        for read in [14, 24] {
+            assert_eq!(filtered_columns(read), ["deviceId"]);
+        }
+        for read in [15, 16] {
+            assert_eq!(filtered_columns(read), ["scopeId", "identifier"]);
+        }
+        assert_eq!(filtered_columns(17), ["scopeId", "identifier", "accountId"]);
+        assert_eq!(
+            filtered_columns(25),
+            ["scopeId", "identifier", "keyEpochId", "recipientAccountId"]
+        );
+        let read_cut = |range: std::ops::Range<usize>| {
+            let mut ranges = reads[range].iter();
+            assert_eq!(ranges.next().unwrap().1, None);
+            let cut = ranges.next().unwrap().1.expect("first read pinned its cut");
+            assert!(ranges.all(|(_, at)| *at == Some(cut)));
+        };
+        read_cut(0..15);
+        read_cut(15..26);
+        second.follow_notes(server);
+        let rows = notes_of(server, second, space);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    });
+}

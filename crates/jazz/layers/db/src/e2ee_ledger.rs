@@ -6,6 +6,7 @@
 
 use super::{BatchKind, Db, Error, ErrorCode, PreparedQuery, ReadOpts, ReadSpec, ReadTier, TxRef};
 use crate::ids::NodeUuid;
+use crate::query::Query;
 use crate::values::CurrentRow;
 
 /// A ledger read: rows of one cut, each with the authority position it was
@@ -64,27 +65,49 @@ impl TxRef<'_> {
     /// the snapshot as the common cut. A row not yet accepted (this store's
     /// own pending write) fails the read rather than be left out or given a
     /// position it does not have; so does any row the encryption hooks
-    /// cannot open. The read joins the transaction's read set.
+    /// cannot open. The read joins the transaction's read set. Once the
+    /// snapshot is pinned, ledger reads may fetch from the authority together
+    /// and still finish in admission order.
     pub async fn ledger_read(&self, prepared: &PreparedQuery) -> Result<LedgerRead, Error> {
-        self.db.require_upstream("a ledger read")?;
-        let serializable = matches!(
-            self.db
-                .inner
-                .batches
-                .borrow()
-                .get(&self.id)
-                .map(|batch| &batch.kind),
-            Some(BatchKind::Serializable { .. })
-        );
-        if !serializable {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "a ledger read runs in a serializable transaction",
-            ));
+        self.ledger_read_prepared(Ok(prepared)).await
+    }
+
+    /// Prepares a ledger query, deferring any preparation error until the
+    /// read's turn so it cannot overtake an earlier authority refusal.
+    #[doc(hidden)]
+    pub async fn ledger_read_query(&self, query: &Query) -> Result<LedgerRead, Error> {
+        let prepared = self.db.prepare_query(query);
+        self.ledger_read_prepared(prepared.as_ref().map_err(Clone::clone))
+            .await
+    }
+
+    async fn ledger_read_prepared(
+        &self,
+        prepared: Result<&PreparedQuery, Error>,
+    ) -> Result<LedgerRead, Error> {
+        if prepared.is_ok() {
+            self.db.require_upstream("a ledger read")?;
+            let serializable = matches!(
+                self.db
+                    .inner
+                    .batches
+                    .borrow()
+                    .get(&self.id)
+                    .map(|batch| &batch.kind),
+                Some(BatchKind::Serializable { .. })
+            );
+            if !serializable {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "a ledger read runs in a serializable transaction",
+                ));
+            }
         }
         // Boxed: the read's state stays off the stack of the runtime that
         // polls it, whose own futures are deep already.
-        let rows = Box::pin(self.all_prepared(prepared)).await?;
+        let opts = ReadOpts::default();
+        let table = prepared.as_ref().ok().map(|query| &query.query().table);
+        let rows = Box::pin(self.all_prepared_admitted(prepared, None, &opts, None, true)).await?;
         let through = match self
             .db
             .inner
@@ -104,7 +127,7 @@ impl TxRef<'_> {
                     ErrorCode::NotObserved,
                     format!(
                         "a ledger read of `{}` found a row not accepted at its cut",
-                        prepared.query().table
+                        table.expect("a successful read has a prepared query")
                     ),
                 ));
             }

@@ -448,3 +448,219 @@ fn pending_read_replaces_its_task_waker() {
     assert_eq!(current.0.load(Ordering::SeqCst), 1);
     assert!(matches!(poll(read.as_mut()), Poll::Ready(Err(_))));
 }
+
+#[cfg(feature = "e2ee-client")]
+mod ledger {
+    use super::*;
+    use jazz::db::{ErrorCode, ReadSpan, SyncMessage, Transport, Upstream};
+
+    // Hold selected fetches and reorder authority replies through the public
+    // transport so the tests can distinguish issued reads from completed ones.
+    struct Link {
+        client: Box<dyn Transport>,
+        server: Box<dyn Transport>,
+        _upstream: Upstream,
+    }
+
+    impl Link {
+        fn new(alice: &Db, bob: &Db) -> Self {
+            let (client_db, client) = duplex();
+            let (server_db, server) = duplex();
+            let upstream = block_on(alice.connect_upstream(client_db));
+            bob.accept_subscriber(server_db, AuthorSubject::SYSTEM)
+                .unwrap();
+            block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
+            let mut link = Self {
+                client,
+                server,
+                _upstream: upstream,
+            };
+            for _ in 0..4 {
+                block_on(alice.tick()).unwrap();
+                while let Some(message) = link.client.try_recv() {
+                    link.server.send(message).unwrap();
+                }
+                link.reply(bob, []);
+            }
+            block_on(alice.tick()).unwrap();
+            link
+        }
+
+        fn requests(&mut self, alice: &Db) -> Vec<SyncMessage> {
+            block_on(alice.tick()).unwrap();
+            let mut reads = Vec::new();
+            while let Some(message) = self.client.try_recv() {
+                if matches!(message, SyncMessage::Read { .. }) {
+                    reads.push(message);
+                } else {
+                    self.server.send(message).unwrap();
+                }
+            }
+            reads
+        }
+
+        fn reply(&mut self, bob: &Db, requests: impl IntoIterator<Item = SyncMessage>) {
+            for message in requests {
+                self.server.send(message).unwrap();
+            }
+            block_on(bob.tick()).unwrap();
+            while let Some(message) = self.server.try_recv() {
+                self.client.send(message).unwrap();
+            }
+        }
+
+        fn pin(&mut self, alice: &Db, bob: &Db, id: OpenTransactionId) -> u64 {
+            let tx = alice.tx_ref(id);
+            let query = alice.prepare_query(&Query::from("notes")).unwrap();
+            let mut read = pin!(tx.ledger_read(&query));
+            assert!(poll(read.as_mut()).is_pending());
+            let requests = self.requests(alice);
+            assert_eq!(requests.len(), 1);
+            self.reply(bob, requests);
+            block_on(alice.tick()).unwrap();
+            match poll(read.as_mut()) {
+                Poll::Ready(result) => result.unwrap().through,
+                Poll::Pending => panic!("the authority already answered the first read"),
+            }
+        }
+
+        fn refuse(&mut self, request: SyncMessage, message: &str) {
+            let SyncMessage::Read { id, .. } = request else {
+                panic!("expected a read request");
+            };
+            self.client
+                .send(SyncMessage::Refused {
+                    id,
+                    code: ErrorCode::Query,
+                    message: message.to_owned(),
+                })
+                .unwrap();
+        }
+    }
+
+    fn fixture() -> (Db, Db, Link) {
+        let alice = open(1);
+        let bob = open(2);
+        block_on(bob.set_authority()).unwrap();
+        let link = Link::new(&alice, &bob);
+        (alice, bob, link)
+    }
+
+    /// Alice's two in-flight reads share a cut despite Bob's subsequent
+    /// update. Alice's staged insert between admissions affects only her
+    /// second read, which refuses the unsettled row.
+    /// Alice: pin -> read A -> stage insert -> read B
+    /// Bob:         update -> answer A and B at pinned cut
+    #[test]
+    fn overlapping_ledger_reads_share_a_cut_and_keep_their_staged_prefixes() {
+        let (alice, bob, mut link) = fixture();
+        let row = block_on(bob.insert("notes", cells("before"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        let cut = link.pin(&alice, &bob, id);
+        block_on(bob.update("notes", row, cells("after"), Default::default())).unwrap();
+
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        assert!(poll(first.as_mut()).is_pending());
+        block_on(tx.insert("notes", cells("unsettled"), Default::default())).unwrap();
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(
+            requests.len(),
+            2,
+            "both reads must be sent before any reply"
+        );
+        assert!(requests.iter().all(|request| matches!(
+            request,
+            SyncMessage::Read { span: ReadSpan::Once { at: Some(at) }, .. } if *at == cut
+        )));
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+
+        let Poll::Ready(Ok(first)) = poll(first.as_mut()) else {
+            panic!("the earlier read should see the pinned accepted row");
+        };
+        assert_eq!(first.through, cut);
+        assert_eq!(
+            texts(first.rows.into_iter().map(|(row, _)| row).collect()),
+            ["before"]
+        );
+        let Poll::Ready(Err(second)) = poll(second.as_mut()) else {
+            panic!("the later read should see the unsettled insert and refuse it");
+        };
+        assert_eq!(second.code, ErrorCode::NotObserved);
+    }
+
+    /// Bob answers Alice's first of two overlapping reads. Alice still
+    /// cannot commit until the second finishes, and reusing the ID cannot
+    /// attach that read to the new transaction.
+    #[test]
+    fn commit_cannot_overtake_an_overlapping_ledger_read() {
+        let (alice, bob, mut link) = fixture();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        link.pin(&alice, &bob, id);
+        block_on(tx.insert("notes", cells("staged"), Default::default())).unwrap();
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let mut requests = link.requests(&alice);
+        assert_eq!(requests.len(), 2, "both reads must be in flight");
+        let unanswered = requests.pop().unwrap();
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(matches!(poll(first.as_mut()), Poll::Ready(_)));
+        assert!(poll(second.as_mut()).is_pending());
+
+        let error = block_on(alice.commit_serializable_handle(id)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        block_on(alice.begin_serializable(id)).unwrap();
+        link.reply(&bob, [unanswered]);
+        block_on(alice.tick()).unwrap();
+        assert!(matches!(poll(second.as_mut()), Poll::Ready(Err(_))));
+        let rows = block_on(bob.all(&query, ReadOpts::default())).unwrap();
+        assert!(rows.is_empty(), "the staged row must not publish");
+    }
+
+    /// Bob refuses Alice's second fetch before answering her first. The
+    /// second read's error still waits for the first result, as does a
+    /// still later query preparation failure.
+    #[test]
+    fn overlapping_ledger_read_errors_surface_in_admission_order() {
+        let (alice, bob, mut link) = fixture();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        link.pin(&alice, &bob, id);
+
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let missing = Query::from("missing_table");
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&query));
+        let mut third = pin!(tx.ledger_read_query(&missing));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        assert!(poll(third.as_mut()).is_pending());
+        let mut requests = link.requests(&alice);
+        assert_eq!(requests.len(), 2, "both valid queries must be in flight");
+        link.refuse(requests.pop().unwrap(), "later fetch refused");
+        block_on(alice.tick()).unwrap();
+        assert!(poll(second.as_mut()).is_pending());
+        assert!(poll(third.as_mut()).is_pending());
+
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(matches!(poll(first.as_mut()), Poll::Ready(Ok(_))));
+        assert!(poll(third.as_mut()).is_pending());
+        let Poll::Ready(Err(error)) = poll(second.as_mut()) else {
+            panic!("expected the second read's authority refusal");
+        };
+        assert_eq!(error.message, "later fetch refused");
+        assert!(matches!(poll(third.as_mut()), Poll::Ready(Err(_))));
+    }
+}

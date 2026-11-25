@@ -231,14 +231,6 @@ impl E2eeClient {
         let (roots, through) = self
             .read_rows(db, tx, &skipped, space_query(rows::SPACE_ROOTS, address)?)
             .await?;
-        let (successors, _) = self
-            .read_rows(
-                db,
-                tx,
-                &skipped,
-                space_query(rows::SPACE_SUCCESSORS, address)?,
-            )
-            .await?;
         let mut members_query = space_query(rows::SPACE_MEMBERS, address)?;
         let rotating = matches!(
             purpose,
@@ -250,7 +242,16 @@ impl E2eeClient {
         if !all_members {
             members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
         }
-        let (members, _) = self.read_rows(db, tx, &skipped, members_query).await?;
+        // The root read pins the cut for both of these reads.
+        let ((successors, _), (members, _)) = futures::try_join!(
+            self.read_rows(
+                db,
+                tx,
+                &skipped,
+                space_query(rows::SPACE_SUCCESSORS, address)?
+            ),
+            self.read_rows(db, tx, &skipped, members_query),
+        )?;
         let mut ledger = if all_members {
             SpaceLedger::whole_space(address.clone(), Position(through))
         } else {
@@ -288,7 +289,7 @@ impl E2eeClient {
         let named_ids: Vec<_> = named.iter().cloned().collect();
         let account_skipped = Cell::new(0);
         let mut accounts = self
-            .read_public_many(db, tx, &account_skipped, &named_ids, BTreeSet::new())
+            .read_public_many(db, tx, &account_skipped, &named_ids)
             .await?;
         let directory = AccountDirectory::new(
             &accounts,
@@ -426,7 +427,6 @@ impl E2eeClient {
                         tx,
                         &account_skipped,
                         &additional.into_iter().collect::<Vec<_>>(),
-                        BTreeSet::new(),
                     )
                     .await?,
                 );
@@ -565,9 +565,7 @@ impl E2eeClient {
             let mut named = holders.clone();
             named.insert(version.root().row.creator_account_id.clone());
             let named: Vec<_> = named.into_iter().collect();
-            let accounts = self
-                .read_public_many(db, tx, &skipped, &named, BTreeSet::new())
-                .await?;
+            let accounts = self.read_public_many(db, tx, &skipped, &named).await?;
             if skipped.get() != 0 {
                 return Err(ProtocolError::InconsistentEvidence.into());
             }

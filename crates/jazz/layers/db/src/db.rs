@@ -11486,6 +11486,27 @@ struct TransactionRead {
     ticket: Rc<TransactionReadTicket>,
 }
 
+impl TransactionRead {
+    fn is_first(&self, state: &TransactionReads) -> bool {
+        state
+            .queue
+            .front()
+            .is_some_and(|ticket| Rc::ptr_eq(ticket, &self.ticket))
+    }
+
+    async fn wait_turn(&self) {
+        // The enclosing poll checks the batch lifetime and registers our waker.
+        std::future::poll_fn(|_| {
+            if self.is_first(&self.state.borrow()) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
 impl Drop for TransactionRead {
     fn drop(&mut self) {
         let wakers = {
@@ -13434,6 +13455,18 @@ impl TxRef<'_> {
         opts: &ReadOpts,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_admitted(Ok(prepared), identity, opts, coverage, false)
+            .await
+    }
+
+    pub(super) async fn all_prepared_admitted(
+        &self,
+        prepared: Result<&PreparedQuery, Error>,
+        identity: Option<AuthorSubject>,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
+        pipeline_ledger_fetch: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let source = &opts.read_view.source;
         if let ReadViewSourceSpec::Snapshot { .. } = source {
             return Err(Error::new(
@@ -13459,7 +13492,20 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let reading = self.read_admitted(prepared, identity, opts, coverage, prefix);
+        let reading = async {
+            let outcome = match prepared {
+                Ok(prepared) => {
+                    self.read_admitted(prepared, identity, opts, coverage, prefix, &guard)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            // Preparation and hydration may fail before this read's turn.
+            if outcome.is_err() {
+                guard.wait_turn().await;
+            }
+            outcome
+        };
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -13476,12 +13522,20 @@ impl TxRef<'_> {
                         *waker = Some(cx.waker().clone());
                     }
                 }
-                if !state
-                    .queue
-                    .front()
-                    .is_some_and(|ticket| Rc::ptr_eq(ticket, &guard.ticket))
-                {
-                    return Poll::Pending;
+                if !guard.is_first(&state) {
+                    // The first read still owns snapshot selection. Only ledger
+                    // reads can start a fetch ahead of their turn, at that cut.
+                    let pinned_ledger = pipeline_ledger_fetch
+                        && matches!(
+                            self.db.inner.batches.borrow().get(&self.id),
+                            Some(Batch {
+                                kind: BatchKind::Serializable { pinned: true, .. },
+                                ..
+                            })
+                        );
+                    if !pinned_ledger {
+                        return Poll::Pending;
+                    }
                 }
             }
             reading.as_mut().poll(cx)
@@ -13536,6 +13590,7 @@ impl TxRef<'_> {
         opts: &ReadOpts,
         coverage: Option<&dyn Fn() -> bool>,
         prefix: BatchPrefix,
+        admission: &TransactionRead,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = opts.tier;
         let include_deleted = opts.read_view.include_deleted;
@@ -13594,7 +13649,7 @@ impl TxRef<'_> {
             Some(_) => Some(self.read_view(source, include_deleted).await?),
             None => None,
         };
-        if let Some((snapshot, pinned)) = snapshot
+        let answer = if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
         {
@@ -13624,22 +13679,29 @@ impl TxRef<'_> {
                     source,
                 )
                 .await?;
-            if let Some(Batch {
+            Some(through)
+        } else {
+            None
+        };
+        // Only the admitted head can take the cut, read its staged
+        // prefix, and record the result.
+        admission.wait_turn().await;
+        if let Some(through) = answer
+            && let Some(Batch {
                 kind:
                     BatchKind::Serializable {
                         snapshot, pinned, ..
                     },
                 ..
             }) = self.db.inner.batches.borrow_mut().get_mut(&self.id)
-                && !*pinned
-            {
-                // Pinned by the authority's answer, or (offline) at the
-                // replica's known cut.
-                if let Some(through) = through {
-                    *snapshot = through;
-                }
-                *pinned = true;
+            && !*pinned
+        {
+            // Pinned by the authority's answer, or (offline) at the
+            // replica's known cut.
+            if let Some(through) = through {
+                *snapshot = through;
             }
+            *pinned = true;
         }
         let non_durable = self.db.inner.non_durable.get();
         if snapshot.is_none()
