@@ -10,13 +10,6 @@ pub enum JazzError {
     /// Storage, the network or the sync server failed.
     #[error("{reason}")]
     Io { reason: String },
-    /// Encryption refused the operation, or hit an I/O failure.
-    #[error("{reason}")]
-    Encryption {
-        code: String,
-        reason: String,
-        io: bool,
-    },
     /// The app was closed, or (for a subscription) the subscription ended.
     #[error("the app is closed")]
     Closed,
@@ -57,6 +50,15 @@ pub enum JazzError {
         served: String,
         reason: String,
     },
+    /// Contract 2: encryption refused the operation (`code` names the
+    /// refusal), or hit an I/O failure (`io`). Last, so the variants before
+    /// it keep their indexes.
+    #[error("{reason}")]
+    Encryption {
+        code: String,
+        reason: String,
+        io: bool,
+    },
 }
 
 impl JazzError {
@@ -75,6 +77,10 @@ impl JazzError {
             Self::Replaced { .. } => Self::Closed,
             Self::NoUser { reason, .. } => Self::Refused { reason },
             Self::BundleMismatch { reason, .. } => Self::Refused { reason },
+            Self::Encryption {
+                reason, io: true, ..
+            } => Self::Io { reason },
+            Self::Encryption { reason, .. } => Self::Refused { reason },
             other => other,
         }
     }
@@ -338,6 +344,62 @@ mod tests {
                 .starts_with("encryptedSessionUnsupported: ")
         );
         assert_eq!(error.for_contract(1).kind(), "refused");
+    }
+
+    /// A contract 1 host doesn't know the encryption kind: it gets the
+    /// refusal or I/O failure it does know, with the same reason.
+    #[test]
+    fn an_encryption_error_maps_down_for_contract_1() {
+        let encryption = |io| JazzError::Encryption {
+            code: "key-pending".into(),
+            reason: "waiting for a key".into(),
+            io,
+        };
+        assert_eq!(
+            encryption(false).for_contract(1),
+            JazzError::Refused {
+                reason: "waiting for a key".into()
+            }
+        );
+        assert_eq!(
+            encryption(true).for_contract(1),
+            JazzError::Io {
+                reason: "waiting for a key".into()
+            }
+        );
+        assert_eq!(encryption(false).for_contract(2), encryption(false));
+    }
+
+    /// UniFFI hosts read a variant by its index: `Encryption` was added
+    /// last, so every earlier variant keeps the index it had.
+    #[test]
+    fn variant_indexes_are_pinned() {
+        let index = |error: JazzError| {
+            let mut bytes = Vec::new();
+            <JazzError as uniffi::Lower<crate::UniFfiTag>>::write(error, &mut bytes);
+            i32::from_be_bytes(bytes[..4].try_into().unwrap())
+        };
+        let reason = || "r".to_owned();
+        assert_eq!(index(JazzError::Refused { reason: reason() }), 1);
+        assert_eq!(index(JazzError::Io { reason: reason() }), 2);
+        assert_eq!(index(JazzError::Closed), 3);
+        assert_eq!(index(JazzError::Permission { reason: reason() }), 4);
+        assert_eq!(
+            index(JazzError::BundleMismatch {
+                own: reason(),
+                served: reason(),
+                reason: reason()
+            }),
+            12
+        );
+        assert_eq!(
+            index(JazzError::Encryption {
+                code: reason(),
+                reason: reason(),
+                io: false
+            }),
+            13
+        );
     }
 
     #[test]
