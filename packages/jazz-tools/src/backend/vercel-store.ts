@@ -466,9 +466,6 @@ mkdir "$run/jazz-recycled-$1" 2>/dev/null
 `;
 }
 
-const CORE_STATE_SCRIPT = coreStateScript();
-const CLAIM_RECYCLE_SCRIPT = claimRecycleScript();
-
 /**
  * Start the core: install the core addon for `version` on the Drive,
  * generate the app id once, and run the newest core version
@@ -1302,7 +1299,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     try {
       const done = await sbx.runCommand({
         cmd: "bash",
-        args: ["-c", CORE_STATE_SCRIPT, "jazz-core-state"],
+        args: ["-c", coreStateScript(), "jazz-core-state"],
       });
       said = done ? (await done.stdout()).trim() : "";
     } catch (error) {
@@ -1329,7 +1326,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     const claim = await sbx
       .runCommand({
         cmd: "bash",
-        args: ["-c", CLAIM_RECYCLE_SCRIPT, "jazz-claim-recycle", String(session)],
+        args: ["-c", claimRecycleScript(), "jazz-claim-recycle", String(session)],
       })
       .catch(() => undefined);
     if (claim?.exitCode !== 0) return false;
