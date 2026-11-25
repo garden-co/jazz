@@ -5,8 +5,11 @@ languageTabs: backend
 ---
 
 - **Equality only.** Encrypted columns can be filtered by equality when they are listed in `equality`.
-  Ordering, ranges, aggregates and text search on an encrypted column fail with an error naming the
-  pattern.
+  Ordering, ranges and text search on an encrypted column fail with an error naming the pattern.
+- **Aggregates use plaintext columns.** A query cannot aggregate or group by an encrypted column,
+  or combine an aggregate with a filter on an encrypted column. `count()` includes every matching
+  row the server returns, even if this device is still waiting for a key to open its encrypted cells.
+  While keys are pending, `count()` can exceed `all().length` for the same filter.
 - **Cloudflare Workers can serve encrypted apps.** Connect the Worker backend to a native Jazz core
   with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
   deploying an encrypted schema to a Durable Object core are unsupported.

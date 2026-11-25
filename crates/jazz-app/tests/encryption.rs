@@ -212,6 +212,40 @@ async fn titles(jazz: &Jazz, count: usize) -> Vec<String> {
     .expect("the rows reach this device and open")
 }
 
+/// Alice can count the encrypted tasks in her project through the native app's untyped client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_app_counts_tasks_with_a_plaintext_filter() {
+    use jazz_app_support::jazz::query::{col, eq, lit};
+    use jazz_app_support::jazz::records::Value as CoreValue;
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    let project = make_project(&alice, "plans").await;
+    add_task(&alice, &project, "first").await.unwrap();
+    add_task(&alice, &project, "second").await.unwrap();
+
+    let rows = alice
+        .with_client(move |client| async move {
+            let query = Query::from("tasks")
+                .filter(eq(
+                    col("projectId"),
+                    lit(CoreValue::Uuid(project.parse().unwrap())),
+                ))
+                .count();
+            Ok(client.query(query, ReadTier::Remote).await?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0]
+            .fields
+            .iter()
+            .any(|field| matches!((&*field.name, &field.value), ("count", Value::Timestamp(2))))
+    );
+}
+
 /// One app-supplied store that successive clients can use from their own threads.
 fn shared_private_store(store: MemoryStore) -> EncryptionConfig {
     EncryptionConfig::store_calls(move |request| answer_memory_store(&store, request))

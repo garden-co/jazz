@@ -642,9 +642,8 @@ fn unsealed(space: uuid::Uuid, value: Value) -> BTreeMap<String, Value> {
 /// Contract: queries the encrypted columns cannot answer without a scan
 /// are refused, naming what is not supported: ordering by an encrypted
 /// column, a filter other than `eq` on one, `eq` on a column without an
-/// equality index, `eq` without the space, an aggregate, and encrypted
-/// columns selected without the space column; and a value of another type
-/// never matches by accident.
+/// equality index, `eq` without the space, and encrypted columns selected
+/// without the space column. Alice can count by space using a plaintext filter.
 #[test]
 fn unanswerable_encrypted_queries_are_refused() {
     let (_server, _client, db, _link, space) = client_in_space();
@@ -658,7 +657,6 @@ fn unanswerable_encrypted_queries_are_refused() {
         in_space().filter(eq(col("note"), lit(text("x")))),
         Query::from("notes").filter(eq(col("body"), lit(text("x")))),
         in_space().filter(eq(col("body"), lit(Value::I32(1)))),
-        in_space().count(),
         Query::from("notes").select(["title", "body"]),
     ] {
         let error = db.prepare_query(&refused).unwrap_err();
@@ -672,6 +670,103 @@ fn unanswerable_encrypted_queries_are_refused() {
         db.prepare_query(&Query::from("notes").select(["projectId", "body"]))
             .is_ok()
     );
+    block_on(db.insert("notes", note(space, "x"), Default::default())).unwrap();
+    let rows = all(&db, in_space().count()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(cell(&rows[0], "count"), Value::U64(1));
+}
+
+/// Alice cannot count rows after an encrypted equality filter.
+#[test]
+fn aggregate_with_an_encrypted_equality_filter_is_refused() {
+    let (_server, _client, db, _link, space) = client_in_space();
+    let query = Query::from("notes")
+        .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+        .filter(eq(col("body"), lit(text("x"))))
+        .count();
+    let error = db.prepare_query(&query).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert_eq!(
+        error.message,
+        "Reading encrypted table `notes` with an aggregate with an encrypted filter is not supported yet"
+    );
+}
+
+/// Alice can group encrypted notes by their plaintext title and count each group.
+#[test]
+fn aggregate_groups_by_a_plaintext_column() {
+    let (_server, _client, db, _link, space) = client_in_space();
+    for title in ["draft", "draft", "final"] {
+        let mut cells = note(space, SECRET);
+        cells.insert("title".to_owned(), text(title));
+        block_on(db.insert("notes", cells, Default::default())).unwrap();
+    }
+
+    let query = Query::from("notes")
+        .count()
+        .group_by("title")
+        .order_by("title", OrderDirection::Asc);
+    let rows = all(&db, query).unwrap();
+    let groups: Vec<_> = rows
+        .iter()
+        .map(|row| (cell(row, "title"), cell(row, "count")))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            (text("draft"), Value::U64(2)),
+            (text("final"), Value::U64(1))
+        ]
+    );
+}
+
+/// Alice can name a count result after an encrypted column in the source table.
+#[test]
+fn aggregate_alias_can_match_an_encrypted_column() {
+    use jazz::query::Aggregate;
+
+    let (_server, _client, db, _link, space) = client_in_space();
+    block_on(db.insert("notes", note(space, SECRET), Default::default())).unwrap();
+
+    let query = Query::from("notes").aggregate([Aggregate::count().alias("body")]);
+    let rows = all(&db, query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(cell(&rows[0], "body"), Value::U64(1));
+}
+
+/// Alice counts Bob's note while its key is pending, and her full read omits it.
+///
+/// ```text
+/// bob ──sealed note──► server ──► alice: count = 1, rows = []
+/// ```
+#[test]
+fn aggregate_counts_a_row_with_a_pending_key() {
+    let (server, _bob, writer, _writer_link, space) = client_in_space();
+    let note = block_on(writer.insert("notes", note(space, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    pump(&server, &writer);
+
+    let alice = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&alice, &server, None);
+    let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
+    let _live =
+        block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
+    pump(&server, &db);
+
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let (result, unreadable) =
+        block_on(db.all_serialized_query_reporting(&bytes, local(), None, None, None)).unwrap();
+    let jazz::db::SerializedReadResult::Rows(rows) = result else {
+        panic!("expected rows");
+    };
+    assert!(rows.is_empty());
+    assert_eq!(unreadable.len(), 1);
+    assert_eq!(unreadable[0].id, note);
+    assert_eq!(unreadable[0].code, "key-pending");
+    let rows = all(&db, query.count()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(cell(&rows[0], "count"), Value::U64(1));
 }
 
 /// Contract: offline, an equality query computes no tokens: it reads the

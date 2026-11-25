@@ -101,8 +101,8 @@ const tasks = await session.db.all(app.tasks.where({ projectId, title: "Call the
 ```
 
 An equality filter on an `equality` column works like any other. Other filters, ordering and joins on
-an encrypted column fail with an error that names the pattern (for example "Reading encrypted table
-`tasks` with an aggregate is not supported yet"); they are never answered by scanning everything.
+an encrypted column fail with an error that names the pattern. Queries that aggregate or group by
+an encrypted column fail as well, as do aggregates with a filter on an encrypted column.
 
 A write to a space whose key this device does not hold yet waits for it (up to ten seconds, for a
 member waiting on another member's delivery) before it fails with the reason `key-pending`.

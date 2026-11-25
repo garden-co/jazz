@@ -553,6 +553,11 @@ impl E2eeHooks for Hooks {
         if keys.closed {
             return Err(closed());
         }
+        // Aggregate results contain no encrypted cells. An output alias can
+        // share the name of an encrypted column in the source table.
+        if site.query.aggregate.is_some() {
+            return Ok(outcome);
+        }
         let catalogue = keys.catalogue.as_ref().ok_or_else(not_observed)?;
         let table_id = catalogue.table(site.table)?;
         let report = |outcome: &mut OpenOutcome, unreadable: Unreadable| {
@@ -738,9 +743,6 @@ impl E2eeHooks for Hooks {
             return Ok(QueryPlan::Plain);
         };
         let table = query.table.as_str();
-        if query.aggregate.is_some() {
-            return Err(unsupported_query("an aggregate", table));
-        }
         if let Some(select) = &query.select
             && select.iter().any(|name| plan.columns.contains_key(name))
             && !plan.self_space()
@@ -762,6 +764,14 @@ impl E2eeHooks for Hooks {
             };
             if !plan.columns.contains_key(name) {
                 continue;
+            }
+            // The encrypted filter is applied after opening the rows, which
+            // is too late to decide which rows contribute to an aggregate.
+            if query.aggregate.is_some() {
+                return Err(unsupported_query(
+                    "an aggregate with an encrypted filter",
+                    table,
+                ));
             }
             let Operand::Literal(value) = value else {
                 return Err(unsupported_query(
