@@ -320,11 +320,20 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
         ).unwrap_err();
         assert!(matches!(refusal, JazzError::Encryption { code, reason, io: false }
             if code == "device-account-root-required" && reason.contains("prevent recovery")));
-        // An encryption call that names nothing is refused with its code.
+        // An encryption call that names nothing is refused with its code,
+        // and its message names the operation.
         match alice.encryption_call("noSuchCall".into(), "{}".into()) {
             Err(JazzError::Encryption {
-                code, io: false, ..
-            }) => assert_eq!(code, "error"),
+                code,
+                reason,
+                io: false,
+            }) => {
+                assert_eq!(code, "error");
+                assert_eq!(
+                    reason,
+                    "encryption (error): unknown encryption operation `noSuchCall`"
+                );
+            }
             other => panic!("expected a coded refusal, got {other:?}"),
         }
         let devices = parse(
