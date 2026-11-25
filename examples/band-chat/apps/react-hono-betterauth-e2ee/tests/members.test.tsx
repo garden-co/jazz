@@ -10,6 +10,7 @@ vi.mock("../jazz.generated", async () => ({ app: (await import("./support/fake-j
 vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).reactMock);
 
 import { MembersDialog } from "../src/components/MembersDialog";
+import { removeMember } from "../src/lib/membership";
 import { ProfileDirectoryProvider } from "../src/lib/profiles";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -214,6 +215,55 @@ describe("removal", () => {
     open([member("1", "alice-account"), member("2", "bob-account")]);
     await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
     expect(await screen.findByText(/Could not remove them:/)).toBeTruthy();
+    expect(db.serializableTransaction).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("a removal racing an admission of the same account", () => {
+  it("runs again on fresh rows after a conflict, so the late member row goes too", async () => {
+    const { PersistedWriteRejectedError } = await import("jazz-tools");
+    const conflict = Object.assign(Object.create(PersistedWriteRejectedError.prototype), {
+      code: "serialization_conflict",
+    });
+    const attempts: Array<Array<[string, string]>> = [];
+    let admitted = false;
+    db.serializableTransaction.mockImplementation(async (run) => {
+      const staged = tx({
+        __e2ee_members: admitted ? [member("late", "bob-account")] : [],
+        roomMembers: admitted ? [{ id: "rm-late" }] : [],
+      });
+      const count = await run(staged.handle);
+      attempts.push(staged.deleted);
+      if (!admitted) {
+        admitted = true; // the second admission commits first
+        throw conflict;
+      }
+      return { wait: async () => count };
+    });
+    const removed = await removeMember({
+      db: db as never,
+      roomId: "room",
+      accountId: "bob-account",
+    });
+    expect(removed).toBe(1);
+    expect(attempts).toEqual([
+      [],
+      [
+        ["__e2ee_members", "late"],
+        ["roomMembers", "rm-late"],
+      ],
+    ]);
+  });
+
+  it("shows the refusal when the conflict does not clear", async () => {
+    const { PersistedWriteRejectedError } = await import("jazz-tools");
+    const conflict = Object.assign(Object.create(PersistedWriteRejectedError.prototype), {
+      code: "serialization_conflict",
+    });
+    db.serializableTransaction.mockRejectedValue(conflict);
+    await expect(
+      removeMember({ db: db as never, roomId: "room", accountId: "bob-account" }),
+    ).rejects.toBe(conflict);
     expect(db.serializableTransaction).toHaveBeenCalledTimes(3);
   });
 });
