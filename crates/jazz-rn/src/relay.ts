@@ -67,6 +67,8 @@ export type NativeForegroundRuntimeFactory = {
 export type NativeForegroundRuntime = {
   /** Additive capability; absent on native builds predating snapshot capture. */
   readonly supportsSnapshotCapture?: boolean;
+  /** Additive capability; absent on native builds with only store wakes. */
+  readonly supportsEncryptionStateWake?: boolean;
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
   /** Native typed liveness; unexpected native failures still throw. */
@@ -414,6 +416,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
           : undefined;
       return {
         supportsSnapshotCapture: foreground.supportsSnapshotCapture === true,
+        supportsEncryptionStateWake: foreground.supportsEncryptionStateWake === true,
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {

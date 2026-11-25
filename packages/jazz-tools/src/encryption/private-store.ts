@@ -108,6 +108,8 @@ export function memoryPrivateStore(): PrivateStore {
 export interface StoreTarget {
   /** Wakes the store now, replaces its deadline, or cancels the deadline. */
   setStoreWake?(callback: ((wake: string) => void) | null): void;
+  /** False when the host can signal store work only. */
+  readonly supportsEncryptionStateWake?: boolean;
   takeStoreRequests(): string[];
   /** `false`: no such request is outstanding, and the answer was dropped. */
   replyStore(id: string, ok: boolean, payload: string): boolean;
@@ -181,13 +183,18 @@ export function servePrivateStore(
   target: StoreTarget,
   store: PrivateStore,
   intervalMs = 2,
-): { stop(options?: { cancelPending?: boolean }): void; drain(): Promise<void> } {
+): {
+  stop(options?: { cancelPending?: boolean }): void;
+  drain(): Promise<void>;
+  onStateChange?: (listener: () => void) => () => void;
+} {
   const queue: QueuedRequest[] = [];
   const stop = new AbortController();
   const { signal } = stop;
   let running: Promise<void> | undefined;
   let servicing = true;
   let scheduled = false;
+  let stateChanged: (() => void) | undefined;
   let clock: ReturnType<typeof setTimeout> | undefined;
   const drain = async () => {
     for (let entry = queue.shift(); entry; entry = queue.shift()) {
@@ -246,6 +253,13 @@ export function servePrivateStore(
   };
   const wake = (urgency: string) => {
     if (!servicing) return;
+    if (urgency === "encryption-state") {
+      // The binding can signal in the middle of polling a Rust future.
+      queueMicrotask(() => {
+        if (servicing) stateChanged?.();
+      });
+      return;
+    }
     if (urgency === "immediate") {
       if (scheduled) return;
       scheduled = true;
@@ -276,6 +290,15 @@ export function servePrivateStore(
     (timer as { unref?: () => void }).unref?.();
   }
   return {
+    onStateChange:
+      target.setStoreWake && target.supportsEncryptionStateWake !== false
+        ? (listener) => {
+            stateChanged = listener;
+            return () => {
+              stateChanged = undefined;
+            };
+          }
+        : undefined,
     stop({ cancelPending = false } = {}) {
       if (servicing) {
         servicing = false;

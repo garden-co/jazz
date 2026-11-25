@@ -1121,6 +1121,70 @@ describe("encryption on Node, end to end", () => {
     await offline.session.close();
   }, 120_000);
 
+  it.each(["all", "one"] as const)(
+    "%s waits for readability after reopening, up to 30 seconds",
+    async (method) => {
+      const host = await serve();
+      const options = {
+        accounts: memoryStore(),
+        privateStore: memoryPrivateStore(),
+        dataPath: `${await mkdtemp(`${tmpdir()}/e2ee-client-`)}/device`,
+      };
+      const opened = await device(host, options);
+      const projectId = await makeProject(opened, "reopen");
+      const id = crypto.randomUUID();
+      await opened.db
+        .insert(app.tasks, { projectId, title: "kept" }, { id })
+        .wait({ tier: "global" });
+      await opened.session.close();
+
+      const query = app.tasks.where({ id });
+      const returning = await device(host, { ...options, wait: false });
+      const handle = returning.db.encryption;
+      const ready = handle.readable();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const readable = vi.spyOn(handle, "readable").mockReturnValue(held);
+      const read = returning.db[method](query, { tier: "local-first" });
+      const early = vi.fn();
+      void read.then(early, early);
+      await ready;
+      expect(readable).toHaveBeenCalledOnce();
+      expect(early).not.toHaveBeenCalled();
+      release();
+      const result = await read;
+      expect(Array.isArray(result) ? result[0] : result).toMatchObject({ id, title: "kept" });
+      readable.mockRestore();
+      await returning.session.close();
+
+      const blocked = await device(host, { ...options, wait: false });
+      const blockedReadable = vi
+        .spyOn(blocked.db.encryption, "readable")
+        .mockReturnValue(new Promise<void>(() => {}));
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        const read = blocked.db[method](query, { tier: "local-first" });
+        const settled = vi.fn();
+        void read.then(settled, settled);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(settled).not.toHaveBeenCalled();
+        const unreadable = expect(read).rejects.toMatchObject({
+          code: "not_observed",
+          message: expect.stringContaining(
+            "before this client has synced their catalogue identities",
+          ),
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        await unreadable;
+      } finally {
+        vi.useRealTimers();
+        blockedReadable.mockRestore();
+      }
+    },
+  );
+
   it("a returning device reads its encrypted rows offline, and its live query goes on once the server is back", async () => {
     const first = await serve();
     const accounts = memoryStore();

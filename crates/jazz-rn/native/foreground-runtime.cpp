@@ -39,6 +39,7 @@ constexpr uint8_t kWakeImmediate = 0;
 constexpr uint8_t kWakeDeferred = 1;
 constexpr uint8_t kWakeAfter = 2;
 constexpr uint8_t kWakeCancelled = 3;
+constexpr uint8_t kWakeEncryptionState = 4;
 
 using facebook::jsi::Function;
 using facebook::jsi::JSError;
@@ -112,6 +113,7 @@ class ForegroundWakeRegistration final
       std::lock_guard<std::mutex> lock(mutex_);
       active_ = false;
       pending_ = false;
+      pendingEncryptionState_ = false;
     }
     // An already-revoked foreground reports INVALID_HANDLE here; revocation
     // itself synchronously removed its Db and therefore its scheduler first.
@@ -144,8 +146,13 @@ class ForegroundWakeRegistration final
         if (kind == kWakeCancelled) {
           active_ = false;
           pending_ = false;
+          pendingEncryptionState_ = false;
         } else {
-          mergeWakeLocked(kind, delayMs);
+          if (kind == kWakeEncryptionState) {
+            pendingEncryptionState_ = true;
+          } else {
+            mergeWakeLocked(kind, delayMs);
+          }
           if (!scheduled_ && callInvoker_) {
             scheduled_ = true;
             invoker = callInvoker_;
@@ -184,11 +191,14 @@ class ForegroundWakeRegistration final
     uint8_t kind = kWakeDeferred;
     uint64_t delayMs = 0;
     bool traceDelivery = false;
+    bool work = false;
+    bool encryptionState = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       scheduled_ = false;
-      if (!active_ || !pending_) return;
-      pending_ = false;
+      if (!active_ || (!pending_ && !pendingEncryptionState_)) return;
+      work = std::exchange(pending_, false);
+      encryptionState = std::exchange(pendingEncryptionState_, false);
       delivering_ = true;
       kind = kind_;
       delayMs = delayMs_;
@@ -201,8 +211,13 @@ class ForegroundWakeRegistration final
       if (callbacks.isObject()) {
         auto callback = callbacks.asObject(runtime).getProperty(runtime, callbackKey().c_str());
         if (callback.isObject() && callback.asObject(runtime).isFunction(runtime)) {
-          auto urgency = String::createFromUtf8(runtime, urgencyFor(kind, delayMs));
-          callback.asObject(runtime).asFunction(runtime).call(runtime, Value(std::move(urgency)));
+          auto notify = callback.asObject(runtime).asFunction(runtime);
+          if (encryptionState) {
+            notify.call(runtime, String::createFromAscii(runtime, "encryption-state"));
+          }
+          if (work) {
+            notify.call(runtime, String::createFromUtf8(runtime, urgencyFor(kind, delayMs)));
+          }
           // This marker means the JSI callback returned to the native bridge.
           if (traceDelivery) traceForegroundWake("callback-invoked");
         }
@@ -218,7 +233,7 @@ class ForegroundWakeRegistration final
     {
       std::lock_guard<std::mutex> lock(mutex_);
       delivering_ = false;
-      if (active_ && pending_ && !scheduled_ && callInvoker_) {
+      if (active_ && (pending_ || pendingEncryptionState_) && !scheduled_ && callInvoker_) {
         scheduled_ = true;
         invoker = callInvoker_;
       }
@@ -256,6 +271,7 @@ class ForegroundWakeRegistration final
   std::mutex mutex_;
   bool active_{true};
   bool pending_{false};
+  bool pendingEncryptionState_{false};
   bool scheduled_{false};
   bool delivering_{false};
   bool traceEnabled_{false};
@@ -555,6 +571,9 @@ class ForegroundHandle final : public HostObject,
 
   Value get(Runtime &runtime, const PropNameID &name) override {
     const auto property = name.utf8(runtime);
+    if (property == "supportsEncryptionStateWake") {
+      return Value(true);
+    }
     if (property == "supportsSnapshotCapture") {
       return Value(jazz_native_relay_supports_snapshot_capture());
     }
@@ -683,6 +702,7 @@ class ForegroundHandle final : public HostObject,
     std::vector<PropNameID> names;
     names.reserve(7);
     names.emplace_back(PropNameID::forAscii(runtime, "supportsSnapshotCapture"));
+    names.emplace_back(PropNameID::forAscii(runtime, "supportsEncryptionStateWake"));
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));

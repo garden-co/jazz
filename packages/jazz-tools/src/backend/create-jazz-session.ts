@@ -256,8 +256,9 @@ class NodeUserRuntimeSource extends RuntimeSource {
           ? {
               encryption: {
                 ...this.encryption,
-                createHandle: (native) =>
+                createHandle: (native, stateChanges) =>
                   new Encryption(native, {
+                    stateChanges,
                     accountSecret: deviceAccountSecretReader(this.account),
                   }),
               },

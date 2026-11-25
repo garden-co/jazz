@@ -103,6 +103,10 @@ export class NativeForegroundDb {
     this.registerWakeScheduler();
   }
 
+  get supportsEncryptionStateWake(): boolean {
+    return this.runtime.supportsEncryptionStateWake === true;
+  }
+
   get setStoreWake(): ((callback: ((wake: string) => void) | null) => void) | undefined {
     if (!this.runtime.setTickScheduler) return undefined;
     return (callback) => {
@@ -121,6 +125,10 @@ export class NativeForegroundDb {
     this.runtime.setTickScheduler((urgency) => {
       // A CallInvoker task can already have crossed into JS at teardown.
       if (this.closed) return;
+      if (urgency === "encryption-state") {
+        this.storeWake?.(urgency);
+        return;
+      }
       if (urgency === "immediate") this.storeWake?.(urgency);
       this.tickScheduler?.(urgency);
     });

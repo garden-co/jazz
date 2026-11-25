@@ -59,6 +59,7 @@ pub const NATIVE_RELAY_ABI_V1: u16 = 7;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
+const FOREGROUND_WAKE_ENCRYPTION_STATE: u8 = 4;
 pub type ForegroundWakeCallback = unsafe extern "C" fn(*mut c_void, u64, u8, u64);
 
 /// Foreground commands are copied across the JSI/C boundary and decoded before

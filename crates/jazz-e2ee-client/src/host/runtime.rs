@@ -649,6 +649,18 @@ impl Encryption {
         })
     }
 
+    fn notify_state(&self) {
+        if let Some(store) = &self.bridge_store {
+            store.notify_store(StoreWake::EncryptionState);
+        }
+    }
+
+    fn set_status(&self, status: AccountStatus) {
+        if self.status.replace(Some(status)) != Some(status) {
+            self.notify_state();
+        }
+    }
+
     /// The loop's last account status and error, and whether the client
     /// can read encrypted rows yet (`readable`), as JSON.
     pub fn state(&self) -> Value {
@@ -851,7 +863,8 @@ impl Encryption {
             self.client.advance_settle_clock(duration);
             return;
         }
-        within(std::future::pending::<()>(), duration).await;
+        // Through the runtime, so the host is asked to wake at the end.
+        self.within(std::future::pending::<()>(), duration).await;
     }
 
     /// Prepares a native write for which the device is still missing a key.
@@ -1055,12 +1068,12 @@ impl Encryption {
             "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;
-                self.status.set(Some(status));
+                self.set_status(status);
                 json!(status_name(status))
             }
             "resetAccount" => {
                 let status = client.reset_account(db).await.map_err(describe)?;
-                self.status.set(Some(status));
+                self.set_status(status);
                 json!(status_name(status))
             }
             "devices" => json!(
@@ -1168,7 +1181,7 @@ impl Encryption {
                 if status == AccountStatus::AwaitingApproval
                     && let Some(restored) = restored
                 {
-                    self.status.set(Some(restored));
+                    self.set_status(restored);
                 }
                 if op == "recoveryRegister" {
                     Value::Null
@@ -1187,7 +1200,7 @@ impl Encryption {
             "recoveryRestore" => {
                 let secret = recovery_secret(args, phrase, secret)?;
                 let status = client.recover_device(db, &secret).await.map_err(describe)?;
-                self.status.set(Some(status));
+                self.set_status(status);
                 json!(status_name(status))
             }
             "recoveryRetire" => {
@@ -1316,6 +1329,7 @@ async fn main_loop(this: Rc<Encryption>) {
         match Box::pin(client.prepare(&db)).await {
             Ok(true) => {
                 this.readable.set(true);
+                this.notify_state();
                 this.set_background_deadline(None);
                 break;
             }
@@ -1400,7 +1414,7 @@ async fn main_loop(this: Rc<Encryption>) {
             }
             let mut verified = Box::pin(client.ensure_account(&db)).await.map(Some);
             if let (Ok(Some(status)), Some(native)) = (&verified, recovering) {
-                this.status.set(Some(*status));
+                this.set_status(*status);
                 this.stage.set("preparing account-secret recovery");
                 let secret = native.recovery.borrow().clone();
                 if let Some(secret) = secret {
@@ -1417,7 +1431,7 @@ async fn main_loop(this: Rc<Encryption>) {
                     if this.native.is_some() {
                         retry_at = None;
                     }
-                    this.status.set(Some(status));
+                    this.set_status(status);
                     *this.last_error.borrow_mut() = None;
                     if let Some(native) = &this.native
                         && !matches!(*native.result.borrow(), Verification::Failed(_))

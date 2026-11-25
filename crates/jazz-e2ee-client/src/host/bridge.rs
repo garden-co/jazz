@@ -51,6 +51,7 @@ pub struct Request {
 
 pub enum StoreWake {
     Request,
+    EncryptionState,
     Deadline(Option<Duration>),
 }
 
@@ -58,6 +59,7 @@ impl StoreWake {
     pub fn urgency(&self) -> String {
         match self {
             Self::Request => "immediate".to_owned(),
+            Self::EncryptionState => "encryption-state".to_owned(),
             Self::Deadline(Some(delay)) => format!("after:{}", delay.as_millis() + 1),
             Self::Deadline(None) => "cancel".to_owned(),
         }
@@ -107,7 +109,7 @@ impl JsStore {
         self.refresh_deadline();
     }
 
-    fn notify_store(&self, event: StoreWake) {
+    pub(super) fn notify_store(&self, event: StoreWake) {
         if let Some(wake) = self.store_wake.borrow().as_ref() {
             wake(event);
         }

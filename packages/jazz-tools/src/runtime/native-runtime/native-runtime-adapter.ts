@@ -262,7 +262,10 @@ export type NativeEncryptionOptions = {
   createHandle: EncryptionHandleFactory;
 };
 
-type EncryptionHandleFactory = (native: EncryptionNative) => Encryption;
+type EncryptionHandleFactory = (
+  native: EncryptionNative,
+  stateChanges: ReturnType<typeof servePrivateStore>["onStateChange"],
+) => Encryption;
 
 /** What a database that has the runtime installed adds to the native calls. */
 type NativeEncryptionDb = EncryptionNative & {
@@ -1177,7 +1180,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private encryptionState?: {
     native: NativeEncryptionDb;
     createHandle: EncryptionHandleFactory;
-    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">;
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">;
     uses: SpaceUse;
     handle?: Encryption;
     online?: boolean;
@@ -1235,7 +1238,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /** Adopt the private store bridge of the React Native foreground. */
   attachEncryption(
     native: NativeEncryptionDb,
-    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">,
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">,
     createHandle: EncryptionHandleFactory,
   ): void {
     this.bindEncryption(native, serving, createHandle);
@@ -1244,7 +1247,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private bindEncryption(
     native: NativeEncryptionDb,
-    serving: Pick<ReturnType<typeof servePrivateStore>, "stop">,
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">,
     createHandle: EncryptionHandleFactory,
   ): void {
     this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
@@ -1299,7 +1302,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
     if (!state.handle) {
-      state.handle = state.createHandle(state.native);
+      state.handle = state.createHandle(state.native, state.serving.onStateChange);
       if (this.ownerRuntime.closed) state.handle.stop();
     }
     return state.handle;

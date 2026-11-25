@@ -77,7 +77,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private foregroundFactory: NativeForegroundFactory | null = null;
   private lifecycleForeground: NativeForegroundDb | null = null;
   private encryptionSchema?: WasmSchema;
-  private encryptionStore?: { stop(): void };
+  private encryptionStore?: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">;
   private adapter?: NativeRuntimeAdapter;
   private pendingCapability: Uint8Array | null = null;
   private ownsAdmission = false;
@@ -151,7 +151,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           this.lifecycleForeground = foreground;
           this.assertForegroundIdentity(foreground, config, session);
           const serving = servePrivateStore(foreground, store);
-          this.encryptionStore = { stop: () => serving.stop({ cancelPending: true }) };
+          this.encryptionStore = {
+            stop: () => serving.stop({ cancelPending: true }),
+            onStateChange: serving.onStateChange,
+          };
           await foreground.openEncryption();
         }
         return;
@@ -315,7 +318,8 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           runtime.attachEncryption(
             foreground,
             this.encryptionStore,
-            (native) => new Encryption(native, { nativeReadiness: true, deviceAccount }),
+            (native, stateChanges) =>
+              new Encryption(native, { nativeReadiness: true, deviceAccount, stateChanges }),
           );
         }
         const appContext: AppContext = {

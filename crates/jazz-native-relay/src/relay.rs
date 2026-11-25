@@ -57,10 +57,11 @@ use thiserror::Error;
 
 use crate::node_lease::ForegroundNodeLease;
 use crate::{
-    FOREGROUND_WAKE_IMMEDIATE, ForegroundDbCommandRequest, ForegroundDbCommandResponse,
-    ForegroundMutationKind, ForegroundPermissionAdvice, ForegroundPermissionAdviceAction,
-    ForegroundSubscriptionEvent, ForegroundTransactionKind, ForegroundWakeState,
-    NATIVE_RELAY_ABI_V1, NativeRelayAbiRange, ensure_native_relay_abi_compatible,
+    FOREGROUND_WAKE_ENCRYPTION_STATE, FOREGROUND_WAKE_IMMEDIATE, ForegroundDbCommandRequest,
+    ForegroundDbCommandResponse, ForegroundMutationKind, ForegroundPermissionAdvice,
+    ForegroundPermissionAdviceAction, ForegroundSubscriptionEvent, ForegroundTransactionKind,
+    ForegroundWakeState, NATIVE_RELAY_ABI_V1, NativeRelayAbiRange,
+    ensure_native_relay_abi_compatible,
 };
 
 /// Frames one host-carried queue holds before a producer sees backpressure.
@@ -842,9 +843,12 @@ impl NativeRelayClient {
             if let Some(store) = store {
                 store.set_store_wake(wake.map(|wake| {
                     Box::new(move |event| {
-                        if matches!(event, StoreWake::Request) {
-                            wake.wake(foreground, FOREGROUND_WAKE_IMMEDIATE, 0);
-                        }
+                        let kind = match event {
+                            StoreWake::Request => FOREGROUND_WAKE_IMMEDIATE,
+                            StoreWake::EncryptionState => FOREGROUND_WAKE_ENCRYPTION_STATE,
+                            StoreWake::Deadline(_) => return,
+                        };
+                        wake.wake(foreground, kind, 0);
                     }) as Box<dyn Fn(_)>
                 }));
             }

@@ -150,6 +150,8 @@ export interface EncryptionOptions {
   deviceAccount?: boolean;
   /** How often to look for reports to deliver, in milliseconds. */
   reportIntervalMs?: number;
+  /** @internal Subscribe to the host's encryption state wake. */
+  stateChanges?: (listener: () => void) => () => void;
 }
 
 /** Takes ownership of the decoded backup secret passed to the native host. */
@@ -213,6 +215,8 @@ export class Encryption {
   readonly keys: Keys;
   readonly members: Members;
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
+  private readonly stateWaiters = new Set<() => void>();
+  private readonly stopStateChanges: (() => void) | undefined;
   private readonly pendingReports: EncryptionReport[] = [];
   private readonly waitingListeners = new Set<(report: EncryptionReport) => void>();
   private reportsDuringReplay: EncryptionReport[] | undefined;
@@ -231,6 +235,7 @@ export class Encryption {
     this.recovery = new Recovery(call, options, this.assertOpen);
     this.keys = new Keys(call);
     this.members = new Members((space) => call("spaceRow", { ...space }));
+    this.stopStateChanges = options.stateChanges?.(() => this.stateChanged());
   }
 
   private async call<T>(op: string, args: Record<string, unknown>): Promise<T> {
@@ -332,10 +337,7 @@ export class Encryption {
       this.assertOpen();
       const state = JSON.parse(this.native.encryptionState()) as { readable?: boolean };
       if (state.readable) return;
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 50);
-        (timer as { unref?: () => void }).unref?.();
-      });
+      await this.waitForStateChange(50);
     }
   }
 
@@ -350,14 +352,33 @@ export class Encryption {
       };
       if (state.status !== null) return state.status;
       if (Date.now() >= this.verificationDeadline) throw verificationTimeout(state);
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 100);
-        (timer as { unref?: () => void }).unref?.();
-      });
+      await this.waitForStateChange(100, this.verificationDeadline);
     }
   }
 
-  // A recovery spends the approval nonce once. Keep polling for the longest
+  private readonly waitForStateChange = (pollMs: number, deadline = Infinity): Promise<void> => {
+    return new Promise((resolve) => {
+      const finish = () => {
+        this.stateWaiters.delete(finish);
+        clearTimeout(timer);
+        resolve();
+      };
+      const remaining = deadline - Date.now();
+      // Custom hosts without a wake callback still need to check the state.
+      const delay = this.stopStateChanges ? remaining : Math.min(remaining, pollMs);
+      const timer = Number.isFinite(delay)
+        ? setTimeout(finish, Math.min(delay, 2_147_483_647))
+        : undefined;
+      (timer as { unref?: () => void } | undefined)?.unref?.();
+      this.stateWaiters.add(finish);
+    });
+  };
+
+  private readonly stateChanged = (): void => {
+    for (const wake of this.stateWaiters) wake();
+  };
+
+  // A recovery spends the approval nonce once. Keep waiting for the longest
   // waiter, while each caller can stop waiting for the shared attempt sooner.
   private verifying: Promise<AccountStatus> | undefined;
   private verificationDeadline = 0;
@@ -412,11 +433,14 @@ export class Encryption {
 
   /** Permanently closes this handle at teardown, ending verification and report delivery. */
   stop(): void {
+    if (this.closed) return;
     this.closed = true;
+    this.stopStateChanges?.();
     for (const leave of this.readyWaits) {
       leave(new EncryptionError("closed", "The encryption handle is closed"));
     }
     this.readyWaits.clear();
+    this.stateChanged();
     if (this.runner) this.runner.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;

@@ -508,8 +508,11 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
                 encryption: {
                   runtime: encryption.runtime,
                   store: encryption.store,
-                  createHandle: (native) =>
-                    new Encryption(native, { accountSecret: encryption.accountSecret }),
+                  createHandle: (native, stateChanges) =>
+                    new Encryption(native, {
+                      accountSecret: encryption.accountSecret,
+                      stateChanges,
+                    }),
                 },
                 plainEntries: declaredEntries(resolveSchemaSource(encryption.app)),
               }

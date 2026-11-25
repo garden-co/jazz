@@ -2549,7 +2549,8 @@ export class Db {
   private boundEncryption: Encryption | undefined;
   private pendingEncryption: Encryption | undefined;
   private encryptedQueries?: EncryptedGuard;
-  private encryptedReadsReady?: Promise<unknown>;
+  private encryptedReadsReady?: Promise<void>;
+  private encryptionReadable = false;
   private readonly successorWaiters = new Set<(next: Db) => void>();
 
   /**
@@ -4504,17 +4505,26 @@ export class Db {
 
   /**
    * Execute a query and return all matching rows as typed objects.
+   * Reads of encrypted columns wait up to 30 seconds for encryption readability.
    *
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.#readOnce(query, options, Date.now() + LOCAL_FIRST_WAIT_MS);
+  }
+
+  async #readOnce<T>(
+    query: QueryBuilder<T>,
+    options: QueryOptions | undefined,
+    deadline: number,
+  ): Promise<T[]> {
     try {
-      return await this.allInternal(query, lowerPublicDbQueryOptions(options));
+      return await this.allInternal(query, lowerPublicDbQueryOptions(options), deadline);
     } catch (error) {
       // On the successor, which may not have synced yet.
-      const answer = (deadline?: number) =>
-        this.runOnSuccessor(() => this.current().all(query, options), deadline);
+      const answer = () =>
+        this.runOnSuccessor(() => this.current().#readOnce(query, options, deadline), deadline);
       // Begun before this Db handed over to a successor, and ended by that
       // (its own runtime closing, or this Db draining before the read
       // reached it): the successor answers it. Any other error is the
@@ -4524,17 +4534,33 @@ export class Db {
       // The thin client refused it, as it reads an encrypted column: the
       // local-first client answers it once loaded.
       if (error instanceof EncryptionNeedsLocalFirstError) {
-        const deadline = Date.now() + LOCAL_FIRST_WAIT_MS;
         await this.awaitLocalFirst(error);
-        return answer(deadline);
+        return answer();
       }
       throw error;
     }
   }
 
+  #encryptionReadiness(wasmQuery: string): Promise<void> | undefined {
+    const app = this.config?.encryption?.app;
+    if (!app || isThinDb(this) || this.encryptionReadable) return;
+    this.encryptedQueries ??= new EncryptedGuard(resolveSchemaSource(app));
+    if (!this.encryptedQueries.queryTouches(wasmQuery)) return;
+    return (this.encryptedReadsReady ??= this.encryption.readable().then(
+      () => {
+        this.encryptionReadable = true;
+      },
+      (error: unknown) => {
+        this.encryptedReadsReady = undefined;
+        throw error;
+      },
+    ));
+  }
+
   private async allInternal<T>(
     query: QueryBuilder<T>,
     options?: InternalDbQueryOptions,
+    encryptionDeadline?: number,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
     const preparation = getOwnerPreparation(client);
@@ -4563,6 +4589,31 @@ export class Db {
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
     const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    const readable =
+      encryptionDeadline === undefined ? undefined : this.#encryptionReadiness(wasmQuery);
+    if (encryptionDeadline !== undefined && readable) {
+      const remaining = Math.max(0, encryptionDeadline - Date.now());
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                Object.assign(
+                  new Error(
+                    "NotObserved: encrypted tables cannot be read or written before this client has synced their catalogue identities once",
+                  ),
+                  { code: "not_observed" },
+                ),
+              ),
+            remaining,
+          );
+        });
+        await Promise.race([readable, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
     await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
     const rows =
       context || usesRelationTraversal
@@ -5010,25 +5061,8 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     const requirement = queryOptions.tier === "remote" ? "server" : "runtime";
-    const app = this.config?.encryption?.app;
-    let encryptionReady: Promise<unknown> | undefined;
-    if (app && !isThinDb(this)) {
-      this.encryptedQueries ??= new EncryptedGuard(resolveSchemaSource(app));
-      if (this.encryptedQueries.queryTouches(wasmQuery)) {
-        // Opened before the client knows the catalogue identities, the query
-        // would answer without its encrypted rows and stay so. It waits for
-        // them and for the keys this device holds, which a returning device
-        // has in its own store: it reads offline. It does not wait for the
-        // account's verification, which needs the server; a device that never
-        // synced waits for its first sync however long that takes.
-        encryptionReady = this.encryptedReadsReady ??= this.encryption
-          .readable()
-          .catch((error: unknown) => {
-            this.encryptedReadsReady = undefined;
-            throw error;
-          });
-      }
-    }
+    // Wait for catalogue identities and held keys before opening a live query.
+    const encryptionReady = this.#encryptionReadiness(wasmQuery);
     const connectionReady = this.connection.shouldDeferSubscriptionStart(requirement)
       ? this.ensureReady(requirement, readyAbort.signal)
       : undefined;
