@@ -1,5 +1,7 @@
 # jazz-napi
 
+## 2.0.0-beta.5
+
 ## 2.0.0-beta.4
 
 ### Patch Changes
