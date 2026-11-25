@@ -428,6 +428,27 @@ impl Jazz {
         CLIENT_THREAD.get() == Arc::as_ptr(&self.info.life) as usize
     }
 
+    /// On this app's client thread ([`Self::on_client_thread`]), the writes
+    /// a [`Self::close`] with `timeout` would report lost now, without
+    /// waiting for them: [`Error::Unsynced`]'s `pending`, by its rule (a
+    /// store in memory, a server, and a non-zero `timeout`, which asks for
+    /// them). `None` when it would lose none, or off that thread. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn unsynced_here(&self, timeout: std::time::Duration) -> Option<usize> {
+        if self.for_user
+            || !self.on_client_thread()
+            || timeout.is_zero()
+            || !self.info.memory
+            || self.info.serverless
+        {
+            return None;
+        }
+        CLIENT_HERE
+            .with(|here| here.borrow().as_ref().map(JazzClient::pending_uploads))
+            .filter(|pending| *pending > 0)
+    }
+
     /// This handle with its calls' waits on the server ended once `ends`
     /// reads true: for a binding's handle that closes while the client
     /// lives on. Not public API.
@@ -856,6 +877,7 @@ fn run(
             // Answered below, with the store let go of.
             Err(error) => return End::Failed(ready, error),
         };
+        CLIENT_HERE.with(|here| *here.borrow_mut() = Some(client.clone()));
         #[cfg(feature = "e2ee-client")]
         if opened.encryption == crate::encryption::Participation::Device {
             crate::encryption::spawn_start();
@@ -930,6 +952,7 @@ fn run(
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
         crate::lifecycle::run_before_stop(&client).await;
+        CLIENT_HERE.with(|here| here.borrow_mut().take());
         let result = client.shutdown().await;
         endpoint_connector.settle(session_end).await;
         End::Stopped(result, stopped)
@@ -967,6 +990,9 @@ thread_local! {
     /// On a client's thread, its run's [`crate::lifecycle::Life`] (by
     /// address): what [`Jazz::on_client_thread`] reads.
     static CLIENT_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// On a client's thread, its client while it runs: what
+    /// [`Jazz::unsynced_here`] counts.
+    static CLIENT_HERE: std::cell::RefCell<Option<JazzClient>> = const { std::cell::RefCell::new(None) };
 }
 
 /// How a client's run ended.

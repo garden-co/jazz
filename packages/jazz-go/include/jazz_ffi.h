@@ -43,9 +43,11 @@
  * step 1 only, and the rest later from another thread: waiting there
  * deadlocks. The same goes for the private store's callback
  * (jazz_open_encrypted), which runs on the client's own thread: there
- * "close" waits for nothing (it ignores a timeoutMs: nothing drains) and
- * returns at once, the handle closed; the client stops once the callback
- * returns.
+ * "close" waits for nothing and returns at once, the handle closed; the
+ * client stops once the callback returns. It ignores a timeoutMs (nothing
+ * drains): the writes such a close asks for and loses at once (memory
+ * storage, unsent) fail it "unsynced" with "pending", as a close that
+ * waited would at its timeout.
  *
  * One app at a time has a persistent store open: jazz_open of a dataDir
  * another app has open, in this process or another, fails with kind
@@ -261,10 +263,11 @@ JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *
  *
  * The callback runs on the client's thread, which every other call on the
  * handle waits for: from inside it, call nothing on the handle but "close"
- * (jazz_call), which closes it without waiting (see the top): its calls
- * fail "closed" from then on, no store or token callback starts after this
- * one, and the client stops once this one returns. Free the handle later,
- * from another thread.
+ * (jazz_call), which closes it without waiting and ignores a timeoutMs,
+ * failing "unsynced" when that loses writes (see the top): its calls fail
+ * "closed" from then on, no store or token callback starts after this one,
+ * and the client stops once this one returns. Free the handle later, from
+ * another thread.
  */
 typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload);
 

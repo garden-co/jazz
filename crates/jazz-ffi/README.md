@@ -201,10 +201,13 @@ another thread: waiting there deadlocks.
 The private store's callback (or UniFFI `PrivateStore`) runs on the
 client's own thread, which every other call waits for: from inside it, call
 nothing on the handle but `"close"` (UniFFI `shutdown`). There it waits for
-nothing and returns at once (a `timeoutMs` is ignored: nothing drains): the
-handle is closed, its calls fail `Closed`, no store or token callback starts
-after this one, and the client stops once the callback returns. Free the
-handle later, from another thread.
+nothing and returns at once: the handle is closed, its calls fail `Closed`,
+no store or token callback starts after this one, and the client stops once
+the callback returns. It ignores a `timeoutMs` (UniFFI `shutdown_within`):
+nothing drains, so the writes it asks for and loses (memory storage,
+unsent) fail it `Unsynced { pending }` at once, mapped as any close's
+(`"unsynced"` in C, `Io` without contract 2). Free the handle later, from
+another thread.
 
 ## Lifecycle (as TS's)
 
