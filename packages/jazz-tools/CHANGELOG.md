@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 2.0.0-beta.3
+
+### Patch Changes
+
+- 96254bb: Cloudflare: run your backend and its Jazz core in one Worker with `jazzWorker` (from the new `jazz-tools/cloudflare`), two Durable Object bindings and no secrets. `durableObjects({ binding: env.JAZZ })` no longer needs `secret`: without `JAZZ_CORE_SECRET`, the core makes its own secret on its first start and hands it to the backend over Workers RPC, which only code holding the binding can call. A Worker that sets `JAZZ_CORE_SECRET` keeps using it. The Cloudflare docs page now shows the one-Worker setup.
+- 7d3da7d: A large schema default (a `string` or `bytes` default above the inline threshold) no longer travels whole inside every commit that creates a row. The client sends the default's chunks ahead of the commit, as it does for a large value the app writes, and the commit names it by reference. Upserts that create a row now push the chunks their filled-in cells need.
+- 58b25a9: A backend never follows a redirect from a remote core. A core reached through `remote()` or a `durableObjects()` URL that answers a request with a 3xx now fails with a `CoreRedirectError` naming the configured URL and where the core pointed, instead of a bare "answered with a redirect" (`durableObjects()` reported its `GET /app` redirect as "did not answer as a Jazz Durable Object core"). Configure the store with the core's final URL. Every request the backend's network transport sends uses `redirect: "manual"`, so no caller can forward the backend credential to another origin by following one.
+- Updated dependencies [96254bb]
+  - jazz-wasm@2.0.0-beta.3
+  - jazz-rn@2.0.0-beta.3
+
 ## 2.0.0-beta.2
 
 ### Patch Changes
