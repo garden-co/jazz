@@ -388,6 +388,10 @@ jobs:
       - name: npm tarballs
         run: node dev/release-publish/npm-publish.mjs art/release-npm "${VERSION}" --check
 
+      # Vercel refuses functions over 250 MB; beta.3's traced to 414 MB.
+      - name: Budget a jazz-tools/backend function (linux-x64)
+        run: node dev/artifacts/verify-backend-function-size.mjs art/release-npm "${VERSION}"
+
       - name: Server binaries
         working-directory: art/release-server
         run: |
