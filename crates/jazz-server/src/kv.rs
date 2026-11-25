@@ -47,11 +47,22 @@ impl HostKv {
         &self,
         f: impl FnOnce(&dyn HostTables, HostTable) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
+        self.call_queued(f, || {})
+    }
+
+    /// [`Self::call`], running `queued` once `f` is queued on the store's
+    /// thread, before waiting for its answer.
+    fn call_queued<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&dyn HostTables, HostTable) -> Result<T, jazz::db::Error> + Send + 'static,
+        queued: impl FnOnce(),
+    ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         let table = self.table;
         self.store.send(Box::new(move |tables| {
             let _ = reply.send(f(tables, table).map_err(|error| error.to_string()));
         }))?;
+        queued();
         answer
             .recv()
             .map_err(|_| "server store closed before answering".to_owned())?
@@ -72,8 +83,12 @@ impl HostKv {
     /// Every pair of the table, read on the store's own connection in one
     /// job. This waits for an open write rather than reading through a
     /// second connection, which can be locked out on a memory store.
-    pub(crate) fn all_on_store(&self) -> KvResult<Vec<HostPair>> {
-        self.call(move |tables, table| jazz::db::block_on(tables.host_prefix(table, &[])))
+    /// `queued` runs once the read is queued on the store's thread.
+    pub(crate) fn all_on_store(&self, queued: impl FnOnce()) -> KvResult<Vec<HostPair>> {
+        self.call_queued(
+            move |tables, table| jazz::db::block_on(tables.host_prefix(table, &[])),
+            queued,
+        )
     }
 
     /// Write `value` at `key` unless a value is there already: the value

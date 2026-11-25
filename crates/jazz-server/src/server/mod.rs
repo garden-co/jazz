@@ -125,6 +125,9 @@ pub struct ServerState {
     /// Tests: the shutdown finalizer panics.
     #[cfg(test)]
     panic_during_shutdown_for_test: std::sync::atomic::AtomicBool,
+    /// Tests: where the next deployment waits for its test.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) deploy_hooks: deployment::DeployHooks,
     pub shutdown: ShutdownController,
 }
 

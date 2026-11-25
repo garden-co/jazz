@@ -57,7 +57,10 @@ pub(crate) async fn deploy_body(
     // is inside a write): the checks see one moment of the table.
     let kept_now: std::collections::HashMap<Vec<u8>, Vec<u8>> = match &kept {
         Some(kept) => kept
-            .all_on_store()
+            .all_on_store(|| {
+                #[cfg(any(test, feature = "test"))]
+                state.deploy_hooks.kept_read_queued();
+            })
             .map_err(DeployError::internal)?
             .into_iter()
             .collect(),
@@ -158,6 +161,8 @@ pub(crate) async fn deploy_body(
     // transaction the apply owns: a conflicting kept value refuses the whole
     // deployment before anything is live, however many instances share the
     // store.
+    #[cfg(any(test, feature = "test"))]
+    state.deploy_hooks.before_apply().await;
     let applied = runtime
         .apply_catalogue_keeping(change, new_bundle, kept_values)
         .await;
@@ -167,6 +172,63 @@ pub(crate) async fn deploy_body(
         .map_err(DeployError::internal)?;
     applied?;
     Ok(deployment.staged.response)
+}
+
+/// Tests: points where the next deployment lets its test act between its
+/// steps, so a race is staged in a fixed order instead of with sleeps.
+#[cfg(any(test, feature = "test"))]
+#[derive(Default)]
+pub(crate) struct DeployHooks {
+    kept_read_queued: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    #[allow(clippy::type_complexity)]
+    before_apply: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl DeployHooks {
+    /// The next deployment's read of the kept declarations signals the
+    /// receiver once it is queued on the store's thread, before it waits
+    /// for that thread.
+    pub(crate) fn signal_kept_read_queued(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (queued, signal) = tokio::sync::oneshot::channel();
+        *self.kept_read_queued.lock().unwrap() = Some(queued);
+        signal
+    }
+
+    /// The next deployment that applies a change on a running runtime
+    /// stops after its checks, just before the change applies: it signals
+    /// the receiver, and goes on when the sender is sent to or dropped.
+    pub(crate) fn pause_before_apply(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached, paused) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        *self.before_apply.lock().unwrap() = Some((reached, resumed));
+        (paused, resume)
+    }
+
+    fn kept_read_queued(&self) {
+        if let Some(queued) = self.kept_read_queued.lock().unwrap().take() {
+            let _ = queued.send(());
+        }
+    }
+
+    async fn before_apply(&self) {
+        let pause = self.before_apply.lock().unwrap().take();
+        if let Some((reached, resumed)) = pause {
+            let _ = reached.send(());
+            let _ = resumed.await;
+        }
+    }
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)
