@@ -136,6 +136,35 @@ it("honours both creator membership opt-outs and preserves an explicit member ro
   expect(await alice.db.encryption.members.list(app.projects, id)).toEqual([explicit]);
 });
 
+it("creates spaces and their memberships offline after receiving the catalogue", async () => {
+  const host = await serve();
+  const alice = await device(host);
+  await alice.db.disconnect();
+
+  const first = alice.db.insert(app.projects, { name: "Offline insert", ownerId: alice.account });
+  const second = await alice.db.transaction((tx) =>
+    tx.insert(app.projects, { name: "Offline transaction", ownerId: alice.account }),
+  );
+  for (const written of [first, second]) {
+    const { id } = await written.wait({ tier: "local" });
+    const filter = await alice.db.encryption.members.where({ table: "projects", id });
+    const local = await alice.db.all(app.__e2ee_members.where(filter), {
+      tier: "local-first",
+      firstLoadRemoteWaitMs: 0,
+    });
+    expect(local.map((row) => row.accountId)).toEqual([alice.account]);
+    expect(await host.jazz.db.encryption.members.list(app.projects, id)).toEqual([]);
+  }
+
+  await alice.db.reconnect();
+  for (const written of [first, second]) {
+    const { id } = await written.wait({ tier: "global" });
+    expect(
+      (await host.jazz.db.encryption.members.list(app.projects, id)).map((row) => row.accountId),
+    ).toEqual([alice.account]);
+  }
+});
+
 const spacesTable = (app as unknown as Record<string, never>)["__e2ee_spaces"];
 
 /** A new project, with its creator as its first member in the same transaction. */

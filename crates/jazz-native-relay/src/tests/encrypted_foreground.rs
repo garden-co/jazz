@@ -455,6 +455,10 @@ fn a_plain_row_relays_from_a_device_to_a_keyless_peer() {
 
     let root = tempfile::tempdir().unwrap();
     let (_, schema) = app_schema(MIXED_APP.as_bytes());
+    // This relay has no authority and therefore no catalogue table identity.
+    let mut schema: serde_json::Value = serde_json::from_slice(&schema).unwrap();
+    schema["addCreatorAsMember"] = json!(false);
+    let schema = serde_json::to_vec(&schema).unwrap();
     let store = serve(Rc::new(MemoryStore::new()));
     unsafe {
         let host = jazz_native_relay_host_new();
