@@ -182,6 +182,23 @@ function failure(error: unknown, operation?: string): EncryptionError {
   return new EncryptionError(code!, detail === "E2EE operation refused" ? message : detail!);
 }
 
+/** `waiting`, unless one of `waits` (told as the handle stops) ends it first. */
+async function untilStopped<T>(
+  waits: Set<(error: EncryptionError) => void>,
+  waiting: Promise<T>,
+): Promise<T> {
+  let leave!: (error: EncryptionError) => void;
+  const stopped = new Promise<never>((_, reject) => {
+    leave = reject;
+  });
+  waits.add(leave);
+  try {
+    return await Promise.race([waiting, stopped]);
+  } finally {
+    waits.delete(leave);
+  }
+}
+
 function verificationTimeout(state: { error?: string | null; stage?: string }): EncryptionError {
   return failure(
     state.error ??
@@ -258,14 +275,17 @@ export class Encryption {
   async ready(options: { timeoutMs?: number } = {}): Promise<AccountStatus> {
     this.assertOpen();
     const timeoutMs = options.timeoutMs ?? 30_000;
-    if (this.options.nativeReadiness) return this.call("ready", { timeoutMs });
+    // Closing ends the wait (`closed`); the verification itself goes on.
+    if (this.options.nativeReadiness) {
+      return untilStopped(this.readyWaits, this.call("ready", { timeoutMs }));
+    }
     const deadline = Number.isNaN(timeoutMs) ? Infinity : Date.now() + timeoutMs;
     this.verificationDeadline = Math.max(this.verificationDeadline, deadline);
     const attempt = (this.verifying ??= this.verifyOnce().finally(() => {
       this.verifying = undefined;
       this.verificationDeadline = 0;
     }));
-    if (deadline === Infinity) return attempt;
+    if (deadline === Infinity) return untilStopped(this.readyWaits, attempt);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const expired = new Promise<void>((resolve) => {
@@ -281,11 +301,14 @@ export class Encryption {
         this.assertOpen();
         throw verificationTimeout(JSON.parse(this.native.encryptionState()));
       });
-      return await Promise.race([attempt, expired]);
+      return await untilStopped(this.readyWaits, Promise.race([attempt, expired]));
     } finally {
       clearTimeout(timer);
     }
   }
+
+  /** Ends each {@link ready} still waiting, as the handle closes. */
+  private readonly readyWaits = new Set<(error: EncryptionError) => void>();
 
   /**
    * Resolves once this client can open the encrypted rows its store holds:
@@ -390,6 +413,10 @@ export class Encryption {
   /** Permanently closes this handle at teardown, ending verification and report delivery. */
   stop(): void {
     this.closed = true;
+    for (const leave of this.readyWaits) {
+      leave(new EncryptionError("closed", "The encryption handle is closed"));
+    }
+    this.readyWaits.clear();
     if (this.runner) this.runner.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
