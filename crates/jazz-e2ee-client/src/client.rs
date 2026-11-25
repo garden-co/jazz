@@ -73,6 +73,8 @@ pub struct ClientConfig<'a> {
 struct HeldDocumentState {
     /// The store's revision of the document, `None` before it exists.
     revision: Option<u64>,
+    /// Bytes confirmed by a save whose held state still matches memory.
+    confirmed_bytes: Option<Vec<u8>>,
     /// The document's own removal counter (§6.4).
     removals: u64,
     /// Records skipped as unsupported, carried over unchanged (§6.2).
@@ -462,6 +464,7 @@ impl E2eeClient {
         }
         let mut state = HeldDocumentState {
             revision: Some(stored.revision),
+            confirmed_bytes: None,
             removals: loaded.revision,
             carried: loaded.unsupported,
             lineage: None,
@@ -685,6 +688,12 @@ impl E2eeClient {
         self.shared.member_watch.borrow().delivery_mark_checks
     }
 
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn delivery_chain_replays(&self) -> usize {
+        self.shared.member_watch.borrow().delivery_chain_replays
+    }
+
     /// Holds the runtime clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]
@@ -877,7 +886,17 @@ impl E2eeClient {
             // more is written or held.
             self.ensure_open()?;
             let state = documents.held.entry(root_id.clone()).or_default();
-            let bytes = {
+            let unchanged = || {
+                self.shared
+                    .keys
+                    .borrow()
+                    .held
+                    .space(&root_id)
+                    .is_some_and(|held| held.same_stored_state(&staged))
+            };
+            let bytes = if let Some(bytes) = state.confirmed_bytes.take().filter(|_| unchanged()) {
+                bytes
+            } else {
                 let device = self.shared.device()?;
                 Self::owner_of(&self.shared, &device).seal_stored_document(
                     &staged,
@@ -886,6 +905,7 @@ impl E2eeClient {
                     &mut **self.shared.random.borrow_mut(),
                 )?
             };
+            // The store still checks the incarnation and revision for reused bytes.
             match retry_save(
                 self.store
                     .save(
@@ -901,7 +921,8 @@ impl E2eeClient {
                     state.revision = Some(revision);
                     state.lineage = None;
                     self.ensure_open()?;
-                    self.shared.keys.borrow_mut().held.hold(staged)?;
+                    self.shared.keys.borrow_mut().held.hold(staged.clone())?;
+                    state.confirmed_bytes = unchanged().then_some(bytes);
                     return Ok(());
                 }
                 Ok(None) => {
@@ -939,6 +960,9 @@ impl E2eeClient {
         let mut documents = self.documents.lock().await;
         self.ensure_open()?;
         self.shared.keys.borrow_mut().held.clear_verified_history();
+        for state in documents.held.values_mut() {
+            state.confirmed_bytes = None;
+        }
         for name in self.store.list(&self.scope).await? {
             let Some(root) = name.strip_prefix(HELD_PREFIX) else {
                 continue;

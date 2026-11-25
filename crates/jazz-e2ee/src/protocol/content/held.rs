@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::registry::Registry;
@@ -108,6 +109,24 @@ impl core::fmt::Debug for HeldSpace {
 }
 
 impl HeldSpace {
+    /// Whether sealing either space would store the same lineage, keys and
+    /// verification marker.
+    pub fn same_stored_state(&self, other: &Self) -> bool {
+        self.application == other.application
+            && self.scope == other.scope
+            && self.root == other.root
+            && self.successors == other.successors
+            && self.verified_through == other.verified_through
+            && self.keys.len() == other.keys.len()
+            && self
+                .keys
+                .iter()
+                .zip(&other.keys)
+                .all(|((depth, a), (other_depth, b))| {
+                    depth == other_depth && a.mark == b.mark && bool::from(a.key.ct_eq(&*b.key))
+                })
+    }
+
     /// The keys of an acquisition (§3.3, §4.2: every key it accepted,
     /// earlier versions included, becomes a held key), with the lineage of
     /// `chain` up to the deepest of them. `keys` must have been
