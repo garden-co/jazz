@@ -13,21 +13,23 @@ Upgrade on a clean Git working tree, and commit after each step, so you can revi
 
 ## Find your starting version
 
-| Starting version  | Commands                                                       | Code changes start at                             |
-| ----------------- | -------------------------------------------------------------- | ------------------------------------------------- |
-| alpha.58 or older | Upgrade to alpha.59 first, following each release's notes      | [alpha.58 or older](#alpha58-or-older)            |
-| alpha.59          | Move data and code to alpha.65, then as from alpha.63–alpha.65 | [alpha.59 to alpha.65](#alpha59-to-alpha65)       |
-| alpha.60          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.60 to alpha.61](#alpha60-to-alpha61)       |
-| alpha.61          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.61 to alpha.62](#alpha61-to-alpha62)       |
-| alpha.62          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.62 to alpha.63](#alpha62-to-alpha63)       |
-| alpha.63          | [From alpha.63–alpha.65](#from-alpha63alpha65)                 | [alpha.63 to alpha.64](#alpha63-to-alpha64)       |
-| alpha.64–alpha.65 | [From alpha.63–alpha.65](#from-alpha63alpha65)                 | [alpha.65 to alpha.66](#alpha65-to-alpha66)       |
-| alpha.66–alpha.67 | [From alpha.66 on](#from-alpha66-on)                           | [alpha.67 to alpha.68](#alpha67-to-alpha68)       |
-| alpha.68          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.68 to alpha.69](#alpha68-to-alpha69)       |
-| alpha.69          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.69 to alpha.70](#alpha69-to-alpha70)       |
-| alpha.70          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.70 to beta.0](#alpha70-to-beta0)           |
-| beta.0            | [From alpha.66 on](#from-alpha66-on)                           | [beta.0 to beta.1](#beta0-to-beta1)               |
-| beta.1 or later   | [From alpha.66 on](#from-alpha66-on)                           | nothing: see [beta.1 and later](#beta1-and-later) |
+| Starting version  | Commands                                                       | Code changes start at                       |
+| ----------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| alpha.58 or older | Upgrade to alpha.59 first, following each release's notes      | [alpha.58 or older](#alpha58-or-older)      |
+| alpha.59          | Move data and code to alpha.65, then as from alpha.63–alpha.65 | [alpha.59 to alpha.65](#alpha59-to-alpha65) |
+| alpha.60          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.60 to alpha.61](#alpha60-to-alpha61) |
+| alpha.61          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.61 to alpha.62](#alpha61-to-alpha62) |
+| alpha.62          | [From alpha.60–alpha.62](#from-alpha60alpha62)                 | [alpha.62 to alpha.63](#alpha62-to-alpha63) |
+| alpha.63          | [From alpha.63–alpha.65](#from-alpha63alpha65)                 | [alpha.63 to alpha.64](#alpha63-to-alpha64) |
+| alpha.64–alpha.65 | [From alpha.63–alpha.65](#from-alpha63alpha65)                 | [alpha.65 to alpha.66](#alpha65-to-alpha66) |
+| alpha.66–alpha.67 | [From alpha.66 on](#from-alpha66-on)                           | [alpha.67 to alpha.68](#alpha67-to-alpha68) |
+| alpha.68          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.68 to alpha.69](#alpha68-to-alpha69) |
+| alpha.69          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.69 to alpha.70](#alpha69-to-alpha70) |
+| alpha.70          | [From alpha.66 on](#from-alpha66-on)                           | [alpha.70 to beta.0](#alpha70-to-beta0)     |
+| beta.0            | [From alpha.66 on](#from-alpha66-on)                           | [beta.0 to beta.1](#beta0-to-beta1)         |
+| beta.1            | [From alpha.66 on](#from-alpha66-on)                           | [beta.1 to beta.2](#beta1-to-beta2)         |
+| beta.2            | [From alpha.66 on](#from-alpha66-on)                           | [beta.2 to beta.3](#beta2-to-beta3)         |
+| beta.3 or later   | [From alpha.66 on](#from-alpha66-on)                           | [later releases](#later-releases)           |
 
 Then work down the code changes from there to the end.
 
@@ -111,7 +113,7 @@ hit:
 Each section is one release step: start at the one the table names and work down to the end. Each
 says who it affects and links to the details. Your typecheck finds most of them, so run it once the
 commands are done, and again after the changes. A step with no section needs no code changes
-(alpha.64 to alpha.65, alpha.66 to alpha.67, and beta.1 on).
+(alpha.64 to alpha.65, and alpha.66 to alpha.67).
 
 ### alpha.58 or older
 
@@ -200,10 +202,28 @@ stubs and the `local_first` Rust names. Most of them fail at build time. See
 Kotlin (experimental) installs from the GitHub release instead of Maven Central. See
 [Upgrading from beta.0 to beta.1](/docs/operating/backups-and-upgrades#upgrading-from-beta0-to-beta1).
 
-### beta.1 and later
+### beta.1 to beta.2
 
-No code changes so far. From beta.0 on, a release that has to break something stable gets its own
-section in [Backups and Upgrades](/docs/operating/backups-and-upgrades#upgrading-between-releases).
+TypeScript apps change nothing. The experimental native clients do:
+
+- **Kotlin:** plain Maven builds depend on `tools.jazz:jazz-kotlin-jvm`, and `close()` returns
+  before the native core has finished (`closeAndWait()` waits).
+- **Swift:** `JazzError` has a new case, `stillQueued`, so an exhaustive `switch` over it needs it.
+- **Rust:** `shutdown` and `close` fail calls waiting on the server with `Error::Stopped`.
+
+See [Upgrading from beta.1 to beta.2](/docs/operating/backups-and-upgrades#upgrading-from-beta1-to-beta2).
+
+### beta.2 to beta.3
+
+No code changes. A backend no longer follows a redirect from a remote core: configure `remote()`
+or `durableObjects()` with the core's final URL. See
+[Upgrading from beta.2 to beta.3](/docs/operating/backups-and-upgrades#upgrading-from-beta2-to-beta3).
+
+### Later releases
+
+From beta.0 on, a release that has to break something stable gets its own section in
+[Backups and Upgrades](/docs/operating/backups-and-upgrades#upgrading-between-releases): work
+through those from your version on.
 
 ## Deploying
 
