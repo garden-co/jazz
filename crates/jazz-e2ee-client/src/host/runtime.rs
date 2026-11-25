@@ -160,13 +160,14 @@ impl RuntimeBuilder {
     }
 
     pub fn drive(&self, settle: impl FnOnce()) {
+        let announced = self.store.announced_deadline();
         self.store.check_clock();
         let runtime = self.attached.borrow().upgrade();
         if let Some(runtime) = &runtime {
             runtime.drive();
         }
         settle();
-        self.store.refresh_deadline();
+        self.store.refresh_deadline_after_poll(announced);
         if let Some(runtime) = runtime {
             runtime.wake_if_owed();
         }
@@ -1843,6 +1844,41 @@ mod tests {
             "relations": {}
         })
         .to_string()
+    }
+
+    /// Alice's host must get another wake when its timer polls before the
+    /// deadline. Arm the builder's bridge directly to test an early poll
+    /// without relying on real timer jitter.
+    #[test]
+    fn a_poll_before_the_deadline_rearms_the_host_timer() {
+        let builder = RuntimeBuilder::from_bindings(
+            String::new(),
+            "test".into(),
+            "test".into(),
+            "alice".into(),
+            None,
+        )
+        .unwrap();
+        let deadlines = Rc::new(RefCell::new(Vec::new()));
+        let announced = Rc::clone(&deadlines);
+        builder.set_store_wake(Some(Box::new(move |wake| {
+            if let StoreWake::Deadline(delay) = wake {
+                announced.borrow_mut().push(delay);
+            }
+        })));
+
+        builder
+            .store
+            .set_background_deadline(Some(web_time::Instant::now() + Duration::from_secs(30)));
+        let first = deadlines.borrow_mut().pop().unwrap().unwrap();
+
+        builder.drive(|| {});
+        let second = deadlines.borrow_mut().pop().unwrap().unwrap();
+        assert!(!second.is_zero() && second <= first);
+
+        builder.drive(|| builder.store.set_background_deadline(None));
+        builder.drive(|| {});
+        assert_eq!(*deadlines.borrow(), [None]);
     }
 
     /// Alice can retry a failed store request with her original device-account

@@ -130,13 +130,22 @@ impl JsStore {
             .min()
     }
 
+    pub(super) fn announced_deadline(&self) -> Option<Instant> {
+        self.announced_deadline.get()
+    }
+
     pub fn check_clock(&self) {
         self.clock_checked.set(Some(Instant::now()));
     }
 
     pub fn refresh_deadline(&self) {
+        self.refresh_deadline_after_poll(None);
+    }
+
+    pub(super) fn refresh_deadline_after_poll(&self, before_poll: Option<Instant>) {
         let at = self.next_deadline_after(self.clock_checked.get().unwrap_or_else(Instant::now));
-        if self.announced_deadline.replace(at) != at {
+        // The host may have consumed its one-shot timer before the deadline.
+        if self.announced_deadline.replace(at) != at || (at.is_some() && at == before_poll) {
             self.notify_store(StoreWake::Deadline(
                 at.map(|at| at.saturating_duration_since(Instant::now())),
             ));
