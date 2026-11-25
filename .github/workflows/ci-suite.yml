@@ -844,7 +844,9 @@ jobs:
   # against jazz-ffi and an in-memory `jazz-tools server`.
   test-kotlin:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs like the other test jobs: on 4, its cargo and Gradle builds
+    # made it the slowest merge-group job (250-300 s, g880-g884).
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
