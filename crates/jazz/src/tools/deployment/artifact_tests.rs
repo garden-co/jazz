@@ -723,10 +723,9 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     .unwrap();
 }
 
-/// `__e2ee_` names Jazz's own end-to-end encryption tables, which schema
-/// validation treats differently: an application may not define one in its
-/// current schema, nor set policies on one, even when the schema it reads
-/// the permissions against holds one (as Jazz's own will).
+/// A file whose version this Jazz can't read (a newer `$schema` or legacy
+/// `format`, another `$schema` URL, or none) is refused for that before any
+/// other check.
 #[test]
 fn an_unknown_version_is_refused_before_anything_else() {
     // `$schema` carries the version.
