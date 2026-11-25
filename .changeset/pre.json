@@ -473,6 +473,7 @@
     "mixed-nullability-claim-params",
     "named-permission-relations",
     "napi-parked-read-host-waits",
+    "napi-platform-packages-only",
     "napi-resume-yielded-ticks",
     "napi-subscription-tier-no-edge",
     "native-client-nodelay",
