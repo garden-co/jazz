@@ -12,6 +12,8 @@ use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 use jazz_e2ee::{OsRandom, RandomSource};
+use jazz_e2ee_client::host::bridge::JsStore;
+use jazz_e2ee_client::host::runtime::{Built, Encryption};
 use jazz_e2ee_client::{AccountStatus, ClientConfig, E2eeClient, MemoryStore, Report};
 
 struct FailingDeliveryIds(Rc<Cell<bool>>);
@@ -208,4 +210,62 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     assert_eq!(*reports.borrow(), [(address, error.to_string())]);
     assert!(sync().is_empty());
     assert_eq!(reports.borrow().len(), 1);
+}
+
+/// Alice starts with a held key for an unwatched space. When she cannot
+/// reach the authority for delivery, the startup sweep reports that space once.
+#[test]
+fn startup_reports_delivery_failure_for_an_unwatched_space() {
+    let settings = EncryptionSettings::default();
+    let server = secure_authority_with(&settings, None);
+    let alice = account(0xa1);
+    let client = Rc::new(open_account(
+        Rc::new(MemoryStore::new()),
+        alice,
+        settings.clone(),
+        None,
+    ));
+    let (db, _link) = session(&client, &server, alice, &settings, 0xa1, None);
+    let project = project(&db, "plans");
+    hold_new_space(&client, &db, project);
+    let at = address(&db, project);
+    // Account verification can still use the fixture's link. Only delivery
+    // is refused by the client's offline state.
+    client.set_online(false);
+    let reports = observe_reports(&client);
+    let db = Rc::new(db);
+    let runtime = Encryption::new(
+        Built {
+            spaces: serde_json::json!({}),
+            client,
+            reports: Rc::default(),
+        },
+        Rc::new(JsStore::default()),
+        db.clone(),
+    );
+    drive(&server, &[&db], async {
+        loop {
+            runtime.drive();
+            let state = runtime.state();
+            assert!(state["error"].is_null(), "{state}");
+            if state["status"] == "active" && state["stage"] == "idle" {
+                break;
+            }
+            futures::pending!();
+        }
+    });
+    runtime.drive();
+    runtime.take_reports();
+    let reports = reports.borrow();
+    let failures: Vec<_> = reports
+        .iter()
+        .filter(|report| matches!(report, Report::DeliveryFailed { .. }))
+        .collect();
+    assert!(
+        matches!(failures.as_slice(), [Report::DeliveryFailed { space, reason }]
+        if space.scope_id == at.scope_id && space.identifier == at.identifier
+        && reason.contains("this client is offline")),
+        "{failures:?}"
+    );
+    runtime.stop();
 }
