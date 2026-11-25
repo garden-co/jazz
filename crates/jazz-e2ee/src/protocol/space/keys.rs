@@ -141,6 +141,7 @@ enum PathCheck {
 /// its version's marker.
 fn authenticate(
     chain: &SpaceChain,
+    depths: &BTreeMap<&str, usize>,
     registry: &Registry,
     depth: usize,
     key: Zeroizing<[u8; 32]>,
@@ -152,7 +153,7 @@ fn authenticate(
     }
     let mut keys = vec![(depth, key)];
     let mut at = depth;
-    while let Some(previous) = chain.history_depth(at) {
+    while let Some(previous) = chain.indexed_history_depth(at, depths) {
         let successor = &chain.versions[at]
             .successor
             .as_ref()
@@ -391,12 +392,13 @@ impl SpaceKeys {
         key: &[u8; 32],
     ) -> ProtocolResult<KeyCheck> {
         self.check_chain(chain)?;
-        let Some(depth) = chain.depth_of(epoch_id) else {
+        let depths = chain.epoch_depths();
+        let Some(&depth) = depths.get(epoch_id) else {
             return Ok(KeyCheck::Invalid);
         };
         self.extend(chain);
         Ok(
-            match authenticate(chain, registry, depth, Zeroizing::new(*key))? {
+            match authenticate(chain, &depths, registry, depth, Zeroizing::new(*key))? {
                 PathCheck::Ok(keys) => {
                     self.insert(keys);
                     KeyCheck::Accepted
@@ -496,6 +498,7 @@ pub fn acquire(
         return Err(ProtocolError::InconsistentEvidence);
     }
     let root_position = chain.root.position;
+    let depths = chain.epoch_depths();
     let mut keys = SpaceKeys::new(chain);
     let mut invalid_deliveries = Vec::new();
     let mut non_derived_deliveries = Vec::new();
@@ -519,7 +522,9 @@ pub fn acquire(
             && let Some(epoch_key) = own.get(writer_epoch)
         {
             let (context, envelope) = version.account_envelope(chain)?;
-            match try_candidate(chain, registry, depth, epoch_key, &context, envelope)? {
+            match try_candidate(
+                chain, &depths, registry, depth, epoch_key, &context, envelope,
+            )? {
                 PathCheck::Ok(found) => {
                     keys.insert(found);
                     continue;
@@ -540,9 +545,15 @@ pub fn acquire(
                 continue;
             };
             let outcome = match row.seal_context(&chain.application, &chain.scope) {
-                Ok(context) if row.validate(&chain.scope).is_ok() => {
-                    try_candidate(chain, registry, depth, epoch_key, &context, &row.envelope)?
-                }
+                Ok(context) if row.validate(&chain.scope).is_ok() => try_candidate(
+                    chain,
+                    &depths,
+                    registry,
+                    depth,
+                    epoch_key,
+                    &context,
+                    &row.envelope,
+                )?,
                 _ => PathCheck::Invalid,
             };
             match outcome {
@@ -617,6 +628,7 @@ fn sealed_to_non_derived<'k>(
 /// Opens one candidate for the version at `depth` and authenticates it.
 fn try_candidate(
     chain: &SpaceChain,
+    depths: &BTreeMap<&str, usize>,
     registry: &Registry,
     depth: usize,
     epoch_key: &[u8; 32],
@@ -624,7 +636,7 @@ fn try_candidate(
     envelope: &[u8],
 ) -> ProtocolResult<PathCheck> {
     match open_account_envelope(registry, epoch_key, context, envelope)? {
-        Outcome::Ok(key) => authenticate(chain, registry, depth, key),
+        Outcome::Ok(key) => authenticate(chain, depths, registry, depth, key),
         Outcome::Invalid => Ok(PathCheck::Unopened),
         Outcome::Unsupported => Ok(PathCheck::Unsupported),
     }
