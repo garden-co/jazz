@@ -7079,4 +7079,82 @@ mod tests {
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "team");
     }
+
+    /// An address names one row: an `InheritsFrom` in a table's own policy
+    /// whose `id_column` or `table_column` is one of that table's array
+    /// columns is refused as `NonScalarAddressColumn`, at its own path and
+    /// under `Or`; the scalar pair passes.
+    ///
+    /// ```text
+    /// members.insert = IF(scopeId, identifiers: [uuid])          ✗
+    /// members.insert = false ∨ IF(scopeIds: [uuid], identifier)  ✗
+    /// members.insert = IF(scopeId, identifier)                   ✓
+    /// ```
+    ///
+    /// A unit test: only Jazz's system tables may hold an `InheritsFrom`,
+    /// and the registered fragment has scalar address columns alone, so no
+    /// deployable schema reaches these top-level paths. The integration
+    /// tests in `inherits_from_refusals.rs` reach the check inside an
+    /// `exists` on an app table.
+    #[test]
+    fn a_top_level_inherits_from_with_a_non_scalar_address_column_is_refused() {
+        let uuids = || ColumnType::Array {
+            element: Box::new(ColumnType::Uuid),
+        };
+        let address = |table_column: &str, id_column: &str| PolicyExpr::InheritsFrom {
+            operation: Operation::Select,
+            table_column: table_column.to_owned(),
+            id_column: id_column.to_owned(),
+            tables: vec!["projects".to_owned()],
+        };
+        let members = |check: PolicyExpr| {
+            SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("projects")
+                        .column("name", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("__e2ee_members")
+                        .column("scopeId", ColumnType::Uuid)
+                        .column("identifier", ColumnType::Uuid)
+                        .column("identifiers", uuids())
+                        .column("scopeIds", uuids())
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(check),
+                        ),
+                )
+                .build()
+        };
+        let insert = "$.__e2ee_members.policies.insert.with_check";
+
+        check_deployable_policies(&members(address("scopeId", "identifier")))
+            .expect("a scalar address passes");
+        for (check, path, column) in [
+            (
+                address("scopeId", "identifiers"),
+                format!("{insert}.InheritsFrom.id_column"),
+                "identifiers",
+            ),
+            (
+                PolicyExpr::Or(vec![PolicyExpr::False, address("scopeIds", "identifier")]),
+                format!("{insert}.Or[1].InheritsFrom.table_column"),
+                "scopeIds",
+            ),
+        ] {
+            let error = check_deployable_policies(&members(check)).expect_err("refused");
+            assert_eq!(
+                error.unsupported_policy(),
+                Some(UnsupportedPolicy::NonScalarAddressColumn),
+                "{error}"
+            );
+            assert_eq!(error.path, path, "{error}");
+            assert!(
+                error.message().contains(&format!("`{column}` is not")),
+                "{error}"
+            );
+        }
+    }
 }
