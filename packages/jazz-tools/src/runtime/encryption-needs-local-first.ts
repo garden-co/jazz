@@ -57,7 +57,7 @@ function needsLocalFirstMessage(
   cause: unknown,
 ): string {
   const lead = creatorMembership
-    ? `Creating a space in \`${table}\` with automatic membership needs the local-first client.`
+    ? `Creating a space in \`${table}\` with automatic membership needs the local-first client. Pass \`addCreatorAsMember: false\` to create the space without adding its creator.`
     : column === undefined
       ? `\`${table}\` has end-to-end encrypted columns, which need the local-first client.`
       : `\`${table}.${column}\` is end-to-end encrypted, which needs the local-first client.`;

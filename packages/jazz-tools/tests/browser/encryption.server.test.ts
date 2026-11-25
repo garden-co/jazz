@@ -610,7 +610,7 @@ it("a thin load with a loader writes and subscribes to an encrypted table before
   expect(wire.holds(marker)).toBe(false);
 }, 240_000);
 
-it("a thin load without a loader refuses an encrypted write with EncryptionNeedsLocalFirstError, and writes plain rows", async () => {
+it("without a loader, a thin client refuses encrypted writes and creates spaces only when automatic membership is disabled", async () => {
   const server = await serverAt("encryption-thin-none");
   const session = await loadThin(server, uniqueDbName("encryption-thin-none-db"));
   const thin = session.getSnapshot().client!.db;
@@ -631,15 +631,23 @@ it("a thin load without a loader refuses an encrypted write with EncryptionNeeds
   expect((refused as EncryptionNeedsLocalFirstError).reason).toBe("no-loader");
 
   const id = crypto.randomUUID();
+  const project = { name: "plain", ownerId: account };
+  const refusedSpace = await Promise.resolve()
+    .then(() => thin.insert(app.projects, project, { id }))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  expect(refusedSpace).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+  const spaceError = refusedSpace as EncryptionNeedsLocalFirstError;
+  expect(spaceError.reason).toBe("no-loader");
+  expect(spaceError.message).toContain('client: () => import("jazz-tools/local-first")');
+  expect(spaceError.message).toContain("addCreatorAsMember: false");
+  expect(isThinDb(thin)).toBe(true);
+
   await step(
     "plain write",
-    thin
-      .insert(app.projects, { name: "plain", ownerId: account }, {
-        id,
-      } as never)
-      .wait({
-        tier: "global",
-      }),
+    thin.insert(app.projects, project, { id, addCreatorAsMember: false }).wait({ tier: "global" }),
   );
   expect(isThinDb(thin)).toBe(true);
 }, 120_000);
