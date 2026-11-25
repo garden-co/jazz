@@ -22,6 +22,12 @@ Install the Sandbox SDK next to `jazz-tools`:
 pnpm add @vercel/sandbox
 ```
 
+`@vercel/sandbox` 4.1.0 to 5.0.0 don't load in a function Vercel doesn't bundle, such as a plain
+Node function in `api/`: they `require()` an ES module (through `@vercel/drives`), which Vercel's
+Node runtime doesn't allow, so `vercel()` fails on the first request with "vercel() could not load
+the @vercel/sandbox package: it require()s an ES module…". Next.js bundles them and isn't affected.
+Outside Next.js, install `@vercel/sandbox@4.0.0`.
+
 Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
