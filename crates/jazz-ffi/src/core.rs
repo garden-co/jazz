@@ -1355,7 +1355,12 @@ impl Core {
                     .collect::<Result<Vec<_>>>()?;
                 Json::from(reports)
             }
-            _ => block_on(encryption.call(op, args))?,
+            _ => match block_on(encryption.call(op, args)) {
+                // Whatever closing cut short reports (the store's callback
+                // shut, say).
+                Err(_) if self.open.is_closed() => return Err(FfiError::Closed),
+                called => called?,
+            },
         };
         Ok(result.to_string())
     }
@@ -1552,11 +1557,18 @@ impl Core {
     /// waiting calls end `Closed` at once, and what it began is cleaned up.
     ///
     /// Returns once no host callback runs (but the caller's own).
+    ///
+    /// From the client's own thread (inside the private store's callback)
+    /// it waits for nothing: see [`Self::close_on_client_thread`].
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
         // Before `closed` is set: an open of the store right after this
         // close must wait for it, not be refused.
         if !self.derived {
             self.jazz.begin_stopping();
+        }
+        if self.jazz.on_client_thread() {
+            self.close_on_client_thread();
+            return Ok(());
         }
         if !self.open.closed.close() {
             return Ok(());
@@ -1566,21 +1578,10 @@ impl Core {
             // transactions roll back and its uploads abort. Its ids are read
             // on the client's thread, after any begin that came before.
             let open = self.open.clone();
-            let _ = block_on(self.jazz.with_client(move |client| async move {
-                let owned: Vec<u64> = open.owned().drain().collect();
-                for id in owned {
-                    if let Some((transaction, _)) =
-                        TRANSACTIONS.with(|t| t.borrow_mut().0.remove(&id))
-                    {
-                        let _ = transaction.rollback();
-                    }
-                    let upload = UPLOADS.with(|u| u.borrow_mut().0.remove(&id));
-                    if let Some(entry) = upload {
-                        let _ = client.abort_streaming_upload(entry.upload).await;
-                    }
-                }
-                Ok(())
-            }));
+            let _ = block_on(
+                self.jazz
+                    .with_client(move |client| release_owned(open, client)),
+            );
             self.end_subscriptions();
             self.close_gates();
             return Ok(());
@@ -1603,6 +1604,42 @@ impl Core {
         self.close_gates();
         result?;
         Ok(())
+    }
+
+    /// [`Self::close_within`] called on the client's own thread, inside a
+    /// callback it makes (the private store's): everything closing waits
+    /// for runs on that thread, after the callback returns, so it must not
+    /// wait here, nor clean up under the operation that called the store.
+    /// The handle is closed when this returns (later calls fail `Closed`, no
+    /// new host callback starts); the clean-up and the stop are sent to the
+    /// client, which runs them once the callback returns. A timeout is not
+    /// waited for: nothing drains.
+    fn close_on_client_thread(&self) {
+        use futures_util::FutureExt as _;
+        if !self.open.closed.close() {
+            return;
+        }
+        for gate in self.gates() {
+            gate.shut();
+        }
+        // Each is sent on its first poll; its answer isn't waited for.
+        if self.derived {
+            let open = self.open.clone();
+            let _ = self
+                .jazz
+                .with_client(move |client| release_owned(open, client))
+                .now_or_never();
+        } else {
+            let _ = self
+                .jazz
+                .with_client(|client| async move {
+                    clean_up_open(client).await;
+                    Ok(())
+                })
+                .now_or_never();
+            let _ = self.jazz.shutdown().now_or_never();
+        }
+        self.end_subscriptions();
     }
 
     /// Each open watch's last call: `None`, the app closed.
@@ -1630,6 +1667,22 @@ pub(crate) fn clean_up(jazz: &Jazz) {
         clean_up_open(client).await;
         Ok(())
     }));
+}
+
+/// What a derived handle (`open`) began, rolled back and aborted on the
+/// client's thread as it closes: the client it shares goes on.
+async fn release_owned(open: Open, client: JazzClient) -> jazz_app_support::Result<()> {
+    let owned: Vec<u64> = open.owned().drain().collect();
+    for id in owned {
+        if let Some((transaction, _)) = TRANSACTIONS.with(|t| t.borrow_mut().0.remove(&id)) {
+            let _ = transaction.rollback();
+        }
+        let upload = UPLOADS.with(|u| u.borrow_mut().0.remove(&id));
+        if let Some(entry) = upload {
+            let _ = client.abort_streaming_upload(entry.upload).await;
+        }
+    }
+    Ok(())
 }
 
 /// [`clean_up`], on the client's thread.

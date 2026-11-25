@@ -41,7 +41,11 @@
  * Closing waits for a token callback that is running, so make yours
  * cancellable and cancel it as you close. From inside a token callback do
  * step 1 only, and the rest later from another thread: waiting there
- * deadlocks.
+ * deadlocks. The same goes for the private store's callback
+ * (jazz_open_encrypted), which runs on the client's own thread: there
+ * "close" waits for nothing (it ignores a timeoutMs: nothing drains) and
+ * returns at once, the handle closed; the client stops once the callback
+ * returns.
  *
  * One app at a time has a persistent store open: jazz_open of a dataDir
  * another app has open, in this process or another, fails with kind
@@ -254,6 +258,13 @@ JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *
  * or a message. Requests and answers carry key bytes: jazz zeroes *payload
  * before it frees it, and its own copy of the request once the callback
  * returns, so wipe any copy of either your callback makes.
+ *
+ * The callback runs on the client's thread, which every other call on the
+ * handle waits for: from inside it, call nothing on the handle but "close"
+ * (jazz_call), which closes it without waiting (see the top): its calls
+ * fail "closed" from then on, no store or token callback starts after this
+ * one, and the client stops once this one returns. Free the handle later,
+ * from another thread.
  */
 typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload);
 

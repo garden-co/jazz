@@ -589,6 +589,155 @@ async fn closing_ends_a_wait_until_ready() {
     result.unwrap();
 }
 
+/// A C host's store that closes its own handle from inside a request, once
+/// armed with it.
+#[derive(Default)]
+struct ClosingStore {
+    store: HostStore,
+    handle: std::sync::atomic::AtomicPtr<jazz_ffi::c_abi::JazzHandle>,
+    /// What its "close" answered: the result, or the error JSON.
+    closed: Mutex<Option<Result<String, String>>>,
+}
+
+/// [`c_store`], calling "close" on the armed handle first.
+unsafe extern "C" fn c_closing_store(
+    ctx: *mut std::ffi::c_void,
+    request: *const std::ffi::c_char,
+    payload: *mut *mut std::ffi::c_char,
+) -> i32 {
+    use std::ffi::CStr;
+    // SAFETY: the test passes a live `ClosingStore` as `ctx`; the handle it
+    // is armed with is live, and closing doesn't free it.
+    unsafe {
+        let closing = &*(ctx as *const ClosingStore);
+        let handle = closing
+            .handle
+            .swap(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+        if !handle.is_null() {
+            let mut err = std::ptr::null_mut();
+            let out =
+                jazz_ffi::c_abi::jazz_call(handle, c"close".as_ptr(), c"{}".as_ptr(), &mut err);
+            let answer = if out.is_null() {
+                let error = CStr::from_ptr(err).to_str().unwrap().to_owned();
+                jazz_ffi::c_abi::jazz_string_free(err);
+                Err(error)
+            } else {
+                let result = CStr::from_ptr(out).to_str().unwrap().to_owned();
+                jazz_ffi::c_abi::jazz_string_free(out);
+                Ok(result)
+            };
+            *closing.closed.lock().unwrap() = Some(answer);
+        }
+        c_store(
+            std::ptr::from_ref(&closing.store) as *mut _,
+            request,
+            payload,
+        )
+    }
+}
+
+/// Contract: a C host's store callback, which runs on the client's thread,
+/// may call "close" on its own handle: it returns at once without waiting
+/// for that thread (no deadlock), the request it is answering still gets
+/// its answer, the handle's calls fail "closed" from then on, and the
+/// handle frees from another thread.
+///
+/// ```text
+/// host ──prepareSpace──► client thread ──save──► store callback ──"close"──► null
+///                                                       ◄── answer
+/// host ──encryptionCall──► closed ► jazz_close
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_store_callback_closes_its_own_handle() {
+    use std::ffi::{CStr, CString, c_char};
+    let app = start().await;
+    let config = app.config();
+    let result = tokio::task::spawn_blocking(move || {
+        let closing = Arc::new(ClosingStore::default());
+        let config = CString::new(config).unwrap();
+        /// A handle a test thread may call into.
+        #[derive(Clone, Copy)]
+        struct Handle(*mut jazz_ffi::c_abi::JazzHandle);
+        // SAFETY: the C ABI takes calls on a handle from any thread.
+        unsafe impl Send for Handle {}
+        let call = |handle: Handle, method: &CStr, args: Value| {
+            let args = CString::new(args.to_string()).unwrap();
+            let mut err: *mut c_char = std::ptr::null_mut();
+            // SAFETY: a live handle and NUL-terminated strings.
+            unsafe {
+                let out =
+                    jazz_ffi::c_abi::jazz_call(handle.0, method.as_ptr(), args.as_ptr(), &mut err);
+                let (text, ok) = if out.is_null() {
+                    (err, false)
+                } else {
+                    (out, true)
+                };
+                let read = parse(CStr::from_ptr(text).to_str().unwrap());
+                jazz_ffi::c_abi::jazz_string_free(text);
+                if ok { Ok(read) } else { Err(read) }
+            }
+        };
+        // SAFETY: valid strings, a live store and a writable error slot.
+        let handle = unsafe {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let handle = jazz_ffi::c_abi::jazz_open_encrypted(
+                config.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+                Some(c_closing_store),
+                Arc::as_ptr(&closing) as *mut std::ffi::c_void,
+                &mut err,
+            );
+            assert!(!handle.is_null(), "{:?}", CStr::from_ptr(err));
+            Handle(handle)
+        };
+        let encryption = move |op: &str, args: Value| {
+            call(handle, c"encryptionCall", json!({ "op": op, "args": args }))
+        };
+        assert_eq!(
+            encryption("waitUntilReady", json!({ "timeoutMs": 30000 })).unwrap(),
+            "active"
+        );
+        let id = jazz_app_support::ObjectId::new().to_string();
+        let space = encryption("spaceRow", json!({ "table": "projects", "id": id })).unwrap();
+        closing
+            .handle
+            .store(handle.0, std::sync::atomic::Ordering::SeqCst);
+        // Preparing the space saves its key: the store callback closes.
+        let (sent, prepared) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(encryption("prepareSpace", space));
+        });
+        let prepared = prepared
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the call the store callback closed under ends: no deadlock");
+        let closed = closing.closed.lock().unwrap().clone();
+        assert_eq!(
+            closed,
+            Some(Ok("null".to_owned())),
+            "the callback's close returns at once"
+        );
+        if let Err(failure) = &prepared {
+            assert_eq!(failure["kind"], "closed", "{failure}");
+        }
+        let after = encryption("state", json!({})).unwrap_err();
+        assert_eq!(after["kind"], "closed", "{after}");
+        let (sent, freed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let handle = handle;
+            // SAFETY: no other call on the handle runs or follows.
+            unsafe { jazz_ffi::c_abi::jazz_close(handle.0) };
+            let _ = sent.send(());
+        });
+        freed
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the closed handle frees");
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// Alice's host receives a refusal when her device has no key for the project,
 /// whether she edits a task directly or stages the write in a transaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

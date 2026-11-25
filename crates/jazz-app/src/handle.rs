@@ -419,6 +419,15 @@ impl Jazz {
         let _ = self.info.replaced.set(session_closing);
     }
 
+    /// Whether the caller runs on this app's client thread: inside a
+    /// callback the client makes there (a foreign private store's), where
+    /// waiting for the client deadlocks, as it waits for the caller. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn on_client_thread(&self) -> bool {
+        CLIENT_THREAD.get() == Arc::as_ptr(&self.info.life) as usize
+    }
+
     /// This handle with its calls' waits on the server ended once `ends`
     /// reads true: for a binding's handle that closes while the client
     /// lives on. Not public API.
@@ -790,6 +799,7 @@ fn run(
     // runtime.
     let store = std::rc::Rc::new(std::cell::RefCell::new(None::<crate::lifecycle::StoreDir>));
     let life = stopper.life.clone();
+    CLIENT_THREAD.set(Arc::as_ptr(&life) as usize);
     let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -951,6 +961,12 @@ fn run(
             Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
         });
     }
+}
+
+thread_local! {
+    /// On a client's thread, its run's [`crate::lifecycle::Life`] (by
+    /// address): what [`Jazz::on_client_thread`] reads.
+    static CLIENT_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How a client's run ended.
