@@ -309,7 +309,7 @@ describe("schema.ts encrypted enums", () => {
     const cwd = await tempDir();
     await writeFile(join(cwd, "package.json"), '{"type":"module"}');
     const appFile = join(cwd, "jazz.app.json");
-    const writeSchema = (variants: string[], indexes: string[]) =>
+    const writeSchema = (variants: string[], indexes: string[], column = "status") =>
       writeFile(
         join(cwd, "schema.ts"),
         `import { schema as s } from "jazz-tools";
@@ -317,7 +317,7 @@ export const schema = s.defineSchema({
   notes: s.table({
     title: s.string(),
     rank: s.int(),
-    status: s.enum(${variants.map((variant) => JSON.stringify(variant)).join(", ")}).optional().default("draft").encrypted(),
+    ${column}: s.enum(${variants.map((variant) => JSON.stringify(variant)).join(", ")}).optional().default("draft").encrypted(),
   }, {}, { space: "id" }).indexOnly(${JSON.stringify(indexes)}),
 });
 const { definePermissions, isMember } = schema;
@@ -354,6 +354,38 @@ export const permissions = definePermissions({
       await expect(generateApp({ cwd })).resolves.toMatchObject({ wroteFiles: false });
       expect(await readFile(appFile, "utf8")).toBe(first);
     }
+  });
+
+  it("keeps the original sealed enum type when a migration renames a widened column", async () => {
+    const { cwd, appFile, writeSchema } = await encryptedEnumApp();
+    const variants = ["draft", "sent"];
+    await writeSchema(variants, ["rank"]);
+    await createAppMigration({ cwd, name: "append-status" });
+    await generateApp({ cwd });
+
+    await writeSchema(variants, ["rank"], "phase");
+    const rename = await createAppMigration({ cwd, name: "rename-status" });
+    expect(rename.todos).toHaveLength(1);
+    const stubPath = rename.file!;
+    const stub = await readFile(stubPath, "utf8");
+    await writeFile(stubPath, stub.replace(rename.todos![0]!, 'phase: m.renameFrom("status"),'));
+
+    await generateApp({ cwd });
+    expect(
+      JSON.parse(await readFile(appFile, "utf8")).tables.notes.encryption.columns.phase,
+    ).toEqual({
+      type: { enum: variants, optional: true },
+      sealedType: { enum: ["draft"], optional: true },
+      default: "draft",
+    });
+    await expect(generateApp({ cwd })).resolves.toMatchObject({ wroteFiles: false });
+
+    await writeSchema([...variants, "archived"], ["title", "rank"], "phase");
+    await createAppMigration({ cwd, name: "append-phase" });
+    await generateApp({ cwd });
+    expect(
+      JSON.parse(await readFile(appFile, "utf8")).tables.notes.encryption.columns.phase.sealedType,
+    ).toEqual({ enum: ["draft"], optional: true });
   });
 
   it("names the column and the required schema change when appending variants alone", async () => {

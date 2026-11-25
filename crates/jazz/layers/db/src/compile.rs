@@ -1557,7 +1557,14 @@ impl<'a> Ctx<'a> {
             return Ok(());
         };
         match &query.flat_join {
-            None => check_operators(table, &query.filters, &query.order_by)?,
+            None => {
+                let source_order = query.order_by.iter().filter(|order| {
+                    !query.aggregate.as_ref().is_some_and(|aggregate| {
+                        aggregate.aggregates.iter().any(|a| a.alias == order.column)
+                    })
+                });
+                check_operators_by(&|column| table.column(column), &query.filters, source_order)?;
+            }
             Some(flat) => {
                 let mut sources: Vec<(&str, &'a Table)> = vec![(
                     flat.root_alias.as_deref().unwrap_or(query.table.as_str()),
@@ -3585,10 +3592,10 @@ fn check_operators(
 
 /// [`check_operators`], with `lookup` finding the column a name in the
 /// query refers to (a flat join's names reach several tables).
-fn check_operators_by<'t>(
+fn check_operators_by<'t, 'o>(
     lookup: &dyn Fn(&str) -> Option<&'t crate::values::Column>,
     filters: &[Predicate],
-    order_by: &[crate::query::OrderBy],
+    order_by: impl IntoIterator<Item = &'o crate::query::OrderBy>,
 ) -> Result<(), Error> {
     // `None`: the column supports everything; `Some(kind)`: it is one of
     // the restricted kinds.

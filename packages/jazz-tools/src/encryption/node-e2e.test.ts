@@ -78,6 +78,11 @@ async function device(
 
 type Device = Awaited<ReturnType<typeof device>>;
 
+it("marks generated encryption space tables at runtime", () => {
+  expect(app.projects._encryptionSpace).toBe(true);
+  expect(app.tasks).not.toHaveProperty("_encryptionSpace");
+});
+
 it("adds the creator and manages members through typed tables and transactions", async () => {
   const host = await serve();
   const alice = await device(host);
