@@ -373,6 +373,27 @@ describe("later versions of an encrypted app", () => {
     expect((await readdir(migrationsDir, { recursive: true })).sort()).toEqual(before);
   });
 
+  // Rust's refusal of a retyped encrypted column, which keeps its stored bytes.
+  const TYPE_CHANGE = /messages\.text/;
+
+  it("refuses an encrypted column's new plaintext type, which stores the same bytes", async () => {
+    const root = await firstVersion();
+    const before = await readdir(join(root, "migrations"), { recursive: true });
+    await writeFile(join(root, "schema.ts"), chat({ text: "s.int().encrypted()" }));
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
+    expect(await readdir(join(root, "migrations"), { recursive: true })).toEqual(before);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(TYPE_CHANGE);
+  });
+
+  it("refuses a new plaintext type beside another change", async () => {
+    const root = await firstVersion();
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ text: "s.int().encrypted()", rooms: ", topic: s.string().optional()" }),
+    );
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
+  });
+
   it("leaves a possible encrypted rename to the author and checks it at generate", async () => {
     const root = await firstVersion();
     await writeFile(join(root, "schema.ts"), chat().replace("text:", "subject:"));

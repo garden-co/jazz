@@ -75,14 +75,17 @@ async function settle(fake: ReturnType<typeof fakeEncryption>) {
 }
 
 describe("a browser waiting for approval", () => {
-  it("is told so wherever the user is, with the code to type elsewhere", async () => {
-    const fake = (mocks.fake = fakeEncryption({ status: "awaiting-approval", devices: [] }));
-    render(<App />);
-    await screen.findByText("This browser is waiting for approval");
-    expect(screen.getByText(/restore with your recovery phrase or passkey/)).not.toBeNull();
-    fake.challenge();
-    await screen.findByText("654321");
-  });
+  it.each(["awaiting-approval", "reenrolled"] as const)(
+    "is told so wherever the user is (%s), with the code to type elsewhere",
+    async (status) => {
+      const fake = (mocks.fake = fakeEncryption({ status, devices: [] }));
+      render(<App />);
+      await screen.findByText("This browser is waiting for approval");
+      expect(screen.getByText(/restore with your recovery phrase or passkey/)).not.toBeNull();
+      fake.challenge();
+      await screen.findByText("654321");
+    },
+  );
 });
 
 describe("finishing leaving this browser", () => {
@@ -109,18 +112,17 @@ describe("finishing leaving this browser", () => {
     expect(readLeaveRecord()).toBeNull();
   });
 
-  it("signs out at start-up when the device ID changed, then drops the record", async () => {
-    writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-old" });
-    mocks.fake = fakeEncryption({
-      deviceId: "device-new",
-      status: "awaiting-approval",
-      devices: [],
-    });
-    render(<App />);
-    await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(readLeaveRecord()).toBeNull());
-    expect(mocks.jazzRefresh).toHaveBeenCalled();
-  });
+  it.each(["reenrolled", "awaiting-approval"] as const)(
+    "signs out at start-up when the device ID changed (%s), then drops the record",
+    async (status) => {
+      writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-old" });
+      mocks.fake = fakeEncryption({ deviceId: "device-new", status, devices: [] });
+      render(<App />);
+      await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(readLeaveRecord()).toBeNull());
+      expect(mocks.jazzRefresh).toHaveBeenCalled();
+    },
+  );
 
   it("does not sign out while the device ID is the same", async () => {
     writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });

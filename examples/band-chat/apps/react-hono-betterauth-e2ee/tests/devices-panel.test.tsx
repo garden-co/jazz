@@ -184,13 +184,18 @@ describe("approving a new browser", () => {
 });
 
 describe("a browser waiting for approval", () => {
-  it("shows it is waiting and offers every way forward", async () => {
-    show(fakeEncryption({ status: "awaiting-approval" }));
-    expect(await screen.findAllByText("This browser is waiting for approval")).toHaveLength(2);
-    expect(screen.getAllByRole("button", { name: "Show approval code" }).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Recovery phrase")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "Restore with passkey" })).not.toBeNull();
-  });
+  it.each(["awaiting-approval", "reenrolled"] as const)(
+    "shows it is waiting (%s) and offers every way forward",
+    async (status) => {
+      show(fakeEncryption({ status }));
+      expect(await screen.findAllByText("This browser is waiting for approval")).toHaveLength(2);
+      expect(screen.getAllByRole("button", { name: "Show approval code" }).length).toBeGreaterThan(
+        0,
+      );
+      expect(screen.getByLabelText("Recovery phrase")).not.toBeNull();
+      expect(screen.getByRole("button", { name: "Restore with passkey" })).not.toBeNull();
+    },
+  );
 
   it("answers a challenge and shows the code to type on the other device", async () => {
     const fake = fakeEncryption({ status: "awaiting-approval" });

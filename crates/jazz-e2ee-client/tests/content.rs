@@ -396,8 +396,20 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
 
-    assert!(all(&db, query.clone()).unwrap().is_empty());
-    assert!(all(&db, query.clone()).unwrap().is_empty());
+    // Each read reports the missing version itself; the listener hears it once.
+    alice.take_reports();
+    for _ in 0..2 {
+        assert!(all(&db, query.clone()).unwrap().is_empty());
+        let taken = alice.take_reports();
+        assert!(
+            taken.iter().any(|report| matches!(
+                report,
+                Report::MissingKey { table, space: missing, .. }
+                    if table == "notes" && missing.identifier == space.to_string()
+            )),
+            "{taken:?}"
+        );
+    }
     alice.flush_reports();
     let reports = seen.borrow();
     assert_eq!(
@@ -542,19 +554,19 @@ fn a_cell_copied_into_another_column_does_not_open() {
     let cells = BTreeMap::from([("note".to_owned(), body)]);
     block_on(server.update("notes", copied, cells, Default::default())).unwrap();
     let query = Query::from("notes");
-    let seen = observe_reports(&client);
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
+    // What the subscription reported; the read below must report it itself.
+    client.take_reports();
 
     let rows = all(&db, query).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         [untouched]
     );
-    client.flush_reports();
     assert_eq!(
-        unreadable(std::mem::take(&mut *seen.borrow_mut())),
+        unreadable(client.take_reports()),
         [(
             copied,
             Some("note".to_owned()),
@@ -785,14 +797,11 @@ fn a_plaintext_only_select_returns_every_row() {
     let _live =
         block_on(db.subscribe(&db.prepare_query(&titles).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
-    alice.flush_reports();
-    let seen = observe_reports(&alice);
-    seen.borrow_mut().clear();
+    alice.take_reports();
     let rows = all(&db, titles).unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| cell(row, "title") == text("title")));
-    alice.flush_reports();
-    assert!(seen.borrow().is_empty());
+    assert_eq!(alice.take_reports(), Vec::new());
 }
 
 /// Alice's store with a row written before a migration added `notes`'

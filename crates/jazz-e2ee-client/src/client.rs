@@ -693,6 +693,15 @@ impl E2eeClient {
         self.shared.flush(Vec::new());
     }
 
+    /// Test observation: takes every report reads made since the last
+    /// call, oldest first, whether or not it was delivered and before
+    /// listeners' de-duplication, so a test can tell which read made one.
+    /// Listeners still get them as usual.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn take_reports(&self) -> Vec<Report> {
+        self.shared.taken.borrow_mut().drain(..).collect()
+    }
+
     /// Calls `f` with the keys this device holds.
     #[cfg(any(test, feature = "testing"))]
     pub fn with_held<T>(&self, f: impl FnOnce(&jazz_e2ee::protocol::content::HeldKeys) -> T) -> T {

@@ -1393,6 +1393,22 @@ fn builders_write_the_specified_bytes() {
     );
 }
 
+/// The keys alice holds, checked to fit `chain` and to hold at least one
+/// version, so `lacking_held` reaches its per-version checks instead of
+/// stopping at the keys.
+fn held_keys(world: &World, chain: &SpaceChain) -> SpaceKeys {
+    let keys = world.acquire(ALICE).keys;
+    assert!(keys.depths().next().is_some(), "alice holds a version");
+    assert!(
+        chain
+            .versions
+            .iter()
+            .any(|version| keys.epoch_ids().any(|held| held == version.epoch_id)),
+        "the held keys belong to this chain"
+    );
+    keys
+}
+
 /// Calls every function that combines a chain with a space ledger (and,
 /// where it takes one, an account directory) and expects each to refuse
 /// the evidence as not coming from one read.
@@ -1411,7 +1427,7 @@ fn assert_inconsistent(
     );
     assert_eq!(members::holders(chain, ledger, 0).err(), inconsistent);
     assert_eq!(
-        lacking_held(chain, ledger, directory, &SpaceKeys::new(chain)).err(),
+        lacking_held(chain, ledger, directory, &held_keys(world, chain)).err(),
         inconsistent
     );
     assert_eq!(rotation_mark(chain, ledger, directory).err(), inconsistent);
@@ -1506,7 +1522,7 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
     ] {
         assert_eq!(rotation_mark(chain, ledger, directory).err(), inconsistent);
         assert_eq!(
-            lacking_held(chain, ledger, directory, &SpaceKeys::new(chain)).err(),
+            lacking_held(chain, ledger, directory, &held_keys(&world, chain)).err(),
             inconsistent
         );
         assert_eq!(
@@ -2500,7 +2516,7 @@ fn a_read_for_one_account_serves_only_that_accounts_acquisition() {
         inconsistent
     );
     assert_eq!(
-        lacking_held(&chain, &bobs, &directory, &SpaceKeys::new(&chain)).err(),
+        lacking_held(&chain, &bobs, &directory, &held_keys(&world, &chain)).err(),
         inconsistent
     );
     assert_eq!(rotation_mark(&chain, &bobs, &directory).err(), inconsistent);

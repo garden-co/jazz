@@ -368,6 +368,80 @@ mod tests {
         }
     }
 
+    /// Alice regenerates her bindings after editing the type notes.detail
+    /// shipped with in history: generate, `--check` and `migrations create`
+    /// all refuse, naming the version and the column, and leave both files
+    /// as they were.
+    fn check_recorded_history(lang: Lang) {
+        let shipped = r#"{
+            "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": { "notes": {
+                "columns": { "summary": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "summary": "string?" } }
+            } },
+            "history": { "v1": { "tables": { "notes": {
+                "columns": { "summary": "bytes", "detail": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "summary": "string?", "detail": "string" } }
+            } } } },
+            "migrations": [{ "from": "v1", "migrate": { "notes": {
+                "detail": { "drop": "bytes", "backwardsDefault": "" }
+            } } }]
+        }"#;
+        let dir = dir();
+        let langs = [lang.into()];
+        let app_path = dir.join(APP_FILE);
+        std::fs::write(&app_path, shipped).unwrap();
+        assert_eq!(
+            generate(&dir, &langs, false).unwrap().written,
+            [lang.file()]
+        );
+        assert_eq!(
+            generate(&dir, &langs, false).unwrap().current,
+            [lang.file()]
+        );
+        let bindings = dir.join(lang.file());
+        let original = std::fs::read(&bindings).unwrap();
+        let app = App::load(shipped.as_bytes()).unwrap();
+        let (history, _) = app
+            .compiled
+            .schemas
+            .iter()
+            .find(|(hash, _)| *hash != app.compiled.current)
+            .unwrap();
+
+        let edited = shipped.replace(r#""detail": "string""#, r#""detail": "int""#);
+        std::fs::write(&app_path, &edited).unwrap();
+        for error in [
+            generate(&dir, &langs, false)
+                .expect_err("generate must preserve the committed history"),
+            generate(&dir, &langs, true).expect_err("validation must refuse the edit"),
+            migrations_create(&dir, &langs, "edit-history")
+                .expect_err("migration creation must refuse the edit"),
+        ] {
+            assert!(
+                error.contains(&history.to_string()[..12])
+                    && error.contains("notes.detail")
+                    && error.contains("can't change"),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&bindings).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(app_path).unwrap(), edited);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice regenerates TypeScript bindings with a dropped column in their history.
+    #[test]
+    fn typescript_bindings_protect_recorded_history() {
+        check_recorded_history(Lang::TypeScript);
+    }
+
+    /// Alice regenerates Rust bindings with a dropped column in their history.
+    #[test]
+    fn rust_bindings_protect_recorded_history() {
+        check_recorded_history(Lang::Rust);
+    }
+
     /// `notes` with its encrypted column `column` declared as `declaration`.
     fn notes_tables(
         column: &str,
@@ -389,15 +463,24 @@ mod tests {
         std::fs::write(path, app.to_string()).unwrap();
     }
 
-    /// Both commands refuse the app file as it is, naming `column`, and
-    /// leave the bindings as they were.
-    fn assert_refused(dir: &Path, langs: &[Selected], column: &str, bindings: &[u8]) {
+    /// Both commands refuse the app file as it is, naming `column` (and
+    /// `reason`, when given), and leave the bindings as they were.
+    fn assert_refused(
+        dir: &Path,
+        langs: &[Selected],
+        column: &str,
+        reason: Option<&str>,
+        bindings: &[u8],
+    ) {
         for error in [
             migrations_create(dir, langs, "edit").unwrap_err(),
             generate(dir, langs, false).unwrap_err(),
             generate(dir, langs, true).unwrap_err(),
         ] {
             assert!(error.contains(column), "{error}");
+            if let Some(reason) = reason {
+                assert!(error.contains(reason), "{reason:?} in {error}");
+            }
         }
         assert_eq!(
             std::fs::read(dir.join(Lang::Rust.file())).unwrap(),
@@ -424,31 +507,45 @@ mod tests {
         let string = json!({"detail": "string?"});
         let empty = json!({});
         let enum_columns = |variants: &[&str]| json!({"detail": sealed(variants)});
-        let cases: [(_, _, &[&str], &[&str], bool); 7] = [
-            (string.clone(), empty.clone(), &[], &[], false),
-            (string.clone(), string.clone(), &["detail"], &[], false),
-            (empty, string.clone(), &[], &[], false),
-            (string, json!({"detail": "int?"}), &[], &[], false),
+        // `Ok(())`: accepted. `Err(reason)`: refused, naming notes.detail
+        // and `reason` when there is one.
+        let cases: [(_, _, &[&str], &[&str], Result<(), Option<&str>>); 7] = [
+            (
+                string.clone(),
+                empty.clone(),
+                &[],
+                &[],
+                Err(Some("holds ciphertext")),
+            ),
+            (
+                string.clone(),
+                string.clone(),
+                &["detail"],
+                &[],
+                Err(Some("token column __e2ee_eq_detail stays")),
+            ),
+            (empty, string.clone(), &[], &[], Err(Some("held plaintext"))),
+            (string, json!({"detail": "int?"}), &[], &[], Err(None)),
             (
                 enum_columns(&["a", "b"]),
                 enum_columns(&["a", "c"]),
                 &[],
                 &[],
-                false,
+                Err(None),
             ),
             (
                 enum_columns(&["a", "b"]),
                 enum_columns(&["a"]),
                 &[],
                 &[],
-                true,
+                Ok(()),
             ),
             (
                 enum_columns(&["a", "b"]),
                 enum_columns(&["a", "b", "c"]),
                 &[],
                 &[],
-                true,
+                Ok(()),
             ),
         ];
         let app = |columns, equality: &[&str], indexes: &[&str]| {
@@ -461,7 +558,7 @@ mod tests {
                 } }
             })
         };
-        for (old, new, old_eq, new_eq, allowed) in cases {
+        for (old, new, old_eq, new_eq, expected) in cases {
             let dir = dir();
             let langs = [Lang::Rust.into()];
             let path = dir.join(APP_FILE);
@@ -469,10 +566,9 @@ mod tests {
             generate(&dir, &langs, false).unwrap();
             let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
             write_app(&path, app(new, new_eq, &["title"]));
-            if allowed {
-                assert_accepted(&dir, &langs);
-            } else {
-                assert_refused(&dir, &langs, "notes.detail", &original);
+            match expected {
+                Ok(()) => assert_accepted(&dir, &langs),
+                Err(reason) => assert_refused(&dir, &langs, "notes.detail", reason, &original),
             }
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -532,7 +628,7 @@ mod tests {
             "detail",
             notes_tables("detail", sealed(&["a", "c"]), &["rank"]),
         );
-        assert_refused(&dir, &langs, "notes.detail", &original);
+        assert_refused(&dir, &langs, "notes.detail", None, &original);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -544,7 +640,7 @@ mod tests {
             "body",
             notes_tables("detail", sealed(&["a", "c"]), &["rank"]),
         );
-        assert_refused(&dir, &langs, "notes.detail", &original);
+        assert_refused(&dir, &langs, "notes.detail", None, &original);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -621,6 +717,7 @@ mod tests {
             &dir,
             &[Lang::Rust.into()],
             "only appending enum variants",
+            None,
             &original,
         );
         std::fs::remove_dir_all(dir).unwrap();

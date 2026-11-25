@@ -765,7 +765,6 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         bob.follow_notes(&server);
 
         bob.client.advance_settle_clock(std::time::Duration::ZERO);
-        let events = reports_of(&bob);
         store.failing.set(true);
         for _ in 0..2 {
             let failed = read_notes(&server, &bob, first);
@@ -773,13 +772,15 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         }
         let saves = store.saves.get();
 
+        // Only this read's reports count, not an earlier read's.
+        bob.client.take_reports();
         let waiting = read_notes(&server, &bob, first);
         assert!(
             waiting.as_ref().is_ok_and(Vec::is_empty),
             "a backed-off space fails no read: {waiting:?}"
         );
         assert!(
-            missing_key_of(&events.borrow(), &bob, first),
+            missing_key_of(&bob.client.take_reports(), &bob, first),
             "a backed-off space's rows are not silently left out"
         );
 
@@ -844,7 +845,6 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
             add_member(&server, &alice, space, &bob.id());
             assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
         }
-        let events = reports_of(&bob);
         bob.follow_notes(&server);
 
         let healthy = space_address(&bob, second);
@@ -870,6 +870,8 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
                 }),
             )
         };
+        // Only this read's reports count, not an earlier read's.
+        bob.client.take_reports();
         let all = read_all();
         assert_eq!(
             all.as_ref().map(Vec::len).ok(),
@@ -877,7 +879,7 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
             "the healthy space's row is returned: {all:?}"
         );
         assert!(
-            missing_key_of(&events.borrow(), &bob, first),
+            missing_key_of(&bob.client.take_reports(), &bob, first),
             "the backed-off space's row is reported missing"
         );
         assert_eq!(read_notes(&server, &bob, second).unwrap().len(), 1);

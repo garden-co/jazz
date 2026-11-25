@@ -704,6 +704,10 @@ pub(crate) struct Shared {
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
     pub(crate) outbox: RefCell<VecDeque<Report>>,
+    /// Test observation: every report a hook made since the test last
+    /// took them, before delivery and de-duplication.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) taken: RefCell<VecDeque<Report>>,
     pub(crate) published: RefCell<Published>,
     pub(crate) creations: RefCell<Creations>,
     /// Versions reads needed and did not hold, since the runtime last
@@ -765,6 +769,8 @@ impl Shared {
             .into(),
             random: RefCell::new(random),
             outbox: Default::default(),
+            #[cfg(any(test, feature = "testing"))]
+            taken: Default::default(),
             published: Default::default(),
             creations: Default::default(),
             missing: Default::default(),
@@ -901,6 +907,8 @@ impl Shared {
     }
 
     pub(crate) fn report(&self, report: Report) {
+        #[cfg(any(test, feature = "testing"))]
+        push_bounded(&mut self.taken.borrow_mut(), report.clone(), MAX_REPORTS);
         let mut outbox = self.outbox.borrow_mut();
         push_bounded(&mut outbox, report, MAX_REPORTS);
     }
