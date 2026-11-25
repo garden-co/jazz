@@ -10,8 +10,9 @@
 //
 // Fails (never warns) when the trace is over MAX_TRACED_BYTES, when it lacks
 // the linux-x64 binary, or when it carries any other .node file.
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -63,6 +64,56 @@ export function judgeTrace(fileSizes) {
   return { totalBytes: total, maxBytes: MAX_TRACED_BYTES, files: fileSizes.length, top, problems };
 }
 
+// The install reads the registry (jazz-tools' third-party dependencies), so
+// it retries network errors only, with backoff. Anything else (a bad
+// tarball, a resolution error) fails at once, and so does the last attempt:
+// the check fails closed. The size judgement itself never retries.
+export const INSTALL_ATTEMPTS = 3;
+export const INSTALL_BACKOFF_MS = [10_000, 30_000];
+const NETWORK_ERROR =
+  /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|EPIPE|UND_ERR_[A-Z_]+)\b|\bE(429|50[0-9])\b|socket hang up|network (?:request|timeout)/i;
+
+/** Whether npm's output says the failure was the network. Exported for tests. */
+export function isNetworkFailure(output) {
+  return NETWORK_ERROR.test(output);
+}
+
+async function installWithRetry(
+  work,
+  { attempts = INSTALL_ATTEMPTS, backoff = INSTALL_BACKOFF_MS } = {},
+) {
+  for (let attempt = 1; ; attempt++) {
+    const result = spawnSync(
+      "npm",
+      [
+        "install",
+        "--no-audit",
+        "--no-fund",
+        "--ignore-scripts",
+        "--os=linux",
+        "--cpu=x64",
+        "--libc=glibc",
+      ],
+      { cwd: work, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}${result.error ? String(result.error) : ""}`;
+    process.stdout.write(output);
+    if (result.status === 0) return;
+    const network = isNetworkFailure(output);
+    if (!network || attempt >= attempts)
+      throw new Error(
+        `npm install failed (exit ${result.status}, attempt ${attempt}/${attempts}${network ? ", network" : ", not a network error: not retried"})`,
+      );
+    const wait = backoff[Math.min(attempt - 1, backoff.length - 1)];
+    console.log(
+      `::warning::npm install hit a network error (attempt ${attempt}/${attempts}); retrying in ${wait / 1000}s`,
+    );
+    rmSync(join(work, "node_modules"), { recursive: true, force: true });
+    rmSync(join(work, "package-lock.json"), { force: true });
+    await sleep(wait);
+  }
+}
+
 export async function verifyBackendFunctionSize(dirArg, version) {
   const dir = resolve(dirArg);
   const files = readdirSync(dir);
@@ -99,19 +150,7 @@ export async function verifyBackendFunctionSize(dirArg, version) {
       join(work, "api.mjs"),
       'import { createJazz } from "jazz-tools/backend";\nexport default () => new Response(typeof createJazz);\n',
     );
-    execFileSync(
-      "npm",
-      [
-        "install",
-        "--no-audit",
-        "--no-fund",
-        "--ignore-scripts",
-        "--os=linux",
-        "--cpu=x64",
-        "--libc=glibc",
-      ],
-      { cwd: work, stdio: ["ignore", "inherit", "inherit"] },
-    );
+    await installWithRetry(work);
     const { nodeFileTrace } = await import(
       pathToFileURL(join(work, "node_modules/@vercel/nft/out/index.js")).href
     );
