@@ -49,7 +49,14 @@ export type ThinRequestDescription =
   | { type: "subscribe"; queryJson: string; options: object }
   | { type: "unsubscribe"; subscription: number }
   | { type: "query"; queryJson: string; options: object; transaction?: string }
-  | { type: "insert"; table: string; values: InsertValues; options: object; transaction?: string }
+  | {
+      type: "insert";
+      table: string;
+      values: InsertValues;
+      options: object;
+      creatorMembership?: boolean;
+      transaction?: string;
+    }
   | {
       type: "update" | "upsert";
       table: string;
@@ -91,6 +98,7 @@ export type BeginStreamDescription = {
   values: InsertValues;
   column: string;
   mutation: "insert" | "update" | "upsert";
+  creatorMembership?: boolean;
   options: object;
   transaction?: string;
 };
@@ -124,6 +132,7 @@ type Touch = { table: string; column?: string };
 
 export class EncryptedGuard {
   private readonly entries = new Map<string, Entry>();
+  private readonly spaceTables = new Set<string>();
   private readonly streams = new WeakSet<AdmittedStream>();
 
   /**
@@ -141,6 +150,7 @@ export class EncryptedGuard {
       );
     }
     for (const [table, entry] of Object.entries(declared ?? {})) {
+      if (entry.scope !== undefined) this.spaceTables.add(entry.scope);
       const columns = Object.keys(entry.columns);
       if (columns.length === 0) continue;
       this.entries.set(table, {
@@ -217,6 +227,9 @@ export class EncryptedGuard {
         // row always touches.
         const entry = this.entries.get(request.table);
         if (entry) this.refuse(request.type, entry.table, firstSealed(entry, request.values));
+        if (request.type === "insert" && request.creatorMembership) {
+          this.checkCreatorMembership(request.type, request.table);
+        }
         return;
       }
       case "update":
@@ -228,8 +241,13 @@ export class EncryptedGuard {
         return;
       case "beginStream": {
         const entry = this.entries.get(request.table);
-        if (!entry) return;
         const operation = `${request.mutation} streaming`;
+        if (!entry) {
+          if (request.mutation === "insert" && request.creatorMembership) {
+            this.checkCreatorMembership(operation, request.table);
+          }
+          return;
+        }
         if (request.mutation !== "update") {
           this.refuse(operation, entry.table, firstSealed(entry, request.values));
         }
@@ -244,6 +262,17 @@ export class EncryptedGuard {
         throw new Error(
           `the thin client cannot send a ${(request as { type: string }).type} request`,
         );
+    }
+  }
+
+  private checkCreatorMembership(operation: string, table: string): void {
+    if (this.spaceTables.has(table)) {
+      throw new EncryptionNeedsLocalFirstError({
+        reason: this.reason(),
+        operation,
+        table,
+        creatorMembership: true,
+      });
     }
   }
 

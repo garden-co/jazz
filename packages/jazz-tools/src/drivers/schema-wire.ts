@@ -58,12 +58,14 @@ export function serializeSchemaSource(
   schema: WasmSchema,
   migrations?: ClientMigrations,
   encryptionBindings?: string,
+  addCreatorAsMember?: boolean,
 ): string {
   return JSON.stringify(
     {
       tables: sortSchemaTables(schema),
       ...(migrations ? { migrations } : {}),
       ...(encryptionBindings === undefined ? {} : { encryptionBindings }),
+      ...(addCreatorAsMember === false ? { addCreatorAsMember } : {}),
     },
     runtimeSchemaJsonReplacer,
   );

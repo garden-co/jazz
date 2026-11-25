@@ -78,7 +78,10 @@ public data class JazzConfig(
                     Storage.Persistent -> "persistent"
                 },
             )
-            encryption?.let { put("environment", it.environment) }
+            encryption?.let {
+                put("environment", it.environment)
+                if (!it.addCreatorAsMember) put("addCreatorAsMember", false)
+            }
             when (auth) {
                 is JazzAuth.DeviceAccount -> put("auth", buildJsonObject { put("deviceKey", auth.key) })
                 is JazzAuth.Bearer -> put("auth", buildJsonObject { put("bearer", true) })

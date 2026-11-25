@@ -24,6 +24,7 @@ type ForegroundMutationOptions = {
   head?: unknown;
   base?: unknown;
   updatedAtMs?: number;
+  addCreatorAsMember?: boolean;
   author?: Uint8Array;
   attribution?: Uint8Array;
 };
@@ -496,6 +497,14 @@ export class NativeForegroundDb {
 
   encryptionState(): string {
     return this.encryptionResult("state", this.encryptionCommand("state"));
+  }
+
+  tableIdentity(table: string): string {
+    const result = this.encryptionCommand("spaceRow", {
+      table,
+      id: "00000000-0000-0000-0000-000000000000",
+    });
+    return (JSON.parse(this.encryptionResult("spaceRow", result)) as { scopeId: string }).scopeId;
   }
 
   encryptionSpaces(): string {

@@ -71,6 +71,8 @@ public data class JazzEncryption(
     val store: PrivateStore,
     /** The deployment's environment: the same for every client of it. */
     val environment: String = "dev",
+    /** Add the signed-in creator to each new space. */
+    val addCreatorAsMember: Boolean = true,
 )
 
 /** A device of the account: active (`status` `active`), or waiting for approval (`waiting`). */

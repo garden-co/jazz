@@ -312,6 +312,7 @@ function isPendingNativePermissionAdvice(value: unknown): value is PendingNative
 type NativeInsertOptions = NativeWriteOptions & {
   rowId?: Uint8Array;
   branch?: unknown;
+  addCreatorAsMember?: boolean;
 };
 
 type NativeUpdateOptions = NativeWriteOptions & {
@@ -2313,6 +2314,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
+    const addCreatorAsMember = _writeContext
+      ? (JSON.parse(_writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember
+      : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -2329,6 +2333,7 @@ export class NativeRuntimeAdapter implements Runtime {
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
+        addCreatorAsMember,
       });
       if (!(rowId instanceof Uint8Array)) {
         throw new Error("Native runtime transaction insert did not return a row id");
@@ -2350,6 +2355,7 @@ export class NativeRuntimeAdapter implements Runtime {
           attribution,
           branch: branchView?.head,
           updatedAtMs: updatedAtMs ?? undefined,
+          addCreatorAsMember,
         }),
       ),
     );

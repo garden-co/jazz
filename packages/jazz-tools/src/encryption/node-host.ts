@@ -25,6 +25,8 @@ export { declaresEncryption };
 export interface NodeEncryptionConfig {
   /** The private store (see {@link PrivateStore}) holding this device's keys. */
   store: PrivateStore;
+  /** Set to false to create encryption spaces without adding their creators. */
+  addCreatorAsMember?: boolean;
 }
 
 /**
@@ -59,6 +61,7 @@ export async function buildNodeEncryption(options: {
     accountId: options.accountId,
     deviceAccountSecret: options.deviceAccountSecret,
     store: options.encryption?.store,
+    addCreatorAsMember: options.encryption?.addCreatorAsMember,
   });
 }
 

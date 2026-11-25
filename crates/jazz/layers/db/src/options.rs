@@ -48,6 +48,8 @@ pub struct DbConfig {
     /// The client's encryption hooks (see [`DbConfig::with_e2ee`]).
     #[cfg(feature = "e2ee-client")]
     pub e2ee: Option<std::rc::Rc<dyn crate::e2ee::E2eeHooks>>,
+    /// Add the signed-in creator to a new encryption space.
+    pub add_creator_as_member: bool,
 }
 
 /// Schema versions and the lenses between them (see
@@ -72,6 +74,7 @@ impl DbConfig {
             system_node: None,
             #[cfg(feature = "e2ee-client")]
             e2ee: None,
+            add_creator_as_member: false,
         }
     }
 
@@ -382,6 +385,8 @@ pub struct InsertOptions {
     pub target: ExactWriteTarget,
     /// Explicit provenance timestamp, or the database clock when omitted.
     pub updated_at_ms: Option<u64>,
+    /// Disable automatic creator membership for this insert.
+    pub add_creator_as_member: Option<bool>,
 }
 
 /// Options for updates.

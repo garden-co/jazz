@@ -36,6 +36,7 @@ use crate::handle::Jazz;
 pub struct EncryptionConfig {
     pub(crate) environment: String,
     pub(crate) store: StoreSource,
+    pub(crate) add_creator_as_member: bool,
 }
 
 #[cfg(feature = "e2ee-client")]
@@ -64,6 +65,7 @@ impl EncryptionConfig {
         Self {
             environment: "dev".to_owned(),
             store: StoreSource::Native(std::sync::Arc::new(make)),
+            add_creator_as_member: true,
         }
     }
 
@@ -76,6 +78,7 @@ impl EncryptionConfig {
         Self {
             environment: "dev".to_owned(),
             store: StoreSource::Calls(std::sync::Arc::new(call)),
+            add_creator_as_member: true,
         }
     }
 
@@ -83,6 +86,12 @@ impl EncryptionConfig {
     /// same for every client of one deployment.
     pub fn environment(mut self, environment: impl Into<String>) -> Self {
         self.environment = environment.into();
+        self
+    }
+
+    /// Whether to add the signed-in creator to new spaces (on by default).
+    pub fn add_creator_as_member(mut self, enabled: bool) -> Self {
+        self.add_creator_as_member = enabled;
         self
     }
 }
@@ -262,6 +271,7 @@ mod plan {
             Ok(Some(ClientEncryption {
                 hooks,
                 start: Some(start),
+                add_creator_as_member: config.add_creator_as_member,
             }))
         }
     }
@@ -272,6 +282,7 @@ mod plan {
         Some(ClientEncryption {
             hooks: jazz_e2ee_client::KeylessHooks::hooks(declarations?),
             start: None,
+            add_creator_as_member: false,
         })
     }
 

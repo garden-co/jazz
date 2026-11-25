@@ -25,7 +25,7 @@ export interface EncryptionRuntimeClass {
     environment: string,
     accountId: string,
     deviceAccountSecret?: string,
-  ): StoreTarget & { ready(): Promise<unknown> };
+  ): StoreTarget & { ready(): Promise<unknown>; setAddCreatorAsMember?(enabled: boolean): void };
 }
 
 /**
@@ -41,6 +41,7 @@ export async function buildEncryption(options: {
   /** The device account's secret (`jazz-auth-v1:...`); it is the account's recovery secret. */
   deviceAccountSecret?: string;
   store: PrivateStore | undefined;
+  addCreatorAsMember?: boolean;
 }): Promise<{ runtime: StoreTarget; store: PrivateStore }> {
   const store = options.store;
   if (!store) throw new EncryptionStoreRequiredError();
@@ -53,6 +54,12 @@ export async function buildEncryption(options: {
       options.deviceAccountSecret,
     ),
   );
+  if (options.addCreatorAsMember === false) {
+    if (!runtime.setAddCreatorAsMember) {
+      throw new Error("This encryption runtime does not support the creator membership option.");
+    }
+    runtime.setAddCreatorAsMember(false);
+  }
   // The store answers the runtime while it loads or makes the device.
   const serving = servePrivateStore(runtime, store);
   try {

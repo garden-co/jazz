@@ -194,18 +194,23 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 		}
 	}
 	var environment string
+	var addCreatorAsMember *bool
 	if cfg.Encryption != nil {
 		if cfg.Encryption.Store == nil {
 			return nil, &Error{Kind: KindRefused, Message: "Config.Encryption needs a Store"}
 		}
 		environment = cfg.Encryption.Environment
+		if option := cfg.Encryption.AddCreatorAsMember; option != nil && !*option {
+			addCreatorAsMember = option
+		}
 	}
 	config, err := json.Marshal(struct {
 		Config
-		Contract    int            `json:"contract"`
-		AuthJSON    map[string]any `json:"auth,omitempty"`
-		Environment string         `json:"environment,omitempty"`
-	}{cfg, 2, auth, environment})
+		Contract           int            `json:"contract"`
+		AuthJSON           map[string]any `json:"auth,omitempty"`
+		Environment        string         `json:"environment,omitempty"`
+		AddCreatorAsMember *bool          `json:"addCreatorAsMember,omitempty"`
+	}{cfg, 2, auth, environment, addCreatorAsMember})
 	if err != nil {
 		return nil, err
 	}

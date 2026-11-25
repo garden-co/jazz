@@ -78,6 +78,9 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
       this.options.WebSocket ?? (bearer ? bearerWebSocket(config.serverUrl!, bearer) : undefined);
     const runtime = new ThinRuntime(schema, {
       ...this.options,
+      addCreatorAsMember:
+        !!(session?.account_id ?? config.accountId) &&
+        config.encryption?.addCreatorAsMember !== false,
       ...(webSocket ? { WebSocket: webSocket } : {}),
       ...(author ? { author } : {}),
     });

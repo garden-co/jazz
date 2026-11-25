@@ -14,4 +14,6 @@ export interface BrowserEncryptionConfig {
    * your own to keep them elsewhere (see the docs).
    */
   store?: PrivateStore;
+  /** Set to false to create encryption spaces without adding their creators. */
+  addCreatorAsMember?: boolean;
 }

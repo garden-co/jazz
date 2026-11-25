@@ -123,6 +123,8 @@ pub struct ClientEncryption {
     /// A device starts its runtime over the open database; a backend, which
     /// holds no keys, has none.
     pub start: Option<StartEncryption>,
+    /// Add the signed-in creator as a member of each space they insert.
+    pub add_creator_as_member: bool,
 }
 
 /// With the `e2ee-client` feature off a client has no hooks to open an
@@ -1040,6 +1042,7 @@ impl JazzClient {
         let encryption = match encryption {
             Some(encryption) => {
                 config = config.with_e2ee(Rc::clone(&encryption.hooks));
+                config.add_creator_as_member = encryption.add_creator_as_member;
                 Some(encryption)
             }
             None => None,

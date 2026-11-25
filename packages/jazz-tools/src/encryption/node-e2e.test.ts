@@ -66,6 +66,7 @@ async function device(
     accounts?: AccountStore;
     dataPath?: string;
     wait?: boolean;
+    addCreatorAsMember?: boolean;
   } = {},
 ) {
   return openEncryptedTestDevice(
@@ -76,6 +77,64 @@ async function device(
 }
 
 type Device = Awaited<ReturnType<typeof device>>;
+
+it("adds the creator and manages members through typed tables and transactions", async () => {
+  const host = await serve();
+  const alice = await device(host);
+  const bob = await device(host);
+  const members = alice.db.encryption.members;
+  const project = await alice.db
+    .insert(app.projects, { name: "Plans", ownerId: alice.account })
+    .wait({ tier: "global" });
+  const { id } = project;
+  expect((await members.list(app.projects, id)).map((row) => row.accountId)).toEqual([
+    alice.account,
+  ]);
+
+  const write = members.add(app.projects, id, bob.account);
+  expect((await write.wait({ tier: "global" })).accountId).toBe(bob.account);
+  expect(await members.remove(app.projects, id, bob.account)).toBe(1);
+
+  const space = { table: "projects", id };
+  const transaction = await alice.db.transaction((tx) =>
+    tx.encryption.members.add(app.projects, id, bob.account),
+  );
+  expect(transaction.value.accountId).toBe(bob.account);
+  await transaction.wait({ tier: "global" });
+  expect((await members.list(space)).map((row) => row.accountId).sort()).toEqual(
+    [alice.account, bob.account].sort(),
+  );
+  expect(await members.remove(space, bob.account)).toBe(1);
+  await members.add(space, bob.account).wait({ tier: "global" });
+  expect(await members.remove(space, bob.account)).toBe(1);
+});
+
+it("honours both creator membership opt-outs and preserves an explicit member row's id", async () => {
+  const host = await serve();
+  const alice = await device(host);
+  const bob = await device(host, { addCreatorAsMember: false });
+  const skipped = await alice.db
+    .insert(
+      app.projects,
+      { name: "Per insert", ownerId: alice.account },
+      { addCreatorAsMember: false },
+    )
+    .wait({ tier: "global" });
+  const disabled = await bob.db
+    .insert(app.projects, { name: "App wide", ownerId: bob.account })
+    .wait({ tier: "global" });
+  expect(await alice.db.encryption.members.list(app.projects, skipped.id)).toEqual([]);
+  expect(await bob.db.encryption.members.list(app.projects, disabled.id)).toEqual([]);
+
+  const id = crypto.randomUUID();
+  const self = await alice.db.encryption.members.row({ table: "projects", id }, alice.account);
+  const written = await alice.db.transaction((tx) => {
+    tx.insert(app.projects, { name: "Explicit member", ownerId: alice.account }, { id });
+    return tx.insert(app.__e2ee_members, self);
+  });
+  const explicit = await written.wait({ tier: "global" });
+  expect(await alice.db.encryption.members.list(app.projects, id)).toEqual([explicit]);
+});
 
 const spacesTable = (app as unknown as Record<string, never>)["__e2ee_spaces"];
 

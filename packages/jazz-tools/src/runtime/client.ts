@@ -159,6 +159,8 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal The authority's catalogue identity for a table of this schema. */
+  tableIdentity?(table: string): string;
   /**
    * @internal Runs a write, and again after the space's key is ready when it
    * fails `key-pending` (an encrypted app only).
@@ -682,6 +684,7 @@ export interface MutationErrorEvent {
 export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: BranchSelector;
+  addCreatorAsMember?: boolean;
 }
 
 export interface UpdateOptions extends TimestampOverrideOptions {
@@ -721,6 +724,7 @@ interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
+  addCreatorAsMember?: boolean;
   transaction_id?: string;
   target_branch_name?: string;
   branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
@@ -1776,7 +1780,12 @@ export class JazzClient {
     {
       updatedAt,
       branch: selected,
-    }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
+      addCreatorAsMember,
+    }: {
+      updatedAt?: number;
+      branch?: BranchView | BranchSelector;
+      addCreatorAsMember?: boolean;
+    } = {},
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
     const session =
@@ -1788,6 +1797,7 @@ export class JazzClient {
       attribution === undefined &&
       !openTransactionId &&
       updatedAt === undefined &&
+      addCreatorAsMember === undefined &&
       !branch
     ) {
       return undefined;
@@ -1797,6 +1807,7 @@ export class JazzClient {
       session &&
       !openTransactionId &&
       updatedAt === undefined &&
+      addCreatorAsMember === undefined &&
       !branch
     ) {
       return JSON.stringify(serializeRuntimeSession(session));
@@ -1811,6 +1822,9 @@ export class JazzClient {
     }
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
+    }
+    if (addCreatorAsMember !== undefined) {
+      payload.addCreatorAsMember = addCreatorAsMember;
     }
     if (openTransactionId) {
       payload.transaction_id = openTransactionId;

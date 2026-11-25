@@ -1706,6 +1706,7 @@ impl StreamingMutationKind {
                     identity,
                     target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
                     updated_at_ms: now_ms,
+                    add_creator_as_member: None,
                 },
             ),
             StreamingMutationKind::Update => StagedOp::Update(

@@ -46,7 +46,7 @@ const MEMBERS: { [name: string]: readonly string[] | true } = {
   devices: ["list", "challenge", "answer", "remove", "requestRemoval", "completeRemovals"],
   recovery: ["create", "enable", "restoreFromPasskey", "register", "restore", "list", "retire"],
   keys: ["deliver", "rotate", "recoverRotation"],
-  members: ["row", "where", "remove"],
+  members: ["row", "where", "add", "list", "remove"],
 };
 /** For the test that keeps the table in step with the real class. */
 export const PENDING_HANDLE_MEMBERS: Readonly<Record<string, readonly string[] | true>> = MEMBERS;
@@ -59,7 +59,7 @@ const isMember = (path: readonly string[]): boolean => {
 };
 
 /** Calls that return a value at once, not a promise. */
-const SYNCHRONOUS = new Set(["recovery.create"]);
+const SYNCHRONOUS = new Set(["recovery.create", "members.add"]);
 /** The runtime's own lifecycle: nothing to wait for on a thin client. */
 const LIFECYCLE = new Set(["start", "stop"]);
 

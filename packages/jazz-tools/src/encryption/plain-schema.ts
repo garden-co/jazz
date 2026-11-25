@@ -42,6 +42,7 @@ export type PlainEntries = Record<
   {
     columns: Record<string, { type: { columnType: ColumnType; nullable: boolean } }>;
     equality?: readonly string[];
+    scope?: string;
   }
 >;
 

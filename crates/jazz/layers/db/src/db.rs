@@ -2227,6 +2227,7 @@ impl Db {
                 account_registry: RefCell::default(),
                 #[cfg(feature = "e2ee-client")]
                 e2ee: config.e2ee,
+                add_creator_as_member: config.add_creator_as_member,
                 e2ee_salt: {
                     let mut salt = [0; 32];
                     if cfg!(feature = "e2ee-client") {
@@ -4253,6 +4254,12 @@ impl Db {
             .commit_prepared(op.row(), async |inner, seq, origin| {
                 let staged = inner.seal_op(&schema, &mut op, streamed).await?;
                 companions = e2ee_write::companion_names(&staged);
+                let member = match &op {
+                    StagedOp::Insert(table, _, options) => {
+                        inner.creator_member(&schema, table, options).await?
+                    }
+                    _ => None,
+                };
                 let mut ops = Vec::with_capacity(staged.len() + 1);
                 // Each apply clears its derived values and nodes. Save the
                 // caller's edits while applying the companions.
@@ -4266,9 +4273,14 @@ impl Db {
                 }
                 inner.derived.borrow_mut().extend(given.0);
                 inner.pending_nodes.borrow_mut().extend(given.1);
-                let mut op = inner.prepare_write(schema, op)?;
+                let mut op = inner.prepare_write(schema.clone(), op)?;
                 let handle = inner.apply_authored(&mut op, who, seq, origin).await?;
                 ops.push(op);
+                if let Some(member) = member {
+                    let mut member = inner.creator_member_write(schema, member).await?;
+                    inner.apply_authored(&mut member, who, seq, origin).await?;
+                    ops.push(member);
+                }
                 Ok((handle, ops))
             })
             .await;
@@ -11306,6 +11318,7 @@ struct Store {
     /// Keys this database's digests of plaintext search values, chosen at
     /// random when it opens: a digest confirms no guessed value elsewhere.
     e2ee_salt: [u8; 32],
+    add_creator_as_member: bool,
 }
 
 impl Store {
@@ -12426,7 +12439,7 @@ impl Db {
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
-        self.commit_ops(&batch, sync::Kind::Mergeable).await
+        self.commit_ops(batch, sync::Kind::Mergeable).await
     }
 
     /// Serializable commit: every row the batch writes must still be at a
@@ -12560,16 +12573,12 @@ impl Db {
                 debug_assert!(snapshot.accepted(), "a snapshot is the authority's");
                 reads
             };
-            return self
-                .commit_ops(
-                    &batch,
-                    sync::Kind::Serializable {
-                        snapshot: snapshot.seq,
-                        reads,
-                        own: own.to_vec(),
-                    },
-                )
-                .await;
+            let kind = sync::Kind::Serializable {
+                snapshot: snapshot.seq,
+                reads,
+                own: own.to_vec(),
+            };
+            return self.commit_ops(batch, kind).await;
         }
         {
             let inner = self.inner.without_overlay();
@@ -12599,14 +12608,18 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch, sync::Kind::Mergeable).await
+        self.commit_ops(batch, sync::Kind::Mergeable).await
     }
 
-    async fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+    async fn commit_ops(&self, mut batch: Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         crate::db::large_ops::renew_upload_leases(self.inner.without_overlay(), &batch.uploads)
             .await?;
+        self.inner
+            .without_overlay()
+            .add_creator_members(&mut batch)
+            .await?;
         let receipt = self
-            .with_upload(async || self.commit_ops_now(batch, kind).await)
+            .with_upload(async || self.commit_ops_now(&batch, kind).await)
             .await?;
         batch.companions.committed();
         Ok(receipt)

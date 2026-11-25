@@ -94,12 +94,13 @@ export function reviewThinRefusal(
   void Promise.resolve()
     .then(() => upgradeDbToLocalFirst(db, loader))
     .catch(() => {});
-  const { operation, table, column } = refusal;
+  const { operation, table, column, creatorMembership } = refusal;
   return new EncryptionNeedsLocalFirstError({
     reason: "transaction",
     operation,
     table,
-    ...(column === undefined ? {} : { column }),
+    column,
+    creatorMembership,
   });
 }
 

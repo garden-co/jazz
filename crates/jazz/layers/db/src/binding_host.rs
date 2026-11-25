@@ -251,6 +251,14 @@ fn insert_options_as<O: HostObject>(
         identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
+        add_creator_as_member: options
+            .get("addCreatorAsMember")?
+            .map(|value| {
+                O::boolean(&value).ok_or_else(|| {
+                    HostError::Argument("addCreatorAsMember must be a boolean".into())
+                })
+            })
+            .transpose()?,
     })
 }
 

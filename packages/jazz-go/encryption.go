@@ -68,6 +68,9 @@ type EncryptionConfig struct {
 	// Environment is the deployment's (default "dev"): the same for every
 	// client of one deployment.
 	Environment string
+	// AddCreatorAsMember adds the signed-in creator to each new space.
+	// A nil value uses the default (true).
+	AddCreatorAsMember *bool
 }
 
 // private stores, by the id jazz-ffi's store callback gets.

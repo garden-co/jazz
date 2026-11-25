@@ -573,6 +573,7 @@ pub struct InsertOptions {
     pub attribution: Option<Uint8Array>,
     pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
+    pub add_creator_as_member: Option<bool>,
 }
 
 #[napi(object)]
@@ -652,6 +653,10 @@ fn insert_options(options: Option<InsertOptions>) -> serde_json::Value {
         .bytes("attribution", options.attribution)
         .json("branch", options.branch)
         .number("updatedAtMs", options.updated_at_ms)
+        .json(
+            "addCreatorAsMember",
+            options.add_creator_as_member.map(serde_json::Value::Bool),
+        )
         .done()
 }
 
@@ -685,6 +690,7 @@ fn restore_options(options: Option<RestoreOptions>) -> serde_json::Value {
         attribution: options.attribution,
         branch: options.branch,
         updated_at_ms: options.updated_at_ms,
+        add_creator_as_member: None,
     }))
 }
 
@@ -1011,6 +1017,11 @@ impl EncryptionRuntime {
             )
             .map_err(napi::Error::from_reason)?,
         })
+    }
+
+    #[napi(js_name = "setAddCreatorAsMember")]
+    pub fn set_add_creator_as_member(&self, enabled: bool) {
+        self.builder.add_creator_as_member.set(enabled);
     }
 
     /// Builds the runtime: settles when its device is loaded or made, which
@@ -2124,6 +2135,7 @@ impl NapiDb {
                     .hooks(identity)
                     .map_err(napi::Error::from_reason)?,
             );
+            db_config.add_creator_as_member = encrypted.builder.add_creator_as_member.get();
             runtime = Some(encrypted);
         }
         let db = match data_path {

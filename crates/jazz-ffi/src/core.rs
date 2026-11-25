@@ -2117,6 +2117,7 @@ fn config(
     let mut auth = None;
     let mut insecure = false;
     let mut environment = None;
+    let mut add_creator_as_member = true;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -2137,6 +2138,11 @@ fn config(
             "backendSecret" => backend_secret = Some(text()?),
             "adminSecret" => admin_secret = Some(text()?),
             "environment" => environment = Some(text()?),
+            "addCreatorAsMember" => {
+                add_creator_as_member = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.addCreatorAsMember must be true or false"))?;
+            }
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
             // An end user over plain http:// to a host other than
@@ -2306,7 +2312,7 @@ fn config(
         if let Some(environment) = environment {
             encryption = encryption.environment(environment);
         }
-        result = result.encryption(encryption);
+        result = result.encryption(encryption.add_creator_as_member(add_creator_as_member));
     }
     let files = AppFiles::new(
         app.clone().into_bytes(),

@@ -77,6 +77,11 @@ impl WasmEncryptionRuntime {
         })
     }
 
+    #[wasm_bindgen(js_name = setAddCreatorAsMember)]
+    pub fn set_add_creator_as_member(&self, enabled: bool) {
+        self.builder.add_creator_as_member.set(enabled);
+    }
+
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the store (answer its requests while waiting).
     pub fn ready(&self) -> js_sys::Promise {
@@ -254,7 +259,11 @@ impl WasmDb {
             &schema,
             &config,
             proof.for_app(&runtime.builder.app_id),
-            |config, identity| Ok(config.with_e2ee(runtime.builder.hooks(identity).map_err(error)?)),
+            |config, identity| {
+                let mut config = config.with_e2ee(runtime.builder.hooks(identity).map_err(error)?);
+                config.add_creator_as_member = runtime.builder.add_creator_as_member.get();
+                Ok(config)
+            },
         )?;
         let inner: WasmDbInner = owner.open_inner()?;
         let host = Rc::downgrade(&inner.host);

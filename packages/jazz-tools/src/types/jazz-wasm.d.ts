@@ -53,6 +53,7 @@ declare module "jazz-wasm" {
       accountId: string,
       deviceAccountSecret?: string | null,
     ): EncryptionRuntime;
+    setAddCreatorAsMember(enabled: boolean): void;
     ready(): Promise<string>;
     setStoreWake(callback: ((wake: string) => void) | null): void;
     takeStoreRequests(): string[];
@@ -112,6 +113,7 @@ declare module "jazz-wasm" {
   export type InsertOptions = WriteOptions & {
     rowId?: Uint8Array;
     branch?: unknown;
+    addCreatorAsMember?: boolean;
   };
 
   export type UpdateOptions = WriteOptions & {

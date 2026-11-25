@@ -67,8 +67,15 @@ relation over one `uuid` column, an encrypted column without a space, and a merg
 encrypted column (the server can't merge ciphertext, so its writes are last-writer-wins). A space's
 `id` and its relation's column stay plain, because the server routes rows by them.
 
-Members are rows of `app.__e2ee_members`. Use `db.encryption.members.row` to add an account with an insert,
-`where` to list members and `remove` to remove an account. Your permissions govern these operations.
+When a signed-in client inserts a space row, Jazz adds the creator as a member in the same
+transaction. Use `db.encryption.members.add(app.projects, projectId, accountId)`,
+`list(app.projects, projectId)` and `remove(app.projects, projectId, accountId)` to manage membership.
+Pass `{ addCreatorAsMember: false }` to `db.insert` or set `addCreatorAsMember: false` in the client's
+`encryption` options to turn off automatic membership. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+
+On a thin browser client, creating a space with automatic membership loads the local-first
+encryption runtime at the first insert. Either opt-out keeps a plaintext space insert on the thin
+client.
 
 ## Give each device a private store
 

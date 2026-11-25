@@ -100,6 +100,7 @@ async function open(
   host: Host,
   device: Device = { accounts: memoryStore(), privateStore: memoryPrivateStore() },
   client?: LocalFirstLoader,
+  addCreatorAsMember?: boolean,
 ): Promise<BrowserJazzSession> {
   const session = await openBrowserSessionCore({
     // An encrypted app serves only device accounts founded for its own app id.
@@ -108,7 +109,7 @@ async function open(
     store: device.accounts,
     initial: "device",
     driver: { type: "memory" },
-    encryption: { app, store: device.privateStore },
+    encryption: { app, store: device.privateStore, addCreatorAsMember },
     ...(client ? { client } : {}),
   });
   cleanups.push(() => session.close());
@@ -262,6 +263,46 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(isThinDb(kept)).toBe(false);
     const rows = await kept.all(tasks.where({ projectId: project }));
     expect(titles(rows).sort()).toEqual(["kept", "waited"]);
+  }, 90_000);
+
+  it("loads the encryption runtime to create a space and keeps either opted-out insert thin", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const session = await open(host, undefined, gate.loader);
+    const thin = db(session);
+    const account = session.getSnapshot().client!.session!.user!;
+    const skipped = await thin
+      .insert(app.projects, { name: "Opted out", ownerId: account }, { addCreatorAsMember: false })
+      .wait({ tier: "global" });
+    expect(gate.calls).toBe(0);
+    expect(isThinDb(thin)).toBe(true);
+
+    const written = thin.insert(app.projects, { name: "Plans", ownerId: account });
+    await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+    gate.release();
+    const project = await written.wait({ tier: "global" });
+    expect(project.id).toBe(written.value.id);
+    expect(isThinDb(thin)).toBe(false);
+    const members = thin.encryption.members;
+    expect((await members.list(app.projects, project.id)).map((row) => row.accountId)).toEqual([
+      account,
+    ]);
+    expect(await members.list(app.projects, skipped.id)).toEqual([]);
+    expect(await thin.all(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual([
+      project,
+    ]);
+
+    const disabledGate = gatedLoader();
+    const disabled = await open(host, undefined, disabledGate.loader, false);
+    const ownerId = disabled.getSnapshot().client!.session!.user!;
+    const other = db(disabled);
+    const otherProject = await other
+      .insert(app.projects, { name: "Disabled", ownerId })
+      .wait({ tier: "global" });
+    expect(disabledGate.calls).toBe(0);
+    expect(isThinDb(other)).toBe(true);
+    expect(await host.jazz.db.encryption.members.list(app.projects, otherProject.id)).toEqual([]);
   }, 90_000);
 
   it("stores a waited insert's encrypted cell as ciphertext, not its plaintext", async () => {

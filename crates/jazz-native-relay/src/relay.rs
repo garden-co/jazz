@@ -1429,6 +1429,7 @@ impl RelayWorker {
         let mut db_config = self.db_config(self.schema.clone(), identity);
         if let Some(runtime) = &runtime {
             db_config = db_config.with_e2ee(runtime.built.client().hooks());
+            db_config.add_creator_as_member = runtime.add_creator_as_member;
         }
         let db = block_on(binding_host::open_memory(db_config))
             .map_err(|error| RelayError::Host(error.into()))?;

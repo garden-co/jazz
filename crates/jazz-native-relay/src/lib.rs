@@ -2133,6 +2133,12 @@ impl NativeRelayHost {
         let bindings = public_schema
             .as_object_mut()
             .and_then(|fields| fields.remove("encryptionBindings"));
+        let add_creator_as_member = public_schema
+            .as_object_mut()
+            .and_then(|fields| fields.remove("addCreatorAsMember"))
+            .map(|value| value.as_bool().ok_or(JazzNativeRelayStatus::InvalidCommand))
+            .transpose()?
+            .unwrap_or(true);
         let migrations = public_schema
             .as_object_mut()
             .and_then(|fields| fields.remove("migrations"))
@@ -2150,6 +2156,7 @@ impl NativeRelayHost {
                         .ok_or(JazzNativeRelayStatus::InvalidCommand)?,
                     &public_schema,
                     owner.ok_or(JazzNativeRelayStatus::InvalidHandle)?,
+                    add_creator_as_member,
                 )
             })
             .transpose()?;

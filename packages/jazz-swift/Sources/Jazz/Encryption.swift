@@ -54,10 +54,13 @@ public struct EncryptionConfig: Sendable {
     public var store: any PrivateStore
     /// The deployment's environment: the same for every client of it.
     public var environment: String
+    /// Add the signed-in creator to each new space.
+    public var addCreatorAsMember: Bool
 
-    public init(store: any PrivateStore, environment: String = "dev") {
+    public init(store: any PrivateStore, environment: String = "dev", addCreatorAsMember: Bool = true) {
         self.store = store
         self.environment = environment
+        self.addCreatorAsMember = addCreatorAsMember
     }
 }
 

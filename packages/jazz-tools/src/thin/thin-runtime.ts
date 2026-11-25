@@ -110,6 +110,8 @@ export type ThinRefusalReview = (
 ) => EncryptionNeedsLocalFirstError;
 
 export interface ThinRuntimeOptions {
+  /** @internal A signed-in client's new spaces add their creator by default. */
+  addCreatorAsMember?: boolean;
   /** WebSocket implementation; the global one by default. */
   WebSocket?: WebSocketConstructor;
   /** Delays between reconnect attempts, in ms; the last one repeats. */
@@ -357,12 +359,14 @@ export class ThinRuntime implements Runtime {
   private authRestoredCallback?: () => void;
   /** Every request passes it before it is encoded (see `admit`). */
   private readonly guard: EncryptedGuard;
+  private readonly addCreatorAsMember: boolean;
   private refusalReason: () => ThinRefusalReason = () => "no-loader";
   private refusalReview?: ThinRefusalReview;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
     this.guard = new EncryptedGuard(schema, () => this.refusalReason());
+    this.addCreatorAsMember = options.addCreatorAsMember === true;
     this.schemaBytes = encodeSchema(schema);
     this.WebSocketImpl = options.WebSocket;
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
@@ -1098,6 +1102,7 @@ export class ThinRuntime implements Runtime {
       type: "insert",
       table,
       values,
+      creatorMembership: this.addCreatorAsMember && !skipsCreatorMembership(writeContext),
       options: {
         rowId: parseUuid(id),
         branch: context.branchView?.head,
@@ -1263,6 +1268,7 @@ export class ThinRuntime implements Runtime {
       values,
       column,
       mutation,
+      creatorMembership: this.addCreatorAsMember,
       options: viewOptions(context),
       transaction: context.transaction ?? undefined,
     });
@@ -1842,6 +1848,13 @@ type WriteTarget = {
   /** An explicit `$updatedAt`; absent for an ordinary write, which the server stamps. */
   updatedAtMs?: number;
 };
+
+function skipsCreatorMembership(writeContext?: string | null): boolean {
+  return (
+    !!writeContext &&
+    (JSON.parse(writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember === false
+  );
+}
 
 /**
  * The main-branch row `op` writes, if any, to hand off. Not a delete: a read

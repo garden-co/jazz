@@ -1,7 +1,7 @@
 //! Sealing writes with the client's encryption hooks ([`crate::e2ee`])
 //! before anything stores, chunks or uploads them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use jazz_model::model::public_api::types::equality_column;
@@ -9,12 +9,12 @@ use jazz_model::model::public_api::types::equality_column;
 use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
     Batch, BatchPrefix, Cells, Db, GroundedRows, InsertOptions, InsertedRows, LargeEdits, Located,
-    StagedOp, Store, StreamingMutationKind, StreamingValueUpload, Target, WriteTarget,
-    column_from_sql, quote, rejected, storage,
+    PreparedWrite, StagedOp, Store, StreamingMutationKind, StreamingValueUpload, Target,
+    WriteTarget, column_from_sql, quote, rejected, storage,
 };
 use crate::e2ee::{E2eeHooks, SealError, StreamTarget, WriteCells, WriteKind};
 use crate::ids::RowUuid;
-use crate::options::{Error, ErrorCode};
+use crate::options::{Error, ErrorCode, WriteIdentity};
 use crate::records::Value;
 use crate::tools::OpenTransactionId;
 use crate::values::Schema;
@@ -198,6 +198,118 @@ impl From<StreamingMutationKind> for WriteKind {
 }
 
 impl Store {
+    pub(super) async fn creator_member(
+        &self,
+        schema: &Schema,
+        table: &str,
+        options: &InsertOptions,
+    ) -> Result<Option<StagedOp>, Error> {
+        if !self.add_creator_as_member || options.add_creator_as_member == Some(false) {
+            return Ok(None);
+        }
+        let Some(hooks) = self.e2ee_hooks() else {
+            return Ok(None);
+        };
+        if !hooks
+            .declarations()
+            .tables
+            .values()
+            .any(|entry| entry.scope == table)
+        {
+            return Ok(None);
+        }
+        let author = match options.identity {
+            WriteIdentity::Database => self.stamp_author(),
+            WriteIdentity::Session(author) => author,
+            WriteIdentity::Attribution(_) => return Ok(None),
+        };
+        let Some(account) = author.account_id() else {
+            return Ok(None);
+        };
+        let row = options.row_id.expect("authored inserts have a row id");
+        let version = schema.jazz.version_id();
+        let namespace = self.namespace().await?;
+        let (Some(namespace), true) = (namespace, self.names_confirmed(&version)) else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "this store has not received its authority's catalogue for this schema version yet",
+            ));
+        };
+        let scope = crate::names::identity(namespace, &schema.table(table)?.stored, None);
+        Ok(Some(StagedOp::Insert(
+            jazz_model::schema::MEMBERS_TABLE.to_owned(),
+            BTreeMap::from([
+                ("scopeId".to_owned(), Value::Uuid(scope)),
+                ("identifier".to_owned(), Value::Uuid(row.0)),
+                ("accountId".to_owned(), Value::Uuid(account.0)),
+            ]),
+            InsertOptions {
+                row_id: Some(self.ids.borrow_mut().next_row_id()),
+                identity: options.identity,
+                updated_at_ms: options.updated_at_ms,
+                ..Default::default()
+            },
+        )))
+    }
+
+    pub(super) async fn creator_member_write(
+        &self,
+        schema: Rc<Schema>,
+        mut member: StagedOp,
+    ) -> Result<PreparedWrite, Error> {
+        self.seal_op(&schema, &mut member, None).await?;
+        self.prepare_write(schema, member)
+    }
+
+    pub(super) async fn add_creator_members(&self, batch: &mut Batch) -> Result<(), Error> {
+        if !self.add_creator_as_member {
+            return Ok(());
+        }
+        let members = jazz_model::schema::MEMBERS_TABLE;
+        let mut explicit = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        for write in &batch.ops {
+            match &write.op {
+                StagedOp::Insert(_, cells, _) if write.layout.source.name == members => {
+                    explicit.insert(member_address(cells, |name| {
+                        write.layout.source.stored_name(name)
+                    }));
+                }
+                StagedOp::Delete(table, row, _) => {
+                    deleted.insert((table.as_str(), *row));
+                }
+                _ => {}
+            }
+        }
+        let mut generated = Vec::new();
+        for write in &batch.ops {
+            let StagedOp::Insert(table, _, options) = &write.op else {
+                continue;
+            };
+            if options
+                .row_id
+                .is_some_and(|row| deleted.contains(&(table.as_str(), row)))
+            {
+                continue;
+            }
+            let schema = &write.layout.policies;
+            let Some(member) = self
+                .creator_member(schema, &write.layout.source.name, options)
+                .await?
+            else {
+                continue;
+            };
+            let StagedOp::Insert(_, cells, _) = &member else {
+                unreachable!()
+            };
+            if explicit.insert(member_address(cells, |name| name)) {
+                generated.push(self.creator_member_write(schema.clone(), member).await?);
+            }
+        }
+        batch.ops.extend(generated);
+        Ok(())
+    }
+
     /// Seal `op`, a write this database authors under `schema` (named as its
     /// caller named it), before anything stores or chunks it. Returns the
     /// internal rows the write needs, as inserts to apply before it in the
@@ -620,4 +732,14 @@ impl Store {
         }
         cells.get(&entry.space).cloned()
     }
+}
+
+fn member_address<'a>(
+    cells: &BTreeMap<String, Value>,
+    column: impl Fn(&'static str) -> &'a str,
+) -> [Option<uuid::Uuid>; 3] {
+    ["scopeId", "identifier", "accountId"].map(|name| match cells.get(column(name)) {
+        Some(Value::Uuid(id)) => Some(*id),
+        _ => None,
+    })
 }

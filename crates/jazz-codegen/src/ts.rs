@@ -233,12 +233,17 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     }
 
     // The type map.
+    let encryption_entries = app.compiled.current_entries();
     out.push_str("interface Types extends AppTypes {\n");
     for table in &app.tables {
         let n = &table_names[&table.name];
         let _ = writeln!(out, "  {}: {{", prop(&table.name));
         let _ = writeln!(out, "    row: {};", n.row);
         let _ = writeln!(out, "    insert: {};", n.insert);
+        if encryption_entries.is_some_and(|entries| entries.values().any(|e| e.scope == table.name))
+        {
+            out.push_str("    encryptionSpace: true;\n");
+        }
         let columns: Vec<String> = table
             .columns
             .iter()

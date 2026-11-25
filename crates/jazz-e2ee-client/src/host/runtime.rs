@@ -36,6 +36,7 @@ use zeroize::Zeroizing;
 /// attached, the store bridge drives the same runtime through a weak reference.
 pub struct RuntimeBuilder {
     pub app_id: String,
+    pub add_creator_as_member: Cell<bool>,
     account_id: String,
     environment: String,
     options: Rc<RefCell<Option<BuildOptions>>>,
@@ -64,6 +65,7 @@ impl RuntimeBuilder {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             app_id,
+            add_creator_as_member: Cell::new(true),
             environment,
             account_id,
             options: Rc::new(RefCell::new(Some(BuildOptions { bindings, secret }))),

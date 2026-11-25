@@ -151,7 +151,15 @@ import { EncryptedGuard } from "../thin/encrypted-guard.js";
 import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
-import { encryptionForDb, notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import {
+  encryptionForDb,
+  memberInsert,
+  notDeclaredEncryption,
+  type AddMemberArgs,
+  type Encryption,
+  type MemberAddress,
+  type MemberRow,
+} from "../encryption/index.js";
 import { pendingEncryption } from "../encryption/pending-handle.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
@@ -524,8 +532,10 @@ interface TimestampOverrideOptions {
 export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: Branch;
+  /** Set to false to create an encryption space without adding its creator. */
+  addCreatorAsMember?: boolean;
 }
-export type StreamingInsertOptions = Omit<InsertOptions, "branch">;
+export type StreamingInsertOptions = Omit<InsertOptions, "branch" | "addCreatorAsMember">;
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;
@@ -1804,14 +1814,30 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     context: DbAccessContext | null,
     ownerClient: JazzClient | undefined,
     prerequisite: TransactionAdmission | undefined,
+    schema?: WasmSchema | null,
   ): Transaction<TKind> {
     const transaction = new Transaction(kind, resolveClient, context);
     transaction.openingPrerequisite = prerequisite;
+    transaction.encryptionSchema = schema ?? null;
     if (ownerClient) transaction.bindOwnerClient(ownerClient);
     return transaction;
   }
 
   private openingPrerequisite?: TransactionAdmission;
+  private encryptionSchema: WasmSchema | null = null;
+
+  readonly encryption = {
+    members: {
+      add: (...args: AddMemberArgs): MemberRow => {
+        const [table, row] = memberInsert(
+          this.encryptionSchema,
+          (schema) => this.resolveClient(schema).getRuntime(),
+          args,
+        );
+        return this.insert<MemberRow, MemberAddress>(table, row);
+      },
+    },
+  };
 
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
@@ -2990,6 +3016,11 @@ export class Db {
     return this.getCurrentClient()?.getRuntime() ?? null;
   }
 
+  /** @internal The runtime attached to the membership table's schema. */
+  runtimeForEncryption(schema: WasmSchema): Runtime {
+    return this.getClient(schema).getRuntime();
+  }
+
   /**
    * @internal Read each runtime query at the remote tier, so that this Db's
    * store holds what the server holds for it before anything subscribes.
@@ -3176,10 +3207,10 @@ export class Db {
     loader: LocalFirstLoader,
     deadline: boolean,
   ): Promise<Db> {
-    const { operation, table, column } = refused;
+    const { operation, table, column, creatorMembership } = refused;
     const failed = (reason: "load-failed" | "timeout", cause?: unknown) =>
       new EncryptionNeedsLocalFirstError(
-        { reason, operation, table, ...(column === undefined ? {} : { column }) },
+        { reason, operation, table, column, creatorMembership },
         cause === undefined ? undefined : { cause },
       );
     let end!: (error: Error) => void;
@@ -3886,7 +3917,13 @@ export class Db {
     const encrypted = declaredEntries(table._schema);
     // The row ID can also name its encryption space. Keep it across the first
     // attempt and any retries, including one that starts key preparation.
-    if (!id && (deferred || (encrypted && Object.hasOwn(encrypted, table._table)))) {
+    if (
+      !id &&
+      (deferred ||
+        (encrypted &&
+          (Object.hasOwn(encrypted, table._table) ||
+            Object.values(encrypted).some((entry) => entry.scope === table._table))))
+    ) {
       id = reserveRowId();
     }
     const value = deferred ? immediateWriteRow(table, id!, values) : undefined;
@@ -4335,6 +4372,7 @@ export class Db {
       context,
       ownerClient ?? undefined,
       prerequisite,
+      this.clientSchema,
     );
   }
 

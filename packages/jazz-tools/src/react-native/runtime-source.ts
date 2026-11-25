@@ -143,7 +143,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         if (encryption && store) {
           const schema = resolveSchemaSource(encryption.app);
           this.encryptionSchema = schema;
-          this.attachSchema(schema, shippedMigrations(schema), compiledBindings(encryption.app));
+          this.attachSchema(
+            schema,
+            shippedMigrations(schema),
+            compiledBindings(encryption.app),
+            encryption.addCreatorAsMember,
+          );
           const foreground = new NativeForegroundDb(
             factory.openAttached(this.admittedCapability!),
             module,
@@ -243,9 +248,14 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     setTrustedReservedSession(config, this.admittedSession);
   }
 
-  private attachSchema(schema: WasmSchema, migrations?: ClientMigrations, bindings?: string): void {
+  private attachSchema(
+    schema: WasmSchema,
+    migrations?: ClientMigrations,
+    bindings?: string,
+    addCreatorAsMember?: boolean,
+  ): void {
     const pending = this.pendingCapability!;
-    const serialized = serializeSchemaSource(schema, migrations, bindings);
+    const serialized = serializeSchemaSource(schema, migrations, bindings, addCreatorAsMember);
     try {
       this.admittedCapability = attachNativeAccountSchema(
         this.foregroundFactory!,

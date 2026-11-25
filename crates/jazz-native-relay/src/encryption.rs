@@ -25,6 +25,7 @@ pub type Declarations = E2eeDeclarations;
 #[derive(Clone)]
 pub(super) struct ForegroundEncryption {
     pub declarations: Declarations,
+    add_creator_as_member: bool,
 }
 
 impl ForegroundEncryption {
@@ -32,6 +33,7 @@ impl ForegroundEncryption {
         bindings: &str,
         schema: &serde_json::Value,
         owner: &AccountSessionOwner,
+        add_creator_as_member: bool,
     ) -> Result<Self, Status> {
         let (current, declarations) =
             host::bound_declarations(bindings.as_bytes(), &owner.app_id, &owner.environment, true)
@@ -43,7 +45,10 @@ impl ForegroundEncryption {
             return Err(Status::LifecycleFailure);
         }
         let declarations = declarations.ok_or(Status::LifecycleFailure)?;
-        Ok(Self { declarations })
+        Ok(Self {
+            declarations,
+            add_creator_as_member,
+        })
     }
 
     pub async fn build(
@@ -59,7 +64,11 @@ impl ForegroundEncryption {
             device_account_secret,
         )
         .await?;
-        Ok(Built { built, store })
+        Ok(Built {
+            built,
+            store,
+            add_creator_as_member: self.add_creator_as_member,
+        })
     }
 }
 
@@ -67,6 +76,7 @@ impl ForegroundEncryption {
 pub(crate) struct Built {
     pub built: host::NativeBuilt,
     pub store: Rc<JsStore>,
+    pub add_creator_as_member: bool,
 }
 
 pub(crate) fn keyless(declarations: Declarations) -> Rc<dyn jazz::e2ee::E2eeHooks> {

@@ -8,10 +8,10 @@
  * from it.
  */
 import type { WasmSchema } from "../drivers/types.js";
-import { PersistedWriteRejectedError } from "../runtime/client.js";
+import { PersistedWriteRejectedError, type Runtime, type WriteResult } from "../runtime/client.js";
 import { bytesToHex } from "../runtime/hex.js";
 import type { Db } from "../runtime/db.js";
-import { boundApp, TypedTableQueryBuilder } from "../typed-app.js";
+import { boundApp, TypedTableQueryBuilder, type TableMeta } from "../typed-app.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
@@ -172,8 +172,13 @@ function failure(error: unknown, operation?: string): EncryptionError {
     return new EncryptionError("secret-format-mismatch", SECRET_FORMAT_MISMATCH);
   }
   const message = error instanceof Error ? error.message : String(error);
-  if (operation === "spaceRow" && message.startsWith("NotObserved: ")) {
-    return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
+  if (operation === "spaceRow") {
+    if (message.startsWith("NotObserved: ")) {
+      return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
+    }
+    if (error instanceof Error && "code" in error && error.code === "not_observed") {
+      return new EncryptionError("not-observed", message);
+    }
   }
   const match = /^([a-z-]+): ([\s\S]*)$/.exec(message);
   if (!match) return new EncryptionError("error", message);
@@ -785,6 +790,65 @@ export interface SpaceRef {
   id: string;
 }
 
+/** A generated table whose rows are encryption spaces. */
+export interface EncryptionSpaceTable {
+  readonly _encryptionSpace: true;
+  readonly _table: string;
+  readonly _schema: WasmSchema;
+}
+
+export type MemberAddress = { scopeId: string; identifier: string; accountId: string };
+export type MemberRow = MemberAddress & { id: string };
+type MemberTable = TableMeta<"__e2ee_members", MemberRow, MemberAddress, Partial<MemberAddress>>;
+type MemberSpace = [space: SpaceRef] | [table: EncryptionSpaceTable, id: string];
+export type AddMemberArgs = [...MemberSpace, accountId: string];
+
+function memberSpace(table: EncryptionSpaceTable | SpaceRef, id?: string): SpaceRef {
+  return "_table" in table ? { table: table._table, id: id! } : table;
+}
+
+function spaceTables(schema: WasmSchema): Set<string> {
+  const compiled = boundApp(schema)?.schema;
+  const entries = compiled?.encryption?.versions?.[compiled.current] as
+    | Record<string, { scope: string }>
+    | undefined;
+  return new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
+}
+
+function requireSpaceTable(tables: Set<string>, table: string): void {
+  if (!tables.has(table)) {
+    throw new EncryptionError(
+      "not-space-table",
+      `Table '${table}' is not a declared encryption space table.`,
+    );
+  }
+}
+
+/** @internal Lower a member insert using the runtime's already observed catalogue. */
+export function memberInsert(
+  fallbackSchema: WasmSchema | null,
+  runtime: (schema: WasmSchema) => Runtime | null,
+  args: AddMemberArgs,
+): [table: TypedTableQueryBuilder<MemberTable>, data: MemberAddress] {
+  const [table, idOrAccount, account] = args;
+  const schema = "_schema" in table ? table._schema : fallbackSchema;
+  if (!schema) throw new EncryptionNotDeclaredError();
+  const space = memberSpace(table, idOrAccount);
+  requireSpaceTable(spaceTables(schema), space.table);
+  const client = runtime(schema);
+  if (!client?.tableIdentity) throw new Error("The runtime cannot resolve space table identities.");
+  let scopeId: string;
+  try {
+    scopeId = client.tableIdentity(space.table);
+  } catch (error) {
+    throw failure(error, "spaceRow");
+  }
+  return [
+    new TypedTableQueryBuilder<MemberTable>("__e2ee_members", schema),
+    { scopeId, identifier: space.id, accountId: account ?? idOrAccount },
+  ];
+}
+
 export class Keys {
   constructor(private readonly call: Call) {}
 
@@ -836,11 +900,7 @@ export class Members {
     private readonly context?: { db: Db; schema: WasmSchema },
   ) {
     if (context) {
-      const schema = boundApp(context.schema)?.schema;
-      const entries = schema?.encryption?.versions?.[schema.current] as
-        | Record<string, { scope: string }>
-        | undefined;
-      this.spaceTables = new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
+      this.spaceTables = spaceTables(context.schema);
     }
   }
 
@@ -854,14 +914,26 @@ export class Members {
 
   /** A filter for the space's member rows, optionally restricted to one account. */
   async where(space: SpaceRef, accountId?: string): Promise<SpaceAddress & { accountId?: string }> {
-    if (this.spaceTables && !this.spaceTables.has(space.table)) {
-      throw new EncryptionError(
-        "not-space-table",
-        `Table '${space.table}' is not a declared encryption space table.`,
-      );
-    }
+    if (this.spaceTables) requireSpaceTable(this.spaceTables, space.table);
     const at = await this.address(space);
     return accountId === undefined ? at : { ...at, accountId };
+  }
+
+  /** Add an account to the space. Wait on the result as you would for an insert. */
+  add(...args: AddMemberArgs): WriteResult<MemberRow> {
+    if (!this.context) throw new Error("Adding members requires a database.");
+    const { db, schema } = this.context;
+    const [table, row] = memberInsert(schema, (schema) => db.runtimeForEncryption(schema), args);
+    return db.insert<MemberRow, MemberAddress>(table, row);
+  }
+
+  /** List the space's member rows visible to the caller. */
+  async list(...args: MemberSpace): Promise<MemberRow[]> {
+    if (!this.context) throw new Error("Listing members requires a database.");
+    const { db, schema } = this.context;
+    const filter = await this.where(memberSpace(args[0], args[1]));
+    const table = new TypedTableQueryBuilder<MemberTable>("__e2ee_members", schema);
+    return db.all(table.where(filter));
   }
 
   /**
@@ -870,10 +942,12 @@ export class Members {
    * Zero means nothing visible was removed. The account may still be a member
    * if the caller cannot read its rows. Call `keys.rotate` for immediate rotation.
    */
-  async remove(space: SpaceRef, accountId: string): Promise<number> {
+  async remove(...args: AddMemberArgs): Promise<number> {
+    const [tableOrSpace, idOrAccount, account] = args;
+    const accountId = account ?? idOrAccount;
     if (typeof accountId !== "string")
       throw new TypeError("Removing a member requires an account ID.");
-    const filter = await this.where(space, accountId);
+    const filter = await this.where(memberSpace(tableOrSpace, idOrAccount), accountId);
     if (!this.context) throw new Error("Removing members requires a database.");
     const { db, schema } = this.context;
     const table = new TypedTableQueryBuilder("__e2ee_members", schema);

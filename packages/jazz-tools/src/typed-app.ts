@@ -1394,7 +1394,10 @@ export type App<TSchema extends SchemaLike> = Simplify<
      */
     readonly "~types"?: TSchema;
   } & {
-    [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
+    [TTable in TableName<TSchema>]: Table<TTable, TSchema> &
+      (TSchema[TTable] extends { readonly encryptionSpace: true }
+        ? { readonly _encryptionSpace: true }
+        : unknown);
   } & {
     /** Read-only queries over accepted content versions of each table. */
     readonly $history: {

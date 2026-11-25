@@ -87,6 +87,7 @@ export async function openEncryptedTestDevice(
     accounts?: AccountStore;
     dataPath?: string;
     wait?: boolean;
+    addCreatorAsMember?: boolean;
   },
   cleanups: Cleanups,
 ) {
@@ -100,7 +101,10 @@ export async function openEncryptedTestDevice(
     driver: config.dataPath
       ? { type: "persistent", dataPath: config.dataPath }
       : { type: "memory" },
-    encryption: { store: config.privateStore ?? memoryPrivateStore() },
+    encryption: {
+      store: config.privateStore ?? memoryPrivateStore(),
+      addCreatorAsMember: config.addCreatorAsMember,
+    },
   });
   cleanups.push(() => session.close());
   if (config.key) await session.restoreDeviceAccount(config.key);

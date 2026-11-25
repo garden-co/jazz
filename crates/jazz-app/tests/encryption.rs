@@ -212,6 +212,56 @@ async fn titles(jazz: &Jazz, count: usize) -> Vec<String> {
     .expect("the rows reach this device and open")
 }
 
+/// Alice can create a project owned by Bob and is still admitted as its first
+/// member. Alice cannot change the project, but she can leave it. For another
+/// project, Alice admits Bob and removes him using the generated member table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_creator_is_admitted_even_without_update_permission() {
+    use bindings::{E2eeMember, NewE2eeMember, NewProject, ProjectUpdate, e2ee_members};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_id = ObjectId::from_uuid(bob.account().unwrap().0);
+    let scope = alice.table_identity("projects").await.unwrap();
+
+    let project = alice
+        .insert(NewProject::new("Bob's plans", bob_id))
+        .await
+        .unwrap();
+    let members = e2ee_members::query().filter(e2ee_members::identifier().eq(project.id));
+    let own = alice.all(members.clone()).await.unwrap();
+    assert_eq!(own.len(), 1);
+    assert_eq!((own[0].scope_id, own[0].account_id), (scope, alice_id));
+    assert_eq!(
+        alice
+            .can_update(project.id, ProjectUpdate::default())
+            .await
+            .unwrap(),
+        jazz_app_support::Advice::Denied,
+    );
+    alice.delete::<E2eeMember>(own[0].id).await.unwrap();
+    assert!(alice.all(members).await.unwrap().is_empty());
+
+    let project = alice
+        .insert(NewProject::new("Alice's plans", alice_id))
+        .await
+        .unwrap();
+    let added = alice
+        .insert(NewE2eeMember::new(scope, project.id, bob_id))
+        .await
+        .unwrap();
+    let members = e2ee_members::query().filter(e2ee_members::identifier().eq(project.id));
+    assert_eq!(alice.all(members.clone()).await.unwrap().len(), 2);
+    alice.delete::<E2eeMember>(added.id).await.unwrap();
+    let remaining = alice.all(members).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].account_id, alice_id);
+}
+
 /// Alice can count the encrypted tasks in her project through the native app's untyped client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_device_app_counts_tasks_with_a_plaintext_filter() {

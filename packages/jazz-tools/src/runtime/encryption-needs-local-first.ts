@@ -25,6 +25,8 @@ export interface EncryptionNeedsLocalFirstDetails {
   table: string;
   /** The encrypted column it named, when it named one. */
   column?: string;
+  /** The space insert needs to add its creator in the same transaction. */
+  creatorMembership?: boolean;
 }
 
 /**
@@ -37,6 +39,7 @@ export class EncryptionNeedsLocalFirstError extends Error {
   readonly operation: string;
   readonly table: string;
   readonly column: string | undefined;
+  declare readonly creatorMembership?: boolean;
 
   constructor(details: EncryptionNeedsLocalFirstDetails, options?: ErrorOptions) {
     super(needsLocalFirstMessage(details, options?.cause), options);
@@ -45,15 +48,17 @@ export class EncryptionNeedsLocalFirstError extends Error {
     this.operation = details.operation;
     this.table = details.table;
     this.column = details.column;
+    if (details.creatorMembership) this.creatorMembership = true;
   }
 }
 
 function needsLocalFirstMessage(
-  { reason, table, column }: EncryptionNeedsLocalFirstDetails,
+  { reason, table, column, creatorMembership }: EncryptionNeedsLocalFirstDetails,
   cause: unknown,
 ): string {
-  const lead =
-    column === undefined
+  const lead = creatorMembership
+    ? `Creating a space in \`${table}\` with automatic membership needs the local-first client.`
+    : column === undefined
       ? `\`${table}\` has end-to-end encrypted columns, which need the local-first client.`
       : `\`${table}.${column}\` is end-to-end encrypted, which needs the local-first client.`;
   switch (reason) {

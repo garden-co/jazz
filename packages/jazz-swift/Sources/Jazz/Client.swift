@@ -161,6 +161,9 @@ public struct Config: Sendable {
         }
         if let encryption {
             object["environment"] = .string(encryption.environment)
+            if !encryption.addCreatorAsMember {
+                object["addCreatorAsMember"] = .bool(false)
+            }
         }
         return try Coding.json(JSONValue.object(object))
     }

@@ -203,6 +203,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         accountId: config.accountId,
         deviceAccountSecret: secret,
         store: config.encryption.store ?? browserPrivateStore(),
+        addCreatorAsMember: config.encryption.addCreatorAsMember,
       });
       this.encryption = {
         ...built,

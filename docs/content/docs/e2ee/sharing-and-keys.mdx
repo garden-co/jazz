@@ -4,46 +4,54 @@ description: "Add and remove the members of an encrypted space, and when their d
 languageTabs: backend
 ---
 
-A space is a row of the table your encryption declaration names (a project, a room). Its **members**
-are the rows of `__e2ee_members` for it, and Jazz's permissions decide who may add them: the space row's
-update rule is the rule for managing members, plus one exception: the account that creates the space row
-may add itself in the same transaction.
+A space is a row of the table your encryption declaration names, such as a project or room. The
+account that creates a space joins it in the same transaction. To add another account, the caller
+must be able to read and update the space row.
 
 ## Create a space and add members
 
-A new space and its creator's own membership are one transaction. `db.encryption.members.row` gives the
-values to insert into the generated members table:
+Insert the space row as usual, then use `members.add` to invite another account.
 
 ```ts
-const id = crypto.randomUUID();
-const space = { table: "projects", id };
-const self = await db.encryption.members.row(space, accountId);
-const written = await db.transaction((tx) => {
-  tx.insert(app.projects, { name: "plans", ownerId: accountId }, { id });
-  tx.insert(app.__e2ee_members, self);
-});
-await written.wait({ tier: "global" });
-
-// Later, the owner adds a member:
-const row = await db.encryption.members.row(space, otherAccountId);
-await db.insert(app.__e2ee_members, row).wait({ tier: "global" });
+const project = await db
+  .insert(app.projects, { name: "Plans", ownerId: accountId })
+  .wait({ tier: "global" });
+await db.encryption.members.add(app.projects, project.id, otherAccountId).wait({ tier: "global" });
+const members = await db.encryption.members.list(app.projects, project.id);
+await db.encryption.members.remove(app.projects, project.id, otherAccountId);
 ```
+
+To turn off creator membership for one space, pass `{ addCreatorAsMember: false }` as the insert's
+third argument. To turn it off for all spaces this client creates, set `addCreatorAsMember: false`
+in the client's `encryption` options.
+
+On a thin browser client, the first space insert that adds its creator loads the local-first
+encryption runtime. Inserts with only plaintext columns can stay on the thin client when you
+turn off automatic membership.
 
 The space's key is made by its first encrypted write. A member gets the key from any device that holds it (the
 first holder to deliver wins), sealed to the member's account, so the member's devices can all read.
 
-## List members
+Use the generated table named by the encryption declaration's `scope`. The methods also accept a
+space reference such as `{ table: "projects", id: project.id }`. On a fresh device, creating a space
+with automatic membership and using the membership helpers can report `not-observed` until the
+device receives the table's identity from the server.
 
-Pass the filter from `members.where` to the ordinary query API. Pass an account ID as the second argument
-to see only that account's rows in the space.
+## Advanced: in your own transaction
+
+Use `tx.encryption.members.add` to stage a member alongside other writes.
 
 ```ts
-const filter = await db.encryption.members.where(space);
-const members = await db.all(app.__e2ee_members.where(filter));
+const written = await db.transaction((tx) => {
+  tx.encryption.members.add(app.projects, project.id, otherAccountId);
+});
+await written.wait({ tier: "global" });
 ```
 
-Use the table named by the encryption declaration's `scope`. On a fresh device, these helpers can
-return the error code `not-observed` until the device first receives the table's identity from the server.
+For direct access to `app.__e2ee_members`, use `await db.encryption.members.row(space, accountId)` to
+prepare the insert values. Use `await db.encryption.members.where(space)` to prepare a query filter.
+Pass an account ID as the second argument to restrict the filter to that account. If you insert the
+creator's member row explicitly in the transaction that creates the space, Jazz keeps that row.
 
 ## When keys arrive
 

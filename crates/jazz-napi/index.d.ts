@@ -13,6 +13,7 @@ export declare class EncryptionRuntime {
    * `bindApp`): what a deployed app has in place of `jazz.app.json`.
    */
   static fromBindings(bindings: string, appId: string, environment: string, accountId: string, deviceAccountSecret?: string | undefined | null): EncryptionRuntime
+  setAddCreatorAsMember(enabled: boolean): void
   /**
    * Builds the runtime: settles when its device is loaded or made, which
    * takes the app's store (answer its requests while waiting).
@@ -681,6 +682,7 @@ export interface InsertOptions {
   attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
+  addCreatorAsMember?: boolean
 }
 
 export interface JazzCoreResponse {
