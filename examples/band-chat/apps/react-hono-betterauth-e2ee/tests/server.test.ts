@@ -5,12 +5,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, keyless, memoryPrivateStore } from "jazz-tools/backend";
 import permissions from "../jazz.permissions.json" with { type: "json" };
+import { LOCAL_ORIGIN } from "../src/lib/config.mjs";
 import { app, cleanUp, createRoom, device, serve, storedBytes, until } from "./harness";
 
 const APP_DIR = join(import.meta.dirname, "..");
@@ -27,14 +28,6 @@ afterEach(async () => {
   for (const child of running.splice(0)) await stopServer(child);
 });
 
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const { port } = probe.address() as { port: number };
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
-
 async function stopServer(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
   const exited = new Promise((resolve) => child.once("exit", resolve));
@@ -42,10 +35,15 @@ async function stopServer(child: ChildProcess): Promise<void> {
   await exited;
 }
 
-/** The app's server on a free port, its data in a new directory. */
+/**
+ * The app's server on a port it picks itself, its data in a new directory.
+ * PORT=0 lets the server bind any free port and report it: a port picked here
+ * and freed before the server binds it could meanwhile go to another test's
+ * server, and our requests with it. As in `pnpm dev`, the page's origin is
+ * Vite's, not this server's port.
+ */
 async function startServer() {
-  const port = await freePort();
-  const origin = `http://127.0.0.1:${port}`;
+  const origin = LOCAL_ORIGIN;
   const dataPath = await mkdtemp(join(tmpdir(), "band-chat-e2ee-server-"));
   const child = spawn(join(APP_DIR, "node_modules/.bin/tsx"), ["server/index.ts"], {
     cwd: APP_DIR,
@@ -53,26 +51,38 @@ async function startServer() {
       ...process.env,
       // A local run that keeps its data on disk, as `pnpm dev` does.
       NODE_ENV: "development",
-      PORT: String(port),
+      PORT: "0",
       APP_ORIGIN: origin,
       BETTER_AUTH_SECRET: "band-chat-server-test-secret-0123456789abcdef",
       JAZZ_DATA_PATH: dataPath,
     },
-    stdio: ["ignore", "inherit", "inherit"],
+    stdio: ["ignore", "pipe", "inherit"],
   });
   running.push(child);
+  const url = await new Promise<string>((resolve, reject) => {
+    const exited = (code: number | null) =>
+      reject(new Error(`the server exited (${code}) before it listened`));
+    child.once("exit", exited);
+    createInterface({ input: child.stdout! }).on("line", (line) => {
+      console.log(line);
+      const port = /^BandChat listening on http:\/\/localhost:(\d+)$/.exec(line)?.[1];
+      if (!port) return;
+      child.off("exit", exited);
+      resolve(`http://127.0.0.1:${port}`);
+    });
+  });
   await until(async () => {
-    const response = await plainFetch(`${origin}/health`).catch(() => undefined);
+    const response = await plainFetch(`${url}/health`).catch(() => undefined);
     return response?.ok ? true : undefined;
   }, "the server to start");
-  return { origin, dataPath, stop: () => stopServer(child) };
+  return { url, origin, dataPath, stop: () => stopServer(child) };
 }
 
 type AppServer = Awaited<ReturnType<typeof startServer>>;
 
 /** A request to the app as its own page sends it: same origin, with `cookie`. */
 function call(server: AppServer, path: string, init: { body?: unknown; cookie?: string } = {}) {
-  return plainFetch(`${server.origin}${path}`, {
+  return plainFetch(`${server.url}${path}`, {
     method: init.body === undefined ? "GET" : "POST",
     headers: {
       origin: server.origin,
@@ -110,12 +120,12 @@ async function sessionOf(server: AppServer, cookie: string) {
 
 /**
  * A Node client of the app signed in with `cookie`, as a browser tab is: its
- * requests and sockets to the app's origin carry the cookie.
+ * requests and sockets to the app's server carry the cookie.
  */
 async function signedInClient(server: AppServer, cookie: string) {
   const realFetch = globalThis.fetch;
   const RealWebSocket = globalThis.WebSocket;
-  const host = new URL(server.origin).host;
+  const host = new URL(server.url).host;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     if (new URL(request.url).host === host && !request.headers.has("cookie"))
@@ -133,7 +143,7 @@ async function signedInClient(server: AppServer, cookie: string) {
     globalThis.WebSocket = RealWebSocket;
   });
   const session = await createJazzClient({
-    serverUrl: `${server.origin}/jazz`,
+    serverUrl: `${server.url}/jazz`,
     app,
     permissions,
     driver: { type: "memory" },
@@ -165,7 +175,7 @@ describe("ending a user's other sign-ins", () => {
 
     // Only the app's own page may ask, signed in.
     expect((await call(server, "/api/end-other-sign-ins", { body: {} })).status).toBe(401);
-    const crossSite = await plainFetch(`${server.origin}/api/end-other-sign-ins`, {
+    const crossSite = await plainFetch(`${server.url}/api/end-other-sign-ins`, {
       method: "POST",
       headers: { origin: "https://elsewhere.example", cookie: caller },
     });
