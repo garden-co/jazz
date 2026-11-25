@@ -141,7 +141,7 @@ it("arms verification backoff after a transient private-store error", async () =
   expect(fired.some((delay) => delay >= 240 && delay <= 501)).toBe(true);
 }, 60_000);
 
-it("arms the next two-second approval probe and detects a challenge", async () => {
+it("detects a challenge through the approval watch, without a polling timer", async () => {
   const { armed, fired } = observeStoreClock();
   const schema = testApp(appFile);
   const host = await startTestJazz({
@@ -174,13 +174,11 @@ it("arms the next two-second approval probe and detects a challenge", async () =
   try {
     await first.devices.challenge(await waiting.deviceId());
     await expect.poll(() => challenge.mock.calls.length, { timeout: 6_000 }).toBe(1);
+    // The watch woke the loop: no two-second approval probe was armed.
     expect(
       armed.some((delay) => delay > 500 && delay <= 2001),
       JSON.stringify({ armed, fired }),
-    ).toBe(true);
-    await expect
-      .poll(() => fired.some((delay) => delay > 500 && delay <= 2001), { timeout: 8_000 })
-      .toBe(true);
+    ).toBe(false);
   } finally {
     stop();
   }
