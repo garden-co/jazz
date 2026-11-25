@@ -700,7 +700,7 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let (id, values, committed) = jazz_app_support::with_key_wait(|| {
+            let (id, values, committed) = jazz_app_support::with_key_wait(&client, || {
                 client.insert_with_id(&name, id.map(|id| *id.uuid()), cells.clone())
             })
             .await?;
@@ -735,9 +735,10 @@ impl Core {
         let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let cells: std::collections::HashMap<_, _> = cells.into_iter().collect();
-            let committed =
-                jazz_app_support::with_key_wait(|| client.upsert(&name, *id.uuid(), cells.clone()))
-                    .await?;
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.upsert(&name, *id.uuid(), cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             // Read before the wait, as insert answers with what it wrote: by
             // the time the server accepts it, someone may have deleted or
@@ -776,9 +777,10 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed =
-                jazz_app_support::with_key_wait(|| client.restore(&name, id, cells.clone()))
-                    .await?;
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.restore(&name, id, cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
             read_back(&client, &table, &name, id).await
@@ -801,8 +803,10 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed =
-                jazz_app_support::with_key_wait(|| client.update(&name, id, cells.clone())).await?;
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.update(&name, id, cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -865,7 +869,8 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = jazz_app_support::with_key_wait(|| client.delete(&name, id)).await?;
+            let committed =
+                jazz_app_support::with_key_wait(&client, || client.delete(&name, id)).await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;

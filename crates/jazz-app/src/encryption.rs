@@ -296,6 +296,8 @@ mod plan {
             Box::pin(retry_after_key(
                 async || begin().await,
                 |error| jazz::tools::JazzError::Write(error.to_string()),
+                std::future::pending(),
+                || unreachable!("a pending future never ends"),
             ))
         }
 
@@ -405,9 +407,14 @@ mod plan {
         let _ = ready(Duration::from_secs(60)).await;
     }
 
+    /// Repeats `operation` while it is refused for want of a key the runtime
+    /// is preparing. Its waits for the key end with `ended`: then the
+    /// original refusal's error is `ended_error`.
     pub(crate) async fn retry_after_key<T, E: From<jazz::tools::JazzError>>(
         mut operation: impl AsyncFnMut() -> std::result::Result<T, jazz::tools::JazzError>,
         preparation_error: impl Fn(Error) -> E,
+        ended: impl std::future::Future<Output = ()>,
+        ended_error: impl Fn() -> E,
     ) -> Result<T, E> {
         use host::WriteRetry;
         use jazz::e2ee::E2eeRefusal;
@@ -417,6 +424,7 @@ mod plan {
             Ok(value) => return Ok(value),
             Err(error) => error,
         };
+        let mut ended = std::pin::pin!(ended);
         let deadline = host::Encryption::write_deadline(Duration::ZERO);
         let mut repeated = false;
         let mut last = false;
@@ -442,9 +450,13 @@ mod plan {
                     TICKED.with(|ticked| ticked.notify_waiters());
                 });
             });
-            let decision = polled(&runtime, retry)
-                .await
-                .map_err(|reason| preparation_error(failure(reason)))?;
+            // The preparation goes on in its own task; only this wait ends.
+            let decision = tokio::select! {
+                biased;
+                decision = polled(&runtime, retry) => decision,
+                () = ended.as_mut() => return Err(ended_error()),
+            }
+            .map_err(|reason| preparation_error(failure(reason)))?;
             if decision == WriteRetry::Stop {
                 return Err((*original).into());
             }
@@ -526,11 +538,19 @@ impl Encryption {
     /// first device, and, for a device account, registers recovery or
     /// recovers with the account secret. Waits up to `timeout` for the
     /// runtime's own loop (which retries while the server is out of reach).
-    /// `active`, `awaiting-approval` or `reenrolled`.
+    /// `active`, `awaiting-approval` or `reenrolled`. Closing the app (or
+    /// this handle) ends the wait: [`Error::Stopped`].
     pub async fn ready(&self, timeout: Duration) -> Result<String> {
         with_runtime!(self, timeout, {
             let started = std::time::Instant::now();
-            move |_| plan::ready(timeout.saturating_sub(started.elapsed()))
+            move |client: jazz::tools::JazzClient| async move {
+                // The runtime's loop goes on verifying; only this wait ends.
+                tokio::select! {
+                    biased;
+                    ready = plan::ready(timeout.saturating_sub(started.elapsed())) => ready,
+                    () = client.waits_ended() => Err(Error::Stopped),
+                }
+            }
         })
     }
 
@@ -591,17 +611,27 @@ pub(crate) fn spawn_start() {
     tokio::task::spawn_local(plan::start());
 }
 
-/// Retries a write that failed for want of a key when a device runtime is running.
+/// Retries a write that failed for want of a key when a device runtime is
+/// running. The wait for the key ends with `client`'s waits (the app or the
+/// handle closing): [`Error::Stopped`].
 #[doc(hidden)]
 pub async fn with_key_wait<T>(
+    client: &jazz::tools::JazzClient,
     mut operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,
 ) -> Result<T> {
     #[cfg(feature = "e2ee-client")]
     {
-        plan::retry_after_key(async || operation(), std::convert::identity).await
+        plan::retry_after_key(
+            async || operation(),
+            std::convert::identity,
+            client.waits_ended(),
+            || Error::Stopped,
+        )
+        .await
     }
     #[cfg(not(feature = "e2ee-client"))]
     {
+        let _ = client;
         operation().map_err(Error::from)
     }
 }

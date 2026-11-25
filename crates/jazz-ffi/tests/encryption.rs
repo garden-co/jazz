@@ -547,6 +547,48 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
     result.unwrap();
 }
 
+/// Contract: closing a handle ends a host's `waitUntilReady` (Go's, Swift's
+/// and Kotlin's) at once with kind "closed", while the device waits for an
+/// unreachable server: the close doesn't wait out the wait's timeout.
+///
+/// ```text
+/// relay unreachable ─► host ──waitUntilReady(60 s)──► waiting
+/// host ──shutdown──► waitUntilReady: closed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_ends_a_wait_until_ready() {
+    let app = start().await;
+    app.relay.set_unreachable(true);
+    let config = app.config();
+    let result = tokio::task::spawn_blocking(move || {
+        let handle =
+            JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
+        let (sent, waited) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let handle = handle.clone();
+            move || {
+                let _ = sent.send(wait_until_ready(&handle, 60_000));
+            }
+        });
+        // The wait is on the client's thread before the close.
+        std::thread::sleep(Duration::from_millis(300));
+        let closing = std::time::Instant::now();
+        handle.shutdown().unwrap();
+        let waited = waited
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the wait ends");
+        assert!(matches!(waited, Err(JazzError::Closed)), "{waited:?}");
+        assert!(
+            closing.elapsed() < Duration::from_secs(5),
+            "the close waited {:?} for readiness",
+            closing.elapsed()
+        );
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// Alice's host receives a refusal when her device has no key for the project,
 /// whether she edits a task directly or stages the write in a transaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

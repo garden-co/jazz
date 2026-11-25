@@ -507,7 +507,7 @@ impl Jazz {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
-            let written = crate::encryption::with_key_wait(|| {
+            let written = crate::encryption::with_key_wait(&client, || {
                 client.update(<U::Row as Table>::NAME, id, cells.clone())
             })
             .await?;
@@ -520,7 +520,8 @@ impl Jazz {
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = crate::encryption::with_key_wait(|| client.delete(T::NAME, id)).await?;
+            let written =
+                crate::encryption::with_key_wait(&client, || client.delete(T::NAME, id)).await?;
             settle.settle(&client, written).await
         })
         .await
@@ -697,7 +698,7 @@ pub(crate) async fn insert_waiting<N: Insert>(
     let name = <N::Row as Table>::NAME;
     let cells = new.into_cells(implementations)?;
     let (id, values, written) =
-        crate::encryption::with_key_wait(|| client.insert(name, cells.clone())).await?;
+        crate::encryption::with_key_wait(client, || client.insert(name, cells.clone())).await?;
     inserted::<N>(client, id, values, written, implementations)
 }
 

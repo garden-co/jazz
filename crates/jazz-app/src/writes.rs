@@ -93,7 +93,7 @@ impl Jazz {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = new.into_cells(&implementations)?;
-            let written = crate::encryption::with_key_wait(|| {
+            let written = crate::encryption::with_key_wait(&client, || {
                 client.upsert(<N::Row as Table>::NAME, *id.uuid(), cells.clone())
             })
             .await?;
@@ -128,9 +128,10 @@ impl Jazz {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written =
-                crate::encryption::with_key_wait(|| client.restore(T::NAME, id, cells.clone()))
-                    .await?;
+            let written = crate::encryption::with_key_wait(&client, || {
+                client.restore(T::NAME, id, cells.clone())
+            })
+            .await?;
             settle.settle(&client, written).await?;
             read_back::<T>(&client, id, &implementations).await
         })

@@ -161,7 +161,8 @@ async fn add_task(jazz: &Jazz, project: &str, title: &str) -> Result<(), Error> 
             ("title".to_owned(), Value::Text(title)),
         ]);
         let (_, values, written) =
-            jazz_app_support::with_key_wait(|| client.insert("tasks", cells.clone())).await?;
+            jazz_app_support::with_key_wait(&client, || client.insert("tasks", cells.clone()))
+                .await?;
         // The row an insert returns has the plaintext, not the sealed bytes.
         assert!(
             values
@@ -615,10 +616,10 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
 async fn a_write_quoting_a_key_refusal_is_returned_unchanged() {
     let app = App::start().await;
     let alice = app.device().await;
-    alice.with_client(|_| async {
+    alice.with_client(|client| async move {
         let reason = "key-pending: space aa/bb is quoted by the application";
         let mut attempts = 0;
-        let error = jazz_app_support::with_key_wait(|| {
+        let error = jazz_app_support::with_key_wait(&client, || {
             attempts += 1;
             Err::<(), _>(jazz::tools::JazzError::Write(reason.to_owned()))
         }).await.unwrap_err();
@@ -1055,7 +1056,8 @@ async fn native_insert_returns_omitted_encrypted_values() {
         .with_client(move |client| async move {
             let cells = HashMap::from([("projectId".into(), uuid(&project))]);
             let (id, values, _) =
-                jazz_app_support::with_key_wait(|| client.insert("tasks", cells.clone())).await?;
+                jazz_app_support::with_key_wait(&client, || client.insert("tasks", cells.clone()))
+                    .await?;
             let schema = client.schema()?;
             let table = &schema[&TableName::new("tasks")];
             let inserted: HashMap<_, _> = table
@@ -1434,6 +1436,133 @@ async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
         .await
         .expect("the client closes")
         .unwrap();
+    app.stop().await;
+}
+
+/// Closing Alice's app ends her write that waits for its space's key: the
+/// write fails `Stopped`, and the close doesn't wait out the write's 10 s
+/// deadline (nor the 30 s drain).
+///
+/// ```text
+/// alice ──insert──► key-pending ──prepare──► store (holds the space key)
+/// alice ──shutdown──► the write ends Stopped ► closed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_ends_a_write_waiting_for_its_key() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let app = App::start().await;
+    let entered = Arc::new(Notify::new());
+    let store = store_with_hook({
+        let entered = entered.clone();
+        move |doc, _| {
+            let entered = entered.clone();
+            let held = doc.starts_with("held-");
+            Box::pin(async move {
+                if held {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            })
+        }
+    });
+    let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
+    let alice = Jazz::open(client_files(), config).await.unwrap();
+    ready(&alice).await;
+    let project = make_project(&alice, "plans").await;
+    let writing = tokio::spawn({
+        let alice = alice.clone();
+        async move { add_task(&alice, &project, "unwritten").await }
+    });
+    tokio::time::timeout(Duration::from_secs(15), entered.notified())
+        .await
+        .expect("the write's preparation reached the store");
+    let closing = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), alice.shutdown())
+        .await
+        .expect("the client closes")
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(60), writing)
+        .await
+        .expect("the write ends")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, Error::Stopped), "{error:?}");
+    assert!(
+        closing.elapsed() < Duration::from_secs(5),
+        "the close waited {:?} for the write",
+        closing.elapsed()
+    );
+    app.stop().await;
+}
+
+/// Closing the phone's app ends its wait for readiness while startup still
+/// recovers the device: the wait fails `Stopped`, and the close doesn't wait
+/// out the wait's timeout (nor the 30 s drain).
+///
+/// ```text
+/// phone ──ready(60 s)──► startup recovery (store holds the nonce)
+/// phone ──shutdown──► ready ends Stopped ► closed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_ends_a_wait_for_readiness() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let laptop = app.device_of(key.clone()).await;
+    assert_eq!(ready(&laptop).await, "active");
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let store = store_with_hook({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |doc, expected| {
+            let entered = entered.clone();
+            let release = release.clone();
+            let recovery = saving_recovery_nonce(doc, expected);
+            Box::pin(async move {
+                if recovery {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
+        }
+    });
+    let phone = Jazz::open(client_files(), app.user(key).encryption(store))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), entered.notified())
+        .await
+        .expect("startup reaches the private store");
+    let waiting = tokio::spawn({
+        let encryption = phone.encryption();
+        async move { encryption.ready(Duration::from_secs(60)).await }
+    });
+    // The wait is on the client's thread before the close.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let closing = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), phone.shutdown())
+        .await
+        .expect("the client closes")
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(60), waiting)
+        .await
+        .expect("the wait ends")
+        .unwrap()
+        .unwrap_err();
+    release.notify_one();
+    assert!(matches!(error, Error::Stopped), "{error:?}");
+    assert!(
+        closing.elapsed() < Duration::from_secs(5),
+        "the close waited {:?} for readiness",
+        closing.elapsed()
+    );
+    laptop.shutdown().await.unwrap();
     app.stop().await;
 }
 
