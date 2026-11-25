@@ -272,13 +272,18 @@ export function servePrivateStore(
     }
     clearTimeout(clock);
     if (urgency === "cancel") return;
-    clock = setTimeout(
-      function wakeAtDeadline() {
-        void tick();
-      },
-      Number(urgency.slice("after:".length)),
-    );
-    (clock as { unref?: () => void }).unref?.();
+    const delay = Number(urgency.slice("after:".length));
+    const deadline = performance.now() + delay;
+    const schedule = (wait: number) => {
+      clock = setTimeout(function wakeAtDeadline() {
+        // Rust still considers the deadline armed when a timer fires early.
+        const remaining = deadline - performance.now();
+        if (remaining > 0) schedule(Math.ceil(remaining));
+        else void tick();
+      }, wait);
+      (clock as { unref?: () => void }).unref?.();
+    };
+    schedule(delay);
   };
   let timer: ReturnType<typeof setInterval> | undefined;
   if (target.setStoreWake) {
