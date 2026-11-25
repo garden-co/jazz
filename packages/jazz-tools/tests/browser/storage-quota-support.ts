@@ -25,25 +25,40 @@ export async function usage(): Promise<number> {
 }
 
 /**
- * The bytes of SQLite pages the IndexedDB VFS holds, read straight from its
- * object store (crates/jazz-wasm/src/idb_vfs.rs). The origin's usage can't
- * show that a write landed: Chromium compacts its IndexedDB files, and usage
- * can drop while new pages are written.
+ * The SQLite pages the IndexedDB VFS holds, by file and offset, read
+ * straight from its object store (crates/jazz-wasm/src/idb_vfs.rs). The
+ * origin's usage can't show that a write landed: Chromium compacts its
+ * IndexedDB files, and usage can drop while new pages are written.
  */
-export async function vfsBytes(): Promise<number> {
+export async function vfsPages(): Promise<Map<string, Uint8Array>> {
   const idb = await new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open("jazz-idb");
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
   try {
-    const blocks = await new Promise<{ data: Uint8Array }[]>((resolve, reject) => {
-      const request = idb.transaction("blocks").objectStore("blocks").getAll();
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    return blocks.reduce((total, block) => total + block.data.byteLength, 0);
+    const blocks = await new Promise<{ path: string; offset: number; data: Uint8Array }[]>(
+      (resolve, reject) => {
+        const request = idb.transaction("blocks").objectStore("blocks").getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      },
+    );
+    return new Map(blocks.map((block) => [`${block.path}@${block.offset}`, block.data]));
   } finally {
     idb.close();
   }
+}
+
+/** Whether two `vfsPages()` reads hold the same pages with the same bytes. */
+export function samePages(a: Map<string, Uint8Array>, b: Map<string, Uint8Array>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [key, page] of a) {
+    const other = b.get(key);
+    if (!other || other.byteLength !== page.byteLength) return false;
+    for (let index = 0; index < page.byteLength; index++) {
+      if (page[index] !== other[index]) return false;
+    }
+  }
+  return true;
 }

@@ -3,7 +3,7 @@ import { generateAuthSecret } from "../../src/index.js";
 import { storageQuotaBrowserCommands } from "./browser-commands.js";
 import { createBrowserTestDb as createDb, uniqueDbName, waitForCondition } from "./support.js";
 import { todos, allTodos, useSharedWorkerBridgeHarness } from "./worker-bridge-harness.js";
-import { chromium, incompressible, usage, vfsBytes } from "./storage-quota-support.js";
+import { chromium, incompressible, samePages, usage, vfsPages } from "./storage-quota-support.js";
 
 describe.runIf(chromium)("IndexedDB storage quota retry", () => {
   const { track, untrack, shutdownDbAndWorker } = useSharedWorkerBridgeHarness();
@@ -32,12 +32,19 @@ describe.runIf(chromium)("IndexedDB storage quota retry", () => {
           });
       }
       expect(refused, "a write past the quota is refused").not.toBeNull();
-      const saved = await vfsBytes();
+      // The refused write may already be in IndexedDB: a local wait
+      // resolves only once a flush writes every commit so far, so when the
+      // row's own write fits but a small commit right after it does not,
+      // the row's wait is refused too. What the retry then saves may be a
+      // few pages that don't grow the file. So this waits for any page to
+      // change: while the last write failed, commits only mark pages dirty,
+      // and a retry that succeeds writes all of them at once.
+      const saved = await vfsPages();
 
       await quota.overrideStorageQuota(origin, null);
       // Nothing writes or waits now: only the retry timer can save it.
       await waitForCondition(
-        async () => (await vfsBytes()) > saved + 300_000,
+        async () => !samePages(saved, await vfsPages()),
         30_000,
         "the refused write should reach IndexedDB once there is room",
       );
