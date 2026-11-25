@@ -33,15 +33,17 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::agility::{KeyPair, MechanismId, PublicKey, SecretKey};
+use crate::registry::Registry;
 
 use super::super::account::AccountFloor;
 use super::super::account::build::{ApprovalNonce, LocalDevice};
 use super::super::canonical::{self, Value, invalid, parse_canonical};
+use super::super::domain::AppDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::position::Position;
 use super::super::records::KeyColumns;
 use super::super::records::account::nonce_commitment;
-use super::store::{Rejection, StoreOwner};
+use super::store::{Rejection, StoreOwner, verify_stored_signature};
 use super::stored::{Binding, Fields, UnrecognisedDocument, ensure_canonical, stored_row};
 
 /// The format of the device document.
@@ -389,15 +391,75 @@ impl StoreOwner<'_> {
         account_id: &str,
         record: &FloorRecord,
     ) -> ProtocolResult<Result<AccountFloor, Rejection>> {
-        if let Err(reason) = self.check_binding(&record.binding)? {
-            return Ok(Err(reason));
-        }
-        if record.account_id != account_id {
-            return Ok(Err(Rejection::Binding));
-        }
-        if let Err(reason) = self.verify(&record.signed_bytes()?, &record.signature)? {
-            return Ok(Err(reason));
-        }
-        Ok(Ok(record.floor.clone()))
+        check_floor(
+            self.registry,
+            &self.device.signing.public,
+            &self.binding()?,
+            account_id,
+            record,
+        )
     }
+}
+
+/// Checks multiple floor records for the same device, computing its binding once.
+pub struct FloorVerifier<'a> {
+    registry: &'a Registry,
+    signing: PublicKey,
+    binding: Binding,
+}
+
+impl<'a> FloorVerifier<'a> {
+    pub fn new(
+        registry: &'a Registry,
+        domain: &AppDomain,
+        account_id: &str,
+        device: &LocalDevice,
+    ) -> ProtocolResult<Self> {
+        let owner = StoreOwner {
+            registry,
+            domain,
+            account_id,
+            device,
+        };
+        Ok(Self {
+            registry,
+            signing: device.signing.public.clone(),
+            binding: owner.binding()?,
+        })
+    }
+
+    pub fn load_floor(
+        &self,
+        account_id: &str,
+        record: &FloorRecord,
+    ) -> ProtocolResult<Result<AccountFloor, Rejection>> {
+        check_floor(
+            self.registry,
+            &self.signing,
+            &self.binding,
+            account_id,
+            record,
+        )
+    }
+}
+
+fn check_floor(
+    registry: &Registry,
+    signing: &PublicKey,
+    binding: &Binding,
+    account_id: &str,
+    record: &FloorRecord,
+) -> ProtocolResult<Result<AccountFloor, Rejection>> {
+    if record.binding != *binding || record.account_id != account_id {
+        return Ok(Err(Rejection::Binding));
+    }
+    if let Err(reason) = verify_stored_signature(
+        registry,
+        signing,
+        &record.signed_bytes()?,
+        &record.signature,
+    )? {
+        return Ok(Err(reason));
+    }
+    Ok(Ok(record.floor.clone()))
 }

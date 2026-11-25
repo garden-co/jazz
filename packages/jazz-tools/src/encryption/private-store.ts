@@ -24,6 +24,13 @@ export { PrivateStoreConflictError, PrivateStoreWipedError };
 export interface PrivateStore {
   /** The document `doc` of `scope`, or `null`. */
   load(scope: string, doc: string): Promise<StoredDocument | null>;
+  /**
+   * Reads all the documents and revisions of `scope` in one snapshot.
+   * Checks `incarnation` in that snapshot and throws {@link PrivateStoreWipedError}
+   * if it is missing or different. Returns an empty array for a live scope
+   * with no documents.
+   */
+  loadAll?(scope: string, incarnation: bigint): Promise<(StoredDocument & { doc: string })[]>;
   /** The incarnation of `scope`, a number fixed when the scope is made (never 0). */
   openScope(scope: string): Promise<bigint>;
   /**
@@ -140,8 +147,21 @@ async function answer(store: PrivateStore, request: StoreRequest): Promise<unkno
       const found = await store.load(text("scope"), text("doc"));
       return found && { bytes: encode(found.bytes), revision: found.revision.toString() };
     }
-    case "openScope":
-      return (await store.openScope(text("scope"))).toString();
+    case "openScope": {
+      const incarnation = (await store.openScope(text("scope"))).toString();
+      return request.loadAll === "v1" && store.loadAll
+        ? { incarnation, loadAll: "v1" }
+        : incarnation;
+    }
+    case "loadAllV1": {
+      if (!store.loadAll) throw new Error("the private store does not support loadAll");
+      const documents = await store.loadAll(text("scope"), BigInt(text("incarnation")));
+      return documents.map(({ doc, bytes, revision }) => ({
+        doc,
+        bytes: encode(bytes),
+        revision: revision.toString(),
+      }));
+    }
     case "save":
       return (
         await store.save(

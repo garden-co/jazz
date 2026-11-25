@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { app } from "../fixtures/encrypted/jazz.generated.js";
 import { browserPrivateStore } from "../../src/encryption/browser-store.js";
+import { buildEncryption } from "../../src/encryption/build.js";
 import {
   PrivateStoreConflictError,
   PrivateStoreWipedError,
 } from "../../src/encryption/private-store.js";
+import { encryptionStoreScope } from "../../src/encryption/store-scope.js";
+import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 
 // The built-in private store in a real browser: IndexedDB, a non-extractable
 // WebCrypto key and the page's Web Locks. Two store objects on one database
@@ -24,6 +28,86 @@ describe("the private store in a browser", () => {
     expect(await after.openScope("device")).toBe(incarnation);
     expect(await after.load("device", "keys")).toEqual({ bytes: bytes(1, 2, 3), revision });
     expect(await after.unprotect(blob)).toEqual(bytes(9, 9, 9));
+  });
+
+  it("reads the same documents and revisions in one transaction, only for the current scope", async () => {
+    const name = uniqueName();
+    const store = browserPrivateStore({ name });
+    const incarnation = await store.openScope("device");
+    const other = await store.openScope("other");
+    await store.save("other", other, "second", bytes(9), null);
+    const revision = await store.save("device", incarnation, "first", bytes(1), null);
+    await store.save("device", incarnation, "first", bytes(2), revision);
+    await store.save("device", incarnation, "second", bytes(3), null);
+    const expected = await Promise.all(
+      (await store.list("device")).map(async (doc) => ({
+        doc,
+        ...(await store.load("device", doc)),
+      })),
+    );
+
+    using transaction = vi.spyOn(IDBDatabase.prototype, "transaction");
+    expect(await store.loadAll("device", incarnation)).toEqual(expected);
+    expect(transaction).toHaveBeenCalledOnce();
+    await store.delete("device");
+    await expect(store.loadAll("device", incarnation)).rejects.toBeInstanceOf(
+      PrivateStoreWipedError,
+    );
+    const reopened = await store.openScope("device");
+    await expect(store.loadAll("device", incarnation)).rejects.toBeInstanceOf(
+      PrivateStoreWipedError,
+    );
+    expect(await store.loadAll("device", reopened)).toEqual([]);
+
+    // An interrupted wipe leaves the documents without their incarnation.
+    const raw = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const wiping = raw.transaction("scopes", "readwrite");
+        wiping.objectStore("scopes").delete("other");
+        wiping.oncomplete = () => resolve();
+        wiping.onabort = () => reject(wiping.error);
+      });
+      await expect(store.loadAll("other", other)).rejects.toBeInstanceOf(PrivateStoreWipedError);
+      expect(await store.loadAll("other", await store.openScope("other"))).toEqual([]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("opens a returning device and its floors with one document read on the browser store", async () => {
+    const store = browserPrivateStore({ name: uniqueName() });
+    const { EncryptionRuntime: host } = await loadWasmModule();
+    expect(host).toBeDefined();
+    const appId = crypto.randomUUID();
+    const environment = "test";
+    const accountId = crypto.randomUUID();
+    const options = { host: host!, app, appId, environment, accountId };
+    await buildEncryption({ ...options, store });
+
+    const scope = encryptionStoreScope(appId, environment, accountId);
+    const incarnation = await store.openScope(scope);
+    for (let index = 0; index < 12; index++) {
+      // Unrecognised floor records still have to be read and checked on open.
+      await store.save(scope, incarnation, `floor-${crypto.randomUUID()}`, bytes(1), null);
+    }
+
+    const load = vi.fn(store.load);
+    const list = vi.fn(store.list);
+    const loadAll = vi.fn(store.loadAll);
+    await buildEncryption({ ...options, store: { ...store, load, list, loadAll } });
+    expect(loadAll).toHaveBeenCalledExactlyOnceWith(scope, incarnation);
+    expect(load).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+
+    await buildEncryption({ ...options, store: { ...store, load, list, loadAll: undefined } });
+    expect(loadAll).toHaveBeenCalledOnce();
+    expect(list).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledTimes(13);
   });
 
   it("never exposes the protecting key: it cannot be exported", async () => {

@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+use crate::agility::PublicKey;
 use crate::error::Error;
 use crate::mechanisms::signature;
 use crate::primitives::{hash, sign};
@@ -143,16 +144,7 @@ impl StoreOwner<'_> {
     }
 
     pub(super) fn verify(&self, bytes: &[u8], signature: &[u8]) -> ProtocolResult<Checked<()>> {
-        match signing::verify(self.registry, &self.device.signing.public, bytes, signature) {
-            Ok(true) => Ok(Ok(())),
-            Ok(false) => Ok(Err(Rejection::Signature)),
-            Err(ProtocolError::Unsupported(_))
-            | Err(ProtocolError::Crypto(Error::UnsupportedFormat)) => {
-                Ok(Err(Rejection::Unsupported))
-            }
-            Err(ProtocolError::ProviderFailure) => Err(ProtocolError::ProviderFailure),
-            Err(_) => Ok(Err(Rejection::Signature)),
-        }
+        verify_stored_signature(self.registry, &self.device.signing.public, bytes, signature)
     }
 
     /// The lineage record of `space`, signed by the device.
@@ -566,6 +558,22 @@ impl StoreOwner<'_> {
             unsupported: Vec::new(),
             updated_document: None,
         }
+    }
+}
+
+pub(super) fn verify_stored_signature(
+    registry: &Registry,
+    key: &PublicKey,
+    bytes: &[u8],
+    signature: &[u8],
+) -> ProtocolResult<Checked<()>> {
+    match signing::verify(registry, key, bytes, signature) {
+        Ok(true) => Ok(Ok(())),
+        Ok(false) => Ok(Err(Rejection::Signature)),
+        Err(ProtocolError::Unsupported(_))
+        | Err(ProtocolError::Crypto(Error::UnsupportedFormat)) => Ok(Err(Rejection::Unsupported)),
+        Err(ProtocolError::ProviderFailure) => Err(ProtocolError::ProviderFailure),
+        Err(_) => Ok(Err(Rejection::Signature)),
     }
 }
 

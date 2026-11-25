@@ -12,6 +12,8 @@ mod mechanisms;
 use std::cell::Cell;
 use std::rc::Rc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use common::*;
 use jazz::db::block_on;
 use jazz::e2ee::EncryptionSettings;
@@ -22,6 +24,7 @@ use jazz_e2ee::protocol::account::AccountFloor;
 use jazz_e2ee::protocol::records::KeyColumns;
 use jazz_e2ee::protocol::{Position, ProtocolError};
 use jazz_e2ee::registry::Registry;
+use jazz_e2ee_client::host::bridge::{JsStore, serve};
 use jazz_e2ee_client::testing::StoreWithSaveHook;
 use jazz_e2ee_client::{ClientConfig, ClientError, E2eeClient, MemoryStore, PrivateStore, Report};
 
@@ -340,6 +343,87 @@ fn floors_only_move_forward_and_survive_a_restart() {
     let client = open_client(Rc::new(store));
     assert_eq!(skipped(&client), [name]);
     assert_eq!(block_on(client.floor(BOB)), None);
+}
+
+/// Alice reopens the same store with individual reads and with a snapshot.
+/// Both retain Bob's authentic floor and the held keys, and report Mallory's
+/// floor whose signed cut was changed. The snapshot preserves the revision.
+#[test]
+fn bulk_and_individual_reopens_authenticate_the_same_documents() {
+    const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
+    const MALLORY: &str = "aaaaaaaa-0000-5000-8000-000000000001";
+    let memory = Rc::new(MemoryStore::new());
+    let client = open_client(memory.clone());
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    let keys = {
+        let device = client.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    let original = floor(9, 0, keys.clone());
+    block_on(client.advance_floor(BOB, &floor(5, 0, keys.clone()))).unwrap();
+    block_on(client.advance_floor(BOB, &original)).unwrap();
+    block_on(client.advance_floor(MALLORY, &original)).unwrap();
+    drop(client);
+    let damaged = format!("floor-{MALLORY}");
+    let stored = block_on(memory.load(&scope(), &damaged)).unwrap().unwrap();
+    memory.overwrite(
+        &scope(),
+        &damaged,
+        String::from_utf8(stored.bytes)
+            .unwrap()
+            .replace(r#""through":"9""#, r#""through":"1""#)
+            .into_bytes(),
+    );
+
+    let single = open_client(memory.clone());
+    let bulk_reads = Rc::new(Cell::new(0));
+    let bulk = open_client(Rc::new(JsStore::served_by(Rc::new({
+        let memory = memory.clone();
+        let single_store = serve(memory.clone());
+        let bulk_reads = bulk_reads.clone();
+        move |request| {
+            let memory = memory.clone();
+            let single_store = single_store.clone();
+            let bulk_reads = bulk_reads.clone();
+            Box::pin(async move {
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") if command["loadAll"] == "v1" => {
+                        let incarnation = memory.open_scope(scope).await.unwrap().to_string();
+                        (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        )
+                    }
+                    Some("loadAllV1") => {
+                        bulk_reads.set(bulk_reads.get() + 1);
+                        let mut documents = Vec::new();
+                        for doc in memory.list(scope).await.unwrap() {
+                            let stored = memory.load(scope, &doc).await.unwrap().unwrap();
+                            documents.push(serde_json::json!({
+                                "doc": doc,
+                                "bytes": STANDARD.encode(stored.bytes),
+                                "revision": stored.revision.to_string(),
+                            }));
+                        }
+                        (true, serde_json::to_string(&documents).unwrap())
+                    }
+                    _ => single_store(request).await,
+                }
+            })
+        }
+    }))));
+    assert_eq!(bulk_reads.get(), 1);
+    for client in [single, bulk] {
+        assert!(client.with_held(|held| held.space(&root).is_some()));
+        assert_eq!(block_on(client.floor(BOB)), Some(original.clone()));
+        assert_eq!(block_on(client.floor(MALLORY)), None);
+        assert_eq!(skipped(&client), [damaged.clone()]);
+    }
 }
 
 /// Contract: a wipe removes alice's device, held keys and floors from the

@@ -74,7 +74,9 @@ function newIncarnation(crypto: Crypto): bigint {
 }
 
 /** Creates the store; see the module description. */
-export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): PrivateStore {
+export function browserPrivateStore(
+  options: BrowserPrivateStoreOptions = {},
+): PrivateStore & Required<Pick<PrivateStore, "loadAll">> {
   const name = options.name ?? DEFAULT_NAME;
   const factory = options.indexedDB ?? globalThis.indexedDB;
   const crypto = options.crypto ?? globalThis.crypto;
@@ -155,6 +157,23 @@ export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): P
         | DocRow
         | undefined;
       return row ? { bytes: new Uint8Array(row.bytes), revision: BigInt(row.revision) } : null;
+    },
+
+    async loadAll(scope, incarnation) {
+      const db = await database();
+      const transaction = db.transaction([SCOPES, DOCS]);
+      const row = (await wait(transaction.objectStore(SCOPES).get(scope))) as ScopeRow | undefined;
+      if (!row || BigInt(row.incarnation) !== incarnation) throw new PrivateStoreWipedError();
+      const rows = (await wait(
+        transaction.objectStore(DOCS).index("scope").getAll(scope),
+      )) as DocRow[];
+      return rows
+        .filter((row) => row.key === docKey(scope, row.doc))
+        .map(({ doc, bytes, revision }) => ({
+          doc,
+          bytes: new Uint8Array(bytes),
+          revision: BigInt(revision),
+        }));
     },
 
     async openScope(scope) {

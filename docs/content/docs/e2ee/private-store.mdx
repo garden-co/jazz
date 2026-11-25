@@ -10,6 +10,7 @@ for each space. Jazz asks the store for a few operations and nothing more:
 | Operation                                        | What it does                                                                                                                                                                           |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `load(scope, doc)`                               | The saved document and its revision, or `null`.                                                                                                                                        |
+| `loadAll(scope, incarnation)`                    | Optionally reads all document names, bytes and revisions from one snapshot. Throws `PrivateStoreWipedError` if the scope is missing or its incarnation changed.                        |
 | `openScope(scope)`                               | The scope's incarnation, a number fixed when the scope is made.                                                                                                                        |
 | `save(scope, incarnation, doc, bytes, expected)` | Replaces a document if the scope and the document's revision are as expected, atomically; otherwise throws `PrivateStoreConflictError` or `PrivateStoreWipedError` and writes nothing. |
 | `list(scope)`, `delete(scope)`                   | Names the documents of a scope, removes a scope.                                                                                                                                       |
@@ -31,6 +32,10 @@ Names starting with a dot are reserved for store metadata and temporary files.
 A scope is active while its incarnation marker exists. Deletion removes that marker atomically
 before cleaning up the documents. If cleanup is interrupted, reads ignore the orphaned documents
 and opening the scope discards them before publishing a new marker. See the [private store contract](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/private-store.ts#L22-L56).
+
+Jazz uses `loadAll` at startup when the store provides it. Check the scope's incarnation and
+read its documents in the same transaction or snapshot. The browser store does this in IndexedDB.
+Stores that omit the method use individual reads. Native UniFFI callbacks use individual reads.
 
 ```ts
 import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";

@@ -17,6 +17,15 @@
 //! them is wiped once used: the texts it writes and reads, and the JSON
 //! values they come from or go to. A handler that takes a request text owns
 //! it and wipes it ([`serve`] does); what crosses into JavaScript cannot be.
+//!
+//! The optional loadAllV1 bridge encoding reuses base64 bytes and decimal
+//! revisions. An openScope request offers it with `"loadAll":"v1"`; hosts
+//! without the operation still answer with the original decimal string.
+//! A host opting in answers with `{"incarnation":"…","loadAll":"v1"}`.
+//! Only after acknowledgement does Rust send loadAllV1 with scope and
+//! incarnation. The answer is an array of `{doc, bytes, revision}` records.
+//! This changes no stored document formats and keeps old hosts and bindings
+//! on the original request and answer shapes for list and load.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -25,6 +34,7 @@ use std::task::{Poll, Waker};
 use std::time::Duration;
 use web_time::Instant;
 
+use crate::store::ScopeDocuments;
 use crate::{PrivateStore, StoreError, Stored};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -87,6 +97,8 @@ pub struct JsStore {
     clock_checked: Cell<Option<Instant>>,
     /// Answers requests instead of the queue (see [`JsStore::served_by`]).
     handler: Option<Handler>,
+    /// Whether the host acknowledged the optional scope read in openScope.
+    load_all_v1: Cell<bool>,
 }
 
 impl JsStore {
@@ -339,6 +351,16 @@ impl PrivateStore for DeadlineStore {
         Box::pin(self.call("load", async { self.store.load(scope, doc).await }))
     }
 
+    fn load_all<'a>(
+        &'a self,
+        scope: &'a str,
+        incarnation: u64,
+    ) -> Option<LocalBoxFuture<'a, Result<ScopeDocuments, StoreError>>> {
+        self.store
+            .load_all(scope, incarnation)
+            .map(|read| Box::pin(self.call("loadAllV1", read)) as _)
+    }
+
     fn open_scope<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
         Box::pin(self.call("openScope", async { self.store.open_scope(scope).await }))
     }
@@ -548,10 +570,63 @@ impl PrivateStore for JsStore {
         })
     }
 
+    fn load_all<'a>(
+        &'a self,
+        scope: &'a str,
+        incarnation: u64,
+    ) -> Option<LocalBoxFuture<'a, Result<ScopeDocuments, StoreError>>> {
+        if !self.load_all_v1.get() {
+            return None;
+        }
+        Some(Box::pin(async move {
+            let mut answer = self
+                .call(
+                    "loadAllV1",
+                    json!({ "scope": scope, "incarnation": incarnation.to_string() }),
+                )
+                .await?;
+            let documents = (|| {
+                answer
+                    .as_array()
+                    .ok_or_else(|| {
+                        StoreError::Failed("the store answered without a list".to_owned())
+                    })?
+                    .iter()
+                    .map(|entry| {
+                        let name = entry["doc"].as_str().ok_or_else(|| {
+                            StoreError::Failed(
+                                "the store listed a name that is not text".to_owned(),
+                            )
+                        })?;
+                        Ok((
+                            name.to_owned(),
+                            Stored {
+                                bytes: bytes_of(&entry["bytes"])?,
+                                revision: number_of(&entry["revision"])?,
+                            },
+                        ))
+                    })
+                    .collect()
+            })();
+            wipe(&mut answer);
+            documents
+        }))
+    }
+
     fn open_scope<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
-        Box::pin(
-            async move { number_of(&self.call("openScope", json!({ "scope": scope })).await?) },
-        )
+        Box::pin(async move {
+            let answer = self
+                .call("openScope", json!({ "scope": scope, "loadAll": "v1" }))
+                .await?;
+            let supported = answer["loadAll"].as_str() == Some("v1");
+            let incarnation = number_of(if supported {
+                &answer["incarnation"]
+            } else {
+                &answer
+            })?;
+            self.load_all_v1.set(supported);
+            Ok(incarnation)
+        })
     }
 
     fn save<'a>(
@@ -718,6 +793,56 @@ mod tests {
     fn id_of(text: &str) -> u64 {
         let request: Value = serde_json::from_str(text).unwrap();
         request["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    /// Alice's host offers a bulk read only after acknowledging version 1.
+    /// Exercise the wire bytes directly to pin compatibility with older hosts.
+    #[test]
+    fn scope_read_bridge_encoding_v1() {
+        let store = JsStore::default();
+        let mut opening = store.open_scope("s");
+        assert!(poll(&mut opening).is_pending());
+        assert_eq!(
+            store.take_requests(),
+            [r#"{"id":"1","loadAll":"v1","op":"openScope","scope":"s"}"#]
+        );
+        assert!(store.reply(1, true, r#""9007199254740993""#));
+        assert_eq!(poll(&mut opening), Poll::Ready(Ok(9007199254740993)));
+        assert!(store.load_all("s", 9007199254740993).is_none());
+
+        let mut opening = store.open_scope("s");
+        assert!(poll(&mut opening).is_pending());
+        assert_eq!(
+            store.take_requests(),
+            [r#"{"id":"2","loadAll":"v1","op":"openScope","scope":"s"}"#]
+        );
+        assert!(store.reply(
+            2,
+            true,
+            r#"{"incarnation":"9007199254740993","loadAll":"v1"}"#
+        ));
+        assert_eq!(poll(&mut opening), Poll::Ready(Ok(9007199254740993)));
+        let mut loading = store.load_all("s", 9007199254740993).unwrap();
+        assert!(poll(&mut loading).is_pending());
+        assert_eq!(
+            store.take_requests(),
+            [r#"{"id":"3","incarnation":"9007199254740993","op":"loadAllV1","scope":"s"}"#]
+        );
+        assert!(store.reply(
+            3,
+            true,
+            r#"[{"doc":"floor","bytes":"AID/","revision":"9007199254740993"}]"#
+        ));
+        assert_eq!(
+            poll(&mut loading),
+            Poll::Ready(Ok(vec![(
+                "floor".to_owned(),
+                Stored {
+                    bytes: vec![0, 128, 255],
+                    revision: 9007199254740993
+                }
+            )]))
+        );
     }
 
     /// Contract: an answer is accepted only for a request that was issued and

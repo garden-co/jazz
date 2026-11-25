@@ -56,6 +56,9 @@ pub struct Stored {
     pub revision: u64,
 }
 
+/// The names, bytes and revisions of the documents in one scope.
+pub type ScopeDocuments = Vec<(String, Stored)>;
+
 impl std::fmt::Debug for Stored {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stored")
@@ -74,6 +77,17 @@ pub trait PrivateStore {
         scope: &'a str,
         doc: &'a str,
     ) -> LocalBoxFuture<'a, Result<Option<Stored>, StoreError>>;
+
+    /// An optional read of an entire scope. Read the incarnation and the
+    /// documents atomically, returning [`StoreError::Wiped`] if the scope is
+    /// absent or has another incarnation.
+    fn load_all<'a>(
+        &'a self,
+        _scope: &'a str,
+        _incarnation: u64,
+    ) -> Option<LocalBoxFuture<'a, Result<ScopeDocuments, StoreError>>> {
+        None
+    }
 
     /// The incarnation of `scope`, creating the scope with a new random
     /// incarnation if it does not exist.

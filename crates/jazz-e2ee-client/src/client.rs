@@ -16,7 +16,8 @@ use jazz_e2ee::protocol::account::AccountFloor;
 use jazz_e2ee::protocol::account::build::LocalDevice;
 use jazz_e2ee::protocol::content::HeldSpace;
 use jazz_e2ee::protocol::content::local::{
-    DeviceSecrets, FLOOR_FORMAT, FloorRecord, StoredApproval, StoredDevice, decode_device_document,
+    DeviceSecrets, FLOOR_FORMAT, FloorRecord, FloorVerifier, StoredApproval, StoredDevice,
+    decode_device_document,
 };
 use jazz_e2ee::protocol::content::store::{HeldKeyRecord, Rejected, RejectedRecord, StoreOwner};
 use jazz_e2ee::protocol::derive;
@@ -31,7 +32,7 @@ use crate::error::ClientError;
 use crate::hooks::{Hooks, plans};
 use crate::mechanisms;
 use crate::state::{Catalogue, KeyState, Report, Shared};
-use crate::store::{PrivateStore, StoreError};
+use crate::store::{PrivateStore, ScopeDocuments, StoreError, Stored};
 
 const DEVICE_DOCUMENT: &str = "device";
 const HELD_PREFIX: &str = "held-";
@@ -227,6 +228,20 @@ impl E2eeClient {
         let random = RefCell::new(random);
         for _ in 0..SAVE_ATTEMPTS {
             let incarnation = store.open_scope(&scope).await?;
+            let mut bulk = match store.load_all(&scope, incarnation) {
+                Some(read) => match read.await {
+                    Ok(documents) => Some(documents),
+                    Err(StoreError::Wiped) => continue,
+                    Err(error) => return Err(error.into()),
+                },
+                None => None,
+            };
+            let initial_device = bulk.as_mut().map(|documents| {
+                documents
+                    .iter()
+                    .position(|(name, _)| name == DEVICE_DOCUMENT)
+                    .map(|index| documents.remove(index).1)
+            });
             match Self::load_device(
                 DeviceLoad {
                     store: &*store,
@@ -237,19 +252,20 @@ impl E2eeClient {
                     account_id: &account_id,
                     scope: &scope,
                 },
+                initial_device,
                 &mut SharedRandom(&random),
             )
             .await
             {
                 Ok(device) => {
-                    opened = Some((incarnation, device));
+                    opened = Some((incarnation, device, bulk));
                     break;
                 }
                 Err(ClientError::Closed) => continue,
                 Err(error) => return Err(error),
             }
         }
-        let (incarnation, device) = opened.ok_or(ClientError::Store(StoreError::Wiped))?;
+        let (incarnation, device, bulk) = opened.ok_or(ClientError::Store(StoreError::Wiped))?;
         let shared = Rc::new(Shared::new(
             registry,
             selected,
@@ -274,12 +290,13 @@ impl E2eeClient {
             reconciled: Cell::new(false),
             documents: Mutex::new(Documents::default()),
         };
-        client.load_documents().await?;
+        client.load_documents(bulk).await?;
         Ok(client)
     }
 
     async fn load_device(
         load: DeviceLoad<'_>,
+        mut initial: Option<Option<Stored>>,
         random: &mut dyn RandomSource,
     ) -> Result<LocalDevice, ClientError> {
         let DeviceLoad {
@@ -293,7 +310,10 @@ impl E2eeClient {
         } = load;
         let unrecognised = || ClientError::UnrecognisedDocument(DEVICE_DOCUMENT.to_owned());
         for _ in 0..SAVE_ATTEMPTS {
-            let stored = store.load(scope, DEVICE_DOCUMENT).await?;
+            let stored = match initial.take() {
+                Some(stored) => stored,
+                None => store.load(scope, DEVICE_DOCUMENT).await?,
+            };
             let expected = match &stored {
                 None => None,
                 Some(stored) => {
@@ -367,16 +387,43 @@ impl E2eeClient {
         }
     }
 
-    async fn load_documents(&self) -> Result<(), ClientError> {
+    async fn load_documents(&self, bulk: Option<ScopeDocuments>) -> Result<(), ClientError> {
         let mut documents = self.documents.lock().await;
-        for name in self.store.list(&self.scope).await? {
-            if let Some(root_id) = name.strip_prefix(HELD_PREFIX) {
-                if let Some(space) = self.read_held(&mut documents, &name, root_id, true).await? {
-                    self.shared.keys.borrow_mut().held.hold(space)?;
-                }
-            } else if let Some(account_id) = name.strip_prefix(FLOOR_PREFIX) {
-                self.load_floor(&mut documents, &name, account_id).await?;
+        let mut floor_verifier = None;
+        if let Some(bulk) = bulk {
+            for (name, stored) in bulk {
+                self.accept_document(&mut documents, &name, stored, &mut floor_verifier)
+                    .await?;
             }
+            return Ok(());
+        }
+        for name in self.store.list(&self.scope).await? {
+            if (name.starts_with(HELD_PREFIX) || name.starts_with(FLOOR_PREFIX))
+                && let Some(stored) = self.store.load(&self.scope, &name).await?
+            {
+                self.accept_document(&mut documents, &name, stored, &mut floor_verifier)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn accept_document<'a>(
+        &'a self,
+        documents: &mut Documents,
+        name: &str,
+        stored: Stored,
+        floor_verifier: &mut Option<FloorVerifier<'a>>,
+    ) -> Result<(), ClientError> {
+        if let Some(root_id) = name.strip_prefix(HELD_PREFIX) {
+            if let Some(space) = self
+                .read_held(documents, name, root_id, stored, true)
+                .await?
+            {
+                self.shared.keys.borrow_mut().held.hold(space)?;
+            }
+        } else if let Some(account_id) = name.strip_prefix(FLOOR_PREFIX) {
+            self.load_floor(documents, name, account_id, stored, floor_verifier)?;
         }
         Ok(())
     }
@@ -395,11 +442,9 @@ impl E2eeClient {
         documents: &mut Documents,
         name: &str,
         root_id: &str,
+        stored: Stored,
         advance_verification: bool,
     ) -> Result<Option<HeldSpace>, ClientError> {
-        let Some(stored) = self.store.load(&self.scope, name).await? else {
-            return Ok(None);
-        };
         let loaded = {
             let device = self.shared.device()?;
             Self::owner_of(&self.shared, &device).load_stored_document(&stored.bytes)?
@@ -457,19 +502,27 @@ impl E2eeClient {
     }
 
     /// Loads one floor record.
-    async fn load_floor(
-        &self,
+    fn load_floor<'a>(
+        &'a self,
         documents: &mut Documents,
         name: &str,
         account_id: &str,
+        stored: Stored,
+        verifier: &mut Option<FloorVerifier<'a>>,
     ) -> Result<(), ClientError> {
-        let Some(stored) = self.store.load(&self.scope, name).await? else {
-            return Ok(());
-        };
         let floor = match FloorRecord::decode(&stored.bytes) {
             Ok(record) => {
                 let device = self.shared.device()?;
-                match Self::owner_of(&self.shared, &device).load_floor(account_id, &record)? {
+                let verifier = match verifier {
+                    Some(verifier) => verifier,
+                    none => none.insert(FloorVerifier::new(
+                        &self.shared.registry,
+                        &self.shared.domain,
+                        &self.shared.account_id,
+                        &device,
+                    )?),
+                };
+                match verifier.load_floor(account_id, &record)? {
                     Ok(floor) => Some(floor),
                     Err(reason) => {
                         self.skipped(name, format!("{reason:?}"));
@@ -851,9 +904,13 @@ impl E2eeClient {
                     // Another writer saved this root's document: take its
                     // keys too, then write both.
                     documents.held.remove(&root_id);
-                    let theirs = self
-                        .read_held(&mut documents, &name, &root_id, false)
-                        .await?;
+                    let theirs = match self.store.load(&self.scope, &name).await? {
+                        Some(stored) => {
+                            self.read_held(&mut documents, &name, &root_id, stored, false)
+                                .await?
+                        }
+                        None => None,
+                    };
                     if documents.unrecognised.contains(&name) {
                         return Err(ClientError::UnrecognisedDocument(name));
                     }
@@ -986,7 +1043,9 @@ impl E2eeClient {
                 }
                 Ok(None) => {
                     documents.floors.remove(account_id);
-                    self.load_floor(&mut documents, &name, account_id).await?;
+                    if let Some(stored) = self.store.load(&self.scope, &name).await? {
+                        self.load_floor(&mut documents, &name, account_id, stored, &mut None)?;
+                    }
                 }
                 Err(StoreError::Wiped) => return Err(self.close()),
                 Err(error) => return Err(error.into()),
@@ -1041,6 +1100,7 @@ impl E2eeClient {
                     account_id: &self.shared.account_id,
                     scope: &self.scope,
                 },
+                None,
                 &mut SharedRandom(&self.shared.random),
             )
             .await?;
