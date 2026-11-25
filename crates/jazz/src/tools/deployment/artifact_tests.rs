@@ -3568,7 +3568,5 @@ fn a_missing_space_table_is_worded_for_own_or_inherited_entries() {
         ),
         "{inherited}"
     );
-    assert!(
-        encryption::check_space_tables(&schema, &encryption::Entries::new(), false).is_ok()
-    );
+    assert!(encryption::check_space_tables(&schema, &encryption::Entries::new(), false).is_ok());
 }

@@ -390,7 +390,7 @@ mod tests {
                 served: reason(),
                 reason: reason()
             }),
-            12
+            11
         );
         assert_eq!(
             index(JazzError::Encryption {
@@ -398,7 +398,7 @@ mod tests {
                 reason: reason(),
                 io: false
             }),
-            13
+            12
         );
     }
 

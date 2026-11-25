@@ -1180,7 +1180,10 @@ mod missing_queue_tests {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for (space, n) in [("held", 1), ("other", 2), ("other", 3), ("other", 4)] {
-            assert_eq!(enqueue_missing(&mut queue, &backoff, entry(space, n), 3), None);
+            assert_eq!(
+                enqueue_missing(&mut queue, &backoff, entry(space, n), 3),
+                None
+            );
         }
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 3, 4]);
