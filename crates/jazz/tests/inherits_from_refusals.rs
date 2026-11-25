@@ -439,6 +439,15 @@ fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
         error.message().contains("must be a scalar column"),
         "{error}"
     );
+    // The deployment refuses it as invalid permissions, for this reason.
+    match deploy(&non_scalar_id) {
+        Err(DeploymentError::InvalidPermissions { reason, .. }) => assert_eq!(
+            reason,
+            error.to_string(),
+            "the deployment names the non-scalar address"
+        ),
+        other => panic!("expected InvalidPermissions, got {other:?}"),
+    }
     assert_refused(
         &within(PolicyExpr::Or(vec![
             PolicyExpr::False,
