@@ -30,6 +30,16 @@ let notesApp = #"""
 /// Linux in the repository's gate, macOS and the iOS simulator against the
 /// release's XCFramework in the mirror's check.
 final class RuntimeTests: XCTestCase {
+    /// The device list as the runtime's `devices` call answers it: a renamed
+    /// or retyped field fails to decode here.
+    func testDeviceListDecodesTheRuntimesFields() throws {
+        let json = #"[{"id":"a","removalRequested":false,"status":"active"},{"id":"b","removalRequested":true,"status":"waiting"}]"#
+        let devices = try JSONDecoder().decode([Device].self, from: Data(json.utf8))
+        XCTAssertEqual(devices.map(\.id), ["a", "b"])
+        XCTAssertEqual(devices.map(\.status), ["active", "waiting"])
+        XCTAssertEqual(devices.map(\.removalRequested), [false, true])
+    }
+
     func local() async throws -> Client {
         try await Client.open(app: notesApp, config: .local())
     }
