@@ -1612,6 +1612,8 @@ async fn main_loop(this: Rc<Encryption>) {
             }
         }
         this.stage.set("idle");
+        // The approval watch wakes the loop when evidence changes; a timer
+        // is needed only to retry a challenge read that failed.
         this.set_background_deadline(retry_at.into_iter().chain(retry_challenge_at).min());
         drop(turn);
         yield_now().await;
