@@ -28,10 +28,12 @@ End-to-end encryption: API changes to the bindings and Rust crates.
 - **`jazz-e2ee-client` `E2eeClient::take_reports`:** only with the `testing` feature, as a test observation; hosts use `on_report` and `flush_reports`.
 - **`jazz-e2ee-client` `SpaceCreation`, `CELL_TYPE_ENCODING` and `host::runtime::{Options, build}`:** removed.
 - **`jazz-app-support` `with_key_wait`:** takes the client first (`with_key_wait(&client, || …)`), whose closing ends its wait.
+- **`jazz-core` `EncryptionRuntime::begin_streaming_upload`:** takes a second argument, `ended`, the future of the client's closing; a wait for the space's key ends with it (`JazzError::ChannelClosed`).
 
 **Other changes**
 
 - Closing an app ends the waits for encryption: a write waiting for its space's key and `encryption().ready(…)` in Rust fail `Stopped` (`closed` through `jazz-ffi`: `waitUntilReady` in Swift, Kotlin and Go), and TypeScript's `db.encryption.ready()` rejects with code `closed`, instead of holding the close until their deadline.
+- Closing an app also ends an encrypted streaming upload waiting for its space's key (Rust fails `ChannelClosed`, `closed` through `jazz-ffi`) and a TypeScript write waiting for its space's key (it rejects with an `EncryptionError` of code `closed`).
 - A C host's private store callback may call `"close"` on its own handle: it closes without waiting, as the callback runs on the client's thread, and the client stops once the callback returns (see `jazz_ffi.h`). It used to deadlock.
 - A write waiting for a key retries on the error's structured `reason` and `space` fields, not its message text. The internal `retryAfterKey` helper changed shape, and its module no longer exports `KEY_WAIT_MS`.
 - A retyped encrypted column is refused naming both types as `jazz.app.json` writes them, the sealed one first.
