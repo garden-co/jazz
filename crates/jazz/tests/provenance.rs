@@ -834,3 +834,95 @@ fn session_user_matches_the_account_and_session_identity_the_exact_login() {
         "{error}"
     );
 }
+
+/// #6378: a read policy on who wrote a row (`$createdBy.account =
+/// session.user`) seeks the reader's rows by their author code, through
+/// an index the policy adds, instead of scanning the table and looking up
+/// each row's author: a read's work follows the rows it returns, not the
+/// rows the table holds.
+#[test]
+fn creator_policies_seek_the_readers_rows_whatever_the_table_holds() {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue};
+    let account = |n: u8| jazz::account_registry::AccountId(uuid::Uuid::from_bytes([n; 16]));
+    let login = |subject: &str, n: u8| {
+        AuthorSubject::authenticated("https://issuer.example", subject)
+            .unwrap()
+            .with_account(account(n))
+    };
+    let (alice, bob) = (login("alice", 0x0a), login("bob", 0x0b));
+    let session =
+        |path: &[&str]| PolicyValue::SessionRef(path.iter().map(|p| (*p).to_owned()).collect());
+    let policies = [
+        PolicyExpr::Cmp {
+            column: "$createdBy.account".to_owned(),
+            op: CmpOp::Eq,
+            value: session(&["user"]),
+        },
+        PolicyExpr::Cmp {
+            column: "$createdBy".to_owned(),
+            op: CmpOp::Eq,
+            value: session(&["user"]),
+        },
+    ];
+    for policy in policies {
+        // Alice wrote two rows; Bob wrote `others`.
+        let read = |others: u8| {
+            let schema = compile_schema(
+                &SchemaBuilder::new()
+                    .table(
+                        TableSchemaBuilder::new("notes")
+                            .column("body", ColumnType::Text)
+                            .policies(common::read_and_allow_all_writes(policy.clone())),
+                    )
+                    .build(),
+            );
+            let db = block_on(Db::open(DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([3; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap();
+            let ids = (0..others as u32 * 4 + 2).map(|n| {
+                let mut bytes = [0u8; 16];
+                bytes[..4].copy_from_slice(&n.to_be_bytes());
+                bytes[15] = 1;
+                RowUuid::from_bytes(bytes)
+            });
+            for (n, id) in ids.enumerate() {
+                let identity = if n < 2 { alice.clone() } else { bob.clone() };
+                block_on(db.insert(
+                    "notes",
+                    body("x"),
+                    InsertOptions {
+                        row_id: Some(id),
+                        identity: WriteIdentity::Session(identity),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            }
+            let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+            let (_, plan) =
+                block_on(db.explain_query_plan(&prepared, Some(alice.clone()))).unwrap();
+            jazz::db::take_vm_steps_for_test();
+            let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice.clone()))
+                .unwrap()
+                .len();
+            (rows, jazz::db::take_vm_steps_for_test(), plan)
+        };
+        let (few, few_steps, plan) = read(2);
+        let (many, many_steps, _) = read(250);
+        assert_eq!((few, many), (2, 2), "{policy:?}");
+        assert!(
+            plan.contains("SEARCH t USING INDEX notes__ix($createdBy)"),
+            "{policy:?}: {plan}"
+        );
+        assert!(!plan.contains("SCAN t"), "{policy:?}: {plan}");
+        assert!(
+            many_steps <= few_steps + few_steps / 4,
+            "{policy:?}: {few_steps} steps over 10 rows, {many_steps} over 1,002\n{plan}"
+        );
+    }
+}
