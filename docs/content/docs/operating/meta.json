@@ -1,4 +1,4 @@
 {
   "title": "Operating Jazz",
-  "pages": ["backups-and-upgrades", "monitoring", "scaling"]
+  "pages": ["backups-and-upgrades", "upgrading-from-older-alphas", "monitoring", "scaling"]
 }
