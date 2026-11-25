@@ -10723,6 +10723,15 @@ impl Db {
         self.inner.composite_scans.get()
     }
 
+    /// The tables this store scanned for its newest commit seq since it
+    /// opened, in order: those its `_jazz_meta` row did not cover yet
+    /// (see `commit_seq`). Empty once every table is covered.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn seq_scans_for_test(&self) -> Vec<String> {
+        self.inner.seq_scans.borrow().clone()
+    }
+
     /// One-shot read records, answer slots, and queued one-shot requests.
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_once_state_for_test(&self) -> (usize, usize, usize) {
@@ -11037,6 +11046,8 @@ impl Db {
             return Ok(());
         }
         // Everything one tick applies commits together.
+        // Not covered here (`Store::cover_commit_seq`): a replica ticks
+        // when it only reads, and must leave its file as it was.
         let conn = self.inner.without_overlay().conn.clone();
         conn.db_scope("sync_tick", async || self.client_apply().await)
             .await?;
@@ -17088,6 +17099,11 @@ impl Db {
         // The unit lands in one scope: its writes, its fate and settlement,
         // its hold's release, the relay's upload record and the bases it
         // was built on. Any failure undoes all of it.
+        self.inner
+            .without_overlay()
+            .cover_commit_seq()
+            .await
+            .map_err(|e| (e, Vec::new()))?;
         let mut merged = HashSet::new();
         let landed_unit = conn
             .db_scope_then("upload", async || {
