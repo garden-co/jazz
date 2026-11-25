@@ -343,6 +343,21 @@ describe("later versions of an encrypted app", () => {
     await expect(generateApp({ cwd: root })).rejects.toThrow(refusal);
   });
 
+  it("refuses a new equality column on an existing table, writing no stub", async () => {
+    const root = await firstVersion();
+    const before = await readdir(join(root, "migrations"), { recursive: true });
+    // The rows stored before it have no tokens, and a migration can't write
+    // theirs without their spaces' keys.
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ messages: ", subject: s.string().optional().encrypted({ equality: true })" }),
+    );
+    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(
+      /messages\.subject: the table existed in the earlier version, whose rows have no equality token for it; adding equality to an existing table is unsupported/,
+    );
+    expect(await readdir(join(root, "migrations"), { recursive: true })).toEqual(before);
+  });
+
   it("refuses an impossible encrypted rename before writing a migration or snapshot", async () => {
     const root = await firstVersion();
     const migrationsDir = join(root, "migrations");
