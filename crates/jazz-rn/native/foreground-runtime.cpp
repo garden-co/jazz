@@ -571,7 +571,7 @@ class ForegroundHandle final : public HostObject,
 
   Value get(Runtime &runtime, const PropNameID &name) override {
     const auto property = name.utf8(runtime);
-    if (property == "supportsEncryptionStateWake") {
+    if (property == "supportsStoreWake" || property == "supportsEncryptionStateWake") {
       return Value(true);
     }
     if (property == "supportsSnapshotCapture") {
@@ -700,8 +700,9 @@ class ForegroundHandle final : public HostObject,
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(7);
+    names.reserve(9);
     names.emplace_back(PropNameID::forAscii(runtime, "supportsSnapshotCapture"));
+    names.emplace_back(PropNameID::forAscii(runtime, "supportsStoreWake"));
     names.emplace_back(PropNameID::forAscii(runtime, "supportsEncryptionStateWake"));
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
