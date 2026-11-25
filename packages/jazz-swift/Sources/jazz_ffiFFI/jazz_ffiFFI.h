@@ -320,6 +320,13 @@ typedef void (*UniffiCallbackInterfacePrivateStoreMethod6)(uint64_t, RustBuffer,
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PRIVATE_STORE_METHOD7
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PRIVATE_STORE_METHOD7
+typedef void (*UniffiCallbackInterfacePrivateStoreMethod7)(uint64_t, RustBuffer, uint64_t, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_STATE_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_STATE_LISTENER
 typedef struct UniffiVTableCallbackInterfaceStateListener {
@@ -360,6 +367,7 @@ typedef struct UniffiVTableCallbackInterfacePrivateStore {
     UniffiCallbackInterfacePrivateStoreMethod4 _Nonnull delete;
     UniffiCallbackInterfacePrivateStoreMethod5 _Nonnull protect;
     UniffiCallbackInterfacePrivateStoreMethod6 _Nonnull unprotect;
+    UniffiCallbackInterfacePrivateStoreMethod7 _Nonnull loadAll;
 } UniffiVTableCallbackInterfacePrivateStore;
 
 #endif
@@ -896,6 +904,11 @@ RustBuffer uniffi_jazz_ffi_fn_method_privatestore_protect(uint64_t ptr, RustBuff
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_UNPROTECT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_UNPROTECT
 RustBuffer uniffi_jazz_ffi_fn_method_privatestore_unprotect(uint64_t ptr, RustBuffer blob, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_LOAD_ALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_LOAD_ALL
+RustBuffer uniffi_jazz_ffi_fn_method_privatestore_load_all(uint64_t ptr, RustBuffer scope, uint64_t incarnation, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_FUNC_GENERATE_DEVICE_KEY
@@ -1641,6 +1654,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_privatestore_protect(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_UNPROTECT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_UNPROTECT
 uint16_t uniffi_jazz_ffi_checksum_method_privatestore_unprotect(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_LOAD_ALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_LOAD_ALL
+uint16_t uniffi_jazz_ffi_checksum_method_privatestore_load_all(void
     
 );
 #endif

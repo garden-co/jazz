@@ -440,6 +440,18 @@ refused, naming the option. A device's schema has the plaintext types of its enc
 in and out as ordinary JSON; writes of a space whose key the device does not hold yet wait for it
 (ten seconds at most). The store is called on the client's thread, one request at a time.
 
+The required UniFFI `load_all(scope, incarnation)` reads a single snapshot at startup. The host
+checks the scope marker in the same transaction as the document read and returns
+`PrivateStoreError::Wiped` if the scope is absent or its incarnation differs. An intact scope with
+no documents returns an empty sequence. Each document carries the name, bytes and revision from
+that snapshot. Jazz authenticates the records and uses the revisions for later saves.
+
+The UniFFI scope snapshot v1 result is a sequence of `ScopeDocument` records in field order
+`doc` (UTF-8), `bytes` (raw byte sequence), `revision` (unsigned 64-bit). The sequence, string
+and byte lengths are 32-bit big-endian and the revision is 64-bit big-endian. This adds a required
+method to the prerelease UniFFI callback interface. Regenerate the bindings with the matching
+library and update Swift and Kotlin stores together. The on-disk private-store formats are unchanged.
+
 A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Numbers that may exceed 2^53 use decimal text.
 
 | `op`        | Fields                                                    | Answer (JSON)                        |
@@ -451,6 +463,13 @@ A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Number
 | `delete`    | `scope`                                                   | `null`                               |
 | `protect`   | `secret`                                                  | the protected blob, base64           |
 | `unprotect` | `blob`                                                    | the secret, base64                   |
+
+The C callback can opt into the existing `loadAllV1` encoding. When the `openScope` request
+includes `"loadAll":"v1"`, a host that supports it answers with
+`{"incarnation":"…","loadAll":"v1"}`. Jazz then sends `loadAllV1` with `scope` and `incarnation`.
+Return a JSON array of `{"doc":"…","bytes":"…","revision":"…"}` objects, or answer
+`wiped` for a missing or changed scope. Hosts that answer `openScope` with the incarnation
+as text continue to receive single-document requests.
 
 An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
 (the scope is not of that incarnation) or a message.
