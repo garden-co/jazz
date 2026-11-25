@@ -452,7 +452,7 @@ export class Encryption {
   private readonly emitQueued = (): EncryptionReport[] => {
     const reports = [
       ...this.pendingReports.splice(0),
-      ...this.native.takeEncryptionReports().map((text) => JSON.parse(text) as EncryptionReport),
+      ...parseReports(this.native.takeEncryptionReports()),
     ];
     for (const report of reports) this.emit(report);
     return reports;
@@ -474,7 +474,7 @@ export class Encryption {
         const { code, message } = snapshot.error;
         replay = [{ type: "report-replay-failed", code, message }];
       } else {
-        const queued = snapshot.queued.map((text) => JSON.parse(text) as EncryptionReport);
+        const queued = parseReports(snapshot.queued);
         const pending = this.pendingReports.splice(0);
         for (const report of [...pending, ...queued]) this.emit(report);
 
@@ -505,6 +505,19 @@ export class Encryption {
       this.reportsDuringReplay = undefined;
     }
   };
+}
+
+/** The runtime's reports; one that is not valid JSON is logged and skipped. */
+function parseReports(texts: readonly string[]): EncryptionReport[] {
+  const reports: EncryptionReport[] = [];
+  for (const text of texts) {
+    try {
+      reports.push(JSON.parse(text) as EncryptionReport);
+    } catch (error) {
+      console.error("Jazz encryption report is not valid JSON", error);
+    }
+  }
+  return reports;
 }
 
 /** Calls one report listener; a throw is logged and the other listeners still run. */
