@@ -142,3 +142,45 @@ it("skips a report that is not valid JSON, in polling and in a replay", async ()
   expect(logged).toHaveBeenCalledTimes(2);
   encryption.stop();
 });
+
+it("gives a late listener whose snapshot fails the reports delivered meanwhile", async () => {
+  const queue: string[] = [];
+  let calls = 0;
+  let reject!: (error: Error) => void;
+  const native = {
+    encryptionCall: () => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(JSON.stringify({ active: [], queued: [] }));
+      return new Promise<string>((_, fail) => {
+        reject = fail;
+      });
+    },
+    takeEncryptionReports: () => queue.splice(0),
+    encryptionState: () => JSON.stringify({ status: "active" }),
+  } as unknown as EncryptionNative;
+  const push = (reason: string) => queue.push(JSON.stringify(report(reason)));
+  const encryption = new Encryption(native, { reportIntervalMs: 10 });
+  const established: EncryptionReport[] = [];
+  encryption.onReport((seen) => established.push(seen));
+  await tick();
+
+  const late: EncryptionReport[] = [];
+  encryption.onReport((seen) => late.push(seen));
+  push("before");
+  await tick(); // starts the replay, whose snapshot stays pending
+  push("during");
+  await tick();
+  expect(reasons(established)).toEqual(["before", "during"]);
+  expect(late).toEqual([]);
+
+  reject(new Error("database: snapshot unavailable"));
+  await tick();
+  expect(late[0]).toMatchObject({ type: "report-replay-failed", code: "database" });
+  expect(reasons(late.slice(1))).toEqual(["before", "during"]);
+
+  push("after");
+  await tick();
+  expect(reasons(established)).toEqual(["before", "during", "after"]);
+  expect(reasons(late.slice(1))).toEqual(["before", "during", "after"]);
+  encryption.stop();
+});
