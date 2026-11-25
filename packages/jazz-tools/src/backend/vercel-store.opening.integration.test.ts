@@ -165,7 +165,9 @@ describe("vercel() store: a core that takes a while to open", () => {
    * for the first session it resumes in; a fresh session routes. Three
    * instances wake it at once, and one writes and another reads through it.
    */
-  async function glitchedSession(prepare: (fake: ReturnType<typeof fakeVercel>) => void = () => {}) {
+  async function glitchedSession(
+    prepare: (fake: ReturnType<typeof fakeVercel>) => void = () => {},
+  ) {
     const core = await startTrustedCore(randomUUID());
     const port = Number(new URL(core.url).port);
     let glitched: Date | undefined;
