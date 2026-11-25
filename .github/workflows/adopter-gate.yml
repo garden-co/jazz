@@ -268,8 +268,9 @@ jobs:
   t4:
     needs: inputs
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # 15 min of checks plus up to 10 for a preview's teardown (Vercel's edge can serve a removed deployment 3+ min).
-    timeout-minutes: 25
+    # 15 min of checks plus a preview's teardown: up to 10 min for the removed deployment to stop answering, up to 10
+    # for the core to stay gone (it can be resumed for minutes after), about 1 for each wait's end and the Drive.
+    timeout-minutes: 36
     # Serialized only in production (the long-lived core). A preview has its own core (ci-<run id>; t4.sh FAILs a CI
     # preview without T4_TEARDOWN=1, which would share cli-previews) and a skip touches nothing, so those runs go side
     # by side: a test dispatch never queues a real RC's t4. (Environment vars such as T4_TEARDOWN are empty here:
