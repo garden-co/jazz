@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-beta.3",
+  "version": "2.0.0-beta.4",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
