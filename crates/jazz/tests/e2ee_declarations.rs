@@ -118,6 +118,14 @@ fn refusal(result: Result<impl std::fmt::Debug, ArtifactError>) -> String {
     result.expect_err("refused").to_string()
 }
 
+/// Why an app may not have a table named `table`, Jazz's system-table prefix.
+fn reserved(table: &str) -> String {
+    format!(
+        "`{table}`: table names starting with `__e2ee_` are reserved for Jazz's own \
+         end-to-end encryption tables; give the table another name"
+    )
+}
+
 /// Alice cannot retype a shipped encrypted column through an implied migration.
 #[test]
 fn an_implied_step_from_history_cannot_retype_an_encrypted_column() {
@@ -427,7 +435,13 @@ fn an_app_may_not_define_or_reach_system_tables() {
         r#""tasks": {"#,
         r#""__e2ee_notes": { "columns": { "x": "string" } }, "tasks": {"#,
     );
-    assert!(refusal(load_app(own.as_bytes())).contains("reserved for Jazz's own"));
+    assert_eq!(
+        refusal(load_app(own.as_bytes())),
+        format!(
+            "jazz.app.json: tables.__e2ee_notes: {}",
+            reserved("__e2ee_notes")
+        )
+    );
     let referencing = app(tasks_entry()).replace(
         r#""done": "boolean""#,
         r#""done": "boolean", "member": { "type": "uuid", "references": "__e2ee_members" }"#,
@@ -439,7 +453,13 @@ fn an_app_may_not_define_or_reach_system_tables() {
         r#""tables": {"#,
         r#""tables": { "__e2ee_members": { "read": "true" },"#,
     );
-    assert!(refusal(load(app.as_bytes(), entry.as_bytes())).contains("reserved for Jazz's own"));
+    assert_eq!(
+        refusal(load(app.as_bytes(), entry.as_bytes())),
+        format!(
+            "jazz.permissions.json: tables.__e2ee_members: {}",
+            reserved("__e2ee_members")
+        )
+    );
     let reach = format!("{MEMBERS_RULE} and exists __e2ee_spaces(identifier = this.id)");
     assert!(
         refusal(load(app.as_bytes(), permissions(&reach).as_bytes()))
@@ -805,13 +825,26 @@ fn the_writer_omits_only_jazzs_complete_fragment() {
     let spaces = altered.get_mut(&TableName::from(SPACES)).unwrap();
     spaces.columns.columns.pop();
     let error = refusal(write(input(altered)));
-    assert!(error.contains("are reserved for Jazz's own"), "{error}");
+    // An incomplete fragment is named by its first table.
+    assert_eq!(
+        error,
+        format!(
+            "jazz.app.json: tables.__e2ee_account_identities: {}",
+            reserved("__e2ee_account_identities")
+        )
+    );
 
     let mut foreign = loaded.current_schema().clone();
     let copy = foreign[&TableName::from(SPACES)].clone();
     foreign.insert(TableName::from("__e2ee_notes"), copy);
     let error = refusal(write(input(foreign)));
-    assert!(error.contains("`__e2ee_notes`"), "{error}");
+    assert_eq!(
+        error,
+        format!(
+            "jazz.app.json: tables.__e2ee_notes: {}",
+            reserved("__e2ee_notes")
+        )
+    );
 }
 
 /// No app was deployed with a table of the reserved prefix, so one is
