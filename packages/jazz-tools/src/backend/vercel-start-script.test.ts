@@ -19,6 +19,7 @@ import {
   claimRecycleScript,
   coreStateScript,
   newerVersion,
+  releaseRecycleScript,
   startScript,
 } from "./vercel-store.js";
 import { VERSION_ORDER } from "./fixtures/version-order.js";
@@ -438,6 +439,9 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await claim("2000")).toBe(0);
     expect(await claim("2000")).toBe(1);
     expect(existsSync(join(root, "tmp/jazz-recycled-1000"))).toBe(false);
+    // A claim given back after a failed stop can be claimed again.
+    spawnSync("bash", ["-c", releaseRecycleScript(root), "jazz-release-recycle", "2000"]);
+    expect(await claim("2000")).toBe(0);
   });
 });
 
