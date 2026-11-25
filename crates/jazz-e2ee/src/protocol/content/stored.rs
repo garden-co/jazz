@@ -39,6 +39,11 @@ pub const DEVICE_HASH_FORMAT: &str = "jazz-e2ee-held-device-v1";
 /// The format `B` names in the lineage prefix hash.
 pub const PREFIX_FORMAT: &str = "jazz-e2ee-held-prefix-v1";
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static PREFIX_ROWS_ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Lowercase hex.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -198,6 +203,8 @@ pub fn prefix_hash(root: &SpaceRoot, successors: &[SpaceSuccessor]) -> ProtocolR
             Value::Array(successors.iter().map(successor_value).collect()),
         ]),
     )?;
+    #[cfg(test)]
+    PREFIX_ROWS_ENCODED.set(PREFIX_ROWS_ENCODED.get() + successors.len() + 1);
     Ok(hex(&sha256(&bytes)))
 }
 
@@ -233,6 +240,8 @@ pub(super) fn prefix_hashes(
         prefix.update(b"]]]");
         prefixes.push(hex(&prefix.finalize()));
     }
+    #[cfg(test)]
+    PREFIX_ROWS_ENCODED.set(PREFIX_ROWS_ENCODED.get() + hashed_depth + 1);
     Ok(prefixes)
 }
 

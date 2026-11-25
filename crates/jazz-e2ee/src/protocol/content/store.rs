@@ -303,6 +303,7 @@ impl StoreOwner<'_> {
     fn check_key(
         &self,
         space: &HeldSpace,
+        prefixes: &[String],
         record: &HeldKeyRecord,
     ) -> ProtocolResult<Checked<(usize, HeldEntry)>> {
         if let Err(reason) = self.check_binding(&record.binding)? {
@@ -323,10 +324,10 @@ impl StoreOwner<'_> {
             return Ok(Err(Rejection::RootMismatch));
         }
         let depth = match usize::try_from(record.depth) {
-            Ok(depth) if depth <= space.successors.len() => depth,
+            Ok(depth) if depth < prefixes.len() => depth,
             _ => return Ok(Err(Rejection::Depth)),
         };
-        if prefix_hash(&space.root, &space.successors[..depth])? != record.prefix {
+        if prefixes[depth] != record.prefix {
             return Ok(Err(Rejection::Prefix));
         }
         if space.epoch_at(depth) != Some(record.epoch_id.as_str()) {
@@ -385,11 +386,22 @@ impl StoreOwner<'_> {
             successors: lineage.successors.clone(),
             keys: BTreeMap::new(),
         };
+        // Hash the lineage once, then check keys in document order so
+        // duplicate and refused records keep their existing precedence.
+        let prefix_count = document
+            .keys
+            .iter()
+            .flatten()
+            .filter_map(|record| usize::try_from(record.depth).ok())
+            .filter(|&depth| depth <= space.successors.len())
+            .max()
+            .map_or(0, |depth| depth + 1);
+        let prefixes = prefix_hashes(&space.root, &space.successors, 0..prefix_count)?;
         let mut rejected = Vec::new();
         let mut unsupported = Vec::new();
         for (index, record) in document.keys.iter().enumerate() {
             let outcome = match record {
-                Some(record) => self.check_key(&space, record)?,
+                Some(record) => self.check_key(&space, &prefixes, record)?,
                 None => Err(Rejection::Malformed),
             };
             match outcome {
@@ -426,5 +438,119 @@ impl StoreOwner<'_> {
             }],
             unsupported: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stored::PREFIX_ROWS_ENCODED;
+    use super::*;
+    use crate::agility::MechanismConfig;
+    use crate::conformance::FixedRandom;
+    use crate::protocol::records::space::{SpaceRoot, SpaceSuccessor};
+
+    /// Alice reopens each held version of her rotated space. The prefix work
+    /// is counted here because the store's public API exposes only the keys.
+    #[test]
+    fn loading_rotations_encodes_each_prefix_row_once() {
+        let id = |number: usize| format!("00000000-0000-4000-8000-{number:012x}");
+        let alice = "a11ce000-0000-5000-8000-00000000a11c";
+        let domain = AppDomain::new(&id(1), Some("dev")).unwrap();
+        let application = domain.account(alice).unwrap();
+        let registry = Registry::builtin();
+        let suite = registry.select(&MechanismConfig::default()).unwrap();
+        let mechanism = suite.key_wrap.mechanism();
+        let mut rng = FixedRandom((0..=255).cycle().take(16_384).collect());
+        let device = LocalDevice::generate(&suite, &registry, &application, &mut rng).unwrap();
+        let owner = StoreOwner {
+            registry: &registry,
+            domain: &domain,
+            account_id: alice,
+            device: &device,
+        };
+        let mut root = SpaceRoot {
+            id: id(2),
+            scope_id: id(3),
+            identifier: id(4),
+            creator_account_id: alice.into(),
+            device_id: device.id.clone(),
+            account_epoch_id: id(5),
+            epoch_id: id(1000),
+            mechanism: mechanism.id.into(),
+            version: mechanism.version,
+            verification: Vec::new(),
+            account_envelope: vec![1],
+            signature: vec![1],
+        };
+        let root_key = [0; 32];
+        root.verification = suite
+            .key_wrap
+            .wrap(
+                &root_key,
+                &root.marker_context(&application).unwrap(),
+                &[0; 32],
+                &mut rng,
+            )
+            .unwrap();
+        let mut space = HeldSpace {
+            application,
+            scope: root.scope().unwrap(),
+            root,
+            successors: Vec::new(),
+            keys: BTreeMap::from([(
+                0,
+                HeldEntry {
+                    key: Zeroizing::new(root_key),
+                    mark: KeyMark::Published,
+                },
+            )]),
+        };
+        let mut encoded = Vec::new();
+        for depth in 1..=100 {
+            let predecessor = space.epoch_at(depth - 1).unwrap().to_owned();
+            let mut successor = SpaceSuccessor {
+                id: id(100 + depth),
+                scope_id: space.root.scope_id.clone(),
+                identifier: space.root.identifier.clone(),
+                predecessor: predecessor.clone(),
+                history_epoch_id: predecessor,
+                epoch_id: id(1000 + depth),
+                author_account_id: alice.into(),
+                author_device_id: device.id.clone(),
+                author_epoch_id: space.root.account_epoch_id.clone(),
+                verification: Vec::new(),
+                history: vec![1],
+                account_envelope: vec![1],
+                signature: vec![1],
+            };
+            let key = Zeroizing::new([depth as u8; 32]);
+            let context = successor
+                .marker_context(&space.application, &space.scope)
+                .unwrap();
+            successor.verification = suite
+                .key_wrap
+                .wrap(&key, &context, &[0; 32], &mut rng)
+                .unwrap();
+            space.successors.push(successor);
+            space.keep_entry(
+                depth,
+                HeldEntry {
+                    key,
+                    mark: KeyMark::Published,
+                },
+            );
+
+            if depth == 10 || depth == 100 {
+                let mut document = owner.seal_document(&space, &[], 0, &mut rng).unwrap();
+                document.keys.reverse();
+                let document = decode_document(&document.encode().unwrap()).unwrap();
+                PREFIX_ROWS_ENCODED.set(0);
+                let loaded = owner.load(&document).unwrap();
+                assert!(loaded.rejected.is_empty());
+                assert_eq!(loaded.space.unwrap().held().count(), depth + 1);
+                encoded.push(PREFIX_ROWS_ENCODED.get());
+            }
+        }
+        assert_eq!(encoded, [11, 101]);
     }
 }

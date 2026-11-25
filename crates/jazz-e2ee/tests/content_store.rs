@@ -412,6 +412,56 @@ fn a_rotated_document_preserves_the_authenticated_bytes() {
     assert_eq!(newest, &owner.seal_key(&sparse, 2, &mut rng).unwrap());
 }
 
+/// Mallory's change to an early or late link in Alice's stored lineage
+/// invalidates the whole document. A signed key with the wrong prefix is
+/// rejected at either depth while the other keys still load.
+#[test]
+fn loading_rejects_tampering_at_shallow_and_deep_rotations() {
+    let (mut world, _, _) = alice_holding(42);
+    for _ in 1..100 {
+        world.rotate(ALICE);
+    }
+    let space = acquire_held(&world, ALICE, ROW);
+    let owner = owner(&world, ALICE);
+    let document = owner
+        .seal_document(&space, &[], 0, &mut TestRandom(5))
+        .unwrap();
+
+    for depth in [1, 100] {
+        let mut changed = document.clone();
+        changed.lineage.successors[depth - 1].history[0] ^= 1;
+        let decoded = decode_document(&changed.encode().unwrap()).unwrap();
+        let loaded = owner.load(&decoded).unwrap();
+        assert!(loaded.space.is_none());
+        assert_eq!(
+            loaded.rejected,
+            [Rejected {
+                record: RejectedRecord::Lineage,
+                reason: Rejection::Signature,
+            }]
+        );
+
+        let mut changed = document.clone();
+        changed.keys[depth].prefix = "00".repeat(32);
+        changed.keys[depth] = resign_key(&world, changed.keys[depth].clone());
+        let decoded = decode_document(&changed.encode().unwrap()).unwrap();
+        let loaded = owner.load(&decoded).unwrap();
+        assert_eq!(
+            loaded.rejected,
+            [Rejected {
+                record: RejectedRecord::Key {
+                    index: depth,
+                    epoch_id: Some(document.keys[depth].epoch_id.clone()),
+                },
+                reason: Rejection::Prefix,
+            }]
+        );
+        let held = loaded.space.unwrap();
+        assert_eq!(held.held().count(), 100);
+        assert!(held.mark(depth).is_none());
+    }
+}
+
 #[test]
 fn a_held_space_survives_the_store() {
     let (world, space, lost) = alice_holding(1);
