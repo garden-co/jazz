@@ -4202,6 +4202,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!isPendingNativeRead(result)) return result;
     const cancel = () => result.cancel();
     this.ownerRuntime.pendingNativeReadCancels.add(cancel);
+    let pollChannel: MessageChannel | undefined;
     try {
       for (;;) {
         if (this.closed || this.ownerRuntime.closed)
@@ -4214,9 +4215,20 @@ export class NativeRuntimeAdapter implements Runtime {
         // read itself may be what lets that pass resume.
         this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
-        await sleep(0);
+        if (typeof location !== "undefined" && typeof MessageChannel !== "undefined") {
+          // Let WebSocket and storage events run without nesting browser timers.
+          const channel = (pollChannel ??= new MessageChannel());
+          await new Promise<void>((resolve) => {
+            channel.port1.onmessage = () => resolve();
+            channel.port2.postMessage(null);
+          });
+        } else {
+          await sleep(0);
+        }
       }
     } finally {
+      pollChannel?.port1.close();
+      pollChannel?.port2.close();
       this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
       cancel();
       // A suspended read may have held the owner while queued commands

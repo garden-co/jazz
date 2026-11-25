@@ -65,6 +65,38 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("polls a pending browser read again without a timer", async () => {
+    const poll = vi
+      .fn<() => Uint8Array | null>()
+      .mockReturnValueOnce(null)
+      .mockReturnValue(Uint8Array.of(0, 0));
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ all: () => ({ poll, cancel: () => undefined }), tick: () => undefined }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.stubGlobal("location", new URL("https://example.test"));
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const query = JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+        ],
+      });
+      expect(await runtime.query(query, null, "local-first")).toEqual([]);
+      expect(poll).toHaveBeenCalledTimes(2);
+      expect(timer).not.toHaveBeenCalledWith(expect.any(Function), 0);
+    } finally {
+      timer.mockRestore();
+      vi.unstubAllGlobals();
+      await runtime.close();
+    }
+  });
+
   it("keeps unreadable rows from a native transaction relation snapshot", async () => {
     const omission = { table: "todos", id: "missing", column: "title", code: "key-pending" };
     const all = vi.fn((..._args: unknown[]) => ({
