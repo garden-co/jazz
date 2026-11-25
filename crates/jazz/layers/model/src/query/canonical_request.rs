@@ -918,3 +918,45 @@ fn put_opt_str(bytes: &mut Vec<u8>, value: Option<&str>) {
 fn put_len(bytes: &mut Vec<u8>, len: usize) {
     bytes.extend_from_slice(&(len as u64).to_be_bytes());
 }
+
+#[cfg(test)]
+mod canonical_request_tests {
+    use super::*;
+
+    /// A lowered policy's table identity keys apart from every other operand
+    /// that names the same text. White-box because no request can carry the
+    /// operand (the query compiler refuses it), so no public read reaches
+    /// its key; the key still decides shape identity should one ever do so.
+    #[test]
+    fn a_table_identity_operand_has_its_own_canonical_key() {
+        let identity = canonical_operand_key(&Operand::TableIdentity("projects".to_owned()));
+        let mut expected = vec![b't'];
+        expected.extend_from_slice(&8u64.to_be_bytes());
+        expected.extend_from_slice(b"projects");
+        assert_eq!(identity, expected);
+        for other in [
+            Operand::Column("projects".to_owned()),
+            Operand::Param("projects".to_owned()),
+            Operand::Claim("projects".to_owned()),
+            Operand::Literal(Value::String("projects".to_owned())),
+        ] {
+            assert_ne!(canonical_operand_key(&other), identity, "{other:?}");
+        }
+    }
+
+    /// Postcard appends `TableIdentity` as variant index 4 of `Operand`,
+    /// after `Literal`; the earlier variants keep their indexes
+    /// (`dev/ADDRESS_POLICY_NODES_COMPATIBILITY.md` §2).
+    #[test]
+    fn operand_postcard_variant_indexes_are_pinned() {
+        let index = |operand: &Operand| postcard::to_allocvec(operand).unwrap()[0];
+        assert_eq!(index(&Operand::Column("p".to_owned())), 0);
+        assert_eq!(index(&Operand::Param("p".to_owned())), 1);
+        assert_eq!(index(&Operand::Claim("p".to_owned())), 2);
+        assert_eq!(index(&Operand::Literal(Value::String("p".to_owned()))), 3);
+        assert_eq!(
+            postcard::to_allocvec(&Operand::TableIdentity("projects".to_owned())).unwrap(),
+            [&[4u8, 8][..], b"projects"].concat()
+        );
+    }
+}

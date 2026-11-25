@@ -123,7 +123,7 @@ The JSON and array encodings are the version 1 value encodings of those
 types, named `json.v1` and `array.v1`. They add types and change none of
 the encodings above, so no existing token changes; the token mechanism
 (`jazz.sodium.equality` 1) and the context policy (`jazz.e2ee.equality.v1`)
-are as they were. Compatibility is defined here: older servers refuse deployments using the new column types, and changing either encoding requires a new versioned name because stored tokens cannot be recomputed.
+are as they were. Compatibility is defined here: older servers refuse deployments using the new column types, and changing either encoding requires a new versioned name because stored tokens cannot be recomputed. The full write-up is [E2EE_EQUALITY_JSON_ARRAY_COMPATIBILITY.md](../../../dev/E2EE_EQUALITY_JSON_ARRAY_COMPATIBILITY.md).
 
 ## Column types
 
