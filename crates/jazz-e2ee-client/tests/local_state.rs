@@ -550,6 +550,81 @@ fn a_lost_verification_save_leaves_the_concurrent_document_alone() {
     assert!(reopened.with_held(|held| held.space(&root).is_none()));
 }
 
+/// Alice reopens a snapshot containing a held key while her other tab
+/// wipes the scope. The stale opener fails without making the key usable.
+///
+/// ```text
+/// opener ──load snapshot──► store ◄──wipe── other tab
+/// opener ──save verification marker──► store ──wiped──► opener
+/// ```
+#[test]
+fn a_wipe_before_the_verification_save_aborts_open() {
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    drop((db, client));
+    let name = format!("held-{root}");
+    let saw_snapshot = Rc::new(Cell::new(false));
+    let wrapped = JsStore::served_by(Rc::new({
+        let store = store.clone();
+        let serve = serve(Rc::new(store.clone()));
+        let saw_snapshot = saw_snapshot.clone();
+        move |request| {
+            let (store, serve, name, saw_snapshot) = (
+                store.clone(),
+                serve.clone(),
+                name.clone(),
+                saw_snapshot.clone(),
+            );
+            Box::pin(async move {
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") => {
+                        let incarnation = store.open_scope(scope).await.unwrap().to_string();
+                        return (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        );
+                    }
+                    Some("loadAllV1") => {
+                        let mut documents = Vec::new();
+                        for doc in ["device", &name] {
+                            let stored = store.load(scope, doc).await.unwrap().unwrap();
+                            documents.push(serde_json::json!({
+                                "doc": doc,
+                                "bytes": STANDARD.encode(stored.bytes),
+                                "revision": stored.revision.to_string(),
+                            }));
+                        }
+                        saw_snapshot.set(true);
+                        return (true, serde_json::to_string(&documents).unwrap());
+                    }
+                    Some("save") if command["doc"] == name => {
+                        assert!(saw_snapshot.get());
+                        store.delete(scope).await.unwrap();
+                    }
+                    _ => {}
+                }
+                serve(request).await
+            })
+        }
+    }));
+
+    match try_open(Rc::new(wrapped), declarations()) {
+        Err(ClientError::Closed) => {}
+        Err(error) => panic!("expected a wiped open, got {error}"),
+        Ok(client) => panic!(
+            "the wiped scope opened with held key: {}",
+            client.with_held(|held| held.space(&root).is_some())
+        ),
+    }
+    assert!(store.scopes().is_empty());
+}
+
 /// Contract: the runtime refuses at open what it cannot honour: mechanism
 /// settings that name an unknown role, a mechanism this build lacks, or a
 /// selection outside the allow-list. The explicit built-in settings open.

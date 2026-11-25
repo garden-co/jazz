@@ -714,6 +714,23 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func link(bearer: String) throws  -> String
     
     /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert.
+     */
+    func memberAdd(table: String, id: String, accountId: String, tier: String?) throws  -> String
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+    func memberList(table: String, id: String) throws  -> String
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+    func memberRemove(table: String, id: String, accountId: String) throws  -> UInt64
+    
+    /**
      * The first row the query matches.
      */
     func one(queryJson: String) throws  -> String?
@@ -1251,6 +1268,53 @@ open func link(bearer: String)throws  -> String  {
 }
     
     /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert.
+     */
+open func memberAdd(table: String, id: String, accountId: String, tier: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_add(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),
+        FfiConverterOptionString.lower(tier),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+open func memberList(table: String, id: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_list(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+open func memberRemove(table: String, id: String, accountId: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_remove(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The first row the query matches.
      */
 open func one(queryJson: String)throws  -> String?  {
@@ -1613,6 +1677,12 @@ public protocol PrivateStore: AnyObject, Sendable {
     
     func unprotect(blob: Data) throws  -> Data
     
+    /**
+     * Reads every document and its revision in one snapshot of the opened
+     * scope. Return Wiped if the scope is missing or its incarnation changed.
+     */
+    func loadAll(scope: String, incarnation: UInt64) throws  -> [ScopeDocument]
+    
 }
 /**
  * A device's private store. Callbacks run synchronously on the client's
@@ -1741,6 +1811,21 @@ open func unprotect(blob: Data)throws  -> Data  {
     uniffi_jazz_ffi_fn_method_privatestore_unprotect(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(blob),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Reads every document and its revision in one snapshot of the opened
+     * scope. Return Wiped if the scope is missing or its incarnation changed.
+     */
+open func loadAll(scope: String, incarnation: UInt64)throws  -> [ScopeDocument]  {
+    return try  FfiConverterSequenceTypeScopeDocument.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_load_all(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterUInt64.lower(incarnation),uniffiCallStatus
     )
 })
 }
@@ -1951,6 +2036,33 @@ fileprivate struct UniffiCallbackInterfacePrivateStore {
 
             
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        loadAll: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            incarnation: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [ScopeDocument] in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadAll(
+                     scope: try FfiConverterString.lift(scope),
+                     incarnation: try FfiConverterUInt64.lift(incarnation)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeScopeDocument.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -3725,6 +3837,67 @@ public func FfiConverterTypeWatch_lower(_ value: Watch) -> UInt64 {
 
 
 
+/**
+ * One named document in a private-store snapshot.
+ */
+public struct ScopeDocument: Equatable, Hashable {
+    public var doc: String
+    public var bytes: Data
+    public var revision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(doc: String, bytes: Data, revision: UInt64) {
+        self.doc = doc
+        self.bytes = bytes
+        self.revision = revision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ScopeDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScopeDocument: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScopeDocument {
+        return
+            try ScopeDocument(
+                doc: FfiConverterString.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScopeDocument, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.doc, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScopeDocument_lift(_ buf: RustBuffer) throws -> ScopeDocument {
+    return try FfiConverterTypeScopeDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScopeDocument_lower(_ value: ScopeDocument) -> RustBuffer {
+    return FfiConverterTypeScopeDocument.lower(value)
+}
+
+
 public struct StoredDocument: Equatable, Hashable {
     public var bytes: Data
     public var revision: UInt64
@@ -4255,6 +4428,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeScopeDocument: FfiConverterRustBuffer {
+    typealias SwiftType = [ScopeDocument]
+
+    public static func write(_ value: [ScopeDocument], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeScopeDocument.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ScopeDocument] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ScopeDocument]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeScopeDocument.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * A new device account's key as `jazz-auth-v1:…` text, for `"auth":
  * {"deviceKey": …}`: keep it as a password, in the platform's keychain.
@@ -4343,6 +4541,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_add() != 10226) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_list() != 47296) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_remove() != 50047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one() != 37106) {
@@ -4520,6 +4727,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_privatestore_unprotect() != 58200) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_load_all() != 33044) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open() != 17356) {

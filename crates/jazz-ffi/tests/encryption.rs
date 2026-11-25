@@ -15,6 +15,7 @@ mod omitted_columns;
 #[path = "../../jazz-app/tests/relay/mod.rs"]
 mod relay;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +24,8 @@ use encrypted_app::EncryptedApp as App;
 use jazz_e2ee_client::testing::answer_memory_store;
 use jazz_e2ee_client::{MemoryStore, PrivateStore as _, StoreError};
 use jazz_ffi::{
-    JazzError, JazzHandle, PrivateStore, PrivateStoreError, StoredDocument, generate_device_key,
+    JazzError, JazzHandle, PrivateStore, PrivateStoreError, ScopeDocument, StoredDocument,
+    generate_device_key,
 };
 use serde_json::{Value, json};
 
@@ -32,11 +34,20 @@ const DIR: &str = concat!(
     "/../jazz-app/tests/fixtures/encrypted"
 );
 
-/// A host-language store that records saves.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Reads {
+    single: usize,
+    list: usize,
+    bulk: usize,
+}
+
+/// A host-language store that records reads and saves.
 #[derive(Default)]
 struct HostStore {
     memory: MemoryStore,
     saves: Mutex<usize>,
+    reads: Mutex<Reads>,
+    wipe_during_bulk: AtomicBool,
 }
 
 fn answer<T>(answer: Result<T, StoreError>) -> Result<T, PrivateStoreError> {
@@ -57,11 +68,33 @@ impl PrivateStore for HostStore {
         scope: String,
         doc: String,
     ) -> Result<Option<StoredDocument>, PrivateStoreError> {
+        self.reads.lock().unwrap().single += 1;
         answer(futures::executor::block_on(self.memory.load(&scope, &doc))).map(|result| {
             result.map(|document| StoredDocument {
                 bytes: document.bytes,
                 revision: document.revision,
             })
+        })
+    }
+
+    fn load_all(
+        &self,
+        scope: String,
+        incarnation: u64,
+    ) -> Result<Vec<ScopeDocument>, PrivateStoreError> {
+        self.reads.lock().unwrap().bulk += 1;
+        if self.wipe_during_bulk.load(Ordering::Relaxed) {
+            self.delete(scope.clone())?;
+        }
+        answer(self.memory.snapshot(&scope, incarnation)).map(|documents| {
+            documents
+                .into_iter()
+                .map(|(doc, stored)| ScopeDocument {
+                    doc,
+                    bytes: stored.bytes,
+                    revision: stored.revision,
+                })
+                .collect()
         })
     }
 
@@ -84,6 +117,7 @@ impl PrivateStore for HostStore {
     }
 
     fn list(&self, scope: String) -> Result<Vec<String>, PrivateStoreError> {
+        self.reads.lock().unwrap().list += 1;
         answer(futures::executor::block_on(self.memory.list(&scope)))
     }
 
@@ -133,6 +167,164 @@ fn wait_until_ready(handle: &JazzHandle, timeout_ms: u64) -> Result<Value, JazzE
             json!({ "timeoutMs": timeout_ms }).to_string(),
         )
         .map(|result| parse(&result))
+}
+
+/// Alice reopens with 1,000 floor documents. The UniFFI adapter fetches the
+/// whole scope in one callback and loads her previously stored device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_returning_host_reads_its_scope_in_one_callback() {
+    let app = start().await;
+    let config = app.config();
+    let result = tokio::task::spawn_blocking(move || {
+        let store = Arc::new(HostStore::default());
+        let alice = JazzHandle::open_with_store(config.clone(), store.clone(), None).unwrap();
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        let device = alice
+            .encryption_call("deviceId".into(), "{}".into())
+            .unwrap();
+        alice.shutdown().unwrap();
+
+        let scope = store.memory.scopes().pop().unwrap();
+        let floors = floors_in(&store, &scope);
+        let original = futures::executor::block_on(store.memory.load(&scope, &floors[0]))
+            .unwrap()
+            .unwrap();
+        // The host treats these as opaque files. Reusing a record under
+        // other names gives Rust floor documents it must read and reject.
+        for _ in floors.len()..1_000 {
+            let name = format!("floor-{}", uuid::Uuid::new_v4());
+            store
+                .memory
+                .overwrite(&scope, &name, original.bytes.clone());
+        }
+        assert_eq!(floors_in(&store, &scope).len(), 1_000);
+        *store.reads.lock().unwrap() = Reads::default();
+
+        let reopened = JazzHandle::open_with_store(config, store.clone(), None).unwrap();
+        assert_eq!(
+            *store.reads.lock().unwrap(),
+            Reads {
+                single: 0,
+                list: 0,
+                bulk: 1
+            }
+        );
+        assert_eq!(
+            reopened
+                .encryption_call("deviceId".into(), "{}".into())
+                .unwrap(),
+            device
+        );
+        reopened.shutdown().unwrap();
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
+/// A wipe after Alice opens the scope invalidates its snapshot. Continued
+/// wipes exhaust the startup retries and surface the wiped error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scope_wiped_during_the_callback_fails_startup_as_wiped() {
+    let app = start().await;
+    let config = app.config();
+    let result = tokio::task::spawn_blocking(move || {
+        let store = Arc::new(HostStore::default());
+        store.wipe_during_bulk.store(true, Ordering::Relaxed);
+        let error = match JazzHandle::open_with_store(config, store.clone(), None) {
+            Ok(_) => panic!("opened a scope wiped during each snapshot"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, JazzError::Encryption { code, reason, .. }
+            if code == "store" && reason.contains("wiped")));
+        assert!(store.reads.lock().unwrap().bulk > 1);
+        assert_eq!(*store.saves.lock().unwrap(), 0);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
+/// Alice reopens from a snapshot with a floor whose signature Mallory spoiled.
+/// Jazz reports the floor and keeps the authentic device and space keys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tampered_floor_does_not_discard_other_snapshot_documents() {
+    let app = start().await;
+    let config = app.config();
+    let result = tokio::task::spawn_blocking(move || {
+        let store = Arc::new(HostStore::default());
+        let alice = JazzHandle::open_with_store(config.clone(), store.clone(), None).unwrap();
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        let account = alice.account().unwrap().unwrap();
+        let (project, _) = make_project(&alice, &account);
+        alice
+            .insert_at(
+                "tasks".into(),
+                json!({ "projectId": project, "title": "plans" }).to_string(),
+                "global".into(),
+            )
+            .unwrap();
+        let device = alice
+            .encryption_call("deviceId".into(), "{}".into())
+            .unwrap();
+        alice.shutdown().unwrap();
+
+        let scope = store.memory.scopes().pop().unwrap();
+        let name = format!("floor-{account}");
+        let stored = futures::executor::block_on(store.memory.load(&scope, &name))
+            .unwrap()
+            .unwrap();
+        let mut altered: Value = serde_json::from_slice(&stored.bytes).unwrap();
+        let cut = altered["through"].as_str().unwrap();
+        altered["through"] = if cut == "0" { json!("1") } else { json!("0") };
+        store
+            .memory
+            .overwrite(&scope, &name, serde_json::to_vec(&altered).unwrap());
+
+        let reopened = JazzHandle::open_with_store(config, store, None).unwrap();
+        assert_eq!(
+            reopened
+                .encryption_call("deviceId".into(), "{}".into())
+                .unwrap(),
+            device
+        );
+        let reports = parse(
+            &reopened
+                .encryption_call("reports".into(), "{}".into())
+                .unwrap(),
+        );
+        let skipped: Vec<_> = reports
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|report| report["type"] == "skipped-record")
+            .map(|report| &report["document"])
+            .collect();
+        assert_eq!(skipped, [&json!(name)]);
+        assert_eq!(wait_until_ready(&reopened, 30_000).unwrap(), "active");
+        let query = json!({ "table": "tasks" }).to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = parse(&reopened.all_at(query.clone(), "remote".into()).unwrap());
+            if rows[0]["title"] == "plans" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{rows}");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        reopened.shutdown().unwrap();
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
+fn floors_in(store: &HostStore, scope: &str) -> Vec<String> {
+    futures::executor::block_on(store.memory.list(scope))
+        .unwrap()
+        .into_iter()
+        .filter(|name| name.starts_with("floor-"))
+        .collect()
 }
 
 /// The first member row is the creator's, in the transaction that
@@ -964,4 +1156,67 @@ async fn key_refusal_on_transaction_write_and_edit() {
     .await
     .unwrap();
     app.stop().await;
+}
+
+/// Alice adds Bob through the UniFFI handle, sees his membership row, and
+/// removes him while retaining her own creator membership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_uniffi_handle_adds_lists_and_removes_space_members() {
+    let app = start().await;
+    let (alice_config, bob_config) = (app.config(), app.config());
+    tokio::task::spawn_blocking(move || {
+        let alice = JazzHandle::open_with_store(alice_config, Arc::new(HostStore::default()), None)
+            .unwrap();
+        let bob =
+            JazzHandle::open_with_store(bob_config, Arc::new(HostStore::default()), None).unwrap();
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        assert_eq!(wait_until_ready(&bob, 30_000).unwrap(), "active");
+        let alice_id = alice.account().unwrap().unwrap();
+        let bob_id = bob.account().unwrap().unwrap();
+        let project = parse(
+            &alice
+                .insert_at(
+                    "projects".into(),
+                    json!({ "name": "plans", "ownerId": alice_id }).to_string(),
+                    "global".into(),
+                )
+                .unwrap(),
+        );
+        let id = project["id"].as_str().unwrap().to_owned();
+        let members = || parse(&alice.member_list("projects".into(), id.clone()).unwrap());
+        let creator = members()[0].clone();
+        assert_eq!(creator["accountId"], alice_id);
+
+        let admitted = parse(
+            &alice
+                .member_add(
+                    "projects".into(),
+                    id.clone(),
+                    bob_id.clone(),
+                    Some("global".into()),
+                )
+                .unwrap(),
+        );
+        assert_eq!(admitted["scopeId"], creator["scopeId"]);
+        assert_eq!(admitted["identifier"], id);
+        assert_eq!(admitted["accountId"], bob_id);
+        assert_eq!(members().as_array().unwrap().len(), 2);
+        assert!(members().as_array().unwrap().contains(&admitted));
+
+        assert_eq!(
+            alice
+                .member_remove("projects".into(), id.clone(), bob_id.clone())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            alice
+                .member_remove("projects".into(), id.clone(), bob_id)
+                .unwrap(),
+            0
+        );
+        assert_eq!(members(), json!([creator]));
+    })
+    .await
+    .unwrap();
 }

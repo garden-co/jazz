@@ -19,7 +19,7 @@ import kotlinx.serialization.json.put
 /** One document of a [PrivateStore], with its revision. */
 public class StoredDocument(public val bytes: ByteArray, public val revision: Long)
 
-/** What [PrivateStore.save] throws when nothing was written. */
+/** A private-store revision or incarnation mismatch. */
 public sealed class PrivateStoreException(message: String) : Exception(message) {
     /** The document's revision is not the one expected. */
     public class Conflict : PrivateStoreException("the private store's document changed")
@@ -40,6 +40,12 @@ public interface PrivateStore {
 
     /** The document, or `null` if there is none. */
     public fun load(scope: String, doc: String): StoredDocument?
+
+    /**
+     * Reads all documents and their revisions in one snapshot. Throws
+     * [PrivateStoreException.Wiped] if the scope is absent or its incarnation changed.
+     */
+    public fun loadAll(scope: String, incarnation: Long): Map<String, StoredDocument>
 
     /**
      * Replaces the document if the scope is still of [incarnation] and the document's
@@ -83,6 +89,10 @@ public data class Device(
     /** Whether this device has published a request to be removed. */
     val removalRequested: Boolean = false,
 )
+
+/** A row granting an account membership in a space. */
+@Serializable
+public data class SpaceMember(val id: String, val scopeId: String, val identifier: String, val accountId: String)
 
 /** The deliveries written and the spaces whose delivery failed in one pass. */
 @Serializable
@@ -152,6 +162,18 @@ public class Encryption internal constructor(
     public suspend fun approve(deviceId: String, code: String) {
         call("approve", buildJsonObject { put("deviceId", deviceId); put("code", code) })
     }
+
+    /** Admits an account to a space and returns its membership row, as an insert would. */
+    public suspend fun addMember(table: String, id: String, accountId: String, tier: WriteTier? = null): SpaceMember =
+        jazzJson.decodeFromString(blocking { native.memberAdd(table, id, accountId, tier?.wire) })
+
+    /** Lists the space's membership rows visible to the caller. */
+    public suspend fun listMembers(table: String, id: String): List<SpaceMember> =
+        jazzJson.decodeFromString(blocking { native.memberList(table, id) })
+
+    /** Removes the account's visible membership rows. Returns the number the authority accepted. */
+    public suspend fun removeMember(table: String, id: String, accountId: String): ULong =
+        blocking { native.memberRemove(table, id, accountId).toString() }.toULong()
 
     /** Removes a device and rotates the account. */
     public suspend fun removeDevice(deviceId: String) {

@@ -21,6 +21,23 @@ const members = await db.encryption.members.list(app.projects, project.id);
 await db.encryption.members.remove(app.projects, project.id, otherAccountId);
 ```
 
+In Rust, pass the generated space row type as the table. This example waits for the sync
+server to accept the insert and admission.
+
+```rust
+use jazz_app::{DurabilityTier, NewProject, Project};
+
+let durable = jazz.durable(DurabilityTier::GlobalServer);
+let project = durable.insert(NewProject::new("Plans", owner_id)).await?;
+durable.add_member::<Project>(project.id, other_account).await?;
+let members = jazz.list_members::<Project>(project.id).await?;
+let removed = jazz.remove_member::<Project>(project.id, other_account).await?;
+```
+
+Swift and Kotlin expose `addMember`, `listMembers` and `removeMember` on their
+`encryption` handle. In Go, use `AddMember`, `ListMembers` and `RemoveMember` on
+`db.Encryption()`. Pass the scope table name and row ID.
+
 To turn off creator membership for one space, pass `{ addCreatorAsMember: false }` as the insert's
 third argument. To turn it off for all spaces this client creates, set `addCreatorAsMember: false`
 in the client's `encryption` options.

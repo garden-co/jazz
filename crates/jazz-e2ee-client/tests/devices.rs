@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use common::*;
@@ -16,8 +17,8 @@ use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee_client::PrivateStore as _;
-use jazz_e2ee_client::host::bridge::JsStore;
-use jazz_e2ee_client::host::runtime::{Built, Encryption};
+use jazz_e2ee_client::host::bridge::{JsStore, StoreWake};
+use jazz_e2ee_client::host::runtime::{ApprovalWatchFault, Built, Encryption};
 use jazz_e2ee_client::{AccountStatus, ClientError, E2eeClient, MemoryStore, PendingApproval};
 
 /// Runs `test` on its own thread; a hang fails after a minute, saying so.
@@ -1745,6 +1746,103 @@ fn the_host_reports_a_new_approval_challenge_from_the_watch() {
         drive(&server, &both, async {
             loop {
                 runtime.drive();
+                if runtime
+                    .take_reports()
+                    .iter()
+                    .any(|report| report == r#"{"type":"challenged"}"#)
+                {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        runtime.stop();
+    });
+}
+
+/// Alice's second device gets a one-shot wake after its watch fails to
+/// open, then receives the first device's challenge on the recovered watch.
+#[test]
+fn the_host_retries_an_approval_watch_that_failed_to_open() {
+    approval_watch_recovery(ApprovalWatchFault::Install);
+}
+
+/// Alice's second device gets a one-shot wake after an approval stream
+/// closes, then receives the first device's challenge on the new watch.
+#[test]
+fn the_host_retries_an_approval_watch_that_closed() {
+    approval_watch_recovery(ApprovalWatchFault::Closed);
+}
+
+fn approval_watch_recovery(fault: ApprovalWatchFault) {
+    within(move || {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, memory(), 2, &settings);
+        let requester = second.id();
+        let db = Rc::new(second.db);
+        let bridge = Rc::new(JsStore::default());
+        let announced = Rc::new(Cell::new(None));
+        bridge.set_store_wake(Some(Box::new({
+            let announced = announced.clone();
+            move |wake| {
+                if let StoreWake::Deadline(delay) = wake {
+                    announced.set(delay);
+                }
+            }
+        })));
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: Rc::new(second.client),
+                reports: Rc::default(),
+            },
+            bridge.clone(),
+            db.clone(),
+        );
+        runtime.fail_approval_watch_once(fault);
+        let wait_for_idle = || {
+            drive(&server, &[&db], async {
+                loop {
+                    runtime.drive();
+                    let state = runtime.state();
+                    assert!(state["error"].is_null(), "{state}");
+                    if state["status"] == "awaiting-approval" && state["stage"] == "idle" {
+                        break;
+                    }
+                    futures::pending!();
+                }
+            });
+        };
+        wait_for_idle();
+        let delay = announced.get().expect("the host needs a retry wake");
+        let deadline = bridge.next_deadline_after(web_time::Instant::now());
+        assert!(deadline.is_some());
+        wait_for_idle();
+        assert_eq!(
+            bridge.next_deadline_after(web_time::Instant::now()),
+            deadline
+        );
+        // The host can sleep until its announced deadline, with no polling.
+        std::thread::sleep(delay);
+        wait_for_idle();
+        assert_eq!(announced.get(), None, "a healthy watch needs no timer");
+        assert!(runtime.take_reports().is_empty());
+
+        let both = [&first.db, db.as_ref()];
+        drive(
+            &server,
+            &both,
+            first.client.challenge_device(&first.db, &requester),
+        )
+        .unwrap();
+        drive(&server, &both, async {
+            loop {
+                runtime.drive();
+                assert_eq!(announced.get(), None);
                 if runtime
                     .take_reports()
                     .iter()

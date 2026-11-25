@@ -306,6 +306,15 @@ pub struct Encryption {
     gate: Gate,
     /// The loop, polled by the host.
     main: RefCell<Option<LocalBoxFuture<'static, ()>>>,
+    #[cfg(any(test, feature = "testing"))]
+    approval_watch_fault: Cell<Option<ApprovalWatchFault>>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalWatchFault {
+    Install,
+    Closed,
 }
 
 /// One runtime call at a time: two calls that each hold a database
@@ -529,6 +538,8 @@ impl Encryption {
             preparations: Default::default(),
             gate: Gate::default(),
             main: RefCell::default(),
+            #[cfg(any(test, feature = "testing"))]
+            approval_watch_fault: Cell::default(),
         });
         let running = Rc::clone(&encryption);
         *encryption.main.borrow_mut() = Some(Box::pin(main_loop(running)));
@@ -596,6 +607,11 @@ impl Encryption {
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_approval_count(&self) -> usize {
         self.approvals.borrow().len()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_approval_watch_once(&self, fault: ApprovalWatchFault) {
+        self.approval_watch_fault.set(Some(fault));
     }
 
     /// The reports waiting, as JSON texts.
@@ -1336,6 +1352,10 @@ async fn main_loop(this: Rc<Encryption>) {
                 this.set_background_deadline(None);
                 break;
             }
+            Ok(false) => {
+                // The host drives the loop after sync applies the catalogue.
+                this.set_background_deadline(None);
+            }
             Err(error) => {
                 if let Some(native) = &this.native {
                     if !native_may_retry(&error) {
@@ -1345,11 +1365,11 @@ async fn main_loop(this: Rc<Encryption>) {
                     }
                     *native.result.borrow_mut() = Verification::Retry(error);
                 }
+                this.set_background_deadline(Some(
+                    web_time::Instant::now() + Duration::from_millis(100),
+                ));
             }
-            _ => {}
         }
-        // The host still uses a noop waker while initial preparation is pending.
-        this.set_background_deadline(Some(web_time::Instant::now() + Duration::from_millis(100)));
         yield_now().await;
     }
     let mut account = None;
@@ -1494,12 +1514,31 @@ async fn main_loop(this: Rc<Encryption>) {
                 noticed = false;
                 retry_challenge_at = None;
             }
-            if approval.is_none() {
-                approval = Box::pin(client.watch_approval(&db)).await.ok();
+            if approval.is_none()
+                && retry_challenge_at.is_none_or(|at| web_time::Instant::now() >= at)
+            {
+                retry_challenge_at = None;
+                let opened = Box::pin(client.watch_approval(&db)).await;
+                #[cfg(any(test, feature = "testing"))]
+                let opened = if this.approval_watch_fault.get() == Some(ApprovalWatchFault::Install)
+                {
+                    this.approval_watch_fault.set(None);
+                    Err(crate::StoreError::Failed("approval watch unavailable".into()).into())
+                } else {
+                    opened
+                };
+                match opened {
+                    Ok(watch) => approval = Some(watch),
+                    Err(_) => retry_challenge_at = Some(web_time::Instant::now() + APPROVAL_RETRY),
+                }
             }
             if let Some((_, [challenges, proved])) = approval.as_mut() {
                 let (changed, challenges_closed) = challenges.changes(|_| Some(()));
                 let (proved_changed, proofs_closed) = proved.changes(|_| Some(()));
+                #[cfg(any(test, feature = "testing"))]
+                let challenges_closed = challenges_closed
+                    || (this.approval_watch_fault.get() == Some(ApprovalWatchFault::Closed)
+                        && this.approval_watch_fault.take().is_some());
                 if challenges.rows.is_empty() {
                     if !changed.is_empty() {
                         noticed = false;
@@ -1523,13 +1562,13 @@ async fn main_loop(this: Rc<Encryption>) {
                         Ok(false) => noticed = false,
                         Ok(true) => {}
                         Err(_) => {
-                            retry_challenge_at =
-                                Some(web_time::Instant::now() + Duration::from_secs(2));
+                            retry_challenge_at = Some(web_time::Instant::now() + APPROVAL_RETRY);
                         }
                     }
                 }
                 if challenges_closed || proofs_closed {
                     approval = None;
+                    retry_challenge_at = Some(web_time::Instant::now() + APPROVAL_RETRY);
                 }
             }
         } else {
@@ -1609,20 +1648,32 @@ async fn main_loop(this: Rc<Encryption>) {
                     let retained = (!start && covered).then_some(&*watch);
                     start = false;
                     reconnect = false;
-                    if let Err(error) = client.deliver_keys_outside_watch(&db, retained).await {
-                        *this.last_error.borrow_mut() = Some(describe(error));
+                    match client.deliver_keys_outside_watch(&db, retained).await {
+                        Ok(results) => {
+                            for (space, result) in results {
+                                if let Err(error) = result {
+                                    client.shared.flush(vec![Report::DeliveryFailed {
+                                        space,
+                                        reason: error.to_string(),
+                                    }]);
+                                }
+                            }
+                        }
+                        Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
                     }
                 }
             }
         }
         this.stage.set("idle");
-        // The approval watch wakes the loop when evidence changes; a timer
-        // is needed only to retry a challenge read that failed.
+        // The approval watch wakes the loop when evidence changes. A retry
+        // deadline covers a failed watch or authoritative challenge read.
         this.set_background_deadline(retry_at.into_iter().chain(retry_challenge_at).min());
         drop(turn);
         yield_now().await;
     }
 }
+
+const APPROVAL_RETRY: Duration = Duration::from_secs(2);
 
 /// How long a call that waits for the loop's delivery pass may wait.
 const DELIVER_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);

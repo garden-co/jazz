@@ -15,7 +15,7 @@ public struct StoredDocument: Sendable {
     }
 }
 
-/// What a private store's `save` throws when nothing was written.
+/// A private-store revision or incarnation mismatch.
 public enum PrivateStoreError: Error, Sendable {
     /// The document's revision is not the one expected.
     case conflict
@@ -32,6 +32,9 @@ public protocol PrivateStore: Sendable {
     func openScope(_ scope: String) throws -> UInt64
     /// The document, or `nil` if there is none.
     func load(scope: String, doc: String) throws -> StoredDocument?
+    /// Reads all documents and their revisions in one snapshot. Throws
+    /// `PrivateStoreError.wiped` if the scope is absent or its incarnation changed.
+    func loadAll(scope: String, incarnation: UInt64) throws -> [String: StoredDocument]
     /// Replaces the document if the scope is still of `incarnation` and the
     /// document's revision is still `expected` (`nil`: it must not exist),
     /// atomically, and returns the new revision. Otherwise throws
@@ -76,6 +79,14 @@ final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
         try call {
             try store.load(scope: scope, doc: doc).map {
                 JazzFFI.StoredDocument(bytes: $0.bytes, revision: $0.revision)
+            }
+        }
+    }
+
+    func loadAll(scope: String, incarnation: UInt64) throws -> [JazzFFI.ScopeDocument] {
+        try call {
+            try store.loadAll(scope: scope, incarnation: incarnation).map { doc, stored in
+                JazzFFI.ScopeDocument(doc: doc, bytes: stored.bytes, revision: stored.revision)
             }
         }
     }
@@ -128,6 +139,14 @@ public struct Device: Decodable, Hashable, Sendable {
     public var status: String
     /// Whether this device has published a request to be removed.
     public var removalRequested: Bool
+}
+
+/// A row granting an account membership in a space.
+public struct SpaceMember: Decodable, Sendable {
+    public let id: ID
+    public let scopeId: ID
+    public let identifier: ID
+    public let accountId: ID
 }
 
 /// The deliveries written and the spaces whose delivery failed in one pass.
@@ -225,6 +244,33 @@ public struct Encryption: Sendable {
     /// Approves the device if `code` is the one `approvalCode` gave.
     public func approve(deviceId: String, code: String) async throws {
         _ = try await call("approve", ["deviceId": .string(deviceId), "code": .string(code)])
+    }
+
+    /// Admits an account to a space and returns its membership row, as an insert would.
+    @discardableResult
+    public func addMember(table: String, id: ID, accountId: ID, tier: WriteTier? = nil) async throws -> SpaceMember {
+        try await Client.typed {
+            let row = try await Client.run {
+                try self.client.handle.memberAdd(table: table, id: id, accountId: accountId, tier: tier?.rawValue)
+            }
+            return try Coding.decode(SpaceMember.self, row, self.client.userInfo)
+        }
+    }
+
+    /// Lists the space's membership rows visible to the caller.
+    public func listMembers(table: String, id: ID) async throws -> [SpaceMember] {
+        try await Client.typed {
+            let rows = try await Client.run { try self.client.handle.memberList(table: table, id: id) }
+            return try Coding.decode([SpaceMember].self, rows, self.client.userInfo)
+        }
+    }
+
+    /// Removes the account's visible membership rows. Returns the number the authority accepted.
+    @discardableResult
+    public func removeMember(table: String, id: ID, accountId: ID) async throws -> UInt64 {
+        try await Client.typed {
+            try await Client.run { try self.client.handle.memberRemove(table: table, id: id, accountId: accountId) }
+        }
     }
 
     /// Removes a device and rotates the account.

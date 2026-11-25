@@ -78,6 +78,11 @@ async function device(
 
 type Device = Awaited<ReturnType<typeof device>>;
 
+it("marks generated encryption space tables at runtime", () => {
+  expect(app.projects._encryptionSpace).toBe(true);
+  expect(app.tasks).not.toHaveProperty("_encryptionSpace");
+});
+
 it("adds the creator and manages members through typed tables and transactions", async () => {
   const host = await serve();
   const alice = await device(host);
@@ -207,6 +212,27 @@ function observeStoreClock() {
   });
   return { armed, fired };
 }
+
+it("waits for the first catalogue without waking the private-store clock", async () => {
+  const first = await serve();
+  await first.stop();
+  const { fired } = observeStoreClock();
+  const alice = await device(first, { wait: false });
+  await alice.db.disconnect();
+  const state = () => JSON.parse(alice.db.encryption["native"].encryptionState());
+  expect(state().readable).toBe(false);
+
+  await new Promise((resolve) => setTimeout(resolve, 60_000));
+  expect(fired).toHaveLength(0);
+
+  await serve({ dir: first.dir, port: first.port });
+  try {
+    await alice.db.reconnect();
+    await expect.poll(() => state().status, { timeout: 5_000 }).toBe("active");
+  } finally {
+    await alice.session.close();
+  }
+}, 90_000);
 
 it("arms verification backoff after a transient private-store error", async () => {
   const { armed, fired } = observeStoreClock();

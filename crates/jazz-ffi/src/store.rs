@@ -48,10 +48,26 @@ pub trait PrivateStore: Send + Sync {
     fn delete(&self, scope: String) -> Result<(), PrivateStoreError>;
     fn protect(&self, secret: Zeroizing<Vec<u8>>) -> Result<Vec<u8>, PrivateStoreError>;
     fn unprotect(&self, blob: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError>;
+
+    /// Reads every document and its revision in one snapshot of the opened
+    /// scope. Return Wiped if the scope is missing or its incarnation changed.
+    fn load_all(
+        &self,
+        scope: String,
+        incarnation: u64,
+    ) -> Result<Vec<ScopeDocument>, PrivateStoreError>;
 }
 
 #[derive(uniffi::Record)]
 pub struct StoredDocument {
+    pub bytes: Vec<u8>,
+    pub revision: u64,
+}
+
+/// One named document in a private-store snapshot.
+#[derive(uniffi::Record)]
+pub struct ScopeDocument {
+    pub doc: String,
     pub bytes: Vec<u8>,
     pub revision: u64,
 }
@@ -110,6 +126,30 @@ impl NativeStore for CallbackStore {
         ))
     }
 
+    fn load_all<'a>(
+        &'a self,
+        scope: &'a str,
+        incarnation: u64,
+    ) -> Option<Answer<'a, Vec<(String, Stored)>>> {
+        let result = self.0.load_all(scope.to_owned(), incarnation);
+        Some(Box::pin(ready(
+            result
+                .map(|documents| {
+                    documents
+                        .into_iter()
+                        .map(
+                            |ScopeDocument {
+                                 doc,
+                                 bytes,
+                                 revision,
+                             }| (doc, Stored { bytes, revision }),
+                        )
+                        .collect()
+                })
+                .map_err(Into::into),
+        )))
+    }
+
     fn save<'a>(
         &'a self,
         scope: &'a str,
@@ -159,6 +199,25 @@ impl NativeStore for CallbackStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Alice's foreign host returns the v1 snapshot as a UniFFI sequence
+    /// of names, bytes and unsigned revisions. Pin the foreign encoding.
+    #[test]
+    fn scope_snapshot_matches_the_host_byte_sequence() {
+        let snapshot = vec![ScopeDocument {
+            doc: "device".to_owned(),
+            bytes: vec![0, 128, 255],
+            revision: 9_007_199_254_740_993,
+        }];
+        let buffer = <Vec<ScopeDocument> as Lower<UniFfiTag>>::lower(snapshot);
+        assert_eq!(
+            buffer.destroy_into_vec(),
+            [
+                0, 0, 0, 1, 0, 0, 0, 6, b'd', b'e', b'v', b'i', b'c', b'e', 0, 0, 0, 3, 0, 128,
+                255, 0, 32, 0, 0, 0, 0, 0, 1,
+            ]
+        );
+    }
 
     /// Alice's host reads the guarded save argument as its usual UniFFI byte
     /// sequence. Exercise lowering directly because a Rust callback skips it.

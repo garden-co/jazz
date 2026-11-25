@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -41,6 +42,18 @@ func (m *memoryStore) Load(scope, doc string) (*Stored, error) {
 		return &stored, nil
 	}
 	return nil, nil
+}
+
+func (m *memoryStore) LoadAll(scope string, incarnation uint64) (map[string]Stored, error) {
+	s, ok := m.scopes[scope]
+	if !ok || s.incarnation != incarnation {
+		return nil, ErrStoreWiped
+	}
+	documents := make(map[string]Stored, len(s.docs))
+	for name, stored := range s.docs {
+		documents[name] = stored
+	}
+	return documents, nil
 }
 
 func (m *memoryStore) Save(scope string, incarnation uint64, doc string, bytes []byte, expected *uint64) (uint64, error) {
@@ -147,6 +160,42 @@ func TestThePrivateStoreAnswersTheRuntimesRequests(t *testing.T) {
 	}
 }
 
+func TestPrivateStoreSnapshotNegotiation(t *testing.T) {
+	store := newMemoryStore()
+	store.next = 1 << 43
+	scope := "device"
+	incarnation, err := store.OpenScope(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decimal := strconv.FormatUint(incarnation, 10)
+	open := map[string]any{"op": "openScope", "scope": scope, "loadAll": "v1"}
+	legacy := struct{ PrivateStore }{store}
+	if ok, text := ask(t, legacy, open); !ok || text != `"`+decimal+`"` {
+		t.Fatalf("legacy openScope: %v %s", ok, text)
+	}
+	if ok, text := ask(t, store, open); !ok || text != `{"incarnation":"`+decimal+`","loadAll":"v1"}` {
+		t.Fatalf("snapshot openScope: %v %s", ok, text)
+	}
+	read := map[string]any{"op": "loadAllV1", "scope": scope, "incarnation": decimal}
+	if ok, text := ask(t, store, read); !ok || text != `[]` {
+		t.Fatalf("empty snapshot: %v %s", ok, text)
+	}
+	store.scopes[scope].docs["device"] = Stored{Bytes: []byte{0, 128, 255}, Revision: 9007199254740993}
+	if ok, text := ask(t, store, read); !ok || text != `[{"bytes":"AID/","doc":"device","revision":"9007199254740993"}]` {
+		t.Fatalf("snapshot: %v %s", ok, text)
+	}
+	if err := store.Delete(scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	if ok, text := ask(t, store, read); ok || text != "wiped" {
+		t.Fatalf("stale snapshot: %v %s", ok, text)
+	}
+}
+
 func TestEncryptionCodeNamesTheFailure(t *testing.T) {
 	err := parseError(`{"kind":"refused","message":"the code differs","code":"approval-code-mismatch"}`)
 	if got := EncryptionCode(err); got != "approval-code-mismatch" {
@@ -154,6 +203,37 @@ func TestEncryptionCodeNamesTheFailure(t *testing.T) {
 	}
 	if got := EncryptionCode(&Error{Kind: KindRefused, Message: "encryption (approval-code-mismatch): the code differs"}); got != "" {
 		t.Fatalf("code = %q", got)
+	}
+}
+
+// All three helpers reach the C ABI and preserve its typed failure.
+func TestMembershipCallsRequireAnEncryptedApp(t *testing.T) {
+	if err := loadFFI(); err != nil {
+		t.Skipf("no libjazz_ffi: %v", err)
+	}
+	app, err := os.ReadFile("../../examples/docs/todo-client-go/jazz.app.json")
+	if err != nil {
+		t.Skipf("outside the repository: %v", err)
+	}
+	ctx := context.Background()
+	id := "8f3c2a7e-1b4d-4c9e-9a2f-6d5e4c3b2a10"
+	db, err := Open(ctx, Config{App: string(app), AppID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	members := db.Encryption()
+	_, addErr := members.AddMember(ctx, "todos", id, id, WaitFor(WriteLocal))
+	_, listErr := members.ListMembers(ctx, "todos", id)
+	_, removeErr := members.RemoveMember(ctx, "todos", id, id)
+	for _, call := range []struct {
+		name string
+		err  error
+	}{{"add", addErr}, {"list", listErr}, {"remove", removeErr}} {
+		if got := EncryptionCode(call.err); got != "not-declared" {
+			t.Errorf("%s: code %q, error %v", call.name, got, call.err)
+		}
 	}
 }
 

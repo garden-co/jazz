@@ -1810,6 +1810,11 @@ function createAppForTables(
   registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
   const history = {} as Record<string, unknown>;
+  const compiled = boundApp(wasmSchema)?.schema;
+  const entries = compiled?.encryption?.versions?.[compiled.current] as
+    | Record<string, { scope: string }>
+    | undefined;
+  const spaceTables = new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
@@ -1819,6 +1824,9 @@ function createAppForTables(
       columnTransformsByTable?.[tableName],
       columnTransformsByTable,
     );
+    if (spaceTables.has(tableName)) {
+      Object.defineProperty(tables[tableName], "_encryptionSpace", { value: true });
+    }
     Object.defineProperty(history, tableName, {
       enumerable: true,
       get: () =>

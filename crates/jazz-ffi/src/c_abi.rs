@@ -365,6 +365,16 @@ pub unsafe extern "C" fn jazz_call(
                 core.tx_rollback(parse_tx(&string("tx")?)?)?;
                 "null".into()
             }
+            "memberAdd" => core.member_add(
+                &string("table")?,
+                &string("id")?,
+                &string("accountId")?,
+                Opts::parse(None, args.get("tier"), false)?.write_tier,
+            )?,
+            "memberList" => core.member_list(&string("table")?, &string("id")?)?,
+            "memberRemove" => core
+                .member_remove(&string("table")?, &string("id")?, &string("accountId")?)?
+                .to_string(),
             "encryptionCall" => core.encryption_call(
                 &string("op")?,
                 &args.get("args").map(Json::to_string).unwrap_or_default(),

@@ -106,6 +106,13 @@ public interface Native : AutoCloseable {
     /** Signs the end user out, and closes the app. */
     public fun signOut(): Unit = close()
 
+    public fun memberAdd(table: String, id: String, accountId: String, tier: String?): String =
+        throw JazzException.NotSupported("adding space members")
+    public fun memberList(table: String, id: String): String =
+        throw JazzException.NotSupported("listing space members")
+    public fun memberRemove(table: String, id: String, accountId: String): ULong =
+        throw JazzException.NotSupported("removing space members")
+
     /** One end-to-end encryption operation by name (see the README), its arguments and result as JSON. */
     public fun encryptionCall(op: String, argsJson: String): String =
         throw JazzException.NotSupported("end-to-end encryption through this native core")

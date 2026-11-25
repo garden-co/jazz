@@ -440,6 +440,18 @@ refused, naming the option. A device's schema has the plaintext types of its enc
 in and out as ordinary JSON; writes of a space whose key the device does not hold yet wait for it
 (ten seconds at most). The store is called on the client's thread, one request at a time.
 
+The required UniFFI `load_all(scope, incarnation)` reads a single snapshot at startup. The host
+checks the scope marker in the same transaction as the document read and returns
+`PrivateStoreError::Wiped` if the scope is absent or its incarnation differs. An intact scope with
+no documents returns an empty sequence. Each document carries the name, bytes and revision from
+that snapshot. Jazz authenticates the records and uses the revisions for later saves.
+
+The UniFFI scope snapshot v1 result is a sequence of `ScopeDocument` records in field order
+`doc` (UTF-8), `bytes` (raw byte sequence), `revision` (unsigned 64-bit). The sequence, string
+and byte lengths are 32-bit big-endian and the revision is 64-bit big-endian. This adds a required
+method to the prerelease UniFFI callback interface. Regenerate the bindings with the matching
+library and update Swift and Kotlin stores together. The on-disk private-store formats are unchanged.
+
 A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Numbers that may exceed 2^53 use decimal text.
 
 | `op`        | Fields                                                    | Answer (JSON)                        |
@@ -452,10 +464,17 @@ A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Number
 | `protect`   | `secret`                                                  | the protected blob, base64           |
 | `unprotect` | `blob`                                                    | the secret, base64                   |
 
+The C callback can opt into the existing `loadAllV1` encoding. When the `openScope` request
+includes `"loadAll":"v1"`, a host that supports it answers with
+`{"incarnation":"…","loadAll":"v1"}`. Jazz then sends `loadAllV1` with `scope` and `incarnation`.
+Return a JSON array of `{"doc":"…","bytes":"…","revision":"…"}` objects, or answer
+`wiped` for a missing or changed scope. Hosts that answer `openScope` with the incarnation
+as text continue to receive single-document requests.
+
 An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
 (the scope is not of that incarnation) or a message.
 
-Use `encryption_call(op, args_json)` for every operation. In C, pass `"encryptionCall"` to
+Use `encryption_call(op, args_json)` for the runtime operations below. In C, pass `"encryptionCall"` to
 `jazz_call` with `{"op", "args"?}`.
 
 | Operations                                                                                | Purpose                                                                                                                                                                     |
@@ -478,3 +497,22 @@ report with the space and reason.
 
 An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
 encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.
+
+### Space membership
+
+Pass the name of the table declared as the encryption scope and the space row's ID.
+Use `member_add(table, id, account_id, tier)`, `member_list(table, id)` and
+`member_remove(table, id, account_id)` on the UniFFI handle. In C, use these
+`jazz_call` methods:
+
+| Method         | Arguments                                 | Result                 |
+| -------------- | ----------------------------------------- | ---------------------- |
+| `memberAdd`    | `{ "table", "id", "accountId", "tier"? }` | Inserted member row    |
+| `memberList`   | `{ "table", "id" }`                       | Visible member rows    |
+| `memberRemove` | `{ "table", "id", "accountId" }`          | Number of rows removed |
+
+A member row contains `id`, `scopeId`, `identifier` (the space row ID) and `accountId`.
+Add settles like an insert, with optional `local` or `global` durability. Remove deletes
+the account's visible rows for the space in a serializable transaction and waits for
+the authority to accept it. A count of zero means there were no matching rows visible
+to the caller.

@@ -3,6 +3,7 @@ package tools.jazz
 import uniffi.jazz_ffi.JazzHandle
 import uniffi.jazz_ffi.SubscriptionListener
 import uniffi.jazz_ffi.PrivateStoreException as FfiStoreException
+import uniffi.jazz_ffi.ScopeDocument as FfiScopeDocument
 import uniffi.jazz_ffi.StoredDocument as FfiDocument
 import uniffi.jazz_ffi.JazzException as FfiException
 
@@ -42,6 +43,12 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
 
                 override fun load(scope: String, doc: String): FfiDocument? = storeCall {
                     store.load(scope, doc)?.let { FfiDocument(it.bytes, it.revision.toULong()) }
+                }
+
+                override fun loadAll(scope: String, incarnation: ULong): List<FfiScopeDocument> = storeCall {
+                    store.loadAll(scope, incarnation.toLong()).map { (doc, stored) ->
+                        FfiScopeDocument(doc, stored.bytes, stored.revision.toULong())
+                    }
                 }
 
                 override fun save(scope: String, incarnation: ULong, doc: String, bytes: ByteArray, expected: ULong?): ULong =
@@ -144,6 +151,12 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun syncStatus(): String = live { handle.syncStatus() }
     override fun refresh(): Unit = live { handle.refresh() }
     override fun bundle(): String? = live { handle.bundle() }
+    override fun memberAdd(table: String, id: String, accountId: String, tier: String?): String =
+        live { handle.memberAdd(table, id, accountId, tier) }
+    override fun memberList(table: String, id: String): String = live { handle.memberList(table, id) }
+    override fun memberRemove(table: String, id: String, accountId: String): ULong =
+        live { handle.memberRemove(table, id, accountId) }
+
     override fun encryptionCall(op: String, argsJson: String): String = live { handle.encryptionCall(op, argsJson) }
 
     override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload {
