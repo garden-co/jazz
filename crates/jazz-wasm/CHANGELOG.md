@@ -1,5 +1,11 @@
 # jazz-wasm
 
+## 2.0.0-beta.3
+
+### Patch Changes
+
+- 96254bb: Cloudflare: run your backend and its Jazz core in one Worker with `jazzWorker` (from the new `jazz-tools/cloudflare`), two Durable Object bindings and no secrets. `durableObjects({ binding: env.JAZZ })` no longer needs `secret`: without `JAZZ_CORE_SECRET`, the core makes its own secret on its first start and hands it to the backend over Workers RPC, which only code holding the binding can call. A Worker that sets `JAZZ_CORE_SECRET` keeps using it. The Cloudflare docs page now shows the one-Worker setup.
+
 ## 2.0.0-beta.2
 
 ## 2.0.0-beta.1
