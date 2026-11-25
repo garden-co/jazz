@@ -1251,23 +1251,23 @@ export class NativeRuntimeAdapter implements Runtime {
 
   /**
    * Runs a write, and again once the space's key is ready if it failed
-   * `key-pending`. Closing the database ends the wait for the key
-   * (`EncryptionError` `closed`); the key's preparation goes on.
+   * `key-pending`. Closing the database, or this schema view, ends the
+   * wait for the key (`EncryptionError` `closed`); the key's preparation
+   * goes on.
    */
   retryAfterKey<T>(operation: () => T): T | Promise<T> {
     const owner = this.ownerRuntime;
     const state = owner.encryptionState;
     if (!state) return operation();
-    return retryAfterKey(operation, async (space, startedAt, repeated) =>
-      JSON.parse(
-        await owner.untilClosed(
-          state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated }),
-        ),
-      ),
-    );
+    return retryAfterKey(operation, async (space, startedAt, repeated) => {
+      const asked = state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated });
+      // A view's own close ends its writes' waits; the owner's ends all.
+      const waiting = owner.untilClosed(asked);
+      return JSON.parse(await (this === owner ? waiting : this.untilClosed(waiting)));
+    });
   }
 
-  /** Ends each write's wait for a key, as this (owner) runtime closes. */
+  /** Ends each write's wait for a key, as this runtime (or view) closes. */
   private readonly keyWaits = new Set<(error: EncryptionError) => void>();
 
   /** `waiting`, unless this runtime closes first: then `closed`. */
@@ -2174,6 +2174,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       if (this.phase === "closed") return;
       this.advancePhase("closed");
+      this.endKeyWaits();
       this.closeRuntimeState();
       return;
     }

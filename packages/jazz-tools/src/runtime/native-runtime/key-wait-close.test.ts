@@ -18,10 +18,17 @@ function idleDb(): Parameters<typeof NativeRuntimeAdapter.fromDb>[0] {
     onMutationError: () => undefined,
     tick: () => undefined,
     close: () => undefined,
+    // A schema view is a façade over this same open.
+    registerSchema: () => idleDb(),
   } as never;
 }
 
-it("ends a write waiting for its space's key when the database closes", async () => {
+/** An owner runtime whose key preparation never answers, and a write waiting on it. */
+function waitingForKey(): {
+  runtime: NativeRuntimeAdapter;
+  askedForKey: Promise<void>;
+  write: (on: NativeRuntimeAdapter) => Promise<unknown>;
+} {
   const runtime = NativeRuntimeAdapter.fromDb(
     idleDb(),
     schema,
@@ -53,11 +60,18 @@ it("ends a write waiting for its space's key when the database closes", async ()
     reason: "key-pending",
     space: { scopeId: "scope", identifier: "project" },
   });
-  const writing = Promise.resolve(
-    runtime.retryAfterKey(() => {
-      throw pending;
-    }),
-  ).catch((error: unknown) => error);
+  const write = (on: NativeRuntimeAdapter) =>
+    Promise.resolve(
+      on.retryAfterKey(() => {
+        throw pending;
+      }),
+    ).catch((error: unknown) => error);
+  return { runtime, askedForKey, write };
+}
+
+it("ends a write waiting for its space's key when the database closes", async () => {
+  const { runtime, askedForKey, write } = waitingForKey();
+  const writing = write(runtime);
   await askedForKey;
   const closing = Date.now();
   await runtime.close();
@@ -65,4 +79,21 @@ it("ends a write waiting for its space's key when the database closes", async ()
   expect(Date.now() - closing).toBeLessThan(1_000);
   expect(error).toBeInstanceOf(EncryptionError);
   expect((error as EncryptionError).code).toBe("closed");
+});
+
+it("ends a schema view's write waiting for its key when the view closes", async () => {
+  const { runtime, askedForKey, write } = waitingForKey();
+  const view = runtime.registerSchemaView(schema);
+  const writing = write(view);
+  await askedForKey;
+  const closing = Date.now();
+  await view.close();
+  const error = await Promise.race([
+    writing,
+    new Promise((resolve) => setTimeout(() => resolve("still waiting"), 1_000)),
+  ]);
+  expect(error).toBeInstanceOf(EncryptionError);
+  expect((error as EncryptionError).code).toBe("closed");
+  expect(Date.now() - closing).toBeLessThan(1_000);
+  await runtime.close();
 });
