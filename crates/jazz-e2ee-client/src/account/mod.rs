@@ -13,7 +13,7 @@ mod devices;
 pub(crate) mod rows;
 
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, ErrorCode, InsertOptions, SubscriptionStream};
 use jazz::ids::RowUuid;
@@ -117,18 +117,12 @@ public_account_row!(
     |row: &DeviceRemovalRequest| vec![row.device_id.clone()]
 );
 
-fn group_public_rows<T: PublicAccountRow>(
-    rows: Vec<Accepted<T>>,
-    by_account: &mut std::collections::BTreeMap<String, PublicAccountLedger>,
-    devices: &mut std::collections::BTreeMap<String, BTreeSet<String>>,
-) {
+type PublicAccounts = BTreeMap<String, (PublicAccountLedger, BTreeSet<String>)>;
+
+fn group_public_rows<T: PublicAccountRow>(rows: Vec<Accepted<T>>, accounts: &mut PublicAccounts) {
     for row in rows {
-        let account = row.row.account_id().to_owned();
-        if let Some(ledger) = by_account.get_mut(&account) {
-            devices
-                .entry(account)
-                .or_default()
-                .extend(row.row.named_devices());
+        if let Some((ledger, devices)) = accounts.get_mut(row.row.account_id()) {
+            devices.extend(row.row.named_devices());
             T::add_to(row, ledger);
         }
     }
@@ -228,8 +222,7 @@ impl E2eeClient {
         skipped: &Cell<usize>,
         query: Query,
     ) -> Result<(Vec<Accepted<R>>, u64), ClientError> {
-        let prepared = db.prepare_query(&query)?;
-        let read = db.tx_ref(tx).ledger_read(&prepared).await?;
+        let read = db.tx_ref(tx).ledger_read_query(&query).await?;
         #[cfg(any(test, feature = "testing"))]
         if R::TABLE == rows::SPACE_DELIVERIES {
             let bounded = query.filters.iter().any(|filter| matches!(filter,
@@ -256,17 +249,31 @@ impl E2eeClient {
     }
 
     /// The public rows of every account in `account_ids` at the cut of
-    /// `tx`: one query per table over all of them (`accountId IN …`, core
-    /// hooks note H6), however many accounts, and the device keys their
-    /// rows name, besides `extra_devices` (given to every account).
+    /// `tx`: one query per table over all of them, then the device keys
+    /// those rows name.
     pub(crate) async fn read_public_many(
         &self,
         db: &Db,
         tx: OpenTransactionId,
         skipped: &Cell<usize>,
         account_ids: &[String],
-        extra_devices: BTreeSet<String>,
     ) -> Result<Vec<PublicAccountLedger>, ClientError> {
+        let mut accounts = self.read_public_rows(db, tx, skipped, account_ids).await?;
+        self.read_public_device_keys(db, tx, skipped, &mut accounts)
+            .await?;
+        Ok(account_ids
+            .iter()
+            .map(|id| accounts.remove(id).expect("every account has a ledger").0)
+            .collect())
+    }
+
+    async fn read_public_rows(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        account_ids: &[String],
+    ) -> Result<PublicAccounts, ClientError> {
         #[cfg(any(test, feature = "testing"))]
         {
             self.shared.member_watch.borrow_mut().public_account_reads += account_ids.len();
@@ -281,41 +288,65 @@ impl E2eeClient {
                 accounts.clone(),
             ))
         };
-        let (roots, through) = self
-            .read_rows::<AccountRoot>(db, tx, skipped, of(AccountRoot::TABLE))
-            .await?;
-        let (approvals, _) = self
-            .read_rows::<PublicDeviceApproval>(db, tx, skipped, of(PublicDeviceApproval::TABLE))
-            .await?;
-        let (successors, _) = self
-            .read_rows::<PublicAccountSuccessor>(db, tx, skipped, of(PublicAccountSuccessor::TABLE))
-            .await?;
-        let (recovery_roots, _) = self
-            .read_rows::<RecoveryRoot>(db, tx, skipped, of(RecoveryRoot::TABLE))
-            .await?;
-        let (account_keys, _) = self
-            .read_rows::<AccountSealingKey>(db, tx, skipped, of(AccountSealingKey::TABLE))
-            .await?;
-        let (removal_requests, _) = self
-            .read_rows::<DeviceRemovalRequest>(db, tx, skipped, of(DeviceRemovalRequest::TABLE))
-            .await?;
-
-        let mut by_account: std::collections::BTreeMap<String, PublicAccountLedger> = account_ids
+        let (
+            (roots, through),
+            (approvals, _),
+            (successors, _),
+            (recovery_roots, _),
+            (account_keys, _),
+            (removal_requests, _),
+        ) = futures::try_join!(
+            self.read_rows::<AccountRoot>(db, tx, skipped, of(AccountRoot::TABLE)),
+            self.read_rows::<PublicDeviceApproval>(
+                db,
+                tx,
+                skipped,
+                of(PublicDeviceApproval::TABLE)
+            ),
+            self.read_rows::<PublicAccountSuccessor>(
+                db,
+                tx,
+                skipped,
+                of(PublicAccountSuccessor::TABLE)
+            ),
+            self.read_rows::<RecoveryRoot>(db, tx, skipped, of(RecoveryRoot::TABLE)),
+            self.read_rows::<AccountSealingKey>(db, tx, skipped, of(AccountSealingKey::TABLE)),
+            self.read_rows::<DeviceRemovalRequest>(
+                db,
+                tx,
+                skipped,
+                of(DeviceRemovalRequest::TABLE)
+            ),
+        )?;
+        let mut accounts: PublicAccounts = account_ids
             .iter()
-            .map(|id| (id.clone(), PublicAccountLedger::new(id, Position(through))))
+            .map(|id| {
+                (
+                    id.clone(),
+                    (
+                        PublicAccountLedger::new(id, Position(through)),
+                        BTreeSet::new(),
+                    ),
+                )
+            })
             .collect();
-        let mut devices: std::collections::BTreeMap<String, BTreeSet<String>> = account_ids
-            .iter()
-            .map(|id| (id.clone(), extra_devices.clone()))
-            .collect();
-        group_public_rows(roots, &mut by_account, &mut devices);
-        group_public_rows(approvals, &mut by_account, &mut devices);
-        group_public_rows(successors, &mut by_account, &mut devices);
-        group_public_rows(recovery_roots, &mut by_account, &mut devices);
-        group_public_rows(account_keys, &mut by_account, &mut devices);
-        group_public_rows(removal_requests, &mut by_account, &mut devices);
+        group_public_rows(roots, &mut accounts);
+        group_public_rows(approvals, &mut accounts);
+        group_public_rows(successors, &mut accounts);
+        group_public_rows(recovery_roots, &mut accounts);
+        group_public_rows(account_keys, &mut accounts);
+        group_public_rows(removal_requests, &mut accounts);
+        Ok(accounts)
+    }
 
-        let wanted: BTreeSet<&String> = devices.values().flatten().collect();
+    async fn read_public_device_keys(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        accounts: &mut PublicAccounts,
+    ) -> Result<(), ClientError> {
+        let wanted: BTreeSet<_> = accounts.values().flat_map(|(_, devices)| devices).collect();
         if !wanted.is_empty() {
             let ids = wanted
                 .iter()
@@ -324,22 +355,20 @@ impl E2eeClient {
                 .collect();
             let query = Query::from(rows::DEVICE_KEYS)
                 .filter(Predicate::In(Operand::Column("deviceId".to_owned()), ids));
-            let (keys, _) = self.read_rows(db, tx, skipped, query).await?;
+            let (keys, _) = self
+                .read_rows::<jazz_e2ee::protocol::records::account::DeviceKeysRow>(
+                    db, tx, skipped, query,
+                )
+                .await?;
             for key in keys {
-                let key: Accepted<jazz_e2ee::protocol::records::account::DeviceKeysRow> = key;
-                for (account, named) in &devices {
-                    if named.contains(&key.row.device_id)
-                        && let Some(ledger) = by_account.get_mut(account)
-                    {
+                for (ledger, named) in accounts.values_mut() {
+                    if named.contains(&key.row.device_id) {
                         ledger.keys.push(key.clone());
                     }
                 }
             }
         }
-        Ok(account_ids
-            .iter()
-            .map(|id| by_account.remove(id).expect("every account has a ledger"))
-            .collect())
+        Ok(())
     }
 
     /// The account's public and private rows at the cut of `tx`.
@@ -355,43 +384,56 @@ impl E2eeClient {
         let (identities, _) = self
             .read_rows(db, tx, &skipped, Query::from(rows::ACCOUNT_IDENTITIES))
             .await?;
-        let (requests, _) = self
-            .read_rows::<DeviceRequest>(db, tx, &skipped, Query::from(rows::DEVICE_REQUESTS))
-            .await?;
-        let (challenges, _) = self
-            .read_rows(db, tx, &skipped, Query::from(rows::DEVICE_CHALLENGES))
-            .await?;
-        let (proofs, _) = self
-            .read_rows(db, tx, &skipped, Query::from(rows::DEVICE_PROOFS))
-            .await?;
-        let (private_approvals, _) = self
-            .read_rows(db, tx, &skipped, Query::from(rows::DEVICE_APPROVALS))
-            .await?;
-        let (deliveries, _) = self
-            .read_rows(db, tx, &skipped, Query::from(rows::DEVICE_DELIVERIES))
-            .await?;
-        let account = account_id_cell(&account_id)?;
-        let (private_successors, _) = self
-            .read_rows(
+        // Identity pins the cut. The remaining account rows are independent
+        // until their device IDs are needed by the device key query.
+        let private = async {
+            futures::try_join!(
+                self.read_rows::<DeviceRequest>(
+                    db,
+                    tx,
+                    &skipped,
+                    Query::from(rows::DEVICE_REQUESTS)
+                ),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_CHALLENGES)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_PROOFS)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_APPROVALS)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_DELIVERIES)),
+            )
+        };
+        let account = match account_id_cell(&account_id) {
+            Ok(account) => account,
+            Err(error) => {
+                // These private reads precede the invalid account ID error.
+                private.await?;
+                return Err(error.into());
+            }
+        };
+        let (
+            ((requests, _), (challenges, _), (proofs, _), (private_approvals, _), (deliveries, _)),
+            (private_successors, _),
+            (recovery_deliveries, _),
+            mut accounts,
+        ) = futures::try_join!(
+            private,
+            self.read_rows(
                 db,
                 tx,
                 &skipped,
-                by_account(rows::ACCOUNT_SUCCESSORS, &account),
-            )
+                by_account(rows::ACCOUNT_SUCCESSORS, &account)
+            ),
+            self.read_rows(db, tx, &skipped, Query::from(rows::RECOVERY_DELIVERIES)),
+            self.read_public_rows(db, tx, &skipped, std::slice::from_ref(&account_id)),
+        )?;
+        accounts
+            .get_mut(&account_id)
+            .expect("own account has a ledger")
+            .1
+            .extend(requests.iter().map(|r| r.row.id.clone()));
+        self.read_public_device_keys(db, tx, &skipped, &mut accounts)
             .await?;
-        let (recovery_deliveries, _) = self
-            .read_rows(db, tx, &skipped, Query::from(rows::RECOVERY_DELIVERIES))
-            .await?;
-        let public = self
-            .read_public_many(
-                db,
-                tx,
-                &skipped,
-                std::slice::from_ref(&account_id),
-                requests.iter().map(|r| r.row.id.clone()).collect(),
-            )
-            .await?
-            .remove(0);
+        let (public, _) = accounts
+            .remove(&account_id)
+            .expect("own account has a ledger");
         let through = public.through;
         Ok(AccountRead {
             public,

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 use jazz::app_id::AppId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, ReadOpts, ReadTier, SyncMessage, Transport,
+    Db, DbConfig, DbIdentity, ErrorCode, FileOptions, ReadOpts, ReadTier, SyncMessage, Transport,
     TransportError, Upstream, block_on, encode_frames,
 };
 use jazz::e2ee::{
@@ -264,14 +264,28 @@ struct Recorded {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     wire: Rc<RefCell<Vec<u8>>>,
+    refusals: Option<ReadRefusals>,
 }
+
+type ReadRefusals = Rc<RefCell<BTreeMap<String, &'static str>>>;
 
 impl Transport for Recorded {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message.clone())? {
             self.wire.borrow_mut().extend(frame);
         }
-        self.out.borrow_mut().push_back(message);
+        if let SyncMessage::Read { id, query, .. } = &message
+            && let Some(refusals) = &self.refusals
+            && let Some(message) = refusals.borrow().get(&query.table)
+        {
+            self.inbound.borrow_mut().push_back(SyncMessage::Refused {
+                id: *id,
+                code: ErrorCode::Query,
+                message: (*message).to_owned(),
+            });
+        } else {
+            self.out.borrow_mut().push_back(message);
+        }
         Ok(())
     }
 
@@ -287,6 +301,15 @@ pub fn link(client: &Db, server: &Db) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
 
 /// `client` connected to `server`, which serves it as `who`.
 pub fn link_as(client: &Db, server: &Db, who: AuthorSubject) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
+    link_as_refusing_reads(client, server, who, None)
+}
+
+pub fn link_as_refusing_reads(
+    client: &Db,
+    server: &Db,
+    who: AuthorSubject,
+    refusals: Option<ReadRefusals>,
+) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let wire = Rc::new(RefCell::new(Vec::new()));
@@ -294,12 +317,14 @@ pub fn link_as(client: &Db, server: &Db, who: AuthorSubject) -> (Upstream, Rc<Re
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
+        refusals,
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
             out: down,
             inbound: up,
             wire: wire.clone(),
+            refusals: None,
         }),
         who,
     ))
