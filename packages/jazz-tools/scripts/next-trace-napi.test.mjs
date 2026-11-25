@@ -5,8 +5,11 @@
 // Next ships jazz-napi only under its hashed external alias, so on Vercel with
 // pnpm every /jazz route answered 503: "Cannot find package 'jazz-napi'".
 //
-// The test packs jazz-tools, jazz-napi and jazz-wasm, installs them in a pnpm
-// app the way a user's install lays them out, and runs `next build` with
+// The test packs jazz-tools, jazz-napi and jazz-wasm, plus the host's
+// @garden-co/jazz-napi-<platform> package from the binary jazz-napi's prepack
+// staged, with jazz-napi naming it as an optional dependency as publish does
+// (the published jazz-napi carries no binary). It installs them in a pnpm app
+// the way a user's install lays them out, and runs `next build` with
 // `output: "standalone"`. That copies exactly the route's `.nft.json` trace
 // into .next/standalone, which is the file set Vercel ships. It then moves the
 // app's own node_modules away, starts the standalone server and requests the
@@ -82,6 +85,65 @@ function pack(dir, dest) {
   return join(dest, tarball);
 }
 
+/** napi-rs's platform suffix for this host, as the published packages name it. */
+function hostPlatform() {
+  const host = `${process.platform}-${process.arch}`;
+  const suffix = {
+    "linux-x64": "linux-x64-gnu",
+    "linux-arm64": "linux-arm64-gnu",
+    "darwin-x64": "darwin-x64",
+    "darwin-arm64": "darwin-arm64",
+    "win32-x64": "win32-x64-msvc",
+  }[host];
+  assert.ok(suffix, `no Jazz NAPI platform package for ${host}`);
+  return suffix;
+}
+
+/**
+ * The published layout: jazz-napi without a binary, naming the platform
+ * package as an optional dependency (publish injects that), and the host's
+ * platform package holding the binary jazz-napi's prepack staged, the one its
+ * packed loader's fingerprint names.
+ */
+function packNativePair(dest) {
+  const napiDir = join(repo, "crates", "jazz-napi");
+  const napi = pack(napiDir, dest);
+  const platform = hostPlatform();
+  const name = `@garden-co/jazz-napi-${platform}`;
+  const binary = `jazz-napi.${platform}.node`;
+  const { version } = JSON.parse(readFileSync(join(napiDir, "package.json"), "utf8"));
+  const platformDir = join(dest, `platform-${platform}`);
+  mkdirSync(platformDir);
+  cpSync(join(napiDir, binary), join(platformDir, binary));
+  const [os, cpu, libc] = platform.split("-");
+  writeFileSync(
+    join(platformDir, "package.json"),
+    JSON.stringify({
+      name,
+      version,
+      main: binary,
+      files: [binary],
+      os: [os],
+      cpu: [cpu],
+      ...(libc === "gnu" ? { libc: ["glibc"] } : {}),
+      license: "MIT",
+    }),
+  );
+  const platformTarball = pack(platformDir, dest);
+  // Add the optional dependency to the packed manifest, as publish's
+  // "Sync jazz-napi platform package versions and optional deps" does.
+  const unpacked = join(dest, "jazz-napi-unpacked");
+  mkdirSync(unpacked);
+  run("tar", ["-xzf", napi, "-C", unpacked], dest);
+  const manifestPath = join(unpacked, "package", "package.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.optionalDependencies = { [name]: version };
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  const published = join(dest, `published-jazz-napi-${version}.tgz`);
+  run("tar", ["-czf", published, "-C", unpacked, "package"], dest);
+  return { napi: published, platform: { name, tarball: platformTarball } };
+}
+
 function consumerApp(root, tarballs) {
   writeFileSync(
     join(root, "package.json"),
@@ -109,6 +171,7 @@ function consumerApp(root, tarballs) {
       "overrides:",
       `  jazz-wasm: file:${tarballs.wasm}`,
       `  jazz-napi: file:${tarballs.napi}`,
+      `  "${tarballs.platform.name}": file:${tarballs.platform.tarball}`,
       // Install scripts the app doesn't need; pnpm 11 refuses to leave them undecided.
       "allowBuilds:",
       "  sharp: false",
@@ -180,7 +243,7 @@ test(
     try {
       const tarballs = {
         tools: pack(packageDir, packs),
-        napi: pack(join(repo, "crates", "jazz-napi"), packs),
+        ...packNativePair(packs),
         wasm: pack(join(repo, "crates", "jazz-wasm"), packs),
       };
       consumerApp(project, tarballs);

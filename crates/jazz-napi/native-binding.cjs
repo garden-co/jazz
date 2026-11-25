@@ -51,9 +51,39 @@ try {
   const message = incompatible
     ? "Jazz NAPI binary was found but could not be loaded. Check that the installed binary is compatible with this operating system, architecture, and system libraries. "
     : missing
-      ? "Jazz NAPI artifact is missing. In this monorepo run pnpm --filter jazz-napi build:debug; for an installed package reinstall matching Jazz package versions. "
+      ? `Jazz NAPI artifact is missing. ${missingPlatformPackageGuidance()} In this monorepo run pnpm --filter jazz-napi build:debug; for an installed package reinstall matching Jazz package versions. `
       : "Jazz NAPI artifact could not be loaded. ";
   const diagnostic = new Error(message + `(${failure?.message || error})`, { cause: error });
   if (failure?.code) diagnostic.code = failure.code;
   throw diagnostic;
+}
+
+// The published jazz-napi package carries no binary: npm installs the one for
+// this platform as an optional dependency. Name it, so a missing install
+// (--omit=optional, a lockfile or node_modules from another platform, a
+// bundler that dropped it) is obvious.
+function missingPlatformPackageGuidance() {
+  const host = `${process.platform}-${process.arch}`;
+  let suffix = {
+    "linux-x64": "linux-x64-gnu",
+    "linux-arm64": "linux-arm64-gnu",
+    "darwin-x64": "darwin-x64",
+    "darwin-arm64": "darwin-arm64",
+    "win32-x64": "win32-x64-msvc",
+  }[host];
+  if (suffix && process.platform === "linux") {
+    let glibc = true;
+    try {
+      glibc = Boolean(process.report?.getReport?.()?.header?.glibcVersionRuntime);
+    } catch {}
+    if (!glibc) suffix = undefined;
+  }
+  if (!suffix)
+    return `Jazz publishes no native binary for ${host}${process.platform === "linux" ? " (musl)" : ""}; supported: linux x64/arm64 (glibc), macOS x64/arm64, Windows x64.`;
+  let version = "";
+  try {
+    version = require("./package.json").version;
+  } catch {}
+  const name = `@garden-co/jazz-napi-${suffix}`;
+  return `Install ${name}${version ? `@${version}` : ""}: npm installs it as an optional dependency of jazz-napi, unless optional dependencies are omitted or node_modules (or the lockfile) was created on another platform.`;
 }

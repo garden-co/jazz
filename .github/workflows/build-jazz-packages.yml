@@ -1495,6 +1495,12 @@ jobs:
           sha256sum *.tgz > NPM-SHA256SUMS
           cat NPM-SHA256SUMS
 
+      # A plain Vercel Function importing createJazz from jazz-tools/backend,
+      # traced as Vercel traces it, must stay under budget (Vercel refuses
+      # 250 MB; beta.3 traced to 414 MB). Fails, never warns.
+      - name: Budget a jazz-tools/backend function (linux-x64)
+        run: node dev/artifacts/verify-backend-function-size.mjs "${RUNNER_TEMP}/npm" "${VERSION}"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-npm
