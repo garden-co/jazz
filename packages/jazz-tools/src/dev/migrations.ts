@@ -2,7 +2,12 @@ import { hasSystemTables } from "../encryption/table-names.js";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { structuralBigInt } from "../runtime/structural-values.js";
-import { isDefinedMigration, witnessColumns, type DefinedMigration } from "../migrations.js";
+import {
+  isDefinedMigration,
+  witnessColumns,
+  type DefinedMigration,
+  type ReadableMigrationSteps,
+} from "../migrations.js";
 import { isDefinedTable } from "../schema-dsl/table.js";
 import {
   readableColumn,
@@ -679,6 +684,7 @@ async function listDir(dir: string): Promise<string[]> {
 async function loadMigrationFiles(
   migrationsDir: string,
   loadModule: ModuleLoader,
+  skipUnresolved = false,
 ): Promise<LoadedMigrationFile[]> {
   const out: LoadedMigrationFile[] = [];
   for (const name of await listDir(migrationsDir)) {
@@ -690,6 +696,7 @@ async function loadMigrationFiles(
       .split("\n")
       .map((line, index) => ({ line: index + 1, match: UNFILLED_STUB_TODO.exec(line) }))
       .filter((entry) => entry.match);
+    if (todos.length > 0 && skipUnresolved) continue;
     if (todos.length > 0)
       throw new Error(
         `migrations/${name} has ${todos.length} unresolved TODO${todos.length === 1 ? "" : "s"} left by \`jazz-tools migrations create\`: ` +
@@ -785,22 +792,57 @@ export function encryptionEntriesText(entries: Record<string, unknown>): string 
  */
 async function snapshotEntries(
   migrationsDir: string,
-  snapshot: SnapshotEntry,
-): Promise<EncryptionEntries> {
-  const file = entriesFile(snapshot.file);
-  let text: string;
-  try {
-    text = await readFile(join(migrationsDir, "snapshots", file), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    if (!hasSystemTables(snapshot.schema)) return {};
-    throw new Error(
-      `migrations/snapshots/${snapshot.file}: version ${shortSchemaHash(snapshot.hash)} declares encryption ` +
-        `(it has Jazz's system tables), but migrations/snapshots/${file}, which holds its encryption ` +
-        "declarations, is missing. Restore it from version control.",
-    );
+  version: SnapshotEntry | string,
+  snapshots: readonly SnapshotEntry[],
+  files: readonly LoadedMigrationFile[],
+  before = files.length,
+): Promise<EncryptionEntries | undefined> {
+  const short = typeof version === "string" ? version : shortSchemaHash(version.hash);
+  const snapshot =
+    typeof version === "string"
+      ? snapshots.filter(({ hash }) => shortSchemaHash(hash) === short).at(-1)
+      : version;
+  let entries: EncryptionEntries | undefined;
+  if (snapshot) {
+    const file = entriesFile(snapshot.file);
+    try {
+      entries = parseEntries(file, await readFile(join(migrationsDir, "snapshots", file), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!hasSystemTables(snapshot.schema)) return {};
+      throw new Error(
+        `migrations/snapshots/${snapshot.file}: version ${short} declares encryption ` +
+          `(it has Jazz's system tables), but migrations/snapshots/${file}, which holds its encryption ` +
+          "declarations, is missing. Restore it from version control.",
+      );
+    }
+  } else {
+    entries = await sidecarEntries(migrationsDir, short);
   }
-  return parseEntries(file, text);
+
+  if (!entries || Object.keys(entries).length === 0) return entries;
+  // The snapshot is written before the author chooses whether this is a rename.
+  let index = before - 1;
+  while (index >= 0 && files[index]!.toHash !== short) index--;
+  const migration = files[index];
+  const steps = migration?.migration.steps.migrate;
+  if (
+    migration &&
+    steps &&
+    Object.values(steps).some((columns) =>
+      Object.values(columns).some((step) => "renameFrom" in step),
+    )
+  ) {
+    const previous = await snapshotEntries(
+      migrationsDir,
+      migration.fromHash,
+      snapshots,
+      files,
+      index,
+    );
+    if (previous) pinEncryptedEnums(entries, previous, false, steps);
+  }
+  return entries;
 }
 
 function parseEntries(file: string, text: string): EncryptionEntries {
@@ -859,6 +901,7 @@ function pinEncryptedEnums(
   entries: EncryptionEntries,
   previous: EncryptionEntries,
   sameVersion: boolean,
+  steps?: ReadableMigrationSteps["migrate"],
 ): void {
   type EnumType = { enum?: string[]; optional?: boolean };
   type EncryptedColumn = EnumType & {
@@ -885,7 +928,13 @@ function pinEncryptedEnums(
     const current = entry as unknown as Entry;
     const columns = { ...current.columns };
     for (const [name, column] of Object.entries(current.columns)) {
-      const old = Object.hasOwn(before, name) ? before[name] : undefined;
+      const step =
+        steps && Object.hasOwn(steps, table) && Object.hasOwn(steps[table]!, name)
+          ? steps[table]![name]
+          : undefined;
+      if (steps && (!step || !("renameFrom" in step))) continue;
+      const oldName = step && "renameFrom" in step ? step.renameFrom : name;
+      const old = Object.hasOwn(before, oldName) ? before[oldName] : undefined;
       if (!old || typeof old !== "object" || typeof column !== "object") continue;
       const oldType = old.type ?? old;
       const { default: defaultValue, ...declared } = column;
@@ -954,17 +1003,18 @@ export async function loadMigrationHistory(options: {
   const currentShort = shortSchemaHash(current.hash);
   const currentEntries = encryptionEntries<ReadableJson>(options.currentTables);
   const snapshots = await listSnapshots(options.migrationsDir);
+  const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
   // The current version's snapshot must declare what schema.ts declares:
   // the hash doesn't cover a plaintext type.
   const currentSnapshot = snapshots.filter((snapshot) => snapshot.hash === current.hash).at(-1);
   let tables = options.currentTables;
   if (currentSnapshot) {
-    const previousEntries = await snapshotEntries(options.migrationsDir, currentSnapshot);
+    const previousEntries =
+      (await snapshotEntries(options.migrationsDir, currentSnapshot, snapshots, files)) ?? {};
     pinEncryptedEnums(currentEntries, previousEntries, true);
     tables = withEntries(tables, currentEntries, currentShort);
     await checkSnapshotEncryption(currentSnapshot, previousEntries, tables, currentEntries);
   }
-  const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
   if (files.length === 0) return { tables, history: {}, migrations: [], current: current.hash };
 
   const versions = new Map<string, Record<string, ReadableTable>>();
@@ -978,7 +1028,7 @@ export async function loadMigrationHistory(options: {
       short,
       withEntries(
         (await snapshotToVersion(snapshot.schema)).tables,
-        await snapshotEntries(options.migrationsDir, snapshot),
+        (await snapshotEntries(options.migrationsDir, snapshot, snapshots, files)) ?? {},
         short,
       ),
     );
@@ -1002,7 +1052,7 @@ export async function loadMigrationHistory(options: {
         if (versions.has(unknown) || !versions.has(known)) continue;
         // A witness table holds what is stored, not an encryption declaration:
         // the version's own `.encryption.json` gives its declarations.
-        const kept = await sidecarEntries(options.migrationsDir, unknown);
+        const kept = await snapshotEntries(options.migrationsDir, unknown, snapshots, files);
         if (!kept && declaresEncryption) {
           failures.set(
             unknown,
@@ -1147,9 +1197,10 @@ export async function createMigration(options: {
     .filter((entry) => entry.timestamp)
     .sort((a, b) => (a.file < b.file ? -1 : 1));
   let baseline: SnapshotEntry | undefined = timestamped.at(-1);
+  let files: LoadedMigrationFile[] | undefined;
   if (!baseline) {
     // Snapshots .64 named by hash alone: the version the last migration leads to.
-    const files = await loadMigrationFiles(migrationsDir, options.loadModule);
+    files = await loadMigrationFiles(migrationsDir, options.loadModule);
     const last = files.at(-1)?.toHash;
     baseline =
       (last && snapshots.find((entry) => shortSchemaHash(entry.hash) === last)) ||
@@ -1175,7 +1226,10 @@ export async function createMigration(options: {
   if (!baseline) {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
-  const previousEntries = await snapshotEntries(migrationsDir, baseline);
+  if (!files && hasSystemTables(baseline.schema))
+    files = await loadMigrationFiles(migrationsDir, options.loadModule, true);
+  const previousEntries =
+    (await snapshotEntries(migrationsDir, baseline, snapshots, files ?? [])) ?? {};
   pinEncryptedEnums(currentEntries, previousEntries, baseline.hash === current.hash);
   await checkSnapshotEncryption(
     baseline,

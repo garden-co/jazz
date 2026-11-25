@@ -720,18 +720,49 @@ fn aggregate_groups_by_a_plaintext_column() {
     );
 }
 
-/// Alice can name a count result after an encrypted column in the source table.
+/// Alice can order grouped notes by their count, even when the count is
+/// named after an encrypted source column. Ordering by that source is refused.
 #[test]
 fn aggregate_alias_can_match_an_encrypted_column() {
     use jazz::query::Aggregate;
 
     let (_server, _client, db, _link, space) = client_in_space();
-    block_on(db.insert("notes", note(space, SECRET), Default::default())).unwrap();
+    for title in ["draft", "draft", "final"] {
+        let mut cells = note(space, SECRET);
+        cells.insert("title".to_owned(), text(title));
+        block_on(db.insert("notes", cells, Default::default())).unwrap();
+    }
 
-    let query = Query::from("notes").aggregate([Aggregate::count().alias("body")]);
-    let rows = all(&db, query).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(cell(&rows[0], "body"), Value::U64(1));
+    let refused = Query::from("notes")
+        .count()
+        .group_by("title")
+        .order_by("body", OrderDirection::Asc);
+    let error = db.prepare_query(&refused).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("encrypted column `notes.body` in ORDER BY")
+    );
+
+    for alias in ["total", "body"] {
+        let query = Query::from("notes")
+            .aggregate([Aggregate::count().alias(alias)])
+            .group_by("title")
+            .order_by(alias, OrderDirection::Asc);
+        let rows = all(&db, query).unwrap();
+        let groups: Vec<_> = rows
+            .iter()
+            .map(|row| (cell(row, "title"), cell(row, alias)))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (text("final"), Value::U64(1)),
+                (text("draft"), Value::U64(2)),
+            ]
+        );
+    }
 }
 
 /// Alice counts Bob's note while its key is pending, and her full read omits it.

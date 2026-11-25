@@ -291,6 +291,13 @@ fn refuse_unplannable(
         "in a filter other than a top-level equality",
     )?;
     for order in &query.order_by {
+        if query
+            .aggregate
+            .as_ref()
+            .is_some_and(|aggregate| aggregate.aggregates.iter().any(|a| a.alias == order.column))
+        {
+            continue;
+        }
         refuse(&order.column, "in ORDER BY")?;
     }
     if let Some(aggregate) = &query.aggregate {

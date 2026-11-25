@@ -88,7 +88,11 @@ const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLoca
 function pageStillLoading() {
   const events = { addEventListener() {}, removeEventListener() {} };
   vi.stubGlobal("document", { ...events, readyState: "loading", visibilityState: "visible" });
-  vi.stubGlobal("window", { ...events, document: globalThis.document });
+  vi.stubGlobal("window", {
+    ...events,
+    document: globalThis.document,
+    performance: globalThis.performance,
+  });
 }
 
 interface Device {
