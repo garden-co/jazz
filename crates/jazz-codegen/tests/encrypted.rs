@@ -78,6 +78,41 @@ fn members_table_gets_no_update_surface() {
     }
 }
 
+/// A backend loading its permissions against the bindings' compiled app
+/// keeps the encrypted app's declarations, so it computes the bundle the
+/// app's files give: the declarations let it derive the system tables'
+/// policies.
+///
+/// ```text
+/// jazz.app.json ──compile_app──► bindings ──load_backend──► bundle, declarations
+///        └──────────────────────load────────────────────► same
+/// ```
+#[test]
+fn a_backend_from_bindings_keeps_the_encryption_declarations() {
+    const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": {
+            "projects": {
+                "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+                "insert": "$createdBy.account = session.user",
+                "update": "ownerId = session.user"
+            },
+            "tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }
+        } }"#;
+    let bound = jazz_codegen::compile_app(&app_json()).unwrap();
+    let from_bindings = artifact::load_backend(bound.as_bytes(), PERMISSIONS.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let from_files = artifact::load(&app_json(), PERMISSIONS.as_bytes()).unwrap();
+    assert_eq!(from_bindings.encryption(), from_files.encryption());
+    assert!(
+        from_bindings
+            .encryption()
+            .entries(&from_bindings.current_hash().to_string())
+            .is_some_and(|entries| entries.contains_key("tasks")),
+        "the bindings' backend lost the declarations"
+    );
+    assert_eq!(from_bindings.bundle(), from_files.bundle());
+}
+
 /// A client that has the bindings but not `jazz.app.json` reads the same
 /// declarations the files give; an app that declares none gives `None`.
 ///

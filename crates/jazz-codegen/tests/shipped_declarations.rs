@@ -101,6 +101,27 @@ fn unchanged_declarations_still_generate() {
             ),
             "{lang:?}"
         );
+
+        // An unrelated plain column moves the shipped version into
+        // `history`, which keeps its `string?` rather than the plain `string`.
+        let added = app(r#""string?""#, BOARDS_WITH_PRIORITY);
+        let created = create(lang, added.as_bytes(), Some(&committed), "add").unwrap();
+        assert!(
+            created.changed && created.todos.is_empty(),
+            "{lang:?}: {created:?}"
+        );
+        let written: serde_json::Value = serde_json::from_str(&created.app).unwrap();
+        let earlier = written["history"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(
+            earlier["tables"]["tasks"]["encryption"]["columns"]["notes"], "string?",
+            "{lang:?}: {}",
+            created.app
+        );
     }
 }
 
