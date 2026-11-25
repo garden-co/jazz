@@ -544,7 +544,8 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
                 began
             }
         };
-        if now.saturating_duration_since(began) >= self.budget * REMOTE_READ_COVERAGE_CAP {
+        let cap = began + self.budget * REMOTE_READ_COVERAGE_CAP;
+        if now >= cap {
             return true;
         }
         // Fates arrive in commit order: once as many have come as were
@@ -557,7 +558,11 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
                 now
             }
         };
-        now.saturating_duration_since(since) >= self.budget
+        if now.saturating_duration_since(since) >= self.budget {
+            return true;
+        }
+        self.db.wake_at((since + self.budget).min(cap));
+        false
     }
 }
 
@@ -807,6 +812,8 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Asks the host to tick after this many milliseconds.
+    pub schedule_tick_after: RefCell<Option<Box<dyn Fn(u64)>>>,
     /// Told of an upload the authority refused that no wait claimed yet,
     /// whether it was a serializable transaction, and the write's claim
     /// if it has one: a wait the caller makes before the host delivers the
@@ -996,9 +1003,26 @@ impl Binding {
             db.become_replica().await;
         }
         db.track_upstream_rejections();
+        let hooks = Rc::<Hooks>::default();
+        let wakes = Rc::downgrade(&hooks);
+        db.set_wake_hook(Box::new(move |at| {
+            let Some(hooks) = wakes.upgrade() else {
+                return;
+            };
+            if let Some(at) = at {
+                if let Some(schedule) = hooks.schedule_tick_after.borrow().as_ref() {
+                    let delay = at.saturating_duration_since(web_time::Instant::now());
+                    let ms =
+                        u64::try_from(delay.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX);
+                    schedule(ms);
+                }
+            } else {
+                hooks.schedule_tick();
+            }
+        }));
         Self {
             db: Rc::new(db),
-            hooks: Rc::default(),
+            hooks,
             node: identity.node,
             author: identity.author,
             trusted_backend,

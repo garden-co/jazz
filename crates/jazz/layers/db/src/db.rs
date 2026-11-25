@@ -2289,6 +2289,7 @@ impl Db {
                 closed: Default::default(),
                 conn,
                 follow_memo: Rc::default(),
+                wakes: Rc::default(),
                 held_acks: Default::default(),
                 ids: RefCell::new(
                     config
@@ -2754,6 +2755,7 @@ impl Db {
         } {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
+        self.inner.wakes.host_ticked();
         self.sync_tick().await?;
         {
             let _operation = self.write_operation().await;
@@ -3889,12 +3891,17 @@ impl Db {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
+                if let Some(Some(at)) = deadline {
+                    self.inner.wakes.wake_at(at);
+                    self.inner.wakes.note_link(hint.get());
+                }
                 deadline.map(|deadline| sync::Gate {
                     signal: signal.clone(),
                     hint,
                     live,
                     deadline,
                     relay_view: non_durable && opts.tier != ReadTier::Remote,
+                    wakes: Rc::clone(&self.inner.wakes),
                 })
             }
             _ => None,
@@ -10997,6 +11004,7 @@ pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
 struct Store {
+    wakes: Rc<sync::Wakes>,
     sessions: RefCell<Vec<sync::Session>>,
     /// Set once connected upstream: this store is a replica.
     client: RefCell<Option<sync::Client>>,
@@ -11387,7 +11395,12 @@ impl Store {
         if let Some(_lease) = self.operation.try_lock() {
             read.release(self);
         } else {
+            let unsubscribe = matches!(read, sync::ReadCleanup::Subscription { .. });
             self.released_reads.borrow_mut().push(read);
+            if unsubscribe {
+                // The current operation might have already drained read cleanup.
+                self.wakes.wake_now();
+            }
         }
     }
 

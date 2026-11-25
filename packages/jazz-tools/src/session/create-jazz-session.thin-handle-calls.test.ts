@@ -1,3 +1,4 @@
+import { setTimeout as realDelay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Encryption, memoryPrivateStore } from "../encryption/index.js";
 import type { Db } from "../runtime/db.js";
@@ -177,31 +178,27 @@ describe("calls on a db.encryption handle taken while thin", () => {
     // The full client's own handle, which the call reaches once the wait releases it.
     const fullDeviceId = vi.spyOn(Encryption.prototype, "deviceId");
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    let outcome: unknown = "pending";
     const call = kept.encryption.deviceId().then(
-      (id) => (outcome = { id }),
-      (error: unknown) => (outcome = error),
+      (id) => ({ id }),
+      (error: unknown) => error,
     );
-    await vi.waitFor(() => expect(gate.calls).toBe(1));
-    gate.release();
-    await vi.waitFor(() => expect(isThinDb(kept)).toBe(false));
-    // Step the clock in small increments, letting real work run between steps, until the call
-    // settles: the wait's own timer may start only after the upgrade has finished, and the full
-    // client's own call then runs on the same clock. A wait without a deadline never settles.
-    let elapsed = 0;
-    let releasedAt: number | undefined;
     try {
-      while (elapsed < 120_000 && outcome === "pending") {
+      await vi.waitFor(() => expect(gate.calls).toBe(1));
+      gate.release();
+      await vi.waitFor(() => expect(isThinDb(kept)).toBe(false));
+      let elapsed = 0;
+      let releasedAt: number | undefined;
+      while (elapsed < 31_000 && releasedAt === undefined) {
         await vi.advanceTimersByTimeAsync(100);
         elapsed += 100;
-        await new Promise((resolve) => setImmediate(resolve));
-        if (releasedAt === undefined && fullDeviceId.mock.calls.length > 0) releasedAt = elapsed;
+        if (fullDeviceId.mock.calls.length > 0) releasedAt = elapsed;
       }
-      expect(outcome).toEqual({ id: expect.any(String) });
-      // Released at the 30-second deadline; how long the full client's own call takes after
-      // that is not this wait's.
       expect(releasedAt).toBeLessThanOrEqual(31_000);
-      await call;
+
+      // The dispatched call can wait for verification driven by real socket I/O
+      // and Rust's monotonic clock. Keep the fake clock frozen during this wait.
+      const outcome = await Promise.race([call, realDelay(5_000, undefined, { ref: false })]);
+      expect(outcome, "the dispatched device ID lookup").toEqual({ id: expect.any(String) });
     } finally {
       vi.useRealTimers();
     }

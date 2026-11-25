@@ -3025,6 +3025,7 @@ pub(crate) struct Gate {
     /// for its upstream it serves from its store once that upstream
     /// cannot answer (see [`Db::serve_due_first_loads`]).
     pub(crate) relay_view: bool,
+    pub(crate) wakes: Rc<Wakes>,
 }
 
 impl Gate {
@@ -3050,11 +3051,60 @@ impl Gate {
         match self.deadline {
             None => false,
             Some(deadline) => {
-                Instant::now() >= deadline
+                let open = Instant::now() >= deadline
                     || !may_wait(link)
-                    || (self.live && link.hint != RemoteLinkHint::Live)
+                    || (self.live && link.hint != RemoteLinkHint::Live);
+                if !open {
+                    self.wakes.wake_at(deadline);
+                    self.wakes.note_link(link);
+                }
+                open
             }
         }
+    }
+}
+
+type WakeHook = Box<dyn Fn(Option<Instant>)>;
+
+/// The earliest deadline requested from the host. Each pending check
+/// reports its deadline again when serviced, including after an early tick.
+#[derive(Default)]
+pub(crate) struct Wakes {
+    armed: StdCell<Option<Instant>>,
+    hook: RefCell<Option<WakeHook>>,
+}
+
+impl Wakes {
+    pub(crate) fn wake_now(&self) {
+        if let Some(hook) = self.hook.borrow().as_ref() {
+            hook(None);
+        }
+    }
+
+    pub(crate) fn wake_at(&self, at: Instant) {
+        let now = Instant::now();
+        if at <= now
+            || self
+                .armed
+                .get()
+                .is_some_and(|armed| armed > now && armed <= at)
+        {
+            return;
+        }
+        self.armed.set(Some(at));
+        if let Some(hook) = self.hook.borrow().as_ref() {
+            hook(Some(at));
+        }
+    }
+
+    pub(crate) fn note_link(&self, link: Link) {
+        if link.hint == RemoteLinkHint::Attempting {
+            self.wake_at(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW);
+        }
+    }
+
+    pub(crate) fn host_ticked(&self) {
+        self.armed.set(None);
     }
 }
 
@@ -9857,6 +9907,16 @@ impl Db {
             .expect("persist replica flag");
     }
 
+    /// Report ready work or its deadline to the host without reentering the database.
+    pub(crate) fn set_wake_hook(&self, hook: Box<dyn Fn(Option<Instant>)>) {
+        *self.inner.wakes.hook.borrow_mut() = Some(hook);
+        self.inner.wakes.host_ticked();
+    }
+
+    pub(crate) fn wake_at(&self, at: Instant) {
+        self.inner.wakes.wake_at(at);
+    }
+
     pub async fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
         let _operation = self.write_operation().await;
         self.become_replica_under_lease().await;
@@ -10358,6 +10418,10 @@ impl Store {
                 client.closed_holds.push((live.holds.clone(), untold));
             }
             client.prune_closed_holds();
+            if client.port.connected() {
+                drop(client);
+                self.wakes.wake_now();
+            }
         }
     }
 
@@ -10493,6 +10557,12 @@ impl Db {
                     }
                     if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                         return Poll::Ready(Ok(std::ops::ControlFlow::Break(None)));
+                    }
+                    if let Some(deadline) = deadline {
+                        inner.wakes.wake_at(deadline);
+                    }
+                    if !strict {
+                        inner.wakes.note_link(client.hint.get());
                     }
                     // A link this store refused answers nothing until a new one
                     // does: a Remote read fails with why (SPEC 8 §8.10).
@@ -12657,6 +12727,17 @@ impl Store {
                 None => ready.push((*id, fetch.message)),
             }
         }
+        if kept.iter().any(|fetch| !fetch.strict) {
+            if let Some(next) = kept
+                .iter()
+                .filter(|fetch| !fetch.strict)
+                .filter_map(|fetch| fetch.until)
+                .min()
+            {
+                self.wakes.wake_at(next);
+            }
+            self.wakes.note_link(client.hint.get());
+        }
         client.relayed_fetches = kept;
         let session = &mut self.sessions.borrow_mut()[index];
         session.outbox.extend(refused);
@@ -13727,6 +13808,9 @@ impl Db {
                 if session.ingress.1 > 0
                     && (session.ingress.1 + bytes) as u64 > policy.incoming_bytes_per_window
                 {
+                    inner.wakes.wake_at(
+                        session.ingress.0 + std::time::Duration::from_millis(policy.window_ms),
+                    );
                     held.push_back(message);
                     continue;
                 }
@@ -15303,9 +15387,17 @@ impl Db {
                 .filter(|(_, wait)| unanswerable || wait.until <= now)
                 .map(|(id, _)| *id)
                 .collect();
-            ids.into_iter()
+            let due = ids
+                .into_iter()
                 .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
-                .collect()
+                .collect();
+            if let Some(next) = session.first_load.values().map(|wait| wait.until).min() {
+                inner.wakes.wake_at(next);
+                if let Some(client) = inner.client() {
+                    inner.wakes.note_link(client.hint.get());
+                }
+            }
+            due
         };
         for (id, wait) in due {
             let policy = {
@@ -15503,16 +15595,19 @@ impl Db {
                 if relayed.is_some()
                     && let Some(until) = wait.and_then(wait_until)
                 {
-                    self.inner.without_overlay().sessions.borrow_mut()[index]
-                        .first_load
-                        .insert(
-                            id,
-                            FirstLoadWait {
-                                until,
-                                prepared: prepared.clone(),
-                                read: viewed.clone(),
-                            },
-                        );
+                    let inner = self.inner.without_overlay();
+                    inner.sessions.borrow_mut()[index].first_load.insert(
+                        id,
+                        FirstLoadWait {
+                            until,
+                            prepared: prepared.clone(),
+                            read: viewed.clone(),
+                        },
+                    );
+                    inner.wakes.wake_at(until);
+                    if let Some(client) = inner.client() {
+                        inner.wakes.note_link(client.hint.get());
+                    }
                 }
                 let inner = db.inner.without_overlay();
                 let namespace = inner.identity_namespace(&active_schema).await?;
@@ -15839,12 +15934,19 @@ impl Db {
                         span: ReadSpan::Once { at },
                     };
                     client.port.queues.outbox.borrow_mut().push(ask.clone());
+                    let until = wait.and_then(wait_until);
+                    if !strict {
+                        if let Some(until) = until {
+                            inner.wakes.wake_at(until);
+                        }
+                        inner.wakes.note_link(client.hint.get());
+                    }
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
                         session: index,
                         ask,
                         strict,
-                        until: wait.and_then(wait_until),
+                        until,
                         message: SyncMessage::Read {
                             id,
                             query,

@@ -161,7 +161,6 @@ export { encodeSchema } from "./schema-codec.js";
 const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
-const SERVER_PUMP_DEBOUNCE_MS = 16;
 const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   none: "none",
   connecting: "attempting",
@@ -1134,7 +1133,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
-  private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
+  private readonly peerTransportWorkListeners = new Set<
+    (requiresDistinctPass?: boolean, passCompleted?: boolean) => void
+  >();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
@@ -1590,7 +1591,9 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.connectUpstream();
   }
 
-  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
+  onPeerTransportWork(
+    listener: (requiresDistinctPass?: boolean, passCompleted?: boolean) => void,
+  ): () => void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
     this.peerTransportWorkListeners.add(listener);
     return () => {
@@ -3553,7 +3556,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
-        // A normal idle connection lets the debounced pump coalesce frames.
         // If the pump is already suspended in a core tick waiting for a chunk,
         // route the frame independently so the response can wake that tick.
         if (this.serverPumpRunning) {
@@ -4841,8 +4843,9 @@ export class NativeRuntimeAdapter implements Runtime {
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
         this.pumpSubscriptions();
-        this.scheduleServerPump();
-        this.notifyPeerTransportWork();
+        // A server pass drains the output of the tick it is already awaiting.
+        if (!this.serverPumpRunning) this.scheduleServerPump();
+        this.notifyPeerTransportWork(false, true);
         if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
@@ -5005,11 +5008,13 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
-    setTimeout(() => {
+    const generation = this.serverConnectionGeneration;
+    queueMicrotask(() => {
+      if (generation !== this.serverConnectionGeneration) return;
       this.serverPumpScheduled = false;
       if (this.closed) return;
       this.startServerPump();
-    }, SERVER_PUMP_DEBOUNCE_MS);
+    });
   }
 
   /** Run a pump without awaiting it. A failure becomes the connection's
@@ -5021,9 +5026,9 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private notifyPeerTransportWork(requiresDistinctPass = false): void {
+  private notifyPeerTransportWork(requiresDistinctPass = false, passCompleted = false): void {
     for (const listener of this.peerTransportWorkListeners) {
-      listener(requiresDistinctPass);
+      listener(requiresDistinctPass, passCompleted);
     }
   }
 
@@ -5081,7 +5086,9 @@ export class NativeRuntimeAdapter implements Runtime {
           return;
         }
       }
+      // Give the host a turn before continuing a burst that filled every round.
       this.serverPumpAgain = true;
+      await sleep(0);
     } finally {
       this.serverPumpRunning = false;
       if (this.serverPumpAgain) {

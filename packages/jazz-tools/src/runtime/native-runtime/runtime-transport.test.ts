@@ -698,17 +698,21 @@ describe("NativeRuntimeAdapter server transport", () => {
     await waitForServerPumpTimer();
     expect(transports).toHaveLength(1);
 
-    // The server delivers a frame, and the socket drops before the debounced
-    // pump routes it into the first connection's transport.
+    // The carrier reports the close after its message handler settles. Hold
+    // this pump request so the frame is still queued when the close reaches the runtime.
+    const schedule = vi
+      .spyOn(runtime as unknown as { scheduleServerPump(): void }, "scheduleServerPump")
+      .mockImplementationOnce(() => {});
     const staleFrame = Uint8Array.from([7, 7, 7]);
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([staleFrame]));
-    await waitForFakeWebSocketNegotiation();
+    await Promise.resolve();
+    expect(schedule).toHaveBeenCalledOnce();
+    schedule.mockRestore();
     expect(transports[0]!.received).toEqual([]);
     sockets[0]!.emitServerClose();
 
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
     await runtime.waitForUpstreamServerConnection();
-    await waitForServerPumpTimer();
-    expect(sockets).toHaveLength(2);
     expect(transports).toHaveLength(2);
     expect(transports[0]!.closed).toBe(true);
     // The frame belongs to the dropped connection's channel state; the
@@ -4016,6 +4020,41 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.receivedBatches).toEqual([[first, second]]);
     expect(transport.received).toEqual([first, second]);
     expect(transport.tickCount).toBe(1);
+  });
+
+  it("drives incoming server work promptly and stops ticking when idle", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transport, tick: () => transport.tick() }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const incoming = Uint8Array.of(2, 10);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([incoming]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect.soft(transport.received).toEqual([incoming]);
+
+      const ticks = transport.tickCount;
+      await vi.advanceTimersByTimeAsync(64);
+      expect(transport.tickCount).toBe(ticks);
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
   });
 
   it("runs another server pass when work is scheduled during an active pass", async () => {

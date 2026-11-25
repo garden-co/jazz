@@ -622,6 +622,12 @@ impl WasmDbInner {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
             }
         }));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+            if let Some(scheduler) = timer.tick_scheduler.borrow().clone() {
+                let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(&format!("after:{ms}")));
+            }
+        }));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, claimed| {
@@ -1696,8 +1702,8 @@ impl WasmDb {
         subscription_stream_to_js(inner, stream)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// The host's tick callback: `"immediate"` for ready sync work or
+    /// `"after:<milliseconds>"` for pending work with a deadline.
     #[wasm_bindgen(js_name = setTickScheduler)]
     pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
         if let Ok(inner) = self.open_inner() {

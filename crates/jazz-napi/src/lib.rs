@@ -1182,6 +1182,15 @@ impl Inner {
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+            if let Some(scheduler) = timer.tick_scheduler.borrow().as_ref() {
+                scheduler.call(
+                    Ok(format!("after:{ms}")),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            }
+        }));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
@@ -2895,8 +2904,8 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// The host's tick callback: `"immediate"` for ready sync work or
+    /// `"after:<milliseconds>"` for pending work with a deadline.
     #[napi(
         js_name = "setTickScheduler",
         ts_args_type = "callback: ((err: Error | null, arg: string) => void)"
@@ -2910,7 +2919,9 @@ impl NapiDb {
             .build_callback(move |context| {
                 // Clear before calling JS so reentrant progress can request
                 // the next turn without losing its wake.
-                requested.store(false, Ordering::Release);
+                if context.value == "immediate" {
+                    requested.store(false, Ordering::Release);
+                }
                 Ok(context.value)
             })?;
         *inner.host.tick_scheduler.borrow_mut() = Some(callback);
