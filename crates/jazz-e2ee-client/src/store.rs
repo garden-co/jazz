@@ -189,6 +189,21 @@ impl MemoryStore {
         docs.insert(doc.to_owned(), Stored { bytes, revision });
     }
 
+    /// Reads a test host's documents and incarnation under the same lock.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn snapshot(&self, scope: &str, incarnation: u64) -> Result<ScopeDocuments, StoreError> {
+        let scopes = self.scopes.lock().unwrap();
+        let scope = scopes
+            .get(scope)
+            .filter(|scope| scope.incarnation == incarnation)
+            .ok_or(StoreError::Wiped)?;
+        Ok(scope
+            .docs
+            .iter()
+            .map(|(name, stored)| (name.clone(), stored.clone()))
+            .collect())
+    }
+
     /// The scopes that hold at least one document.
     pub fn scopes(&self) -> Vec<String> {
         self.scopes

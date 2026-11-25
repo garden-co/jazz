@@ -3,6 +3,7 @@ package tools.jazz
 import uniffi.jazz_ffi.JazzHandle
 import uniffi.jazz_ffi.SubscriptionListener
 import uniffi.jazz_ffi.PrivateStoreException as FfiStoreException
+import uniffi.jazz_ffi.ScopeDocument as FfiScopeDocument
 import uniffi.jazz_ffi.StoredDocument as FfiDocument
 import uniffi.jazz_ffi.JazzException as FfiException
 
@@ -42,6 +43,12 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
 
                 override fun load(scope: String, doc: String): FfiDocument? = storeCall {
                     store.load(scope, doc)?.let { FfiDocument(it.bytes, it.revision.toULong()) }
+                }
+
+                override fun loadAll(scope: String, incarnation: ULong): List<FfiScopeDocument> = storeCall {
+                    store.loadAll(scope, incarnation.toLong()).map { (doc, stored) ->
+                        FfiScopeDocument(doc, stored.bytes, stored.revision.toULong())
+                    }
                 }
 
                 override fun save(scope: String, incarnation: ULong, doc: String, bytes: ByteArray, expected: ULong?): ULong =

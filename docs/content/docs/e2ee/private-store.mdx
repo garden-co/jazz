@@ -33,9 +33,12 @@ A scope is active while its incarnation marker exists. Deletion removes that mar
 before cleaning up the documents. If cleanup is interrupted, reads ignore the orphaned documents
 and opening the scope discards them before publishing a new marker. See the [private store contract](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/private-store.ts#L22-L56).
 
-Jazz uses `loadAll` at startup when the store provides it. Check the scope's incarnation and
-read its documents in the same transaction or snapshot. The browser store does this in IndexedDB.
-Stores that omit the method use individual reads. Native UniFFI callbacks use individual reads.
+Jazz uses `loadAll` at startup to fetch the device, held keys and account floors with their
+revisions. Check the scope's incarnation and read its documents in the same transaction or
+snapshot. The browser store does this in IndexedDB. Swift and Kotlin stores must implement
+`loadAll`. Go and JavaScript stores can opt in and otherwise use individual reads. Jazz
+authenticates each stored record and uses its revision for later saves. See the
+[native store examples](/docs/e2ee/native).
 
 ```ts
 import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";

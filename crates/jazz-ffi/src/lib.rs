@@ -25,7 +25,7 @@ mod store;
 use std::sync::Arc;
 
 pub use error::JazzError;
-pub use store::{PrivateStore, PrivateStoreError, StoredDocument};
+pub use store::{PrivateStore, PrivateStoreError, ScopeDocument, StoredDocument};
 
 uniffi::setup_scaffolding!("jazz_ffi");
 
