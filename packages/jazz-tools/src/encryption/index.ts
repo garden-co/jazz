@@ -16,6 +16,7 @@ import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
 import { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
+import { isOlderBuildSecretRefusal, SECRET_FORMAT_MISMATCH } from "./secret-format.js";
 
 export {
   memoryPrivateStore,
@@ -61,6 +62,7 @@ export class EncryptionError extends Error {
     | "device-account-root-required"
     | "device-account-secret-required"
     | "no-account"
+    | "secret-format-mismatch"
     | (string & Record<never, never>);
   declare readonly stage?: "account-reset";
   declare readonly outcome?: "refused" | "unknown";
@@ -160,6 +162,11 @@ function takeSecretHex(bytes: Uint8Array): string {
 }
 
 function failure(error: unknown, operation?: string): EncryptionError {
+  // Only these calls hand the runtime the account secret's text.
+  const secretCall = operation === "recoveryRegister" || operation === "recoveryRestore";
+  if (secretCall && isOlderBuildSecretRefusal(error)) {
+    return new EncryptionError("secret-format-mismatch", SECRET_FORMAT_MISMATCH);
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (operation === "spaceRow" && message.startsWith("NotObserved: ")) {
     return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
