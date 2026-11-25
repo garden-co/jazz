@@ -2,12 +2,6 @@ import type { WasmSchema } from "./types.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { isRecord } from "../runtime/util.js";
 
-interface RuntimeSchemaEnvelope {
-  __jazzRuntimeSchema: 1;
-  schema: WasmSchema;
-  loadedPolicyBundle: boolean;
-}
-
 interface SerializeRuntimeSchemaOptions {
   loadedPolicyBundle?: boolean;
 }
@@ -50,30 +44,37 @@ function sortSchemaTables(schema: WasmSchema): WasmSchema {
   ) as WasmSchema;
 }
 
+// The sorted tables serialize once per schema object; the schema source and the runtime
+// envelope are spliced around that text. Byte-identical to stringifying each envelope
+// whole: the replacer returns objects unchanged, and keys keep insertion order.
+const sortedTablesJson = new WeakMap<WasmSchema, string>();
+
+function tablesJson(schema: WasmSchema): string {
+  let json = sortedTablesJson.get(schema);
+  if (json === undefined) {
+    json = JSON.stringify(sortSchemaTables(schema), runtimeSchemaJsonReplacer);
+    sortedTablesJson.set(schema, json);
+  }
+  return json;
+}
+
 /**
  * Serialize the developer-authored schema AST for Rust compilation, with the
  * migrations the app ships if it attaches them.
  */
 export function serializeSchemaSource(schema: WasmSchema, migrations?: ClientMigrations): string {
-  return JSON.stringify(
-    {
-      tables: sortSchemaTables(schema),
-      ...(migrations ? { migrations } : {}),
-    },
-    runtimeSchemaJsonReplacer,
-  );
+  const tables = tablesJson(schema);
+  if (!migrations) return `{"tables":${tables}}`;
+  return `{"tables":${tables},"migrations":${JSON.stringify(migrations, runtimeSchemaJsonReplacer)}}`;
 }
 
+/** `{ __jazzRuntimeSchema: 1, schema, loadedPolicyBundle }`, with the schema's tables sorted. */
 export function serializeRuntimeSchema(
   schema: WasmSchema,
   options?: SerializeRuntimeSchemaOptions,
 ): string {
-  const envelope: RuntimeSchemaEnvelope = {
-    __jazzRuntimeSchema: 1,
-    schema: sortSchemaTables(schema),
-    loadedPolicyBundle: options?.loadedPolicyBundle ?? false,
-  };
-  return JSON.stringify(envelope, runtimeSchemaJsonReplacer);
+  const loadedPolicyBundle = options?.loadedPolicyBundle ?? false;
+  return `{"__jazzRuntimeSchema":1,"schema":${tablesJson(schema)},"loadedPolicyBundle":${loadedPolicyBundle ? "true" : "false"}}`;
 }
 
 export function getRuntimeSchemaCacheKey(

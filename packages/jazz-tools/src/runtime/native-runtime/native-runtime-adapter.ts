@@ -7653,6 +7653,25 @@ function subscriptionSource(
   };
 }
 
+// The logical view of a table's physical columns depends only on that column array, which
+// the schema or the output-columns plan holds for the subscription's lifetime: build it once
+// per array, not once per decoded row.
+const logicalColumnsByPhysical = new WeakMap<
+  readonly ColumnDescriptor[],
+  ReturnType<typeof logicalStorageColumns>
+>();
+
+function logicalStorageColumnsFor(
+  physicalColumns: readonly ColumnDescriptor[],
+): ReturnType<typeof logicalStorageColumns> {
+  let logical = logicalColumnsByPhysical.get(physicalColumns);
+  if (!logical) {
+    logical = logicalStorageColumns(physicalColumns);
+    logicalColumnsByPhysical.set(physicalColumns, logical);
+  }
+  return logical;
+}
+
 function runtimeSubscriptionRow(
   row: RowState,
   schema: WasmSchema | undefined,
@@ -7662,7 +7681,7 @@ function runtimeSubscriptionRow(
     outputColumns && row.table === outputColumns.rootTable
       ? outputColumns.rootColumns
       : schema?.[row.table]?.columns;
-  const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
+  const columns = physicalColumns ? logicalStorageColumnsFor(physicalColumns) : undefined;
   if (!columns) {
     throw new Error(`missing schema for subscription row table ${row.table}`);
   }

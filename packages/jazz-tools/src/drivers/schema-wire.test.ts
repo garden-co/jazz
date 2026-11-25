@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "./types.js";
-import { getRuntimeSchemaCacheKey, serializeRuntimeSchema } from "./schema-wire.js";
+import {
+  getRuntimeSchemaCacheKey,
+  serializeRuntimeSchema,
+  runtimeSchemaJsonReplacer,
+  serializeSchemaSource,
+} from "./schema-wire.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -163,6 +168,47 @@ describe("serializeRuntimeSchema", () => {
     expect(loaded).not.toBe(unloaded);
     expect(JSON.parse(unloaded)).toMatchObject({ loadedPolicyBundle: false });
     expect(JSON.parse(loaded)).toMatchObject({ loadedPolicyBundle: true });
-    expect(stringify).toHaveBeenCalledTimes(2);
+    // The schema's tables serialize once; both envelopes are spliced around that text.
+    expect(stringify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("serializeSchemaSource", () => {
+  const schema: WasmSchema = {
+    zeta: {
+      columns: [
+        {
+          name: "payload",
+          column_type: { type: "Bytea" },
+          nullable: false,
+          default: { type: "Bytea", value: new Uint8Array([7, 8]) },
+        },
+      ],
+    },
+    alpha: {
+      columns: [{ name: "title", column_type: { type: "Text" }, nullable: true }],
+    },
+  };
+  const migrations = {
+    schemas: [{ hash: "a", schema: { bytes: new Uint8Array([1]) } }],
+    migrations: [{ fromHash: "a", toHash: "b", forward: [{ op: "add" }] }],
+  };
+
+  it("is byte-identical to stringifying the whole source, with and without migrations", () => {
+    for (const shipped of [undefined, migrations]) {
+      const sorted = { alpha: schema.alpha, zeta: schema.zeta };
+      const whole = JSON.stringify(
+        { tables: sorted, ...(shipped ? { migrations: shipped } : {}) },
+        runtimeSchemaJsonReplacer,
+      );
+      expect(serializeSchemaSource(schema, shipped)).toBe(whole);
+    }
+  });
+
+  it("shares the serialized tables with the runtime envelope", () => {
+    const source = JSON.parse(serializeSchemaSource(schema));
+    const envelope = JSON.parse(serializeRuntimeSchema(schema));
+    expect(envelope.schema).toEqual(source.tables);
+    expect(Object.keys(envelope)).toEqual(["__jazzRuntimeSchema", "schema", "loadedPolicyBundle"]);
   });
 });
