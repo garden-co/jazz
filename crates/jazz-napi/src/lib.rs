@@ -1019,8 +1019,8 @@ impl EncryptionRuntime {
     pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
         let future = self
             .builder
-            .build_future()
-            .ok_or_else(|| napi::Error::from_reason("the runtime is already built"))?;
+            .start_build()
+            .map_err(napi::Error::from_reason)?;
         Ok(json_promise(env, future)?)
     }
 
@@ -3834,6 +3834,36 @@ mod encryption_tests {
             Some("jazz-auth-v1:short".into()),
         );
         assert!(result.is_err_and(|error| error.reason == "invalid device account secret"));
+    }
+
+    /// A build whose store never answers refuses a second `ready` as still
+    /// running, not as built, and frees the slot once it is abandoned.
+    #[test]
+    fn encryption_startup_refuses_a_second_ready_while_the_store_is_silent() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let runtime = EncryptionRuntime::from_bindings(
+            jazz_codegen::compile_app(app).unwrap(),
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            None,
+        )
+        .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut silent = runtime.builder.start_build().ok().unwrap();
+        assert!(silent.as_mut().poll(&mut context).is_pending());
+        assert!(!runtime.take_store_requests().is_empty());
+        assert_eq!(
+            runtime.builder.start_build().err(),
+            Some(encryption::STILL_BUILDING)
+        );
+        drop(silent);
+        assert!(
+            runtime.builder.start_build().is_ok(),
+            "an abandoned build frees the slot"
+        );
     }
 
     /// Alice can retry readiness after her private store refuses a request,

@@ -9,6 +9,7 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 import { boundApp } from "../typed-app.js";
 import { EncryptionStoreRequiredError } from "./index.js";
 import { servePrivateStore, type PrivateStore, type StoreTarget } from "./private-store.js";
+import { explainingSecretFormat, secretFormatExplained } from "./secret-format.js";
 
 /** The bindings' compiled app as the runtime reads it. */
 export function compiledBindings(app: SchemaSourceInput): string {
@@ -47,17 +48,21 @@ export async function buildEncryption(options: {
 }): Promise<{ runtime: StoreTarget; store: PrivateStore }> {
   const store = options.store;
   if (!store) throw new EncryptionStoreRequiredError();
-  const runtime = options.host.fromBindings(
-    compiledBindings(options.app),
-    options.appId,
-    options.environment,
-    options.accountId,
-    options.deviceAccountSecret,
+  const runtime = explainingSecretFormat(() =>
+    options.host.fromBindings(
+      compiledBindings(options.app),
+      options.appId,
+      options.environment,
+      options.accountId,
+      options.deviceAccountSecret,
+    ),
   );
   // The store answers the runtime while it loads or makes the device.
   const serving = servePrivateStore(runtime, store);
   try {
     await runtime.ready();
+  } catch (error) {
+    throw secretFormatExplained(error);
   } finally {
     serving.stop();
   }

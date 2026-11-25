@@ -16,6 +16,7 @@ import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
 import { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
+import { isOlderBuildSecretRefusal, SECRET_FORMAT_MISMATCH } from "./secret-format.js";
 
 export {
   memoryPrivateStore,
@@ -61,6 +62,7 @@ export class EncryptionError extends Error {
     | "device-account-root-required"
     | "device-account-secret-required"
     | "no-account"
+    | "secret-format-mismatch"
     | (string & Record<never, never>);
   declare readonly stage?: "account-reset";
   declare readonly outcome?: "refused" | "unknown";
@@ -160,6 +162,11 @@ function takeSecretHex(bytes: Uint8Array): string {
 }
 
 function failure(error: unknown, operation?: string): EncryptionError {
+  // Only these calls hand the runtime the account secret's text.
+  const secretCall = operation === "recoveryRegister" || operation === "recoveryRestore";
+  if (secretCall && isOlderBuildSecretRefusal(error)) {
+    return new EncryptionError("secret-format-mismatch", SECRET_FORMAT_MISMATCH);
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (operation === "spaceRow" && message.startsWith("NotObserved: ")) {
     return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
@@ -391,7 +398,7 @@ export class Encryption {
   }
 
   private emit(report: EncryptionReport) {
-    for (const listener of this.listeners) listener(report);
+    for (const listener of this.listeners) notify(listener, report);
   }
 
   /** Listens to reports; returns the function that stops it. */
@@ -429,22 +436,29 @@ export class Encryption {
 
   private deliver() {
     if (!this.reportsDuringReplay && this.waitingListeners.size > 0) {
-      void this.replayReports();
+      // Deliver what is queued before taking the snapshot: the snapshot call
+      // drives the runtime, which can queue newer reports for the next tick.
+      // With no established listeners, leave the queue for the snapshot.
+      const beforeSnapshot = this.listeners.size > 0 ? this.emitQueued() : [];
+      void this.replayReports(beforeSnapshot);
+      return;
     }
-    // With no established listeners, leave the queue for the snapshot.
     if (this.listeners.size === 0) return;
-    for (const report of this.pendingReports.splice(0)) {
-      this.reportsDuringReplay?.push(report);
-      this.emit(report);
-    }
-    for (const text of this.native.takeEncryptionReports()) {
-      const report = JSON.parse(text) as EncryptionReport;
-      this.reportsDuringReplay?.push(report);
-      this.emit(report);
-    }
+    const delivered = this.emitQueued();
+    this.reportsDuringReplay?.push(...delivered);
   }
 
-  private readonly replayReports = async () => {
+  /** Emits the pending and native reports to established listeners; returns them. */
+  private readonly emitQueued = (): EncryptionReport[] => {
+    const reports = [
+      ...this.pendingReports.splice(0),
+      ...this.native.takeEncryptionReports().map((text) => JSON.parse(text) as EncryptionReport),
+    ];
+    for (const report of reports) this.emit(report);
+    return reports;
+  };
+
+  private readonly replayReports = async (beforeSnapshot: EncryptionReport[]) => {
     const reportsDuringReplay: EncryptionReport[] = [];
     this.reportsDuringReplay = reportsDuringReplay;
     try {
@@ -466,12 +480,16 @@ export class Encryption {
 
         // The native queue puts the overflow notice first.
         const dropped = queued[0]?.type === "reports-dropped" ? queued.splice(0, 1) : [];
-        // The active set already accounts for queued unreadables and withdrawals.
+        // The active set already accounts for unreadables and withdrawals
+        // taken before it.
+        const held = (report: EncryptionReport) =>
+          report.type === "unreadable" || report.type === "withdrawn";
         replay = [
           ...dropped,
           ...snapshot.active,
+          ...beforeSnapshot.filter((report) => !held(report)),
           ...pending,
-          ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+          ...queued.filter((report) => !held(report)),
           ...reportsDuringReplay,
         ];
       }
@@ -480,13 +498,22 @@ export class Encryption {
         this.listeners.add(listener);
         for (const report of replay) {
           if (!this.listeners.has(listener)) break;
-          listener(report);
+          notify(listener, report);
         }
       }
     } finally {
       this.reportsDuringReplay = undefined;
     }
   };
+}
+
+/** Calls one report listener; a throw is logged and the other listeners still run. */
+function notify(listener: (report: EncryptionReport) => void, report: EncryptionReport) {
+  try {
+    listener(report);
+  } catch (error) {
+    console.error("Jazz encryption report listener failed", error);
+  }
 }
 
 type Call = <T>(op: string, args?: Record<string, unknown>) => Promise<T>;
