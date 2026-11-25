@@ -109,7 +109,7 @@ export class NativeForegroundDb {
   }
 
   get setStoreWake(): ((callback: ((wake: string) => void) | null) => void) | undefined {
-    if (!this.runtime.setTickScheduler) return undefined;
+    if (this.runtime.supportsStoreWake !== true || !this.runtime.setTickScheduler) return undefined;
     return (callback) => {
       this.storeWake = callback;
       if (callback) this.registerWakeScheduler();

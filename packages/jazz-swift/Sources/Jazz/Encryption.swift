@@ -15,7 +15,7 @@ public struct StoredDocument: Sendable {
     }
 }
 
-/// What a private store's `save` throws when nothing was written.
+/// A private-store revision or incarnation mismatch.
 public enum PrivateStoreError: Error, Sendable {
     /// The document's revision is not the one expected.
     case conflict
@@ -32,6 +32,9 @@ public protocol PrivateStore: Sendable {
     func openScope(_ scope: String) throws -> UInt64
     /// The document, or `nil` if there is none.
     func load(scope: String, doc: String) throws -> StoredDocument?
+    /// Reads all documents and their revisions in one snapshot. Throws
+    /// `PrivateStoreError.wiped` if the scope is absent or its incarnation changed.
+    func loadAll(scope: String, incarnation: UInt64) throws -> [String: StoredDocument]
     /// Replaces the document if the scope is still of `incarnation` and the
     /// document's revision is still `expected` (`nil`: it must not exist),
     /// atomically, and returns the new revision. Otherwise throws
@@ -76,6 +79,14 @@ final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
         try call {
             try store.load(scope: scope, doc: doc).map {
                 JazzFFI.StoredDocument(bytes: $0.bytes, revision: $0.revision)
+            }
+        }
+    }
+
+    func loadAll(scope: String, incarnation: UInt64) throws -> [JazzFFI.ScopeDocument] {
+        try call {
+            try store.loadAll(scope: scope, incarnation: incarnation).map { doc, stored in
+                JazzFFI.ScopeDocument(doc: doc, bytes: stored.bytes, revision: stored.revision)
             }
         }
     }

@@ -242,14 +242,23 @@ it("fails an operation that was pending when the held tick failure happened", as
   db.tick();
 });
 
-it("opens a native foreground from its store wake without an opening poll timer", async () => {
+it.each([
+  { mode: "store wakes without polling", supportsStoreWake: true, elapsedMs: 0 },
+  {
+    mode: "fallback polling on a core-only scheduler",
+    supportsStoreWake: undefined,
+    elapsedMs: 10,
+  },
+])("opens a native foreground using $mode", async ({ supportsStoreWake, elapsedMs }) => {
   let command: NativeForegroundCommand;
   let response: NativeForegroundResponse;
   let wake: ((urgency: "immediate") => void) | undefined;
-  let answered = false;
+  const answered: string[] = [];
+  let nextRequest = 1;
   const requests: string[] = [];
   const db = new NativeForegroundDb(
     {
+      ...(supportsStoreWake ? { supportsStoreWake } : {}),
       setTickScheduler(callback) {
         wake = callback;
       },
@@ -257,18 +266,21 @@ it("opens a native foreground from its store wake without an opening poll timer"
         if (typeof command !== "object") throw new Error("expected a command");
         switch (command.type) {
           case "encryptionOpen":
-            if (!answered) {
-              requests.push(JSON.stringify({ id: "1", op: "openScope", scope: "alice" }));
-              wake?.("immediate");
+            if (nextRequest <= 2 && nextRequest === answered.length + 1) {
+              requests.push(
+                JSON.stringify({ id: String(nextRequest), op: "openScope", scope: "alice" }),
+              );
+              nextRequest += 1;
+              if (supportsStoreWake) wake?.("immediate");
             }
-            response = { type: "encryptionOpen", ready: answered };
+            response = { type: "encryptionOpen", ready: answered.length === 2 };
             break;
           case "takeStoreRequests":
             response = { type: "storeRequests", requests: requests.splice(0) };
             break;
           case "replyStore":
             expect(command.payload).toBe('"1"');
-            answered = true;
+            answered.push(command.id);
             response = { type: "storeReply", accepted: true };
             break;
           default:
@@ -297,10 +309,11 @@ it("opens a native foreground from its store wake without an opening poll timer"
     const opened = db.openEncryption().then(() => {
       ready = true;
     });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(elapsedMs);
+    expect(answered).toEqual(["1", "2"]);
     expect(ready).toBe(true);
     await opened;
-    expect(vi.getTimerCount()).toBe(0);
+    if (supportsStoreWake) expect(vi.getTimerCount()).toBe(0);
   } finally {
     store.stop({ cancelPending: true });
     vi.useRealTimers();

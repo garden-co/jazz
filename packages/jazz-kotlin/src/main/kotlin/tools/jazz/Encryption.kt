@@ -19,7 +19,7 @@ import kotlinx.serialization.json.put
 /** One document of a [PrivateStore], with its revision. */
 public class StoredDocument(public val bytes: ByteArray, public val revision: Long)
 
-/** What [PrivateStore.save] throws when nothing was written. */
+/** A private-store revision or incarnation mismatch. */
 public sealed class PrivateStoreException(message: String) : Exception(message) {
     /** The document's revision is not the one expected. */
     public class Conflict : PrivateStoreException("the private store's document changed")
@@ -40,6 +40,12 @@ public interface PrivateStore {
 
     /** The document, or `null` if there is none. */
     public fun load(scope: String, doc: String): StoredDocument?
+
+    /**
+     * Reads all documents and their revisions in one snapshot. Throws
+     * [PrivateStoreException.Wiped] if the scope is absent or its incarnation changed.
+     */
+    public fun loadAll(scope: String, incarnation: Long): Map<String, StoredDocument>
 
     /**
      * Replaces the document if the scope is still of [incarnation] and the document's

@@ -119,6 +119,40 @@ db, err := jazz.Open(ctx, jazz.Config{
 status, err := db.Encryption().Ready(ctx, 30*time.Second)
 ```
 
+### Read the scope in one snapshot
+
+Swift and Kotlin `PrivateStore` implementations provide `loadAll(scope, incarnation)`.
+Return a map of document names to bytes and revisions. Read the scope marker and its
+documents in one transaction. If the marker is absent or differs from the incarnation
+returned by `openScope`, throw the store's wiped error.
+
+These methods use an app-owned `database` with a read transaction that returns the
+scope's incarnation and a map of stored documents. The same transaction covers both reads.
+
+```swift
+func loadAll(scope: String, incarnation: UInt64) throws -> [String: StoredDocument] {
+    try database.readTransaction { snapshot in
+        guard try snapshot.incarnation(for: scope) == incarnation else {
+            throw PrivateStoreError.wiped
+        }
+        return try snapshot.documents(in: scope)
+    }
+}
+```
+
+```kotlin
+override fun loadAll(scope: String, incarnation: Long): Map<String, StoredDocument> =
+    database.readTransaction { snapshot ->
+        if (snapshot.incarnation(scope) != incarnation) throw PrivateStoreException.Wiped()
+        snapshot.documents(scope)
+    }
+```
+
+For a file store, use the same scope lock for the marker check, the directory read,
+and each write or delete. A Go store can opt into the same startup read by providing
+`LoadAll(scope string, incarnation uint64) (map[string]jazz.Stored, error)`, returning
+`jazz.ErrStoreWiped` for an absent or changed incarnation.
+
 `ready` verifies the account and enrols this device (or founds the account's first device). It returns
 `active`, `awaiting-approval` (another device must approve it, or its recovery phrase does) or
 `reenrolled`.

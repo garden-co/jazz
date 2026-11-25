@@ -44,6 +44,18 @@ func (m *memoryStore) Load(scope, doc string) (*Stored, error) {
 	return nil, nil
 }
 
+func (m *memoryStore) LoadAll(scope string, incarnation uint64) (map[string]Stored, error) {
+	s, ok := m.scopes[scope]
+	if !ok || s.incarnation != incarnation {
+		return nil, ErrStoreWiped
+	}
+	documents := make(map[string]Stored, len(s.docs))
+	for name, stored := range s.docs {
+		documents[name] = stored
+	}
+	return documents, nil
+}
+
 func (m *memoryStore) Save(scope string, incarnation uint64, doc string, bytes []byte, expected *uint64) (uint64, error) {
 	s, ok := m.scopes[scope]
 	if !ok || s.incarnation != incarnation {
@@ -145,6 +157,42 @@ func TestThePrivateStoreAnswersTheRuntimesRequests(t *testing.T) {
 	}
 	if ok, _ = answerStore(store, "not json"); ok {
 		t.Fatal("a request that is not JSON is refused")
+	}
+}
+
+func TestPrivateStoreSnapshotNegotiation(t *testing.T) {
+	store := newMemoryStore()
+	store.next = 1 << 43
+	scope := "device"
+	incarnation, err := store.OpenScope(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decimal := strconv.FormatUint(incarnation, 10)
+	open := map[string]any{"op": "openScope", "scope": scope, "loadAll": "v1"}
+	legacy := struct{ PrivateStore }{store}
+	if ok, text := ask(t, legacy, open); !ok || text != `"`+decimal+`"` {
+		t.Fatalf("legacy openScope: %v %s", ok, text)
+	}
+	if ok, text := ask(t, store, open); !ok || text != `{"incarnation":"`+decimal+`","loadAll":"v1"}` {
+		t.Fatalf("snapshot openScope: %v %s", ok, text)
+	}
+	read := map[string]any{"op": "loadAllV1", "scope": scope, "incarnation": decimal}
+	if ok, text := ask(t, store, read); !ok || text != `[]` {
+		t.Fatalf("empty snapshot: %v %s", ok, text)
+	}
+	store.scopes[scope].docs["device"] = Stored{Bytes: []byte{0, 128, 255}, Revision: 9007199254740993}
+	if ok, text := ask(t, store, read); !ok || text != `[{"bytes":"AID/","doc":"device","revision":"9007199254740993"}]` {
+		t.Fatalf("snapshot: %v %s", ok, text)
+	}
+	if err := store.Delete(scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	if ok, text := ask(t, store, read); ok || text != "wiped" {
+		t.Fatalf("stale snapshot: %v %s", ok, text)
 	}
 }
 

@@ -34,7 +34,10 @@ var (
 // PrivateStore is where a device keeps its encryption keys. It is called on
 // the client's thread, one request at a time, so answer quickly. Keep the
 // documents in files or rows you protect with the platform's key store (see
-// Protect and Unprotect).
+// Protect and Unprotect). A store can also implement
+// LoadAll(scope string, incarnation uint64) (map[string]Stored, error)
+// to read the scope in one snapshot at startup. It returns ErrStoreWiped
+// when the scope is missing or has another incarnation.
 type PrivateStore interface {
 	// OpenScope is the incarnation of scope, creating the scope with a new
 	// random, non-zero incarnation if there is none.
@@ -107,6 +110,7 @@ func onStore(ctx, request, payload uintptr) (status int32) {
 // base64 and numbers that may exceed 2^53 are decimal text.
 type storeRequest struct {
 	Op          string  `json:"op"`
+	LoadAll     string  `json:"loadAll"`
 	Scope       string  `json:"scope"`
 	Doc         string  `json:"doc"`
 	Incarnation string  `json:"incarnation"`
@@ -151,13 +155,41 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 		return true, answer
 	}
 	b64 := base64.StdEncoding
+	bulk, supportsBulk := store.(interface {
+		LoadAll(scope string, incarnation uint64) (map[string]Stored, error)
+	})
 	switch r.Op {
 	case "openScope":
 		n, err := store.OpenScope(r.Scope)
 		if err != nil {
 			return fail(err)
 		}
-		return text(strconv.FormatUint(n, 10))
+		incarnation := strconv.FormatUint(n, 10)
+		if supportsBulk && r.LoadAll == "v1" {
+			return text(map[string]string{"incarnation": incarnation, "loadAll": "v1"})
+		}
+		return text(incarnation)
+	case "loadAllV1":
+		if !supportsBulk {
+			break
+		}
+		incarnation, err := strconv.ParseUint(r.Incarnation, 10, 64)
+		if err != nil {
+			return fail(err)
+		}
+		documents, err := bulk.LoadAll(r.Scope, incarnation)
+		if err != nil {
+			return fail(err)
+		}
+		rows := make([]map[string]string, 0, len(documents))
+		for name, stored := range documents {
+			rows = append(rows, map[string]string{
+				"doc":      name,
+				"bytes":    b64.EncodeToString(stored.Bytes),
+				"revision": strconv.FormatUint(stored.Revision, 10),
+			})
+		}
+		return text(rows)
 	case "load":
 		stored, err := store.Load(r.Scope, r.Doc)
 		if err != nil {
