@@ -496,7 +496,7 @@ impl E2eeClient {
         accounts: &[String],
     ) -> Result<usize, ClientError> {
         let mut read = self
-            .read_space_of(db, tx, address, SpaceReadPurpose::RotationBatch)
+            .read_space_of(db, tx, address, SpaceReadPurpose::RotationBatch(accounts))
             .await?;
         if read.skipped_deliveries {
             return Err(ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into());

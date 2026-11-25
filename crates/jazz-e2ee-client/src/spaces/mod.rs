@@ -99,13 +99,13 @@ pub(crate) struct SpaceRead {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SpaceReadPurpose {
+pub(super) enum SpaceReadPurpose<'a> {
     Acquire,
     WriteCheck,
     Deliver,
     Rotate,
     RecoverRotation,
-    RotationBatch,
+    RotationBatch(&'a [String]),
 }
 
 pub(crate) fn protocol_address(space: &DbSpaceAddress) -> Result<SpaceAddress, ClientError> {
@@ -217,7 +217,7 @@ impl E2eeClient {
         db: &Db,
         tx: OpenTransactionId,
         address: &SpaceAddress,
-        purpose: SpaceReadPurpose,
+        purpose: SpaceReadPurpose<'_>,
     ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
         let own = self.shared.account_id.clone();
@@ -244,7 +244,7 @@ impl E2eeClient {
             purpose,
             SpaceReadPurpose::Rotate
                 | SpaceReadPurpose::RecoverRotation
-                | SpaceReadPurpose::RotationBatch
+                | SpaceReadPurpose::RotationBatch(_)
         );
         let all_members = rotating || purpose == SpaceReadPurpose::Deliver;
         if !all_members {
@@ -272,7 +272,17 @@ impl E2eeClient {
                 .iter()
                 .map(|row| row.row.author_account_id.clone()),
         );
-        if all_members {
+        if let SpaceReadPurpose::RotationBatch(batch) = purpose {
+            // Recipient selection already ran. This transaction only needs
+            // the histories of its recipients who are still members.
+            let members = ledger.member_accounts();
+            named.extend(
+                batch
+                    .iter()
+                    .filter(|account| members.contains(*account))
+                    .cloned(),
+            );
+        } else if all_members {
             named.extend(ledger.member_accounts());
         }
         let named_ids: Vec<_> = named.iter().cloned().collect();
@@ -301,7 +311,7 @@ impl E2eeClient {
             if let Some(chain) = &chain {
                 let before = skipped.get();
                 let current = &chain.last().epoch_id;
-                let batch = purpose == SpaceReadPurpose::RotationBatch;
+                let batch = matches!(purpose, SpaceReadPurpose::RotationBatch(_));
                 let own = Some(self.shared.account_id.as_str());
                 let query =
                     epoch_deliveries_query(address, current, if batch { own } else { None })?;

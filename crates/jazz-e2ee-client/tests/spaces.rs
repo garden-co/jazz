@@ -393,6 +393,35 @@ fn rotation_and_follow_up_read_only_current_deliveries() {
     assert_eq!(alice.client.take_delivery_reads(), (49, 0, 3));
 }
 
+/// Alice rotates for 101 other members. The follow-up transaction reads
+/// only Alice's history and that of its one remaining recipient.
+#[test]
+fn rotation_follow_up_reads_only_the_accounts_it_uses() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    for seed in 1..=101 {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+    }
+    pump(&server, &alice.db);
+
+    alice.client.take_public_account_reads();
+    assert_eq!(
+        alice
+            .rotate(&server, &space_address(&alice, space))
+            .unwrap(),
+        101
+    );
+    // Everyone for selection, Alice for acquisition, and Alice and
+    // the final recipient for the follow-up.
+    assert_eq!(alice.client.take_public_account_reads(), 102 + 1 + 2);
+}
+
 /// Bob received the root key but had not opened it when Alice removed him
 /// and rotated. Rejoining lets him recover the first note from his old
 /// delivery while he still waits for a delivery of the new key.

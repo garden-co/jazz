@@ -267,6 +267,10 @@ impl E2eeClient {
         account_ids: &[String],
         extra_devices: BTreeSet<String>,
     ) -> Result<Vec<PublicAccountLedger>, ClientError> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.shared.member_watch.borrow_mut().public_account_reads += account_ids.len();
+        }
         let accounts: Vec<Operand> = account_ids
             .iter()
             .map(|id| account_id_cell(id).map(Operand::Literal))

@@ -597,6 +597,13 @@ impl E2eeClient {
         std::mem::take(&mut self.shared.member_watch.borrow_mut().delivery_reads)
     }
 
+    /// Public account histories requested since the last call.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn take_public_account_reads(&self) -> usize {
+        std::mem::take(&mut self.shared.member_watch.borrow_mut().public_account_reads)
+    }
+
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
     pub fn delivery_mark_checks(&self) -> usize {
