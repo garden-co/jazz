@@ -531,8 +531,13 @@ impl Encryption {
 
     /// Ends the loop (the host is closing): it holds this runtime, so it
     /// must be dropped for the runtime to be.
+    ///
+    /// Key preparations still running get one last poll, so one that can
+    /// finish does; the rest end with the client, which is closing, and
+    /// are dropped because they hold the runtime too.
     pub fn stop(&self) {
         *self.main.borrow_mut() = None;
+        self.preparations.settle();
         self.preparations.0.borrow_mut().clear();
         self.client.close();
         self.approvals.borrow_mut().clear();
@@ -712,7 +717,7 @@ impl Encryption {
     }
 
     /// Run each preparation on the caller's executor. Once started it must
-    /// finish even when the write times out.
+    /// finish even when the write times out; only [`Self::stop`] ends it.
     pub async fn retry_write_with(
         self: &Rc<Self>,
         space: &SpaceAddress,
@@ -908,7 +913,13 @@ impl Encryption {
                     .get("open")
                     .and_then(Value::as_bool)
                     .ok_or("`open` is missing")?;
-                self.use_space(open, text("table")?, text("id")?);
+                let (table, id) = (text("table")?, text("id")?);
+                // Still answered after shutdown (a host's subscriptions
+                // close after it), but nothing is queued for a loop that
+                // no longer runs.
+                if self.client.ensure_open().is_ok() {
+                    self.use_space(open, table, id);
+                }
                 return Ok(Value::Null);
             }
             "setOnline" => {
@@ -1975,6 +1986,25 @@ mod tests {
             run(runtime.space_address("projects", "room")).unwrap_err(),
             expected.to_string()
         );
+    }
+
+    /// After shutdown a host's subscriptions still close (`useSpace`
+    /// answers), but nothing is queued for the loop, which no longer runs.
+    #[test]
+    fn a_space_use_after_shutdown_queues_nothing() {
+        let runtime = native_runtime_with_catalogue(true);
+        let use_space = || {
+            run(runtime.call(
+                "useSpace".into(),
+                json!({ "open": false, "table": "projects", "id": "room" }),
+            ))
+        };
+        assert_eq!(use_space(), Ok(Value::Null));
+        assert_eq!(runtime.uses.borrow().len(), 1);
+        runtime.uses.borrow_mut().clear();
+        run(runtime.call("shutdown".into(), Value::Null)).unwrap();
+        assert_eq!(use_space(), Ok(Value::Null));
+        assert!(runtime.uses.borrow().is_empty());
     }
 
     /// Alice's write must return its refusal at the deadline even if preparation

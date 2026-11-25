@@ -3537,3 +3537,38 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         }
     }
 }
+
+/// A space table missing from a version is refused in words that fit
+/// whose entries name it: the version's own (a backstop behind its entry
+/// checks) or the nearest earlier ones it follows.
+#[test]
+fn a_missing_space_table_is_worded_for_own_or_inherited_entries() {
+    let schema = SchemaBuilder::new().build();
+    let entries: encryption::Entries = [(
+        "messages".to_owned(),
+        crate::tools::public_schema::EncryptionEntry {
+            space: "roomId".to_owned(),
+            scope: "rooms".to_owned(),
+            columns: Default::default(),
+            equality: Vec::new(),
+        },
+    )]
+    .into();
+    let own = encryption::check_space_tables(&schema, &entries, false).unwrap_err();
+    assert_eq!(
+        own,
+        "space table rooms is not in this version: its encryption entries name rooms as a \
+         space table. Keep rooms, or declare its entries with a space table this version has."
+    );
+    let inherited = encryption::check_space_tables(&schema, &entries, true).unwrap_err();
+    assert!(
+        inherited.starts_with(
+            "space table rooms is not in this version (dropped or renamed). This version \
+             declares no encryption entries"
+        ),
+        "{inherited}"
+    );
+    assert!(
+        encryption::check_space_tables(&schema, &encryption::Entries::new(), false).is_ok()
+    );
+}

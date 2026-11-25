@@ -298,9 +298,22 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
             matches!(alice.encryption_call("resetAccount".into(), "{}".into()),
             Err(JazzError::Encryption { code, io: false, .. }) if code == "account-reset-not-allowed")
         );
-        alice.encryption_call("ready".into(), "{}".into()).unwrap();
-        let roots = parse(&alice.encryption_call("recoveryList".into(), "{}".into()).unwrap());
-        assert_eq!(roots.as_array().unwrap().len(), 1);
+        // The verified account can predate the root its start registered:
+        // read it again until the root is there.
+        let started = std::time::Instant::now();
+        let roots = loop {
+            alice.encryption_call("ready".into(), "{}".into()).unwrap();
+            let roots = parse(&alice.encryption_call("recoveryList".into(), "{}".into()).unwrap());
+            if !roots.as_array().unwrap().is_empty() {
+                break roots;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(15),
+                "no root registered"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(roots.as_array().unwrap().len(), 1, "{roots}");
         let refusal = alice.encryption_call(
             "recoveryRetire".into(),
             json!({ "rootId": roots[0]["id"] }).to_string(),

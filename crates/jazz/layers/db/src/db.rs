@@ -11526,8 +11526,17 @@ impl Batch {
         }
     }
 
+    /// Drops what a failed sealed stage added, its companions' ops
+    /// included.
     fn restore_prefix(&mut self, prefix: BatchPrefix) {
         self.ops.truncate(prefix.ops);
+        self.restore_edits(prefix);
+    }
+
+    /// Drops the edits a failed stage added. Not `ops`: a stage pushes its
+    /// op only once it succeeded, so ops past `prefix.ops` are other
+    /// stages' of the same transaction, made while this one awaited.
+    fn restore_edits(&mut self, prefix: BatchPrefix) {
         self.edits.derived.truncate(prefix.derived);
         self.edits.pending_nodes.truncate(prefix.pending_nodes);
     }
@@ -13090,7 +13099,7 @@ impl Db {
         if staged.is_err()
             && let Some(batch) = self.inner.batches.borrow_mut().get_mut(&id)
         {
-            batch.restore_prefix(prefix);
+            batch.restore_edits(prefix);
         }
         staged
     }
