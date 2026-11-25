@@ -48,3 +48,21 @@ Playwright needs no secrets. `npx playwright install --with-deps chromium` needs
 ## Preview mode (dry-run RCs)
 
 `T4_MODE=preview` (workflow input `t4_mode: preview`) runs the same steps against a Vercel **preview** of the app instead of production. It builds without `--prod` and runs `deploy --prebuilt`, with a per-run `BETTER_AUTH_SECRET`, since the project's auth vars are production-only. The app's preview core is namespace `cli-previews`. The long-lived production core and the production deployment are never touched. With `T4_TEARDOWN=1` (set, approved by Anselm 2026-11-19), each preview run uses its own core, `ci-<run id>`, and t4 deletes, on every exit after the deploy step, exactly what that run created: its preview deployment (matched by the exact URL `vercel deploy` printed; approved by Anselm 2026-11-19 21:34 UTC), then that Sandbox, then that Drive once it has detached. The deployment goes first, since while it is live any request starts the core again. Never anything in production. A dry run has no GitHub release to download the core from, so the preview serves the RC's `@garden-co/jazz-napi-linux-x64-gnu` tarball from its own `public/t4-core/`, passed to `vercel({ coreTarballUrl })` through `T4_CORE_TARBALL`. Without it, dry runs share the `cli-previews` core, which is never deleted. The eval project's previews are public (Vercel Authentication is off, Anselm 2026-11-19). If protection is ever turned back on, set `T4_VERCEL_BYPASS_SECRET` (Protection Bypass for Automation): the smoke and `core-state.sh` send it as `x-vercel-protection-bypass`, and a protected preview without it FAILs.
+
+## Live large-value checks
+
+After the existing deployment test, the release gate runs two large-value checks
+against the candidate packages in both production and preview test modes:
+
+- The candidate native core writes chunks to a fresh Vercel Drive using `files()`.
+  A second Sandbox mounts that Drive and reads the full value through Jazz.
+- A native SQLite core on the CI runner uses `vercelBlob()` with a real private Blob
+  store. The check finds an offloaded leaf in SQLite, verifies its object exists,
+  reopens the core, and compares the entire value.
+
+Configure `T4_BLOB_READ_WRITE_TOKEN` in the GitHub `adopter-gate-t4` environment
+with a read-write token for a dedicated **private** Vercel Blob store. A missing
+token fails the live check. Sandbox and Drive creation use the existing T4 Vercel
+project credentials. Each run creates its own Drive, Sandboxes, and Blob prefix
+and removes them on normal test completion or failure. The long-lived eval
+core keeps its current storage configuration.
