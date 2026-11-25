@@ -101,6 +101,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "insert"  {"table": T, "row": R}          -> the inserted row, with "id"
  *   "update"  {"table": T, "id": I, "patch": P} -> null
  *   "delete"  {"table": T, "id": I}           -> null
+ *   "memberAdd"    {"table": T, "id": I, "accountId": A, "tier"?} -> member row
+ *   "memberList"   {"table": T, "id": I}                         -> [member row, ...]
+ *   "memberRemove" {"table": T, "id": I, "accountId": A}          -> count
  *   "account" {}                              -> "<account uuid>" | null
  *   "backendClient" {}  -> "trusted" | "scoped" | null (not a backend
  *                          client; a jazz_for_user handle: its parent's)

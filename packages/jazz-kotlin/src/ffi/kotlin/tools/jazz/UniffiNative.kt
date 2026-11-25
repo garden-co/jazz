@@ -144,6 +144,12 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun syncStatus(): String = live { handle.syncStatus() }
     override fun refresh(): Unit = live { handle.refresh() }
     override fun bundle(): String? = live { handle.bundle() }
+    override fun memberAdd(table: String, id: String, accountId: String, tier: String?): String =
+        live { handle.memberAdd(table, id, accountId, tier) }
+    override fun memberList(table: String, id: String): String = live { handle.memberList(table, id) }
+    override fun memberRemove(table: String, id: String, accountId: String): ULong =
+        live { handle.memberRemove(table, id, accountId) }
+
     override fun encryptionCall(op: String, argsJson: String): String = live { handle.encryptionCall(op, argsJson) }
 
     override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload {

@@ -101,6 +101,35 @@ impl JazzHandle {
             .surface(self.core.encryption_call(&op, &args_json))
     }
 
+    /// Admits an account to the space. Returns the membership row as JSON,
+    /// with the same durability options as an insert.
+    pub fn member_add(
+        &self,
+        table: String,
+        id: String,
+        account_id: String,
+        tier: Option<String>,
+    ) -> Result<String> {
+        self.core.surface(self.core.ensure_open())?;
+        let tier = self
+            .core
+            .surface(tier.as_deref().map(core::write_tier).transpose())?;
+        self.core
+            .surface(self.core.member_add(&table, &id, &account_id, tier))
+    }
+
+    /// The visible membership rows of the space, as a JSON array.
+    pub fn member_list(&self, table: String, id: String) -> Result<String> {
+        self.core.surface(self.core.member_list(&table, &id))
+    }
+
+    /// Deletes the account's visible memberships. Returns the number the
+    /// authority accepted in a serializable transaction.
+    pub fn member_remove(&self, table: String, id: String, account_id: String) -> Result<u64> {
+        self.core
+            .surface(self.core.member_remove(&table, &id, &account_id))
+    }
+
     /// The end user's session as JSON: `{"status": "signedIn", "user":
     /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
     /// `None` for a local app.

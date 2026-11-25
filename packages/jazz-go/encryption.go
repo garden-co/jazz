@@ -341,6 +341,37 @@ func (e *Encryption) Approve(ctx context.Context, deviceID, code string) error {
 	return e.Call(ctx, "approve", map[string]any{"deviceId": deviceID, "code": code}, nil)
 }
 
+// SpaceMember is a row granting an account membership in a space.
+type SpaceMember struct {
+	ID         string `json:"id"`
+	ScopeID    string `json:"scopeId"`
+	Identifier string `json:"identifier"`
+	AccountID  string `json:"accountId"`
+}
+
+// AddMember admits an account to a space and returns its membership row, as an insert would.
+func (e *Encryption) AddMember(ctx context.Context, table, id, accountID string, opts ...WriteOption) (SpaceMember, error) {
+	var member SpaceMember
+	args := withOptions(map[string]any{"table": table, "id": id, "accountId": accountID}, opts)
+	err := e.db.call(ctx, "memberAdd", args, &member)
+	return member, err
+}
+
+// ListMembers lists the space's membership rows visible to the caller.
+func (e *Encryption) ListMembers(ctx context.Context, table, id string) ([]SpaceMember, error) {
+	var members []SpaceMember
+	err := e.db.call(ctx, "memberList", map[string]any{"table": table, "id": id}, &members)
+	return members, err
+}
+
+// RemoveMember removes the account's visible membership rows and returns the
+// number the authority accepted.
+func (e *Encryption) RemoveMember(ctx context.Context, table, id, accountID string) (uint64, error) {
+	var count uint64
+	err := e.db.call(ctx, "memberRemove", map[string]any{"table": table, "id": id, "accountId": accountID}, &count)
+	return count, err
+}
+
 // RemoveDevice removes a device and rotates the account.
 func (e *Encryption) RemoveDevice(ctx context.Context, deviceID string) error {
 	return e.Call(ctx, "remove", map[string]any{"deviceId": deviceID}, nil)

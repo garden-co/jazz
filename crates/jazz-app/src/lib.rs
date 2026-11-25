@@ -79,6 +79,7 @@ mod include;
 mod jazz_session;
 mod large;
 mod lifecycle;
+mod members;
 mod query;
 mod read;
 mod relation;
@@ -123,6 +124,7 @@ pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 #[doc(hidden)]
 pub use lifecycle::before_client_stops;
+pub use members::{NewSpaceMember, SpaceMember};
 pub use query::{
     Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, ValuePart, created_at,
     deleted_at, id, updated_at,

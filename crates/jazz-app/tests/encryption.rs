@@ -1841,3 +1841,105 @@ async fn check_root_refusal(delay_after_durable_write: Option<Duration>) {
     alice.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// Alice creates a space, admits Bob directly and in a transaction, and
+/// removes both of Bob's memberships while retaining her own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_space_members_follow_insert_and_transaction_semantics() {
+    use bindings::{NewProject, Project, Task};
+    use jazz_app_support::{DurabilityTier, ReadTier};
+
+    let app = App::start().await;
+    let alice = app.device().await.durable(DurabilityTier::GlobalServer);
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+
+    let first = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let second = alice
+        .insert(NewProject::new("other", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let creator = alice.list_members::<Project>(first).await.unwrap();
+    assert_eq!(creator.len(), 1);
+    assert_eq!(creator[0].account_id, alice_id);
+    refused_with(alice.list_members::<Task>(first).await, "not-a-space-table");
+
+    let admitted = alice
+        .add_member::<Project>(first, bob_account)
+        .await
+        .unwrap();
+    assert_eq!(admitted.account_id, bob_id);
+    assert_eq!(admitted.identifier, first);
+    assert_eq!(admitted.scope_id, creator[0].scope_id);
+
+    let staged = alice
+        .transaction(move |tx| async move {
+            tx.add_member::<Project>(second, bob_account).await?;
+            tx.add_member::<Project>(first, bob_account).await
+        })
+        .await
+        .unwrap();
+    assert_ne!(staged.id, admitted.id);
+    let listed = alice.list_members::<Project>(first).await.unwrap();
+    assert_eq!(listed.len(), 3);
+    assert!(listed.contains(&admitted));
+    assert!(listed.contains(&staged));
+
+    let open = alice.begin_transaction().await.unwrap();
+    let abandoned = open
+        .add_member::<Project>(first, bob_account)
+        .await
+        .unwrap();
+    open.rollback().await.unwrap();
+    assert!(
+        !alice
+            .list_members::<Project>(first)
+            .await
+            .unwrap()
+            .contains(&abandoned)
+    );
+
+    assert_eq!(
+        alice
+            .remove_member::<Project>(first, bob_account)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        alice
+            .remove_member::<Project>(first, bob_account)
+            .await
+            .unwrap(),
+        0
+    );
+    let read = |id| {
+        alice.all_with(
+            bindings::e2ee_members::query().filter(bindings::e2ee_members::identifier().eq(id)),
+            ReadTier::Remote,
+        )
+    };
+    let remaining = read(first).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, creator[0].id);
+    assert!(
+        read(second)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.account_id == bob_id)
+    );
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}

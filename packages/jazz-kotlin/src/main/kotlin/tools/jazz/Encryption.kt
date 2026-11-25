@@ -84,6 +84,10 @@ public data class Device(
     val removalRequested: Boolean = false,
 )
 
+/** A row granting an account membership in a space. */
+@Serializable
+public data class SpaceMember(val id: String, val scopeId: String, val identifier: String, val accountId: String)
+
 /** The deliveries written and the spaces whose delivery failed in one pass. */
 @Serializable
 public data class KeyDeliveryResult(val delivered: Long, val failed: Long)
@@ -152,6 +156,18 @@ public class Encryption internal constructor(
     public suspend fun approve(deviceId: String, code: String) {
         call("approve", buildJsonObject { put("deviceId", deviceId); put("code", code) })
     }
+
+    /** Admits an account to a space and returns its membership row, as an insert would. */
+    public suspend fun addMember(table: String, id: String, accountId: String, tier: WriteTier? = null): SpaceMember =
+        jazzJson.decodeFromString(blocking { native.memberAdd(table, id, accountId, tier?.wire) })
+
+    /** Lists the space's membership rows visible to the caller. */
+    public suspend fun listMembers(table: String, id: String): List<SpaceMember> =
+        jazzJson.decodeFromString(blocking { native.memberList(table, id) })
+
+    /** Removes the account's visible membership rows. Returns the number the authority accepted. */
+    public suspend fun removeMember(table: String, id: String, accountId: String): ULong =
+        blocking { native.memberRemove(table, id, accountId).toString() }.toULong()
 
     /** Removes a device and rotates the account. */
     public suspend fun removeDevice(deviceId: String) {

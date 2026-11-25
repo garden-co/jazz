@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -154,6 +155,37 @@ func TestEncryptionCodeNamesTheFailure(t *testing.T) {
 	}
 	if got := EncryptionCode(&Error{Kind: KindRefused, Message: "encryption (approval-code-mismatch): the code differs"}); got != "" {
 		t.Fatalf("code = %q", got)
+	}
+}
+
+// All three helpers reach the C ABI and preserve its typed failure.
+func TestMembershipCallsRequireAnEncryptedApp(t *testing.T) {
+	if err := loadFFI(); err != nil {
+		t.Skipf("no libjazz_ffi: %v", err)
+	}
+	app, err := os.ReadFile("../../examples/docs/todo-client-go/jazz.app.json")
+	if err != nil {
+		t.Skipf("outside the repository: %v", err)
+	}
+	ctx := context.Background()
+	id := "8f3c2a7e-1b4d-4c9e-9a2f-6d5e4c3b2a10"
+	db, err := Open(ctx, Config{App: string(app), AppID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	members := db.Encryption()
+	_, addErr := members.AddMember(ctx, "todos", id, id, WaitFor(WriteLocal))
+	_, listErr := members.ListMembers(ctx, "todos", id)
+	_, removeErr := members.RemoveMember(ctx, "todos", id, id)
+	for _, call := range []struct {
+		name string
+		err  error
+	}{{"add", addErr}, {"list", listErr}, {"remove", removeErr}} {
+		if got := EncryptionCode(call.err); got != "not-declared" {
+			t.Errorf("%s: code %q, error %v", call.name, got, call.err)
+		}
 	}
 }
 
