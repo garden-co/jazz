@@ -5311,6 +5311,7 @@ export class NativeRuntimeAdapter implements Runtime {
       attempt.carrier === this.serverCarrier;
     if (isCurrent) {
       this.serverConnectionGeneration += 1;
+      this.serverPumpScheduled = false;
       this.serverConnectionAttempt = null;
       this.serverCarrier = null;
     }
