@@ -99,9 +99,8 @@ wrangler uses, `jazz-tools/backend` runs on WebAssembly instead of the native No
 
 Choose the store according to where your core runs. Use `durableObjects()` for a core in a
 Cloudflare Durable Object, as in the example below. Use `remote({ url, appId, secret })` for a
-separately hosted native Jazz core. Apps with encrypted columns require the native core. Their
-Worker backend relays encrypted data without holding encryption keys. See
-[Encryption limits](/docs/e2ee/limits).
+separately hosted native Jazz core. An app with encrypted columns needs the native core. The
+Worker holds no encryption keys. See [Encryption limits](/docs/e2ee/limits).
 
 ```ts title="worker.ts"
 import { Hono } from "hono";

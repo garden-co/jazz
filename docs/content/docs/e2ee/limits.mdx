@@ -1,144 +1,80 @@
 ---
 title: Encryption Limits
-description: "What encrypted columns do not do yet, and what is left to the app."
+description: "What encrypted columns don't do, and what encryption doesn't protect."
 languageTabs: backend
 ---
 
-- **Equality only.** Encrypted columns can be filtered by equality when they are listed in `equality`.
-  Ordering, ranges and text search on an encrypted column fail with an error naming the pattern.
-- **Aggregates use plaintext columns.** A query cannot aggregate or group by an encrypted column,
-  or combine an aggregate with a filter on an encrypted column. `count()` includes every matching
-  row the server returns, even if this device is still waiting for a key to open its encrypted cells.
-  While keys are pending, `count()` can exceed `all().length` for the same filter.
-- **Cloudflare Workers can serve encrypted apps.** Connect the Worker backend to a native Jazz core
-  with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
-  deploying an encrypted schema to a Durable Object core are unsupported.
-- **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
-- **Appending variants to an encrypted enum needs a new schema version.** Add a schema change that
-  creates a new version, such as adding an index, then run `jazz-tools migrations create`. It keeps
-  the original sealed type so existing values remain readable.
-- **The deploy has the final word on schema changes.** `migrations create` and `generate` check
-  encrypted columns using only your app files. A few changes depend on which versions your server
-  has already deployed, such as shortening an encrypted enum list in a version that only adds an
-  index. The tooling accepts those, and the deploy may still refuse them with an error naming the
-  column.
-- **A version that declares no encryption entries keeps its inherited space tables.** If the
-  nearest earlier declarations use `rooms` as a space table, keep `rooms` under that name. Keep its
-  read rule from the members table if any inherited entry using `rooms` encrypts a column.
-  You can drop an encrypted table unless it is itself an inherited space table. To drop or
-  rename a space table, declare encryption in the new version. Even one entry with no encrypted
-  columns makes the new version follow its own declarations. If you have already deployed
-  that version without declarations, make the change in another new version: a deployed version's
-  declarations can't change.
-- **A writer that hasn't loaded a row can move it to another space.** A write can't change an
-  encrypted row's space, but the client or backend making the write checks this against its own
-  copy of the row, and the server does not check it again. A writer that has never loaded the row
-  can upsert it with another space column, for example another `projectId`. Only sessions allowed
-  to update the row can do this, and your backend, which your permissions don't check.
+The [protocol spec](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_PROTOCOL.md#8-security-properties-and-limits)
+has the full list and the reasons.
 
-  The row moves to the new space, and its readers are that space's members. They see its plain
-  columns. The encrypted values the upsert left out stay sealed for the old space, so the move
-  discloses none of them:
-  - a reader that also holds a key of the old space gets the row, with those cells reported
-    `stale-space`;
-  - any other reader doesn't get the row: it is reported `key-pending` or `key-unavailable`, then
-    `invalid-ciphertext` once its device can tell the cells' key isn't the new space's;
-  - a filter by one of those columns doesn't find the row in its new space.
+## Queries and schema
 
-  Encrypted values the upsert did supply are sealed for the new space, so its members can read
-  them.
+- You can filter an encrypted column by equality only, and only if it was declared with
+  `equality: true`. Ordering, ranges, text search, grouping and aggregates fail with an error
+  that names the pattern.
+- `count()` includes rows this device can't decrypt yet, so it can be higher than `all().length`
+  for the same filter.
+- Jazz doesn't encrypt a plain column that already holds data. See
+  [Encrypting existing data](/docs/e2ee/encrypting-existing-data).
+- `equality` can't be added to a table that already exists. Copy the column into a new table
+  that declares it.
+- The deploy restricts schema changes to encrypted tables and names the column it refuses.
+  `generate` and `migrations create` can accept a change that the deploy then refuses. The
+  [schema change rules](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_SCHEMA_CHANGES.md)
+  list what is allowed.
+- A write can't move an encrypted row to another space, but only the writer's own copy of the
+  row enforces this. A client or backend that never loaded the row can upsert it with a
+  different space column. Its encrypted values then read as `stale-space` or not at all, until a
+  writer that hasn't loaded the row writes the original space back.
 
-  To repair the row, write its original space back. That write is checked the same way, so a
-  writer whose copy shows the row in the new space is refused. Use a writer that hasn't loaded the
-  row, and upsert the row with its original space. If the move also supplied encrypted values,
-  write them again once the row is back, from a writer that holds the old space's key: until then
-  they read as `stale-space`.
+## What the server can do
 
-- **Existing plain columns are not encrypted for you.** A column is encrypted when it is declared
-  encrypted at creation; Jazz does not convert one that already holds data. Copy the data into a new
-  encrypted table instead: see [Encrypting existing data](/docs/e2ee/encrypting-existing-data). The
-  old plaintext stays in history, replicas and backups.
-- **Equality is declared when the table is created.** It cannot be added to a column of a table that
-  already exists, because rows older than the column have no equality token. To filter by such a
-  column later, copy it into a new table that declares it.
-- **Keys follow members.** A member's device gets a key from another member's device; if no member
-  device that holds it is online, a new member waits, and a write waits ten seconds before it fails
-  `key-pending`.
-- **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
-  the member could already read.
-- **Writes can still use the old key after a removal.** A device that's connected and watching
-  the space learns of a device removal one sync round trip after it commits. Other devices learn
-  of it when they next sync the space. A write can use the old key before the writer learns of
-  the removal, while offline after learning of it, or if an online rotation is refused or
-  still undecided at the write's deadline. In each case the write goes ahead. When the host
-  reports a reconnection, the runtime checks each watched space for removals before its next
-  encrypted write. The space rotates at the next opportunity when an online member who can
-  update it writes or explicitly rotates it. A removed device keeps its existing keys and receives no new keys
-  through that device record.
-- **A device account's secret is the account.** Whoever holds the secret (its 24-word phrase, passkey or
-  exported key) controls the account, encryption included. Removing a device does not lock out a holder:
-  the device recovers by itself at its next start and receives later keys. Retiring the recovery
-  credential does not help either, because the holder can still act as the account. If the secret may
-  have leaked, the only remedy is a new account. For an account your own sign-in manages, retire the
-  recovery credential and register a new secret.
-- **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
-  holds until it updates.
-- **A copied store may answer one more challenge.** See [Copied stores](#copied-stores).
-- **A device protects only what it has seen of another account's history.** Each device keeps a floor
-  for another account's history in a space: the newest state of it that the device has observed. A
-  floor protects a device only against a rollback after its own first observation, and it advances
-  with each change the device sees. Before that first observation, or after a wipe or re-enrolment,
-  the device cannot tell a rolled-back history from the real one. A device that never saw the newer
-  history (for example, it never read a space naming that account after the removal) is not
-  protected, and other devices' floors do not protect it. These floors are per device and per
-  account; they are kept next to the held keys and wiped with them.
-- **Encrypted columns need the local-first client in the browser.** The thin client holds no keys.
-  With a `client` loader, operations on encrypted columns wait up to 30 seconds for the local-first
-  client; without one they fail with `EncryptionNeedsLocalFirstError`. Writes that wait are kept in
-  memory and lost if the page closes first, and writes made after a waiting one (plain ones too) run
-  after it, so one delayed write delays the rest, and a plain read made behind a streaming write that
-  waits can wait up to 30 seconds too. A transaction callback may run twice before the
-  client has loaded; a transaction you open with `beginTransaction()` is not held behind a waiting
-  callback transaction, so begin it again after the load. A callback transaction refused only at
-  commit also holds later writes until its rerun starts. A live query on a client that never loads stays loading after its warning, until a failed load, a sign-out or a close ends it. On a thin `Db`, `db.encryption` waits the same way (`keys.*` included, and `ready({ timeoutMs })` waits at most 30 seconds), and `recovery.create()` cannot wait and throws. A sign-out ends waiting calls with `DbClosedError`; a call made afterwards gets `DbReplacedError`. See
-  [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
-- **No default store.** The app supplies the private store and its protection.
-- **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
-  web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
-  command-line apps with a bearer), and the Rust, Swift, Kotlin, Go, React Native and Expo clients.
-  See [Encryption in native apps](/docs/e2ee/native).
-- **What the Rust, Swift, Kotlin and Go clients do not do yet.**
-  - A subscription holds no key watch. Keys reach a device through the pass that runs at start,
-    through reads that left rows out for want of a key, and when the app calls
-    `keysDeliver`; a member added while another member's device is running may wait for that device's
-    next pass.
-  - Only the usual writes (insert, update, delete, upsert, restore) wait for a key. Transactions, partial
-    edits and branch writes fail `key-pending` at once: call `ready` or `keysDeliver`, then write again.
-  - The runtime is not told when the connection drops, so an equality query offline matches as it does
-    online.
-  - The Swift, Kotlin and Go `Session` (account switching) takes no private store yet: open an encrypted
-    app with a client instead.
-- **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
-  key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
-  script that runs on your page's origin (an injected one, for example through a cross-site scripting
-  hole; a worker does not change this) can ask the browser to unprotect the device's stored keys and read
-  the space keys from the tab's memory. It can then read what the device is given later, and act as the
-  device (including approving another device), until the device is **removed**. Rotating a space does not
-  stop it. It cannot reach other devices' keys, and it loses access when the device is removed, except through a
-  device it approved while it had access: that device keeps access until it is removed too. After a
-  suspected injection, check the account's device list from a trusted device and remove the affected
-  device and any device you do not recognise (each removal rotates the account);
-  keep your page free of untrusted scripts as you would for anything else sensitive.
-- **A sign-out clears keys from that tab’s memory.** While keys remain in the private store, a later
-  user of the browser profile or a script on your origin can use them as above. With persistent
-  storage and `clearOnSignOut: true`, the last tab to release the account’s store wipes the saved keys
-  with the account’s local data. See [Signing out](/docs/e2ee/browser#signing-out).
-- **Secret cleanup covers the buffers Jazz owns.** Closing the encryption host drops the runtime's
-  in-memory secret state. When the Rust host takes ownership of a device-account secret as text, it
-  wipes that text after parsing and holds the decoded bytes in memory that is wiped on drop. Debug
-  output for the decoded secret omits its value. A JavaScript string cannot be wiped in place, and
-  the host cannot erase copies held by the caller.
+- The server sees everything that isn't an encrypted column: row IDs, plain columns, who is a
+  member of which space, and who wrote each row and when.
+- Permissions decide who gets keys. Anyone who can update a space row can add any account as a
+  member, and so can your backend. Members' devices then send that account the keys.
+- The backend can't read or compute on encrypted columns. Do that on a client.
+- A Cloudflare Worker backend can serve an encrypted app only through a native Jazz core, with
+  `remote()`. A Durable Object core can't host an encrypted schema, and a Worker can't run a
+  client that holds keys.
 
-## Copied stores
+## Members and keys
 
-A copy of an unapproved device's store, taken while its protection travels with it (a restored backup, a VM snapshot), can answer one more approval challenge with an already revealed nonce. A server that substitutes keys could then pass the approval code for that one approval. Where the protection is bound to the device, a copy opens nothing.
+- A space is designed for up to 1,000 member accounts. Jazz doesn't refuse more.
+- A new member can read what was written to the space before they joined.
+- A new member waits for the key until a device that holds it is online.
+- Removing a member can't take back what they already read.
+- After a removal, writes use the old key until the key changes. That includes writes made
+  offline and writes from a device that hasn't heard of the removal yet. The server stops
+  sending the removed member rows, but the removed member holds the key those rows use.
+- A member row written offline before a removal and synced after it makes the account a member
+  again. Check the member list after a removal has synced.
+
+## Devices
+
+- Whoever holds a device account's secret controls the account, and removing a device doesn't
+  lock them out. See [Devices and recovery](/docs/e2ee/devices-and-recovery#device-accounts).
+- A script on your page can use the device's keys. An injected script can read what the device
+  reads and act as the device until the device is removed. Changing a space's key doesn't stop
+  it. After a suspected injection, use a trusted device to remove the affected device and any
+  device you don't recognise.
+- Saved keys stay in the browser after sign-out unless you set `clearOnSignOut`. A later user of
+  the same browser profile can use them.
+- A copy of a private store that comes with its key can act as the device. A restored backup or
+  a VM snapshot can be such a copy. Keep the key in the operating system's key store and out of
+  backups.
+- A new or wiped device can't tell if the server shows it an outdated list of another account's
+  devices. A device detects that only for accounts it has seen before.
+- Jazz wipes the key material it owns in memory. It can't wipe JavaScript strings, and in React
+  Native keys cross the JavaScript bridge as strings. Keep tools that log the bridge or inspect
+  the heap away from real accounts.
+
+## Rust, Swift, Kotlin and Go
+
+- Keys are delivered when the app starts, after a read that left rows out, and when you call
+  `keysDeliver`. A subscription alone doesn't deliver keys.
+- Only `insert`, `update`, `delete`, `upsert` and `restore` wait for a key. Transactions, partial
+  edits and branch writes fail with `key-pending` at once. Call `ready` or `keysDeliver`, then
+  write again.
+- The session APIs don't take a private store, so open an encrypted app with a client. In Rust,
+  use `Jazz::open`. `JazzSession::open` returns `Error::EncryptedSessionUnsupported`.
