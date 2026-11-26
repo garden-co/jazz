@@ -707,6 +707,70 @@ mod ledger {
         );
     }
 
+    /// Ordinary serializable snapshots retain Alice's own pending commits
+    /// from transaction start, even if Bob accepts one past the pinned cut.
+    /// A ledger read must refuse that row once it has a newer position.
+    /// Alice: insert -> begin -> pin with empty read -> read inserted row
+    /// Bob:                       reply at cut -> accept insert
+    #[test]
+    fn ledger_read_refuses_own_commit_accepted_after_the_pinned_cut() {
+        let (alice, bob, mut link) = fixture();
+        let write = block_on(alice.insert("notes", cells("pending"), Default::default())).unwrap();
+        let tx = alice.tx_ref(begin(&alice));
+        block_on(alice.tick()).unwrap();
+        let commit = loop {
+            match link.client.try_recv().expect("Alice has sent her commit") {
+                message @ SyncMessage::Commit { .. } => break message,
+                message => link.server.send(message).unwrap(),
+            }
+        };
+
+        let empty = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("text"), lit("missing"))))
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&empty));
+        assert!(poll(first.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Ok(first)) = poll(first.as_mut()) else {
+            panic!("the empty read should pin the cut");
+        };
+        assert!(first.rows.is_empty());
+
+        link.reply(&bob, [commit]);
+        block_on(alice.tick()).unwrap();
+        let at = drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        assert!(at > first.through);
+
+        let query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(write.row_uuid().0)))),
+            )
+            .unwrap();
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(result) = poll(second.as_mut()) else {
+            panic!("Bob answered the read at the pinned cut");
+        };
+        let error = result.expect_err("the row was accepted after the ledger cut");
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        assert!(
+            error
+                .message
+                .contains("found a row not accepted at its cut")
+        );
+    }
+
     /// Alice's first read refuses her staged row. Bob then inserts a row
     /// that Alice's first successful read sees at a fresh authority cut.
     #[test]
