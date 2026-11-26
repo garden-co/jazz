@@ -464,14 +464,20 @@ impl StoreOwner<'_> {
         if let (Some(space), Some(key)) = (&mut loaded.space, key)
             && loaded.rejected.is_empty()
         {
-            space.verified_through = space
-                .held()
-                .enumerate()
-                .take_while(|(expected, (depth, mark))| {
-                    *expected == *depth && **mark == KeyMark::Published
-                })
-                .last()
-                .map(|(_, (depth, _))| depth);
+            // The consecutive published run from the shallowest held key: a
+            // member who joined after rotations holds nothing below it, and
+            // a key found there later lowers the depth (`keep_entry`).
+            let first = space.held().next().map(|(depth, _)| depth);
+            space.verified_through = first.and_then(|first| {
+                space
+                    .held()
+                    .enumerate()
+                    .take_while(|(offset, (depth, mark))| {
+                        first + *offset == *depth && **mark == KeyMark::Published
+                    })
+                    .last()
+                    .map(|(_, (depth, _))| depth)
+            });
             if let Some(depth) = space
                 .verified_through
                 .filter(|&depth| Some(depth) > verified)
@@ -880,6 +886,52 @@ mod tests {
                 assert!(opened.updated_document.is_none());
             }
         }
+    }
+
+    /// Bob joined Alice's space after three rotations, so his first key is
+    /// at depth 3. His first reopen checks every record and marks them; the
+    /// next reopen checks none again.
+    #[test]
+    fn a_space_held_from_a_later_epoch_is_marked_on_reopen() {
+        let mut rng = cycling_random();
+        let alice = Alice::new(&mut rng);
+        let owner = alice.owner();
+        let full = alice.space(5, &mut rng);
+        let mut space = full.clone();
+        space.keys.retain(|&depth, _| depth >= 3);
+        let bytes = owner
+            .seal_stored_document(&space, &[], 0, &mut rng)
+            .unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&bytes).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 3);
+        assert_eq!(reopened.space.unwrap().verified_through, Some(5));
+        let marked = reopened.updated_document.unwrap();
+
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&marked).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 0);
+        assert!(reopened.rejected.is_empty());
+        assert!(reopened.updated_document.is_none());
+        let mut later = reopened.space.unwrap();
+        assert_eq!(later.held().count(), 3);
+
+        // An older key found later is below the marked depth: it is checked
+        // on its first reopen, with the records the shortened marker no
+        // longer covers.
+        let mut older = full;
+        older.keys.retain(|&depth, _| depth == 1);
+        later.keep(older).unwrap();
+        let bytes = owner
+            .seal_stored_document(&later, &[], 0, &mut rng)
+            .unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&bytes).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 4);
+        assert!(reopened.rejected.is_empty());
+        let space = reopened.space.unwrap();
+        assert_eq!(space.held().count(), 4);
+        assert_eq!(space.verified_through, Some(1), "the gap at 2 ends the run");
     }
 
     /// A marker whose tag does not match the bytes is ignored: every record
