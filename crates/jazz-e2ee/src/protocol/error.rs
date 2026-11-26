@@ -18,8 +18,6 @@ pub enum UnsupportedCapability {
     SigningVersion,
     /// An account key envelope names an unregistered mechanism or version.
     AccountKeyEnvelope,
-    /// The commitment key or endorsement signature names an unknown mechanism or version.
-    CommitmentMechanism,
 }
 
 impl UnsupportedCapability {
@@ -28,7 +26,6 @@ impl UnsupportedCapability {
             Self::LedgerVersion => "ledger-version",
             Self::SigningMechanism => "signing-mechanism",
             Self::SigningVersion => "signing-version",
-            Self::CommitmentMechanism => "commitment-mechanism",
             Self::AccountKeyEnvelope => "account-key-envelope",
         }
     }
@@ -98,7 +95,6 @@ pub enum RefusalCode {
     AccountHasHistory,
     DeviceKeysMismatch,
     NoDeviceRequest,
-    CommitmentMissing,
     ResetDeviceActive,
     DeviceNotActive,
     DeviceRemoved,
@@ -129,7 +125,6 @@ impl RefusalCode {
         match self {
             Self::AccountHasHistory => "account-has-history",
             Self::DeviceKeysMismatch => "device-keys-mismatch",
-            Self::CommitmentMissing => "commitment-missing",
             Self::NoDeviceRequest => "no-device-request",
             Self::ResetDeviceActive => "reset-device-active",
             Self::DeviceNotActive => "device-not-active",
@@ -169,14 +164,6 @@ impl RecoveryFailure {
             Self::DeliveryUnusable => "recovery-delivery-unusable",
         }
     }
-}
-
-/// The part of a stored admission pin contradicted by the read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinMismatch {
-    CanonicalRoot,
-    NextRootPosition,
-    LogDigest,
 }
 
 /// Why a protocol operation failed. Messages are fixed strings.
@@ -231,8 +218,6 @@ pub enum ProtocolError {
     /// (`stale-state`, §2.4 "Floors"): a rollback or withheld rows.
     #[error("E2EE evidence is older than state already verified")]
     StaleState,
-    #[error("E2EE evidence contradicts the pinned admission history")]
-    PinMismatch(PinMismatch),
     /// This device was active in the account state it last verified and is
     /// not active in the newer one (`device-no-longer-active`, §2.4
     /// "Floors"): it was removed, or the account was reset to a generation
@@ -266,7 +251,6 @@ impl ProtocolError {
             Self::Refused(kind) => Some(kind.code()),
             Self::Recovery(kind) => Some(kind.code()),
             Self::RootNotMine => Some("root-not-mine"),
-            Self::PinMismatch(_) => Some("pin-mismatch"),
             Self::StaleState => Some("stale-state"),
             Self::DeviceNoLongerActive => Some("device-no-longer-active"),
             _ => None,

@@ -46,11 +46,8 @@ getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
 [dev-dependencies]
 # Builds this crate's own tests and examples with the conformance kit.
 jazz-e2ee = { path = ".", features = ["conformance"] }
-# Independent implementation used by the SLH-DSA interoperability tests.
-fips205 = { version = "=0.5.0", default-features = false, features = [
-  "slh-dsa-sha2-128s",
-  "default-rng",
-] }
+# Independent implementation used by the SLH-DSA key-generation test.
+fips205 = { version = "=0.5.0", default-features = false, features = ["slh-dsa-sha2-128s"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
