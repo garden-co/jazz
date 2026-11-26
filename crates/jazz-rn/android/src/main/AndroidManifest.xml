@@ -1,4 +1,11 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="com.jazzrn">
+  <application>
+    <provider
+        android:name="com.jazzrn.JazzRelayPrewarmProvider"
+        android:authorities="${applicationId}.jazzrelayprewarm"
+        android:exported="false"
+        android:initOrder="1000" />
+  </application>
 </manifest>

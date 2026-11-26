@@ -83,6 +83,15 @@ typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
 typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);
 jazz_native_relay_host *jazz_native_relay_host_new(void);
 void jazz_native_relay_host_free(jazz_native_relay_host *host);
+/* Open the relay the last launch admitted under storage_root (a UTF-8 path,
+ * root_len bytes) and a spare foreground store on it, before the app's
+ * JavaScript asks. A guess: the first admission claims it or, for another
+ * scope, closes it, and an unclaimed one closes after 30 s. Ok when there is
+ * nothing to open. */
+jazz_native_relay_status jazz_native_relay_host_prewarm(
+    jazz_native_relay_host *host,
+    const uint8_t *root,
+    size_t root_len);
 /* Retain host state for one non-zero platform-issued JSI runtime token. The
  * token scopes invalidation: destroying one bridge must never retire a
  * sibling bridge's foreground aliases. */

@@ -141,6 +141,8 @@ mod pre_sync_writes;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../rebind_identity.rs"]
+mod rebind_identity;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]

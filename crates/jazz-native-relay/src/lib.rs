@@ -792,6 +792,14 @@ pub enum ForegroundSubscriptionEvent {
         delta: Vec<u8>,
         terminal_operations_json: String,
     },
+    /// The subscription could not open. It carries what a failed command
+    /// carries: the display text and, for a core error, its stable code and
+    /// reason name, as [`ForegroundDbCommandResponse::CodedOperationError`].
+    OpenFailed {
+        reason: String,
+        code: Option<String>,
+        reason_name: Option<String>,
+    },
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
@@ -871,6 +879,59 @@ pub struct NativeRelayHost {
 struct AdmittedRelayScope {
     config: RelayOpenConfig,
     claims: BTreeMap<String, Value>,
+    /// What the next launch's prewarm opens (see [`PrewarmRecord`]).
+    prewarm_record: String,
+}
+
+/// What a launch leaves beside its stores so the next one can open the same
+/// relay before JavaScript asks (Android's prewarm). No credential and no
+/// claims: only what names the store and shapes its schema.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrewarmRecord {
+    scope: RelayScopeRequest,
+    sqlite_path: String,
+    schema_json: String,
+    author: jazz::ids::AuthorSubject,
+}
+
+const PREWARM_RECORD: &str = "jazz-prewarm.json";
+
+/// How long a prewarmed relay waits for an admission that claims it.
+const PREWARM_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The relay configuration a scope admission request names.
+fn relay_open_config(
+    scope: RelayScopeRequest,
+    sqlite_path: String,
+    schema_json: &str,
+    identity: DbIdentity,
+) -> Result<RelayOpenConfig, JazzNativeRelayStatus> {
+    let mut public_schema = serde_json::from_str::<serde_json::Value>(schema_json)
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+    let migrations = public_schema
+        .as_object_mut()
+        .and_then(|fields| fields.remove("migrations"))
+        .map(|bundle| serde_json::to_vec(&bundle))
+        .transpose()
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+    let migrations =
+        jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+    let public_schema = serde_json::from_value(public_schema)
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+    let schema =
+        JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+    Ok(RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: scope.into(),
+        sqlite_path: PathBuf::from(sqlite_path),
+        schema,
+        migrations,
+        identity,
+    })
 }
 
 struct OpenedRelay {
@@ -1590,7 +1651,7 @@ impl NativeRelayHost {
         {
             return Err(JazzNativeRelayStatus::InvalidHandle);
         }
-        let (config, author, claims) = {
+        let (config, author, claims, prewarm_record) = {
             let admitted = self
                 .admitted_scopes
                 .get(&admitted_scope)
@@ -1599,8 +1660,10 @@ impl NativeRelayHost {
                 admitted.config.clone(),
                 admitted.config.identity.author,
                 admitted.claims.clone(),
+                admitted.prewarm_record.clone(),
             )
         };
+        let record_dir = config.sqlite_path.parent().map(|dir| dir.to_path_buf());
         let scope = config.scope.clone();
         let relay = self.registry.open_admitted(config).map_err(relay_status)?;
         self.ensure_private_scope_worker(admitted_scope, &scope, relay.clone(), author)?;
@@ -1675,6 +1738,12 @@ impl NativeRelayHost {
                 lease,
             },
         );
+        if let Some(dir) = record_dir {
+            let tmp = dir.join(format!("{PREWARM_RECORD}.tmp"));
+            if std::fs::write(&tmp, prewarm_record.as_bytes()).is_ok() {
+                let _ = std::fs::rename(&tmp, dir.join(PREWARM_RECORD));
+            }
+        }
         Ok(foreground)
     }
 
@@ -1992,34 +2061,19 @@ impl NativeRelayHost {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         reject_bearer_claims(&request.claims)?;
-        // The attached schema, and beside its tables the migrations the app
-        // ships, if any (`ClientMigrations` in jazz-tools).
-        let mut public_schema = serde_json::from_str::<serde_json::Value>(&request.schema_json)
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let migrations = public_schema
-            .as_object_mut()
-            .and_then(|fields| fields.remove("migrations"))
-            .map(|bundle| serde_json::to_vec(&bundle))
-            .transpose()
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let migrations =
-            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
-                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let public_schema = serde_json::from_value(public_schema)
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let schema =
-            JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let config = RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: request.scope.into(),
-            sqlite_path: PathBuf::from(request.sqlite_path),
-            schema,
-            migrations,
-            identity: request.identity,
-        };
+        let prewarm_record = serde_json::to_string(&PrewarmRecord {
+            scope: request.scope.clone(),
+            sqlite_path: request.sqlite_path.clone(),
+            schema_json: request.schema_json.clone(),
+            author: request.identity.author,
+        })
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let config = relay_open_config(
+            request.scope,
+            request.sqlite_path,
+            &request.schema_json,
+            request.identity,
+        )?;
         // A scope is immutable once trusted code has admitted it. Reject a
         // conflicting second configuration before JavaScript can receive a
         // capability, even if no relay alias has been opened yet.
@@ -2033,12 +2087,17 @@ impl NativeRelayHost {
         }) {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
+        // This admission disproves a prewarm of any other scope.
+        self.registry
+            .retire_speculation_except(&config.scope)
+            .map_err(relay_status)?;
         let handle = self.allocate_admission_capability().map_err(relay_status)?;
         self.admitted_scopes.insert(
             handle,
             AdmittedRelayScope {
                 config,
                 claims: request.claims,
+                prewarm_record,
             },
         );
         Ok(handle)
@@ -2158,6 +2217,16 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema_json =
             serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        // A relay prewarmed for this scope already holds this process's
+        // fresh node; adopt it instead of the one setup minted, so the
+        // admitted open finds the relay it guessed.
+        if let Some(identity) = self
+            .registry
+            .speculative_identity(&RelayScope::from(pending.scope.clone()))
+            && identity.author == pending.identity.author
+        {
+            pending.identity = identity;
+        }
         let socket = pending.socket;
         let admitted = self.admit_scope(RelayScopeAdmissionRequest {
             scope: pending.scope,
@@ -2232,6 +2301,9 @@ impl NativeRelayHost {
         }
         // Closes the store synchronously, before its files go.
         self.registry.close(&scope).map_err(relay_status)?;
+        // Before the files: a deletion cut short must not leave the next
+        // launch's prewarm a record naming a half-deleted store.
+        forget_prewarm_record(&sqlite_path);
         relay::delete_store_files(&sqlite_path)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         relay::forget_rebuilt_marker(&sqlite_path);
@@ -2623,6 +2695,109 @@ impl JazzNativeRelayHostLease {
         let host = self.lock()?;
         host.require_lease_foreground_runtime(self.runtime_token, foreground)?;
         Ok(host)
+    }
+}
+
+/// Open the relay the last launch admitted under `storage_root`, and a
+/// spare foreground Db on it, before JavaScript asks (Android runs this from
+/// a content provider at process start). A guess only: the first admission
+/// claims it or, for another scope, closes it, and nobody claiming it within
+/// [`PREWARM_HOLD`] closes it too.
+///
+/// # Safety
+/// `host` must be live; `root` must be readable for `root_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_prewarm(
+    host: *mut JazzNativeRelayHost,
+    root: *const u8,
+    root_len: usize,
+) -> JazzNativeRelayStatus {
+    ffi_call(|| {
+        if host.is_null() || root.is_null() {
+            return Err(JazzNativeRelayStatus::InvalidArgument);
+        }
+        let root = unsafe { std::slice::from_raw_parts(root, root_len) };
+        let root = std::str::from_utf8(root).map_err(|_| JazzNativeRelayStatus::InvalidArgument)?;
+        host_prewarm(unsafe { &*host }, std::path::Path::new(root), PREWARM_HOLD)
+    })
+}
+
+/// [`jazz_native_relay_host_prewarm`] with its hold as a parameter.
+fn host_prewarm(
+    host: &JazzNativeRelayHost,
+    root: &std::path::Path,
+    hold: std::time::Duration,
+) -> Result<(), JazzNativeRelayStatus> {
+    let Ok(bytes) = std::fs::read(root.join(PREWARM_RECORD)) else {
+        return Ok(());
+    };
+    let Ok(record) = serde_json::from_slice::<PrewarmRecord>(&bytes) else {
+        let _ = std::fs::remove_file(root.join(PREWARM_RECORD));
+        return Err(JazzNativeRelayStatus::InvalidArgument);
+    };
+    // A fresh node for this process, as session setup would give it; the
+    // admission adopts it (see `attach_canonical_schema`).
+    let identity = fresh_client_identity(record.author).map_err(relay_status)?;
+    // Parsed before the host lock, which session setup also takes.
+    let config = relay_open_config(
+        record.scope,
+        record.sqlite_path,
+        &record.schema_json,
+        identity,
+    )?;
+    let scope = config.scope.clone();
+    let relay = {
+        let guard = host.lock()?;
+        // Late: JavaScript already chose what to admit.
+        if !guard.admitted_scopes.is_empty() || !guard.pending_private_sessions.is_empty() {
+            return Ok(());
+        }
+        // The app deleted that store: never create it again. Checked under
+        // the host lock, which `delete_scope_store` holds too.
+        if !config.sqlite_path.is_file() {
+            forget_prewarm_record(&config.sqlite_path);
+            return Ok(());
+        }
+        match guard.registry.prewarm(config).map_err(relay_status)? {
+            // Weak: the hold must not keep the relay (and its store) alive
+            // past the host that owns it.
+            Some(relay) => relay.downgrade(),
+            None => return Ok(()),
+        }
+    };
+    let weak_host = Arc::downgrade(&host.inner);
+    let (held_scope, held_relay) = (scope.clone(), relay.clone());
+    let spawned = std::thread::Builder::new()
+        .name("jazz-prewarm-hold".to_owned())
+        .spawn(move || {
+            std::thread::sleep(hold);
+            let Some(host) = weak_host.upgrade() else {
+                return;
+            };
+            let Ok(guard) = host.lock() else { return };
+            let _ = guard.registry.retire_unclaimed(&held_scope, &held_relay);
+        });
+    if spawned.is_err() {
+        // Without its hold nothing would close an unclaimed guess.
+        let _ = host.lock()?.registry.retire_unclaimed(&scope, &relay);
+        return Err(JazzNativeRelayStatus::LifecycleFailure);
+    }
+    Ok(())
+}
+
+/// Remove the prewarm record beside `sqlite_path` if it names that store.
+fn forget_prewarm_record(sqlite_path: &std::path::Path) {
+    let Some(dir) = sqlite_path.parent() else {
+        return;
+    };
+    let path = dir.join(PREWARM_RECORD);
+    let names_it = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PrewarmRecord>(&bytes).ok())
+        .is_none_or(|record| std::path::Path::new(&record.sqlite_path) == sqlite_path);
+    if names_it {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dir.join(format!("{PREWARM_RECORD}.tmp")));
     }
 }
 
@@ -3106,7 +3281,7 @@ impl NativeRelayHost {
                     .clone();
                 let Response::MutationErrors { events_json } = self
                     .foreground_client(foreground)?
-                    .execute(Request::DrainMutationErrors)
+                    .drain_mutation_errors()
                     .map_err(foreground_engine_status)?
                 else {
                     return Err(JazzNativeRelayStatus::LifecycleFailure);
@@ -3274,6 +3449,7 @@ mod tests {
             );
         }
     }
+    mod prewarm;
     mod snapshot_capture_codec;
     mod socket_worker;
 

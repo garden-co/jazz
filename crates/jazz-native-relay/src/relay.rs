@@ -20,12 +20,12 @@
 //! wakes it through the platform callback.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -311,6 +311,42 @@ pub struct NativeRelay {
     inner: Arc<RelayInner>,
 }
 
+/// Names one relay without keeping it open.
+#[derive(Clone)]
+pub(crate) struct WeakRelay(std::sync::Weak<RelayInner>);
+
+impl NativeRelay {
+    pub(crate) fn downgrade(&self) -> WeakRelay {
+        WeakRelay(Arc::downgrade(&self.inner))
+    }
+}
+
+/// The stores a relay owner thread holds open right now (tests only).
+#[cfg(test)]
+pub(crate) static LIVE_OWNERS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Lists its store in [`LIVE_OWNERS`] for as long as the owner thread runs.
+#[cfg(test)]
+struct LiveOwner(PathBuf);
+
+#[cfg(test)]
+impl LiveOwner {
+    fn new(path: PathBuf) -> Self {
+        LIVE_OWNERS.lock().unwrap().push(path.clone());
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl Drop for LiveOwner {
+    fn drop(&mut self) {
+        let mut live = LIVE_OWNERS.lock().unwrap();
+        if let Some(at) = live.iter().position(|path| *path == self.0) {
+            live.remove(at);
+        }
+    }
+}
+
 struct RelayInner {
     commands: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
@@ -375,9 +411,14 @@ impl NativeRelay {
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
         let (started_tx, started_rx) = mpsc::channel();
         let owner_alive = Arc::clone(&alive);
+        #[cfg(test)]
+        let live_path = sqlite_path.clone();
         let join = thread::Builder::new()
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
+                // Declared first, dropped last: after the worker's store.
+                #[cfg(test)]
+                let _live = LiveOwner::new(live_path);
                 let _alive = OwnerAlive(owner_alive);
                 let mut worker = match RelayWorker::open(config) {
                     Ok(worker) => {
@@ -428,10 +469,14 @@ impl NativeRelay {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
     ) -> Result<NativeRelayClient, RelayError> {
-        let id = self.run(move |worker| worker.attach(identity, claims, 0))?;
+        let (id, shared) = self.run(move |worker| {
+            let id = worker.attach(identity, claims, 0)?;
+            Ok((id, Arc::clone(&worker.client(id)?.shared)))
+        })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
+            shared,
         })
     }
 
@@ -446,10 +491,14 @@ impl NativeRelay {
         if identity.author != self.inner.identity.author {
             return Err(RelayError::ScopeConfigurationMismatch);
         }
-        let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water))?;
+        let (id, shared) = self.run(move |worker| {
+            let id = worker.attach(identity, claims, lease.high_water)?;
+            Ok((id, Arc::clone(&worker.client(id)?.shared)))
+        })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
+            shared,
         })
     }
 
@@ -536,6 +585,48 @@ impl NativeRelay {
         })
     }
 
+    /// Queue the spare foreground open without waiting.
+    pub(crate) fn prepare_spare(&self) -> Result<(), RelayError> {
+        let job: RelayJob = Box::new(|worker| worker.prepare_spare());
+        let commands = self
+            .inner
+            .commands
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?;
+        commands
+            .as_ref()
+            .ok_or(RelayError::Closed)?
+            .try_send(RelayCommand::Run(job))
+            .map_err(|_| RelayError::OwnerQueueFull)
+    }
+
+    /// Queue `operation` on the owner thread without waiting, and say
+    /// whether it was queued. A full queue drops it: the owner drives after
+    /// every queued job anyway.
+    pub(crate) fn post(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) + Send + 'static,
+    ) -> Result<bool, RelayError> {
+        if !self.is_alive() {
+            return Err(RelayError::Closed);
+        }
+        let job: RelayJob = Box::new(operation);
+        let commands = self
+            .inner
+            .commands
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?;
+        match commands
+            .as_ref()
+            .ok_or(RelayError::Closed)?
+            .try_send(RelayCommand::Run(job))
+        {
+            Ok(()) => Ok(true),
+            Err(mpsc::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(RelayError::Closed),
+        }
+    }
+
     /// Run `operation` on the owner thread and wait for its result.
     pub(crate) fn run<T: Send + 'static>(
         &self,
@@ -575,6 +666,7 @@ impl NativeRelay {
 pub struct NativeRelayClient {
     relay: NativeRelay,
     id: u64,
+    shared: Arc<SharedForeground>,
 }
 
 impl NativeRelayClient {
@@ -582,18 +674,176 @@ impl NativeRelayClient {
         self.id
     }
 
-    /// Run one ordinary core turn for this foreground and its relay. A
-    /// failure of an earlier drive is reported once.
+    /// What the JS thread answers without the owner needs this foreground
+    /// open and the owner alive.
+    fn usable(&self) -> Result<(), RelayError> {
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Err(RelayError::UnknownClient(self.id));
+        }
+        if !self.relay.is_alive() {
+            return Err(RelayError::Closed);
+        }
+        Ok(())
+    }
+
+    /// Ask the owner for a drive and return: it reports a failure of an
+    /// earlier one, once. The drive's results reach the foreground as
+    /// events, drained without the owner. Ticks while a requested drive has
+    /// not begun ask for nothing more.
     pub(crate) fn pump_foreground(&self) -> Result<(), RelayError> {
+        self.usable()?;
+        if let Some(error) = self
+            .shared
+            .drive_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            return Err(RelayError::Drive(error));
+        }
+        if self.shared.drive_requested.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let id = self.id;
-        self.relay.run(move |worker| {
-            worker.client(id)?;
-            worker.drive();
-            match worker.drive_error.take() {
-                Some(error) => Err(RelayError::Drive(error)),
-                None => Ok(()),
+        let shared = Arc::clone(&self.shared);
+        let queued = self.relay.post(move |worker| {
+            shared.drive_requested.store(false, Ordering::Release);
+            if worker.client(id).is_err() {
+                return;
             }
+            worker.drive();
+            if let Some(error) = worker.drive_error.take() {
+                *shared
+                    .drive_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+                // The JS thread learns of it on its next tick: wake it.
+                if let Ok(client) = worker.client_mut(id) {
+                    client.notify = true;
+                    client.wake();
+                }
+            }
+        });
+        if !matches!(queued, Ok(true)) {
+            // Nothing queued: the next tick asks again.
+            self.shared.drive_requested.store(false, Ordering::Release);
+        }
+        queued.map(|_| ())
+    }
+
+    /// Take a subscription's buffered events on the calling thread. A full
+    /// buffer asks the owner for a turn, whose drive refills it.
+    fn drain_subscription(
+        &self,
+        subscription: u64,
+    ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        self.usable()?;
+        let (events, full) = {
+            let mut events = self
+                .shared
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(buffer) = events.get_mut(&subscription) else {
+                return Ok(ForegroundDbCommandResponse::OperationError {
+                    reason: format!("unknown subscription {subscription}"),
+                });
+            };
+            let full = buffer.len() >= FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS;
+            (buffer.drain(..).collect(), full)
+        };
+        if full {
+            // A dead owner refills nothing; the events taken are still these.
+            let _ = self.relay.post(|_| {});
+        }
+        Ok(ForegroundDbCommandResponse::SubscriptionEvents { events })
+    }
+
+    /// Close a subscription for the JS thread at once: its buffer goes now,
+    /// the core subscription on the owner's next turn.
+    fn unsubscribe_queued(
+        &self,
+        subscription: u64,
+    ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        self.usable()?;
+        let closed = self
+            .shared
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&subscription)
+            .is_some();
+        if closed {
+            self.shared
+                .unsubscribed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(subscription);
+            // A full queue drops it: the next drive closes it anyway.
+            let _ = self.relay.post(|_| {});
+        }
+        Ok(ForegroundDbCommandResponse::Unsubscribed { closed })
+    }
+
+    /// Answer a subscribe with its handle at once and open it on the owner's
+    /// next turn, in command order. A full owner queue refuses it, as it
+    /// refuses any command.
+    fn subscribe_queued(
+        &self,
+        query: Vec<u8>,
+        options_json: String,
+    ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        self.usable()?;
+        let handle = self.shared.next_handle.fetch_add(1, Ordering::Relaxed) + 1;
+        self.shared
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(handle, VecDeque::new());
+        let id = self.id;
+        let job: RelayJob =
+            Box::new(move |worker| worker.subscribe_foreground(id, handle, query, options_json));
+        let sent = self
+            .relay
+            .inner
+            .commands
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?
+            .as_ref()
+            .ok_or(RelayError::Closed)
+            .and_then(|commands| {
+                commands
+                    .try_send(RelayCommand::Run(job))
+                    .map_err(|error| match error {
+                        mpsc::TrySendError::Full(_) => RelayError::OwnerQueueFull,
+                        mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
+                    })
+            });
+        if let Err(error) = sent {
+            self.shared
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&handle);
+            return Err(error);
+        }
+        Ok(ForegroundDbCommandResponse::Subscribed {
+            subscription: handle,
         })
+    }
+
+    /// Mutation errors no wait claimed; none without a turn of the owner
+    /// when none was recorded since the last drain.
+    pub(crate) fn drain_mutation_errors(&self) -> Result<ForegroundDbCommandResponse, RelayError> {
+        if !self.shared.mutation_errors.load(Ordering::Acquire)
+            && !self.shared.closed.load(Ordering::Acquire)
+            && self.relay.is_alive()
+        {
+            return Ok(ForegroundDbCommandResponse::MutationErrors {
+                events_json: "[]".to_owned(),
+            });
+        }
+        self.execute(ForegroundDbCommandRequest::DrainMutationErrors)
     }
 
     /// Execute one foreground command on the owner thread.
@@ -601,6 +851,57 @@ impl NativeRelayClient {
         &self,
         command: ForegroundDbCommandRequest,
     ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        match &command {
+            ForegroundDbCommandRequest::DrainSubscription { subscription } => {
+                return self.drain_subscription(*subscription);
+            }
+            ForegroundDbCommandRequest::Unsubscribe { subscription } => {
+                return self.unsubscribe_queued(*subscription);
+            }
+            _ => {}
+        }
+        let command = match command {
+            ForegroundDbCommandRequest::Subscribe {
+                query,
+                options_json,
+            } => {
+                return self.subscribe_queued(query, options_json);
+            }
+            ForegroundDbCommandRequest::UploadStatus => {
+                self.usable()?;
+                let cached = self
+                    .shared
+                    .upload_status
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                if let Some(status_json) = cached {
+                    return Ok(ForegroundDbCommandResponse::UploadStatus { status_json });
+                }
+                // The first ask waits for the owner; from then on it keeps
+                // the answer current.
+                ForegroundDbCommandRequest::UploadStatus
+            }
+            ForegroundDbCommandRequest::TakeSlowQueryReport { app } => {
+                self.usable()?;
+                let (shapes, dropped) = std::mem::take(
+                    &mut *self
+                        .shared
+                        .slow
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                );
+                let lines = if shapes.is_empty() && dropped == 0 {
+                    Vec::new()
+                } else {
+                    jazz::slow::report_lines(&shapes, dropped, app.as_deref())
+                };
+                return Ok(ForegroundDbCommandResponse::SlowQueryReport {
+                    lines_json: serde_json::Value::from(lines).to_string(),
+                });
+            }
+            command => command,
+        };
         let id = self.id;
         self.relay
             .run(move |worker| worker.execute_foreground(id, command))
@@ -678,10 +979,39 @@ struct PendingOperation {
     advice: Option<u64>,
 }
 
+/// What a foreground's JS thread reads without a turn of the owner: its
+/// subscriptions' encoded events, whether a mutation error may wait, and a
+/// drive failure not yet reported. The owner fills it; a drain or a tick
+/// takes from it under the lock alone, never queueing behind a drive.
+#[derive(Default)]
+pub(crate) struct SharedForeground {
+    events: Mutex<HashMap<u64, VecDeque<ForegroundSubscriptionEvent>>>,
+    mutation_errors: AtomicBool,
+    drive_error: Mutex<Option<String>>,
+    closed: AtomicBool,
+    /// Handles of subscriptions, operations and transactions: the JS thread
+    /// takes one for a subscription it opens without waiting for the owner.
+    next_handle: AtomicU64,
+    /// The upload status as of the owner's last turn, once the JS thread
+    /// asked for one (`None` before).
+    upload_status: Mutex<Option<String>>,
+    /// Slow query shapes the owner took when due, and how many it dropped,
+    /// for the JS thread's next report.
+    slow: Mutex<(Vec<jazz::slow::SlowQuery>, u64)>,
+    /// A drive the JS thread asked for is queued and has not begun: further
+    /// ticks until it begins ask for nothing more.
+    drive_requested: AtomicBool,
+    /// Subscriptions the JS thread closed; the owner closes them in the core
+    /// on its next turn.
+    unsubscribed: Mutex<Vec<u64>>,
+}
+
+/// Slow query shapes held for a report no one took: as many as the core's
+/// own log keeps.
+const SHARED_SLOW_SHAPES_MAX: usize = 256;
+
 struct ForegroundSubscription {
     stream: SubscriptionStream,
-    /// Events produced but not yet drained, already encoded.
-    buffer: VecDeque<ForegroundSubscriptionEvent>,
     /// Its first event was produced: nothing time-bound is left to poll.
     opened: bool,
     closed: bool,
@@ -721,17 +1051,19 @@ struct Foreground {
     write_order: VecDeque<TransactionId>,
     uploads: BTreeMap<u64, binding_host::StreamingMutation>,
     mutation_errors: Rc<RefCell<Vec<MutationErrorReport>>>,
+    shared: Arc<SharedForeground>,
     /// The platform callback and the host handle it is called with.
     wake: Option<(u64, Arc<ForegroundWakeState>)>,
     /// Something changed for this foreground since the drive began.
     notify: bool,
-    next_handle: u64,
+    /// What the published upload status was computed from: both stores'
+    /// pending revisions and this store's refusal count.
+    status_key: Option<(u64, u64, u64)>,
 }
 
 impl Foreground {
     fn handle(&mut self) -> u64 {
-        self.next_handle += 1;
-        self.next_handle
+        self.shared.next_handle.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Remember a committed write for later waits; a rejected one is
@@ -739,6 +1071,7 @@ impl Foreground {
     fn track(&mut self, write: binding_host::Write) -> (TransactionId, RowUuid) {
         let claimed = Rc::new(Cell::new(false));
         if let Some(error) = &write.rejected {
+            self.shared.mutation_errors.store(true, Ordering::Release);
             self.mutation_errors.borrow_mut().push(MutationErrorReport {
                 claimed: Some(Rc::clone(&claimed)),
                 event: mutation_error_event(
@@ -818,15 +1151,71 @@ impl Foreground {
         }
     }
 
-    /// Buffer every event the subscriptions produced.
+    /// Close in the core what the JS thread unsubscribed.
+    fn reap_unsubscribed(&mut self) {
+        let handles = std::mem::take(
+            &mut *self
+                .shared
+                .unsubscribed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if handles.is_empty() {
+            return;
+        }
+        let mut closed = Vec::new();
+        for handle in handles {
+            if let Some(subscription) = self.subscriptions.remove(&handle) {
+                closed.push(subscription);
+                self.dirty.set(true);
+            }
+        }
+        // Dropped here, outside the buffers' lock.
+        drop(closed);
+    }
+
+    /// Buffer every event the subscriptions produced, up to each buffer's
+    /// room. The events are encoded outside the lock, so a drain never waits
+    /// for it; a buffer the JS thread removed meanwhile takes nothing.
     fn collect_events(&mut self) -> Result<(), String> {
-        for subscription in self.subscriptions.values_mut() {
-            while !subscription.closed
-                && subscription.buffer.len() < FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS
+        self.reap_unsubscribed();
+        let room: Vec<(u64, usize)> = {
+            let shared = self
+                .shared
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.subscriptions
+                .iter()
+                .filter(|(_, subscription)| !subscription.closed)
+                .filter_map(|(handle, _)| {
+                    let room = FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS
+                        .saturating_sub(shared.get(handle)?.len());
+                    (room > 0).then_some((*handle, room))
+                })
+                .collect()
+        };
+        let mut produced = Vec::new();
+        let mut result = Ok(());
+        'subscriptions: for (handle, room) in room {
+            let Some(subscription) = self.subscriptions.get_mut(&handle) else {
+                continue;
+            };
+            let mut events = Vec::new();
+            while events.len() < room
+                && !subscription.closed
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
-                let event = match binding_host::event_chunk(event).map_err(|e| e.to_string())? {
+                let event = match binding_host::event_chunk(event) {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        result = Err(error.to_string());
+                        produced.push((handle, events));
+                        break 'subscriptions;
+                    }
+                };
+                events.push(match event {
                     EventChunk::Delta {
                         delta,
                         reset,
@@ -848,12 +1237,96 @@ impl Foreground {
                         subscription.closed = true;
                         ForegroundSubscriptionEvent::Closed
                     }
-                };
-                subscription.buffer.push_back(event);
-                self.notify = true;
+                });
+            }
+            if !events.is_empty() {
+                produced.push((handle, events));
             }
         }
-        Ok(())
+        if produced.iter().any(|(_, events)| !events.is_empty()) {
+            let mut shared = self
+                .shared
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (handle, events) in produced {
+                if let Some(buffer) = shared.get_mut(&handle)
+                    && !events.is_empty()
+                {
+                    buffer.extend(events);
+                    self.notify = true;
+                }
+            }
+        }
+        result
+    }
+
+    /// Refresh what the JS thread reads without the owner: the upload status
+    /// (once it asked for one) and a slow-query report that fell due.
+    fn publish_shared(&mut self) {
+        let wants_status = self
+            .shared
+            .upload_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some();
+        if wants_status {
+            let own = self.binding.upload_status();
+            let store = self.authority.upload_status();
+            let key = (own.pending_revision, store.pending_revision, own.rejected);
+            // The pending sets are merged only when one of them changed.
+            if self.status_key != Some(key) {
+                self.status_key = Some(key);
+                let status = serde_json::to_string(&merged_upload_status(
+                    own,
+                    store,
+                    &self.binding,
+                    &self.authority,
+                ))
+                .expect("an upload status serializes");
+                let mut cached = self
+                    .shared
+                    .upload_status
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if cached.as_deref() != Some(status.as_str()) {
+                    *cached = Some(status);
+                    // A reader woken earlier in this drive read the old one.
+                    self.notify = true;
+                }
+            }
+        }
+        if let Some((shapes, dropped)) = self.binding.db.take_due_slow_queries() {
+            let mut slow = self
+                .shared
+                .slow
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slow.1 += dropped;
+            for shape in shapes {
+                // Windows the JS thread did not take yet add up per shape,
+                // as one window does.
+                if let Some(held) = slow
+                    .0
+                    .iter_mut()
+                    .find(|held| held.table == shape.table && held.sql == shape.sql)
+                {
+                    held.runs += shape.runs;
+                    held.total += shape.total;
+                    if shape.slowest > held.slowest {
+                        held.slowest = shape.slowest;
+                        held.rows = shape.rows;
+                        held.scanned = shape.scanned;
+                        held.sorted = shape.sorted;
+                        held.plan = shape.plan;
+                    }
+                } else if slow.0.len() < SHARED_SLOW_SHAPES_MAX {
+                    slow.0.push(shape);
+                } else {
+                    slow.1 += 1;
+                }
+            }
+        }
     }
 
     /// Whether time-bound work is pending that a drive must re-check.
@@ -871,6 +1344,12 @@ impl Foreground {
     }
 
     fn close(mut self) {
+        self.shared.closed.store(true, Ordering::Release);
+        self.shared
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         for (_, operation) in std::mem::take(&mut self.pending) {
             if let Some(id) = operation.advice {
                 self.authority.cancel_permission_advice(id);
@@ -925,6 +1404,9 @@ pub(crate) struct RelayWorker {
     redrive: bool,
     /// When time-bound waits were last evaluated.
     timed: Instant,
+    /// A foreground Db a prewarm opened ahead of the first attach, under
+    /// this relay's identity; the attach rebinds it.
+    spare: Option<Db>,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it.
@@ -1031,7 +1513,27 @@ impl RelayWorker {
             rebuilt: false,
             redrive: false,
             timed: Instant::now(),
+            spare: None,
         })
+    }
+
+    /// Open the next foreground's Db now, under this relay's own identity
+    /// (the attach rebinds it), so the first attach does not wait for it. A
+    /// failure leaves the attach to open its own.
+    fn prepare_spare(&mut self) {
+        if self.spare.is_none() {
+            self.spare = self.open_foreground_db(self.identity).ok();
+        }
+    }
+
+    /// A foreground client's in-memory store, opened fresh.
+    fn open_foreground_db(&self, identity: DbIdentity) -> Result<Db, RelayError> {
+        block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
+        .map_err(|error| RelayError::Host(error.into()))
     }
 
     fn run(&mut self, receiver: mpsc::Receiver<RelayCommand>) {
@@ -1117,12 +1619,14 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(relay_db_config(
-            self.schema.clone(),
-            identity,
-            &self.migrations,
-        )))
-        .map_err(|error| RelayError::Host(error.into()))?;
+        let spare = self
+            .spare
+            .take()
+            .and_then(|mut db| db.rebind_identity(identity).then_some(db));
+        let db = match spare {
+            Some(db) => db,
+            None => self.open_foreground_db(identity)?,
+        };
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -1134,8 +1638,11 @@ impl RelayWorker {
         let dirty = hook(&binding);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
+        let shared = Arc::new(SharedForeground::default());
+        let flagged = Arc::clone(&shared);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, claimed| {
+                flagged.mutation_errors.store(true, Ordering::Release);
                 reports.borrow_mut().push(MutationErrorReport {
                     claimed,
                     event: mutation_error_event(&tx_id.to_string(), error, serializable, true),
@@ -1171,9 +1678,10 @@ impl RelayWorker {
                 write_order: VecDeque::new(),
                 uploads: BTreeMap::new(),
                 mutation_errors,
+                shared,
                 wake: None,
                 notify: false,
-                next_handle: 0,
+                status_key: None,
             },
         );
         self.drive();
@@ -1410,6 +1918,11 @@ impl RelayWorker {
     /// Tick what asked for a tick and move frames until nothing moves.
     pub(crate) fn drive(&mut self) {
         self.redrive = false;
+        // Subscriptions the JS thread closed are closed in the core before
+        // this drive's rounds, which tick what that dirtied.
+        for client in self.clients.values_mut() {
+            client.reap_unsubscribed();
+        }
         for round in 0.. {
             if round == NATIVE_RELAY_DRIVE_ROUNDS {
                 self.redrive = true;
@@ -1423,11 +1936,17 @@ impl RelayWorker {
                     progressed = true;
                 }
             }
-            for client in self.clients.values() {
+            for client in self.clients.values_mut() {
                 if client.dirty.replace(false) {
                     if let Err(error) = block_on(client.binding.tick()) {
                         self.drive_error = Some(error.to_string());
                     }
+                    // Hand what this tick produced to the foreground now,
+                    // not after the relay's own work of this drive.
+                    if let Err(error) = client.collect_events() {
+                        self.drive_error = Some(error);
+                    }
+                    client.wake();
                     progressed = true;
                 }
                 let frames = client.link.take_outbound();
@@ -1471,6 +1990,7 @@ impl RelayWorker {
                 self.drive_error = Some(error);
             }
             client.poll_pending();
+            client.publish_shared();
             if !client.mutation_errors.borrow().is_empty() {
                 client.notify |= client
                     .mutation_errors
@@ -1479,6 +1999,60 @@ impl RelayWorker {
                     .any(|report| report.claimed.as_ref().is_none_or(|claimed| !claimed.get()));
             }
             client.wake();
+        }
+    }
+
+    /// Open a subscription the JS thread already answered with `handle`.
+    /// A failure reaches it as the subscription's rejection, the way a
+    /// subscription the core refuses later does.
+    fn subscribe_foreground(&mut self, id: u64, handle: u64, query: Vec<u8>, options_json: String) {
+        let Ok(client) = self.client_mut(id) else {
+            return;
+        };
+        let opened = open_subscription(client, handle, &query, &options_json, false);
+        // What the open produced (its first snapshot) is drainable now; a
+        // failure there is any subscription's, not this open's.
+        if let Err(error) = client.collect_events() {
+            self.drive_error = Some(error);
+        }
+        let Ok(client) = self.client_mut(id) else {
+            return;
+        };
+        match opened {
+            // Opened, or unsubscribed before it opened.
+            Ok(_) => {}
+            Err(error) => {
+                let event = match operation_error(error) {
+                    ForegroundDbCommandResponse::CodedOperationError {
+                        code,
+                        reason_name,
+                        reason,
+                    } => ForegroundSubscriptionEvent::OpenFailed {
+                        reason,
+                        code: Some(code),
+                        reason_name,
+                    },
+                    ForegroundDbCommandResponse::OperationError { reason } => {
+                        ForegroundSubscriptionEvent::OpenFailed {
+                            reason,
+                            code: None,
+                            reason_name: None,
+                        }
+                    }
+                    _ => unreachable!("operation_error answers an operation error"),
+                };
+                // The JS thread may have closed it meanwhile: then no one reads it.
+                if let Some(buffer) = client
+                    .shared
+                    .events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_mut(&handle)
+                {
+                    buffer.push_back(event);
+                    client.notify = true;
+                }
+            }
         }
     }
 
@@ -1492,6 +2066,13 @@ impl RelayWorker {
             Ok(response) => response,
             Err(error) => operation_error(error),
         };
+        // What the command produced (a write's echo in this foreground's own
+        // subscriptions, a first snapshot) is drainable when it returns: the
+        // caller drains without a turn of the owner.
+        client.publish_shared();
+        if let Err(error) = client.collect_events() {
+            self.drive_error = Some(error);
+        }
         Ok(response)
     }
 }
@@ -1660,6 +2241,44 @@ struct StreamingOptions {
     transaction: Option<String>,
 }
 
+/// Open a subscription under a handle already taken, and buffer what it
+/// produced at once.
+/// Open a subscription under `handle`. The owner's own (`owned`) gets its
+/// buffer here; one the JS thread opened keeps the buffer it made, and is
+/// not opened (`Ok(false)`) when the JS thread removed it meanwhile.
+fn open_subscription(
+    client: &mut Foreground,
+    handle: u64,
+    query: &[u8],
+    options_json: &str,
+    owned: bool,
+) -> Result<bool, HostError> {
+    let stream = client
+        .binding
+        .subscribe(query, &json(options_json)?, None, None)?;
+    let shared = Arc::clone(&client.shared);
+    let mut events = shared
+        .events
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if owned {
+        events.entry(handle).or_default();
+    } else if !events.contains_key(&handle) {
+        drop(events);
+        drop(stream);
+        return Ok(false);
+    }
+    client.subscriptions.insert(
+        handle,
+        ForegroundSubscription {
+            stream,
+            opened: false,
+            closed: false,
+        },
+    );
+    Ok(true)
+}
+
 fn foreground_command(
     client: &mut Foreground,
     command: ForegroundDbCommandRequest,
@@ -1695,39 +2314,19 @@ fn foreground_command(
             query,
             options_json,
         } => {
-            let stream = binding.subscribe(&query, &json(&options_json)?, None, None)?;
             let handle = client.handle();
-            client.subscriptions.insert(
-                handle,
-                ForegroundSubscription {
-                    stream,
-                    buffer: VecDeque::new(),
-                    opened: false,
-                    closed: false,
-                },
-            );
+            open_subscription(client, handle, &query, &options_json, true)?;
             client.collect_events().map_err(HostError::Argument)?;
             Response::Subscribed {
                 subscription: handle,
             }
         }
-        Request::DrainSubscription { subscription } => {
-            client.collect_events().map_err(HostError::Argument)?;
-            let subscription = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
-                HostError::Argument(format!("unknown subscription {subscription}"))
-            })?;
-            let events = subscription.buffer.drain(..).collect();
-            // Refill from the core: what is left wakes the foreground to
-            // drain again.
-            client.collect_events().map_err(HostError::Argument)?;
-            Response::SubscriptionEvents { events }
-        }
-        Request::Unsubscribe { subscription } => {
-            let closed = client.subscriptions.remove(&subscription).is_some();
-            if closed {
-                client.dirty.set(true);
-            }
-            Response::Unsubscribed { closed }
+        // The JS thread answers these itself (`NativeRelayClient::execute`);
+        // no command reaches the owner with them.
+        Request::DrainSubscription { .. } | Request::Unsubscribe { .. } => {
+            return Err(HostError::Argument(
+                "drains and unsubscribes are answered on the JS thread".to_owned(),
+            ));
         }
         Request::Poll { operation } => match client.completed.remove(&operation) {
             Some(response) => response,
@@ -1943,6 +2542,10 @@ fn foreground_command(
             return Err(binding_host::not_supported("write state snapshots"));
         }
         Request::DrainMutationErrors => {
+            client
+                .shared
+                .mutation_errors
+                .store(false, Ordering::Release);
             let reports = std::mem::take(&mut *client.mutation_errors.borrow_mut());
             let events = reports
                 .into_iter()
@@ -1964,13 +2567,17 @@ fn foreground_command(
         Request::PendingUploadCount => Response::PendingUploadCount {
             count: foreground_upload_status(&binding, &client.authority).pending as u64,
         },
-        Request::UploadStatus => Response::UploadStatus {
-            status_json: serde_json::to_string(&foreground_upload_status(
-                &binding,
-                &client.authority,
-            ))
-            .expect("an upload status serializes"),
-        },
+        Request::UploadStatus => {
+            let status_json =
+                serde_json::to_string(&foreground_upload_status(&binding, &client.authority))
+                    .expect("an upload status serializes");
+            *client
+                .shared
+                .upload_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(status_json.clone());
+            Response::UploadStatus { status_json }
+        }
         Request::PendingUploadRows { table } => {
             let mut rows = binding.pending_upload_rows(&table)?;
             // Each store resolves the app's name itself: a store opened
@@ -2132,8 +2739,21 @@ fn foreground_command(
 /// foreground's own: the store reports a relayed commit's refusal to its
 /// session, not as one of its own.
 fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
-    let own = binding.upload_status();
-    let store = authority.upload_status();
+    merged_upload_status(
+        binding.upload_status(),
+        authority.upload_status(),
+        binding,
+        authority,
+    )
+}
+
+/// [`foreground_upload_status`] from both stores' own statuses.
+fn merged_upload_status(
+    own: UploadStatus,
+    store: UploadStatus,
+    binding: &Binding,
+    authority: &Binding,
+) -> UploadStatus {
     let pending = sorted_union_len(
         &binding.db.pending_upload_ids(),
         &authority.db.pending_upload_ids(),
@@ -2202,26 +2822,142 @@ fn wait_for_write(
 #[derive(Default)]
 pub struct NativeRelayRegistry {
     relays: Mutex<BTreeMap<RelayScope, NativeRelay>>,
+    /// Relays a prewarm opened from the last launch's record that no
+    /// admission has claimed yet. Lock order: `relays`, then this.
+    speculative: Mutex<BTreeSet<RelayScope>>,
 }
 
 impl NativeRelayRegistry {
+    /// The scopes with an open relay, and whether each is still speculative.
+    #[cfg(test)]
+    pub(crate) fn open_scopes(&self) -> Vec<(RelayScope, bool)> {
+        let relays = self.relays.lock().unwrap();
+        let speculative = self.speculative.lock().unwrap();
+        relays
+            .keys()
+            .map(|scope| (scope.clone(), speculative.contains(scope)))
+            .collect()
+    }
+
+    /// Open `config`'s relay ahead of its admission, as speculative, and
+    /// queue its spare foreground Db. `None` if the scope is already open.
+    pub(crate) fn prewarm(
+        &self,
+        config: RelayOpenConfig,
+    ) -> Result<Option<NativeRelay>, RelayError> {
+        config.validate()?;
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        if relays.contains_key(&config.scope)
+            || relays
+                .values()
+                .any(|relay| relay.inner.sqlite_path == config.sqlite_path)
+        {
+            return Ok(None);
+        }
+        let relay = NativeRelay::spawn(config.clone())?;
+        relay.prepare_spare()?;
+        relays.insert(config.scope.clone(), relay.clone());
+        self.speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .insert(config.scope);
+        Ok(Some(relay))
+    }
+
+    /// The identity of a prewarmed relay no admission has claimed yet.
+    pub fn speculative_identity(&self, scope: &RelayScope) -> Option<DbIdentity> {
+        let relays = self.relays.lock().ok()?;
+        let speculative = self.speculative.lock().ok()?;
+        if !speculative.contains(scope) {
+            return None;
+        }
+        relays.get(scope).map(|relay| relay.inner.identity)
+    }
+
+    /// An admission of `scope` disproves every other guess: close the
+    /// speculative relays of other scopes. Joined here, under the registry
+    /// lock, so nothing opens or deletes their files before they let go.
+    pub(crate) fn retire_speculation_except(&self, scope: &RelayScope) -> Result<(), RelayError> {
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let mut speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let others: Vec<RelayScope> = speculative
+            .iter()
+            .filter(|s| *s != scope)
+            .cloned()
+            .collect();
+        for other in others {
+            speculative.remove(&other);
+            if let Some(relay) = relays.remove(&other) {
+                relay.inner.shutdown();
+            }
+        }
+        Ok(())
+    }
+
+    /// Close `relay` if it is still `scope`'s unclaimed prewarm: the launch
+    /// admitted nothing it guessed (a signed-out screen, a headless start).
+    pub(crate) fn retire_unclaimed(
+        &self,
+        scope: &RelayScope,
+        relay: &WeakRelay,
+    ) -> Result<bool, RelayError> {
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let mut speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let ours = relays
+            .get(scope)
+            .is_some_and(|open| std::ptr::eq(Arc::as_ptr(&open.inner), relay.0.as_ptr()));
+        if !ours || !speculative.remove(scope) {
+            return Ok(false);
+        }
+        if let Some(open) = relays.remove(scope) {
+            open.inner.shutdown();
+        }
+        Ok(true)
+    }
+
     pub fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
             .relays
             .lock()
             .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .remove(&config.scope);
         if let Some(existing) = relays.get(&config.scope) {
-            if existing.inner.sqlite_path != config.sqlite_path
+            let mismatch = existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.migrations != config.migrations_key()
-                || existing.inner.identity != config.identity
-            {
+                || existing.inner.identity != config.identity;
+            if mismatch && speculative {
+                // The guess was this scope under another schema (an app
+                // update) or node: replace it, joined before the reopen.
+                existing.inner.shutdown();
+                relays.remove(&config.scope);
+            } else if mismatch {
                 return Err(RelayError::ScopeConfigurationMismatch);
-            }
-            if existing.is_alive() {
+            } else if existing.is_alive() {
                 return Ok(existing.clone());
             }
+        }
+        if let Some(existing) = relays.get(&config.scope) {
             existing.inner.shutdown();
             relays.remove(&config.scope);
         }
@@ -2244,6 +2980,10 @@ impl NativeRelayRegistry {
             .relays
             .lock()
             .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        self.speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .remove(scope);
         let Some(relay) = relays.remove(scope) else {
             return Ok(false);
         };
@@ -3008,5 +3748,42 @@ mod sorted_union_len_tests {
         assert_eq!(sorted_union_len(&[], &[1, 2]), 2);
         assert_eq!(sorted_union_len(&[1, 3, 5], &[2, 3, 6, 7]), 6);
         assert_eq!(sorted_union_len(&[1, 2, 3], &[1, 2, 3]), 3);
+    }
+}
+
+#[cfg(test)]
+impl NativeRelayClient {
+    /// Occupy the owner thread for `duration`, as a long drive does: the
+    /// job is queued from another thread, which waits for it.
+    pub(crate) fn occupy_owner_for_test(&self, duration: Duration) {
+        let relay = self.relay.clone();
+        std::thread::spawn(move || {
+            let _ = relay.run(move |_| {
+                std::thread::sleep(duration);
+                Ok(())
+            });
+        });
+        // Let the owner take it before the caller's next command.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    /// How many subscriptions are open in this foreground's core, as the
+    /// owner sees them on its next turn.
+    pub(crate) fn open_subscriptions_for_test(&self) -> usize {
+        let id = self.id;
+        self.relay
+            .run(move |worker| Ok(worker.client(id)?.subscriptions.len()))
+            .unwrap()
+    }
+
+    /// Queue `duration` of owner work and return at once.
+    pub(crate) fn queue_owner_work_for_test(&self, duration: Duration) {
+        let relay = self.relay.clone();
+        std::thread::spawn(move || {
+            let _ = relay.run(move |_| {
+                std::thread::sleep(duration);
+                Ok(())
+            });
+        });
     }
 }
