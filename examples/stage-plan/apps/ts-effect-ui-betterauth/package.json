@@ -13,7 +13,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe",
+    "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fed5d778219dd9da2ce3b6611c07318159e",
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "@hono/node-server": "^1.19.11",
     "better-auth": "1.7.22",

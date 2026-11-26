@@ -112,7 +112,7 @@ describe("liveQuery", { timeout: 30_000 }, () => {
     const { layer } = trackedJazz("error");
     const broken = liveQuery("broken", null, {
       // A table the schema doesn't have: the core refuses the subscription.
-      query: () => ({ ...app.todos, _table: "missing" }) as typeof app.todos,
+      query: () => ({ ...app.todos, _table: "missing" }) as unknown as typeof app.todos,
       onRows: (): Msg => ({ _tag: "Rows", titles: [] }),
       onError: (error): Msg => ({ _tag: "Failed", error }),
     });

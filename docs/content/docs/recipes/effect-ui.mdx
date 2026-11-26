@@ -12,8 +12,9 @@ signed in comes from a service.
 
 <Callout type="warn">
   Experimental. `@effect/ui` has no npm release yet: install a snapshot build pinned to one commit,
-  such as `pnpm add https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe`. This module follows it, and
-  its API may change in any release. Effect UI needs `effect@^4.1.4`.
+  such as `pnpm add
+  https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fed5d778219dd9da2ce3b6611c07318159e`. This module
+  follows it, and its API may change in any release. Effect UI needs `effect@^4.1.4`.
 </Callout>
 
 The StagePlan example
@@ -40,7 +41,7 @@ Model. The query is built from the deps only, and they are part of the Subscript
 ```ts
 import { UiSchema } from "@effect/ui";
 import { Html } from "@effect/ui/html";
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 import { JazzError } from "jazz-tools/effect";
 import { liveQuery } from "jazz-tools/effect-ui";
 import { app } from "./jazz.generated";
@@ -54,10 +55,11 @@ const Message = UiSchema.TaggedEnum({
 export const TaskList = Html.component({
   name: "TaskList",
   props: Schema.Struct({ showId: Schema.String }),
-  model: Schema.Struct({ tasks: Schema.Array(Task) }),
+  // `None` until the first result: loading, as opposed to no tasks.
+  model: Schema.Struct({ tasks: Schema.Option(Schema.Array(Task)) }),
   message: Message,
 }).make({
-  init: () => ({ tasks: [] }),
+  init: () => ({ tasks: Option.none() }),
   subscriptions: ({ props }) => [
     liveQuery("tasks", props.showId, {
       query: (showId) => app.tasks.where({ showId }),
@@ -66,11 +68,14 @@ export const TaskList = Html.component({
     }),
   ],
   update: {
-    GotTasks: ($, { tasks }) => $.evolve({ tasks }),
+    GotTasks: ($, { tasks }) => $.evolve({ tasks: Option.some(tasks) }),
     FailedTasks: ($) => $.model,
   },
   view: (h, model) =>
-    h.ul.children(model.tasks.map((task) => h.li.key(task.id).children(task.title))),
+    Option.match(model.tasks, {
+      onNone: () => h.p.children("Loading…"),
+      onSome: (tasks) => h.ul.children(tasks.map((task) => h.li.key(task.id).children(task.title))),
+    }),
 });
 ```
 

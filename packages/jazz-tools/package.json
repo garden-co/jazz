@@ -262,7 +262,7 @@
   },
   "devDependencies": {
     "@better-auth/test-utils": "^1.7.22",
-    "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe",
+    "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fed5d778219dd9da2ce3b6611c07318159e",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
