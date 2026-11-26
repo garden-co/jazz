@@ -617,6 +617,55 @@ mod ledger {
         assert_eq!(reads[2].rows[0].0, *second_row.0.as_bytes());
     }
 
+    /// Alice admits B while A selects a snapshot from Bob. Only after A
+    /// succeeds may B send a fetch, and it must ask at A's cut.
+    /// Alice: admit A -> admit B -> pin A -> fetch B
+    /// Bob:                     reply A          -> reply B
+    #[test]
+    fn queued_ledger_read_waits_for_the_first_successful_pin() {
+        let (alice, bob, mut link) = fixture();
+        let tx = alice.tx_ref(begin(&alice));
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [SyncMessage::Read {
+                    span: ReadSpan::Once { at: None },
+                    ..
+                }]
+            ),
+            "only the first read may fetch before the snapshot is pinned"
+        );
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(poll(second.as_mut()).is_pending());
+        assert!(
+            link.requests(&alice).is_empty(),
+            "a reply alone does not pin the snapshot"
+        );
+        let Poll::Ready(Ok(first)) = poll(first.as_mut()) else {
+            panic!("the first read should pin the snapshot");
+        };
+
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert!(matches!(
+            requests.as_slice(),
+            [SyncMessage::Read { span: ReadSpan::Once { at: Some(at) }, .. }] if *at == first.through
+        ));
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Ok(second)) = poll(second.as_mut()) else {
+            panic!("the second read should use the pinned snapshot");
+        };
+        assert_eq!(second.through, first.through);
+    }
+
     /// Alice's first read refuses her staged row. Bob then inserts a row
     /// that Alice's first successful read sees at a fresh authority cut.
     #[test]
