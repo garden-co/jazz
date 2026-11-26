@@ -79,8 +79,9 @@ pub struct JsStore {
     /// Overrides [`ANSWER_TIMEOUT`] (tests).
     timeout: Cell<Option<Duration>>,
     /// Called when a request is queued, so the host polls the queue soon.
-    wake: RefCell<Option<Box<dyn Fn()>>>,
-    store_wake: RefCell<Option<StoreScheduler>>,
+    /// Shared so a call can release the borrow first: the host may call back.
+    wake: RefCell<Option<Rc<dyn Fn()>>>,
+    store_wake: RefCell<Option<Rc<dyn Fn(StoreWake)>>>,
     background_deadline: Cell<Option<Instant>>,
     operation_deadlines: RefCell<BTreeMap<Instant, usize>>,
     announced_deadline: Cell<Option<Instant>>,
@@ -100,17 +101,19 @@ impl JsStore {
     }
 
     pub fn set_wake(&self, wake: Box<dyn Fn()>) {
-        *self.wake.borrow_mut() = Some(wake);
+        *self.wake.borrow_mut() = Some(Rc::from(wake));
     }
 
     pub fn set_store_wake(&self, wake: Option<StoreScheduler>) {
-        self.store_wake.replace(wake);
+        self.store_wake.replace(wake.map(Rc::from));
         self.announced_deadline.set(None);
         self.refresh_deadline();
     }
 
     pub(super) fn notify_store(&self, event: StoreWake) {
-        if let Some(wake) = self.store_wake.borrow().as_ref() {
+        // Not borrowed during the call: the host may set or clear its wake.
+        let wake = self.store_wake.borrow().clone();
+        if let Some(wake) = wake {
             wake(event);
         }
     }
@@ -188,7 +191,9 @@ impl JsStore {
 
     /// Asks the host to tick now (the same call as when a request is queued).
     pub fn request_wake(&self) {
-        if let Some(wake) = self.wake.borrow().as_ref() {
+        // Not borrowed during the call: the host may set its wake again.
+        let wake = self.wake.borrow().clone();
+        if let Some(wake) = wake {
             wake();
         }
     }
@@ -746,6 +751,35 @@ mod tests {
         announced.borrow_mut().clear();
         let _deadline = store.operation_deadline(Instant::now() - Duration::from_millis(5));
         assert_eq!(*announced.borrow(), vec![Some(Duration::ZERO)]);
+    }
+
+    /// Contract: the host may call back into the store from its wake
+    /// callbacks, for instance to stop listening, without a borrow panic.
+    #[test]
+    fn a_host_may_call_back_from_its_wake_callbacks() {
+        let store = Rc::new(JsStore::default());
+        let weak = Rc::downgrade(&store);
+        let stops = Rc::new(Cell::new(0));
+        let count = Rc::clone(&stops);
+        store.set_store_wake(Some(Box::new(move |wake| {
+            if matches!(wake, StoreWake::Deadline(Some(_))) {
+                count.set(count.get() + 1);
+                weak.upgrade().unwrap().set_store_wake(None);
+            }
+        })));
+        let _deadline = store.operation_deadline(Instant::now() + Duration::from_secs(60));
+        assert_eq!(stops.get(), 1);
+
+        let weak = Rc::downgrade(&store);
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || {
+            count.set(count.get() + 1);
+            weak.upgrade().unwrap().set_wake(Box::new(|| {}));
+        }));
+        store.request_wake();
+        store.request_wake();
+        assert_eq!(wakes.get(), 1);
     }
 
     /// Contract: an answer is accepted only for a request that was issued and
