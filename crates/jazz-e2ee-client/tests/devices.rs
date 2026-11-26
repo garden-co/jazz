@@ -875,6 +875,131 @@ fn reconnect_reads_space_and_membership_changes() {
     });
 }
 
+/// Alice's first device reconnects with no app watches. While it was
+/// offline, her other device rotated one space and admitted Bob to both.
+/// The reconnect pass delivers the current key of each space to Bob.
+///
+/// ```text
+/// Alice's first device  ──offline────────────────────────► reconnect
+/// Alice's other device ──rotate one space──► add Bob to both
+/// Bob                  ◄────current keys for both spaces───────┘
+/// ```
+///
+#[test]
+fn reconnect_serves_offline_changes_in_unwatched_spaces() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let (alice, bob) = (account(0xa1), account(0xb0));
+        let first = device(&server, alice, deferred_memory_store(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, deferred_memory_store(), 2, &settings);
+        second.status(&server, &[&first]);
+        approve(&server, &first, &second);
+        assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
+        let bob_device = device(&server, bob, deferred_memory_store(), 3, &settings);
+        assert_eq!(bob_device.status(&server, &[]), AccountStatus::Active);
+
+        let rotated = space_with_a_note(&server, &first, &account_id(alice));
+        let unchanged = space_with_a_note(&server, &first, &account_id(alice));
+        let rotate = space_address(&first, rotated);
+        // Expire the recent writes too, so no shared watch follows these spaces.
+        first
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(61));
+        let db = Rc::new(first.db);
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: Rc::new(first.client),
+                reports: Rc::default(),
+            },
+            Rc::new(JsStore::default()),
+            db.clone(),
+        );
+        let settle = || {
+            for _ in 0..10 {
+                pump(&server, &db);
+                drive(&server, &[&db], async {
+                    loop {
+                        runtime.drive();
+                        let state = runtime.state();
+                        assert!(state["error"].is_null(), "{state}");
+                        if state["status"] == "active" && state["stage"] == "idle" {
+                            break;
+                        }
+                        futures::pending!();
+                    }
+                });
+            }
+        };
+        settle();
+        runtime.set_online(false);
+        assert!(db.detach_connection(&first._link));
+
+        drive(
+            &server,
+            &[&second.db],
+            second.client.rotate(&second.db, &rotate),
+        )
+        .unwrap();
+        let successor = all(&server, Query::from("__e2ee_space_successors")).unwrap();
+        let [successor] = successor.as_slice() else {
+            panic!("the other device must have committed one rotation");
+        };
+        let root = all(
+            &server,
+            Query::from("__e2ee_spaces").filter(eq(col("identifier"), lit(Value::Uuid(unchanged)))),
+        )
+        .unwrap();
+        let bob_id = Value::Uuid(account_id(bob).parse().unwrap());
+        for space in [rotated, unchanged] {
+            let member = std::collections::BTreeMap::from([
+                (
+                    "scopeId".to_owned(),
+                    Value::Uuid(rotate.scope_id.parse().unwrap()),
+                ),
+                ("identifier".to_owned(), Value::Uuid(space)),
+                ("accountId".to_owned(), bob_id.clone()),
+            ]);
+            block_on(
+                second
+                    .db
+                    .insert("__e2ee_members", member, Default::default()),
+            )
+            .unwrap();
+        }
+        pump(&server, &second.db);
+        let deliveries = || {
+            all(
+                &server,
+                Query::from("__e2ee_space_deliveries")
+                    .filter(eq(col("recipientAccountId"), lit(bob_id.clone()))),
+            )
+            .unwrap()
+        };
+        assert!(deliveries().is_empty());
+
+        let (_link, _) = link_as(&db, &server, alice);
+        runtime.set_online(true);
+        settle();
+        let deliveries = deliveries();
+        for (space, epoch) in [
+            (rotated, successor.cell("epochId")),
+            (unchanged, root[0].cell("epochId")),
+        ] {
+            assert!(
+                deliveries
+                    .iter()
+                    .any(|row| row.cell("identifier") == Some(Value::Uuid(space))
+                        && row.cell("keyEpochId") == epoch),
+                "Bob should receive the current key for {space} after the first device reconnects",
+            );
+        }
+        runtime.stop();
+    });
+}
+
 /// Alice's member subscription fails while her link stays online. Bob removes
 /// a device before she receives that change, so her first write must check
 /// the authority and rotate.

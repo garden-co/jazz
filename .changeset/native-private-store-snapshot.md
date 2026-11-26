@@ -1,5 +1,5 @@
 ---
-"jazz-tools": patch
+"jazz-tools": minor
 ---
 
-Read native encryption documents in one private-store callback at startup. Swift and Kotlin private stores must implement `loadAll` with an incarnation-checked snapshot. Go stores can opt in with `LoadAll`. Jazz continues to authenticate each record and preserve its saved revision.
+**Breaking for Swift and Kotlin custom private stores.** Implement `loadAll` to return the documents in one incarnation-checked snapshot. Jazz uses this callback at startup. Go stores can opt in with `LoadAll`. Jazz continues to authenticate each record and preserve its saved revision.

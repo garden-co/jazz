@@ -571,6 +571,20 @@ impl PrivateStore for ProtectedStore {
     }
 }
 
+/// A memory store whose callback replies on a subsequent poll.
+pub fn deferred_memory_store() -> Rc<dyn PrivateStore> {
+    let serve = jazz_e2ee_client::host::bridge::serve(Rc::new(MemoryStore::new()));
+    Rc::new(jazz_e2ee_client::host::bridge::JsStore::served_by(Rc::new(
+        move |request| {
+            let reply = serve(request);
+            Box::pin(async move {
+                YieldOnce(false).await;
+                reply.await
+            })
+        },
+    )))
+}
+
 /// A memory store whose next saves can be made to fail, or to yield to
 /// other work and then meet another writer's save: what a full disk or a
 /// second tab looks like.
@@ -590,7 +604,7 @@ pub struct FaultyStore {
 }
 
 /// Returns pending once, waking itself, so that other futures run.
-struct YieldOnce(bool);
+pub struct YieldOnce(pub bool);
 
 impl std::future::Future for YieldOnce {
     type Output = ();

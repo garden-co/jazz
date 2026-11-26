@@ -10,12 +10,85 @@ use jazz::e2ee::{EncryptionSettings, SpaceAddress};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
-use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
+use jazz_e2ee::protocol::ProtocolError;
+use jazz_e2ee::protocol::space::members::{DELIVERY_BATCH, holders};
 use jazz_e2ee::{OsRandom, RandomSource};
 use jazz_e2ee_client::host::bridge::JsStore;
 use jazz_e2ee_client::host::runtime::{Built, Encryption};
 use jazz_e2ee_client::testing::StoreWithSaveHook;
 use jazz_e2ee_client::{AccountStatus, ClientConfig, E2eeClient, MemoryStore, Report};
+
+/// Alice's rotation reads all deliveries for the current epoch only.
+/// A later batch reads just Alice's deliveries and cannot decide who else
+/// holds that epoch. The partial ledger is internal to the rotation.
+#[test]
+fn rotation_reads_do_not_claim_unread_epoch_coverage() {
+    let settings = EncryptionSettings::default();
+    let server = secure_authority_with(&settings, None);
+    let alice = account(0xa1);
+    let client = open_account(deferred_memory_store(), alice, settings.clone(), None);
+    let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+    assert_eq!(
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+        AccountStatus::Active
+    );
+    let space = project(&db, "plans");
+    pump(&server, &db);
+    let scope = block_on(db.table_identity("projects")).unwrap().unwrap().0;
+    block_on(server.insert(
+        "__e2ee_members",
+        BTreeMap::from([
+            ("scopeId".to_owned(), Value::Uuid(scope)),
+            ("identifier".to_owned(), Value::Uuid(space)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(alice.account_id().unwrap().0),
+            ),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &db);
+    drive(
+        &server,
+        &[&db],
+        host_write(&client, &db, async || {
+            db.insert("notes", note(space, SECRET), Default::default())
+                .await
+        }),
+    )
+    .unwrap();
+    let address = SpaceAddress {
+        scope_id: scope.to_string(),
+        identifier: space.to_string(),
+    };
+    drive(&server, &[&db], client.rotate(&db, &address)).unwrap();
+
+    let read = |batch| {
+        let (chain, ledger) = drive(
+            &server,
+            &[&db],
+            client.rotation_read_for_test(&db, &address, batch),
+        )
+        .unwrap();
+        (chain.unwrap(), ledger)
+    };
+    let (chain, ledger) = read(None);
+    assert_eq!(
+        holders(&chain, &ledger, 1).unwrap(),
+        BTreeSet::from([account_id(alice)])
+    );
+    assert_eq!(
+        holders(&chain, &ledger, 0),
+        Err(ProtocolError::InconsistentEvidence)
+    );
+
+    let (chain, ledger) = read(Some(&[]));
+    assert_eq!(
+        holders(&chain, &ledger, 1),
+        Err(ProtocolError::InconsistentEvidence)
+    );
+}
 
 struct FailingDeliveryIds(Rc<Cell<bool>>);
 
