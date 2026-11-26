@@ -981,6 +981,7 @@ export class NativeForegroundDb {
     head?: unknown,
     base?: unknown,
     transaction?: string,
+    addCreatorAsMember?: boolean,
   ) {
     if (updatedAtMs !== undefined && (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0)) {
       throw new Error("updatedAtMs must be a non-negative safe integer");
@@ -992,7 +993,7 @@ export class NativeForegroundDb {
       rowId,
       cells,
       column,
-      optionsJson: JSON.stringify({ updatedAtMs, head, base, transaction }),
+      optionsJson: JSON.stringify({ updatedAtMs, head, base, transaction, addCreatorAsMember }),
     });
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "streamingMutationOpened")

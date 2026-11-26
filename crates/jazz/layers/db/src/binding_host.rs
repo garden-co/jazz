@@ -2406,6 +2406,14 @@ impl StreamingMutation {
         state.binding.staged(id, staged)
     }
 
+    /// Set a streamed insert's `addCreatorAsMember` before it finishes
+    /// (`Some(false)`: create the space without its creator's membership).
+    pub fn set_add_creator_as_member(&mut self, add: Option<bool>) -> HostResult<()> {
+        let state = self.state.as_mut().ok_or_else(closed)?;
+        state.upload.set_add_creator_as_member(add);
+        Ok(())
+    }
+
     /// Drop the upload; `false` when already closed.
     pub fn abort(&mut self) -> HostResult<bool> {
         let Some(state) = self.state.take() else {

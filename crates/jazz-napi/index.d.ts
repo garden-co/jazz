@@ -124,7 +124,7 @@ export declare class NapiDb {
   deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
   restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
   restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
-  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null, transaction?: string | undefined | null): StreamingMutation
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null, transaction?: string | undefined | null, addCreatorAsMember?: boolean | undefined | null): StreamingMutation
   /**
    * Open a backend runtime for an app that declares encryption, with
    * hooks that hold no keys: it relays the clients' ciphertext and works

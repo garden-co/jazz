@@ -1,0 +1,27 @@
+{
+  "tables": {
+    "notes": {
+      "space": "id",
+      "scope": "notes",
+      "columns": {
+        "title": "string",
+        "status": {
+          "type": {
+            "enum": [
+              "draft",
+              "sent"
+            ],
+            "optional": true
+          },
+          "sealedType": {
+            "enum": [
+              "draft"
+            ],
+            "optional": true
+          },
+          "default": "draft"
+        }
+      }
+    }
+  }
+}

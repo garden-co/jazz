@@ -642,8 +642,10 @@ fn unsealed(space: uuid::Uuid, value: Value) -> BTreeMap<String, Value> {
 /// Contract: queries the encrypted columns cannot answer without a scan
 /// are refused, naming what is not supported: ordering by an encrypted
 /// column, a filter other than `eq` on one, `eq` on a column without an
-/// equality index, `eq` without the space, and encrypted columns selected
-/// without the space column. Alice can count by space using a plaintext filter.
+/// equality index, `eq` without the space, encrypted columns selected
+/// without the space column, and an aggregate over or grouped by an
+/// encrypted column; and a value of another type never matches by accident.
+/// Alice can count by space using a plaintext filter.
 #[test]
 fn unanswerable_encrypted_queries_are_refused() {
     let (_server, _client, db, _link, space) = client_in_space();
@@ -658,6 +660,9 @@ fn unanswerable_encrypted_queries_are_refused() {
         Query::from("notes").filter(eq(col("body"), lit(text("x")))),
         in_space().filter(eq(col("body"), lit(Value::I32(1)))),
         Query::from("notes").select(["title", "body"]),
+        in_space().group_by("body"),
+        in_space().min("body"),
+        in_space().max("body"),
     ] {
         let error = db.prepare_query(&refused).unwrap_err();
         assert_eq!(error.code, ErrorCode::Query, "{error:?}");

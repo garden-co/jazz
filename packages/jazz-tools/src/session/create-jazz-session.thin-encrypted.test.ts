@@ -309,6 +309,34 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(await host.jazz.db.encryption.members.list(app.projects, otherProject.id)).toEqual([]);
   }, 90_000);
 
+  it("keeps an opted-out streamed space insert thin, without a creator member", async () => {
+    const host = await serve();
+    // The refusal is logged once per process; keep it out of the output.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const session = await open(host);
+    const thin = db(session);
+    const ownerId = session.getSnapshot().client!.session!.user!;
+    async function* chunks(name: string): AsyncGenerator<string> {
+      yield name;
+    }
+
+    const streamed = await thin.insertStreaming(
+      app.projects,
+      { name: chunks("Streamed, opted out"), ownerId },
+      { addCreatorAsMember: false },
+    );
+    await streamed.wait({ tier: "global" });
+    expect(isThinDb(thin)).toBe(true);
+    expect(await host.jazz.db.encryption.members.list(app.projects, streamed.value.id)).toEqual([]);
+
+    // Without the opt-out, creating the space needs the local-first client.
+    const refused = await settled(
+      thin.insertStreaming(app.projects, { name: chunks("Streamed"), ownerId }),
+    );
+    expect(refused.error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((refused.error as EncryptionNeedsLocalFirstError).creatorMembership).toBe(true);
+  }, 60_000);
+
   it("stores a waited insert's encrypted cell as ciphertext, not its plaintext", async () => {
     const host = await serve();
     const { kept, gate, project } = await thinMember(host);

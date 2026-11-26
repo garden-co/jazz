@@ -2128,6 +2128,8 @@ struct StreamingOptions {
     base: Option<jazz::protocol::BranchViewBase>,
     /// The open transaction the finished value is staged in.
     transaction: Option<String>,
+    /// A streamed insert's `addCreatorAsMember`.
+    add_creator_as_member: Option<bool>,
 }
 
 fn foreground_command(
@@ -2472,7 +2474,7 @@ fn foreground_command(
                     HostError::Argument(format!("invalid streaming mutation options: {error}"))
                 })?,
             };
-            let upload = binding.begin_streaming_mutation(
+            let mut upload = binding.begin_streaming_mutation(
                 table,
                 &row_id,
                 &cells,
@@ -2485,6 +2487,7 @@ fn foreground_command(
                 options.base,
                 options.transaction.as_deref(),
             )?;
+            upload.set_add_creator_as_member(options.add_creator_as_member)?;
             let handle = client.handle();
             client.uploads.insert(handle, upload);
             Response::StreamingMutationOpened { upload: handle }

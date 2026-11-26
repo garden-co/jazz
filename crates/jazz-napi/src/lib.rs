@@ -2575,11 +2575,12 @@ impl NapiDb {
         head: Option<JsonValue>,
         base: Option<JsonValue>,
         transaction: Option<String>,
+        add_creator_as_member: Option<bool>,
     ) -> js::Result<StreamingMutation> {
         let head = structured(head, "head")?;
         let base = structured(base, "base")?;
         let inner = self.open_inner()?;
-        let mutation = inner
+        let mut mutation = inner
             .binding
             .begin_streaming_mutation(
                 table,
@@ -2594,6 +2595,9 @@ impl NapiDb {
                 base,
                 transaction.as_deref(),
             )
+            .map_err(|error| sync_host_error(env, error))?;
+        mutation
+            .set_add_creator_as_member(add_creator_as_member)
             .map_err(|error| sync_host_error(env, error))?;
         Ok(StreamingMutation { inner, mutation })
     }

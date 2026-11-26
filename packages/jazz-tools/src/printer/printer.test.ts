@@ -398,12 +398,12 @@ describe("the schema printer", () => {
     expect(schema).toContain('.history("latest")');
   });
 
-  it("reports app-wide settings and unknown encryption fields", () => {
+  it("reports sealedType, app-wide settings and unknown encryption fields", () => {
     const rooms = { columns: { name: "bytes", nameText: "string?" } };
     const encryption = {
       space: "id",
       scope: "rooms",
-      columns: { name: { type: "string", from: "nameText" } },
+      columns: { name: { type: "string", sealedType: "string", from: "nameText" } },
       backfill: ["name"],
     };
     const out = printSchemaTs(
@@ -418,6 +418,12 @@ describe("the schema printer", () => {
         path: "tables.rooms.encryption.backfill",
         text: '["name"]',
         reason: "Unknown encryption key backfill. Expected space, scope, columns or equality.",
+      },
+      {
+        path: "tables.rooms.encryption.columns.name.sealedType",
+        text: '"string"',
+        reason:
+          "Printing sealedType is supported only for an encrypted enum whose declared type appends variants to it; `jazz-tools generate` would not keep any other pin",
       },
       {
         path: "tables.rooms.encryption.columns.name.from",

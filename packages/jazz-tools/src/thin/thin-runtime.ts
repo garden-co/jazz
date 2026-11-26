@@ -1268,7 +1268,7 @@ export class ThinRuntime implements Runtime {
       values,
       column,
       mutation,
-      creatorMembership: this.addCreatorAsMember,
+      creatorMembership: this.addCreatorAsMember && !skipsCreatorMembership(writeContext),
       options: viewOptions(context),
       transaction: context.transaction ?? undefined,
     });

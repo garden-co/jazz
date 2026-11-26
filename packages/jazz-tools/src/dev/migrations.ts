@@ -808,7 +808,10 @@ async function snapshotEntries(
   if (snapshot) {
     const file = entriesFile(snapshot.file);
     try {
-      entries = parseEntries(file, await readFile(join(migrationsDir, "snapshots", file), "utf8"));
+      entries = parseEncryptionEntries(
+        file,
+        await readFile(join(migrationsDir, "snapshots", file), "utf8"),
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       if (!hasSystemTables(snapshot.schema)) return {};
@@ -848,7 +851,12 @@ async function snapshotEntries(
   return entries;
 }
 
-function parseEntries(file: string, text: string): EncryptionEntries {
+/**
+ * Read a `<snapshot>.encryption.json`: `{ "tables": { <table>: <encryption> } }`,
+ * each entry as `jazz.app.json` writes a table's `encryption`, with a widened
+ * enum's `sealedType`. Pinned by `fixtures/encryption-sidecar/sealed-type.encryption.json`.
+ */
+export function parseEncryptionEntries(file: string, text: string): EncryptionEntries {
   const parsed = JSON.parse(text) as { tables?: EncryptionEntries };
   if (!parsed || typeof parsed.tables !== "object" || parsed.tables === null)
     throw new Error(
@@ -872,7 +880,7 @@ async function sidecarEntries(
     .sort()
     .at(-1);
   if (!file) return undefined;
-  return parseEntries(file, await readFile(join(dir, file), "utf8"));
+  return parseEncryptionEntries(file, await readFile(join(dir, file), "utf8"));
 }
 
 /** `tables` without any table's encryption entry. */

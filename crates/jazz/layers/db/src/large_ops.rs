@@ -1340,6 +1340,7 @@ impl Db {
             },
             kind,
             initialized: false,
+            add_creator_as_member: None,
             preparation: Some(lv::PushStreamingPreparation::new(
                 kind,
                 Box::new(move |chunk| {
@@ -1492,7 +1493,16 @@ impl Db {
                     "a streamed insert writes one exact branch, not a branch view",
                 ));
             }
-            let op = mutation.staged(table, row, cells, identity, now_ms, head, base);
+            let op = mutation.staged(
+                table,
+                row,
+                cells,
+                identity,
+                now_ms,
+                head,
+                base,
+                upload.add_creator_as_member,
+            );
             if self.inner.e2ee_hooks().is_some() {
                 return self
                     .fetching_with(&[], op, async |op| {
@@ -1696,6 +1706,7 @@ impl StreamingMutationKind {
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        add_creator_as_member: Option<bool>,
     ) -> StagedOp {
         match self {
             StreamingMutationKind::Insert => StagedOp::Insert(
@@ -1706,7 +1717,7 @@ impl StreamingMutationKind {
                     identity,
                     target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
                     updated_at_ms: now_ms,
-                    add_creator_as_member: None,
+                    add_creator_as_member,
                 },
             ),
             StreamingMutationKind::Update => StagedOp::Update(
@@ -1788,9 +1799,20 @@ pub struct StreamingValueUpload {
     /// only a write of that row, to that target, in that space publishes
     /// it, and leaves it to the hooks as it is.
     pub(super) sealed_for: Option<SealedFor>,
+    /// A streamed insert's `InsertOptions::add_creator_as_member`.
+    add_creator_as_member: Option<bool>,
 }
 
 pub(crate) type StreamedSeal<'a> = &'a SealedFor;
+
+impl StreamingValueUpload {
+    /// Set the streamed insert's [`InsertOptions::add_creator_as_member`]
+    /// (`Some(false)` creates a space without its creator's membership row).
+    /// An update or upsert ignores it, as a plain one does.
+    pub fn set_add_creator_as_member(&mut self, add: Option<bool>) {
+        self.add_creator_as_member = add;
+    }
+}
 
 /// The refusal of a sealed stream published anywhere but where it was
 /// sealed for: there it would never open, and nothing would seal it again.
@@ -2224,7 +2246,16 @@ impl TxRef<'_> {
                 &view_target(head.clone(), base.clone()),
             )
             .await?;
-        let op = mutation.staged(table, row, cells, identity, now_ms, head, base);
+        let op = mutation.staged(
+            table,
+            row,
+            cells,
+            identity,
+            now_ms,
+            head,
+            base,
+            upload.add_creator_as_member,
+        );
         let held = large.is_some();
         let edits = crate::db::LargeEdits {
             derived: large.into_iter().collect(),
