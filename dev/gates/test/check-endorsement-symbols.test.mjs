@@ -116,6 +116,23 @@ test("the package build checks the published WASM module after building it", () 
   assert.ok(upload > check, "before uploading it");
 });
 
+test("the package build checks the published backend module before wasm-opt strips its names", () => {
+  const workflow = fs.readFileSync(
+    path.join(root, ".github/workflows/build-jazz-packages.yml"),
+    "utf8",
+  );
+  const job = workflow.slice(workflow.indexOf("\n  build-wasm-backend:\n"));
+  const steps = job.slice(0, job.indexOf("\n  test-wasm-durable-object:\n"));
+  const build = steps.indexOf("run: pnpm --filter jazz-wasm build:backend\n");
+  const check = steps.indexOf(
+    "run: node dev/gates/check-endorsement-symbols.mjs crates/jazz-wasm/backend/unstripped/jazz_wasm_backend_bg.wasm\n",
+  );
+  const upload = steps.indexOf("name: jazz-wasm-backend-pkg");
+  assert.ok(build >= 0, "the build-wasm-backend job builds the backend module");
+  assert.ok(check > build, "the build-wasm-backend job checks the module after building it");
+  assert.ok(upload > check, "before uploading it");
+});
+
 test("CI checks the symbols of the artifacts the TypeScript examples partition produced", () => {
   const partition = planFor({ partition: "typescript-examples" });
   const check = partition.find((item) => item.label === label);

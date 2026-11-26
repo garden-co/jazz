@@ -338,6 +338,11 @@ jobs:
           test ! -e crates/jazz-wasm/backend/pkg/.gitignore
           grep --quiet serveThinTransaction crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
 
+      # The published backend module links no lattice or SHA-3 code either.
+      # wasm-opt strips its names, so the check reads the copy from before it.
+      - name: Check jazz-wasm backend for lattice or SHA-3 symbols
+        run: node dev/gates/check-endorsement-symbols.mjs crates/jazz-wasm/backend/unstripped/jazz_wasm_backend_bg.wasm
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-backend-pkg
