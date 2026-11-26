@@ -3083,11 +3083,14 @@ impl Wakes {
 
     pub(crate) fn wake_at(&self, at: Instant) {
         let now = Instant::now();
-        if at <= now
-            || self
-                .armed
-                .get()
-                .is_some_and(|armed| armed > now && armed <= at)
+        if at <= now {
+            self.wake_now();
+            return;
+        }
+        if self
+            .armed
+            .get()
+            .is_some_and(|armed| armed > now && armed <= at)
         {
             return;
         }
@@ -18322,6 +18325,22 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    /// Alice's read may reach its deadline before the host arms it. Test
+    /// the scheduler directly to reproduce the boundary without sleeping.
+    #[test]
+    fn scheduling_an_elapsed_deadline_wakes_the_host_immediately() {
+        let wakes = super::Wakes::default();
+        let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = std::rc::Rc::clone(&requests);
+        *wakes.hook.borrow_mut() = Some(Box::new(move |at| recorded.borrow_mut().push(at)));
+        let elapsed = super::Instant::now();
+        let later = elapsed + std::time::Duration::from_secs(60);
+        wakes.wake_at(later);
+        wakes.wake_at(elapsed);
+        assert_eq!(requests.borrow().as_slice(), &[Some(later), None]);
+        assert_eq!(wakes.armed.get(), Some(later));
+    }
+
     /// A known catalogue version's bytes are what they were before versions
     /// decoded one by one (pinned from `main`, where `CatalogueVersion`
     /// held a `SchemaVersion`), and decode back to `Known`.

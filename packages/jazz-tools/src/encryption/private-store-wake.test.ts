@@ -82,3 +82,25 @@ it("drives a pending Rust deadline once and cancels a superseded timer", async (
   expect(vi.getTimerCount()).toBe(0);
   store.stop();
 });
+
+it("serves store wakes without advertising encryption state wakes on a store-only host", async () => {
+  const runtime = { ...target(), supportsEncryptionStateWake: false };
+  const serving = servePrivateStore(runtime, memoryPrivateStore());
+  try {
+    expect(serving.onStateChange).toBeUndefined();
+    runtime.request("1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.replyStore).toHaveBeenCalledExactlyOnceWith("1", true, '"1"');
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    serving.stop();
+  }
+});
+
+it("clears the host's store wake when serving stops", () => {
+  const runtime = target();
+  const setWake = vi.spyOn(runtime, "setStoreWake");
+  const serving = servePrivateStore(runtime, memoryPrivateStore());
+  serving.stop();
+  expect(setWake.mock.calls).toEqual([[expect.any(Function)], [null]]);
+});

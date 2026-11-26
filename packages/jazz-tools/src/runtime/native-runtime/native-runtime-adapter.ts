@@ -5017,9 +5017,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
-    const generation = this.serverConnectionGeneration;
     queueMicrotask(() => {
-      if (generation !== this.serverConnectionGeneration) return;
       this.serverPumpScheduled = false;
       if (this.closed) return;
       this.startServerPump();
