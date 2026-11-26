@@ -444,6 +444,59 @@ fn rotation_follow_up_reads_only_the_accounts_it_uses() {
     assert_eq!(alice.client.take_public_account_reads(), 2);
 }
 
+/// Alice rotates for 101 other members, and her first try at the rest
+/// fails because she is offline. Back online, the retry waits 2 s, as
+/// after a first failure online, and then reads only Alice's history and
+/// that of its one remaining recipient, as the rotator's own batch does:
+/// not every member's, as the pass would.
+#[test]
+fn a_rotation_retry_reads_only_the_accounts_its_batch_uses() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    for seed in 1..=101 {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+    }
+    pump(&server, &alice.db);
+
+    let address = space_address(&alice, space);
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 100);
+    let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+    alice.client.advance_settle_clock(std::time::Duration::ZERO);
+    alice.client.set_online(false);
+    // The rotation's own rows, seen once by the watch: their pass fails
+    // offline, and the rest of the rotation is not tried offline.
+    alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.finish_rotation_for_test(&alice.db, &address)
+        )
+        .is_err()
+    );
+    alice.client.set_online(true);
+    alice.client.advance_settle_clock(std::time::Duration::from_secs(1));
+    let early = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(early.is_empty(), "retried before its wait: {early:?}");
+    alice.client.advance_settle_clock(std::time::Duration::from_secs(1));
+    alice.client.take_public_account_reads();
+    let synced = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        matches!(synced.as_slice(), [(at, Ok(SpaceKeyState::Held))] if *at == address),
+        "{synced:?}"
+    );
+    // Alice for the sync's acquisition, then Alice and the final recipient
+    // for the batch: the pass would read all 102.
+    assert_eq!(alice.client.take_public_account_reads(), 1 + 2);
+    assert!(alice.sync_spaces(&server, &mut watch).unwrap().is_empty());
+}
+
 /// Mallory, a member who holds the space's key, gets the new version in
 /// the first batch of Alice's rotation and writes deliveries that do not
 /// open to the members left for the follow-up. Alice's background pass
