@@ -1121,6 +1121,65 @@ pub(crate) fn unchecked_address(address: &DbSpaceAddress) -> SpaceAddress {
 }
 
 #[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use jazz::db::{Db, DbConfig, DbIdentity, block_on};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::query::Query;
+    use jazz::records::Value;
+    use jazz::schema::JazzSchema;
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+    /// Alice replaces her watch after Bob updates a row. The opening
+    /// snapshot contains the same row ID and owner at a new position.
+    /// Only the watch's routing state exposes whether it noticed the change.
+    #[test]
+    fn a_reopened_watch_notices_a_rows_new_position() {
+        block_on(async {
+            let schema = JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(TableSchemaBuilder::new("notes").column("body", ColumnType::Text))
+                    .build(),
+            )
+            .unwrap();
+            let db = Db::open(DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ))
+            .await
+            .unwrap();
+            db.set_authority().await.unwrap();
+            let cells =
+                |text: &str| BTreeMap::from([("body".to_owned(), Value::String(text.into()))]);
+            let inserted = db
+                .insert("notes", cells("old"), Default::default())
+                .await
+                .unwrap();
+            let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+            let watch = || db.subscribe(&prepared, Default::default());
+            let owner = |_: &jazz::db::CurrentRow| Some("bob");
+            let mut before = WatchedRows::new(watch().await.unwrap());
+            assert_eq!(before.changes(owner), (BTreeSet::from(["bob"]), false));
+            db.upsert(
+                "notes",
+                inserted.row_uuid(),
+                cells("new"),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+            let mut reopened = WatchedRows::new(watch().await.unwrap());
+            reopened.rows = before.rows;
+            assert_eq!(reopened.changes(owner), (BTreeSet::from(["bob"]), false));
+        });
+    }
+}
+
+#[cfg(test)]
 mod event_tests {
     use super::*;
 
