@@ -583,18 +583,35 @@ impl E2eeClient {
                     return Ok(written);
                 }
                 Err(error) => {
-                    if self.shared.keys.borrow().online {
-                        pending.failures += 1;
-                    }
-                    if pending.failures >= ROTATION_ATTEMPTS {
-                        watch.pending_deliveries.remove(space);
-                    } else {
-                        pending.retry_at = Some(self.shared.now() + retry_delay(pending.failures));
-                    }
                     drop(watch);
+                    self.rotation_attempt_failed(space);
                     return Err(self.forget_account_on(error));
                 }
             }
+        }
+    }
+
+    /// Counts a failed attempt at the rest of this device's rotation of
+    /// `space`, wherever it failed: in a batch, or before it, in the
+    /// acquisition that must succeed first. Online it is one more failure
+    /// in a row; the next attempt waits [`retry_delay`], and the
+    /// [`ROTATION_ATTEMPTS`]th failure leaves the rest to the pass of any
+    /// holder (protocol §3.4). Offline it is not counted, and waits as long
+    /// as a first failure. Nothing pending: nothing to count.
+    pub(crate) fn rotation_attempt_failed(&self, space: &SpaceAddress) {
+        let online = self.shared.keys.borrow().online;
+        let now = self.shared.now();
+        let mut watch = self.shared.member_watch.borrow_mut();
+        let Some(pending) = watch.pending_deliveries.get_mut(space) else {
+            return;
+        };
+        if online {
+            pending.failures += 1;
+        }
+        if pending.failures >= ROTATION_ATTEMPTS {
+            watch.pending_deliveries.remove(space);
+        } else {
+            pending.retry_at = Some(now + retry_delay(pending.failures));
         }
     }
 

@@ -501,6 +501,82 @@ fn a_rotation_retry_reads_only_the_accounts_its_batch_uses() {
     assert!(alice.sync_spaces(&server, &mut watch).unwrap().is_empty());
 }
 
+/// Alice rotates for 101 other members, and every acquisition that must
+/// precede the rest of her rotation fails. Each failure counts as a failed
+/// attempt: the rest is tried again 2 s later, then 4, 8, 16 and 32 s, each
+/// time when its retry comes due and with nothing else syncing in, and
+/// the sixth failure in a row leaves it to the pass of any holder. The
+/// test hooks read the pending rest and the runtime's next wake, which no
+/// public API shows; the failure is injected, as no real server fails a
+/// read on cue.
+///
+/// ```text
+/// t=0    acquire fails (1) ── retry in 2 s
+/// t=2    acquire fails (2) ── retry in 4 s
+/// ...
+/// t=62   acquire fails (6) ── given up: nothing pending, no retry
+/// ```
+#[test]
+fn a_rotation_whose_acquisition_keeps_failing_retries_then_gives_up() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    for seed in 1..=101 {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+    }
+    pump(&server, &alice.db);
+
+    let address = space_address(&alice, space);
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 100);
+    assert_eq!(
+        alice.client.pending_rotation_for_test(&address).unwrap(),
+        Some((0, None))
+    );
+    let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+    alice.client.advance_settle_clock(std::time::Duration::ZERO);
+    alice.client.fail_acquisitions_for_test(6);
+    let second = std::time::Duration::from_secs(1);
+
+    // The first attempt, with the rotation's own rows.
+    let synced = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        matches!(synced.as_slice(), [(at, Err(_))] if *at == address),
+        "{synced:?}"
+    );
+    for (failures, wait) in [(1, 2), (2, 4), (3, 8), (4, 16), (5, 32)] {
+        let wait = std::time::Duration::from_secs(wait);
+        assert_eq!(
+            alice.client.pending_rotation_for_test(&address).unwrap(),
+            Some((failures, Some(wait))),
+            "after failure {failures}"
+        );
+        // The runtime is woken for the retry.
+        assert_eq!(alice.client.next_rotation_retry_for_test(), Some(wait));
+        alice.client.advance_settle_clock(wait - second);
+        let early = alice.sync_spaces(&server, &mut watch).unwrap();
+        assert!(early.is_empty(), "retried before its wait: {early:?}");
+        alice.client.advance_settle_clock(second);
+        let synced = alice.sync_spaces(&server, &mut watch).unwrap();
+        assert!(
+            matches!(synced.as_slice(), [(at, Err(_))] if *at == address),
+            "attempt {}: {synced:?}",
+            failures + 1
+        );
+    }
+    // The sixth failure gave up: nothing pending, and no retry to wake for.
+    assert_eq!(alice.client.pending_rotation_for_test(&address).unwrap(), None);
+    assert_eq!(alice.client.next_rotation_retry_for_test(), None);
+    alice
+        .client
+        .advance_settle_clock(std::time::Duration::from_secs(64));
+    assert!(alice.sync_spaces(&server, &mut watch).unwrap().is_empty());
+}
+
 /// Mallory, a member who holds the space's key, gets the new version in
 /// the first batch of Alice's rotation and writes deliveries that do not
 /// open to the members left for the follow-up. Alice's background pass
