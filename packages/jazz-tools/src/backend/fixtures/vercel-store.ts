@@ -110,6 +110,44 @@ export function fakeVercel(core: { appId: string; url: string }) {
     failLookups: 0,
     /** Called when a start brings the core up. */
     onStart: undefined as (() => void) | undefined,
+    /** The next `failStops` stops fail as Vercel's API does when it refuses one. */
+    failStops: 0,
+    /** Called when the store stops the Sandbox's session. */
+    onStop: undefined as (() => void) | undefined,
+    /** The session (its start) in which a start last brought the core up. */
+    launchedIn: undefined as Date | undefined,
+    /**
+     * What the Sandbox's core state check says (see `coreStateScript`);
+     * by default `listening` once a start brought the core up, else `down`.
+     */
+    coreState: undefined as (() => string | Promise<string>) | undefined,
+  };
+  /** The sessions (by start time) whose recycle a waiter claimed. */
+  const recycleClaims: number[] = [];
+  /** A command the store runs in the Sandbox and waits for, by its `$0`. */
+  const inSandbox = async (args: string[]) => {
+    if (state.status !== "running") throw new Error("Status code 410 is not ok: sandbox stopped");
+    if (args[2] === "jazz-core-state") {
+      const said = state.coreState
+        ? await state.coreState()
+        : state.launchedIn === state.startedAt && !state.failing
+          ? "listening 1"
+          : "down";
+      return { exitCode: 0, stdout: async () => `${said}\n` };
+    }
+    if (args[2] === "jazz-claim-recycle") {
+      const session = Number(args[3]);
+      const claimed = !recycleClaims.includes(session);
+      if (claimed) recycleClaims.push(session);
+      return { exitCode: claimed ? 0 : 1, stdout: async () => "" };
+    }
+    if (args[2] === "jazz-release-recycle") {
+      const at = recycleClaims.indexOf(Number(args[3]));
+      if (at >= 0) recycleClaims.splice(at, 1);
+      calls.push("release recycle");
+      return { exitCode: 0, stdout: async () => "" };
+    }
+    throw new Error(`unexpected command ${args.join(" ")}`);
   };
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
@@ -129,8 +167,9 @@ export function fakeVercel(core: { appId: string; url: string }) {
       },
     }),
     runCommand: async (command) => {
-      launches.push(command);
       const { args } = command;
+      if (args[0] === "-c") return inSandbox(args);
+      launches.push(command);
       const scriptPath = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
       const script = files.get(scriptPath)!.toString();
       const startId = scriptPath.replace(/^.*\//, "").replace(/\.sh$/, "");
@@ -157,6 +196,7 @@ export function fakeVercel(core: { appId: string; url: string }) {
         return;
       }
       state.failing = false;
+      state.launchedIn = state.startedAt;
       state.onStart?.();
       if (!state.running || newerVersion(version, state.running)) state.running = version;
     },
@@ -170,8 +210,14 @@ export function fakeVercel(core: { appId: string; url: string }) {
           : null
         : (files.get(path) ?? null),
     stop: async () => {
+      if (state.failStops > 0) {
+        state.failStops--;
+        calls.push("stop failed");
+        throw Object.assign(new Error("Status code 500 is not ok"), { response: { status: 500 } });
+      }
       calls.push("stop");
       state.status = "stopped";
+      state.onStop?.();
     },
   });
   const sdk: SandboxSdk = {
@@ -187,6 +233,8 @@ export function fakeVercel(core: { appId: string; url: string }) {
         if (!state.exists) throw new Error("404 sandbox not found");
         if (params.resume) {
           calls.push(`resume ${String(params.name)}`);
+          // A fresh session: resuming starts one.
+          if (state.status !== "running") state.startedAt = new Date();
           state.status = "running";
           const sbx = handle();
           await (params.onResume as (sbx: SandboxHandle) => Promise<void>)(sbx);
@@ -200,6 +248,7 @@ export function fakeVercel(core: { appId: string; url: string }) {
         state.region = String(params.region);
         state.exists = true;
         state.status = "running";
+        state.startedAt = new Date();
         return handle();
       },
     },
@@ -217,7 +266,7 @@ export function fakeVercel(core: { appId: string; url: string }) {
       },
     },
   };
-  return { sdk, calls, state, files, launches };
+  return { sdk, calls, state, files, launches, recycleClaims };
 }
 
 export function onVercel(env: Record<string, string>) {

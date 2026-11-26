@@ -21,6 +21,9 @@ dev/t --test integration --exact storage_corpus::pinned_sqlite_corpus_reopens_an
 # serves its deployments, accounts and rows, accepts current writes, and
 # reopens again.
 dev/t -p jazz-server --exact server::data_dir_corpus::pinned_server_data_dir_reopens_and_accepts_current_writes
+# A store from before the commit seq row (jazz#6367) is scanned until its
+# first write records the row; later opens read the row and scan nothing.
+dev/t --test integration --exact storage_corpus::pinned_server_corpus_gains_its_commit_seq_row_on_first_write
 # Its enum column holds each store's own tags, read back as names.
 dev/t --test integration --exact storage_corpus::pinned_corpus_stores_enum_tags
 # Damage is reported as a storage error, never read as rows.
