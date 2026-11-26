@@ -64,6 +64,32 @@ fn memory() -> Rc<dyn jazz_e2ee_client::PrivateStore> {
     Rc::new(MemoryStore::new())
 }
 
+/// As [`device`], with a runtime that uses `registry`.
+fn device_with_registry(
+    server: &Db,
+    who: AuthorSubject,
+    node: u8,
+    settings: &EncryptionSettings,
+    registry: jazz_e2ee::registry::Registry,
+) -> Device {
+    let client = block_on(E2eeClient::open(jazz_e2ee_client::ClientConfig {
+        store: memory(),
+        declarations: declarations_with(settings.clone()),
+        account_id: account_id(who),
+        registry,
+        random: Box::new(jazz_e2ee::OsRandom),
+        device_account: None,
+    }))
+    .unwrap();
+    let (db, link) = session(&client, server, who, settings, node, None);
+    Device {
+        client,
+        db,
+        notes: None,
+        _link: link,
+    }
+}
+
 impl Device {
     fn id(&self) -> String {
         self.client.device().unwrap().id.clone()
@@ -3696,22 +3722,7 @@ fn a_provider_failure_opening_the_recovery_delivery_fails_the_registration() {
         registry
             .replace_key_sealer(std::sync::Arc::new(RecoveryOpenFails(fails.clone())))
             .unwrap();
-        let client = block_on(E2eeClient::open(jazz_e2ee_client::ClientConfig {
-            store: memory(),
-            declarations: declarations_with(settings.clone()),
-            account_id: account_id(alice),
-            registry,
-            random: Box::new(jazz_e2ee::OsRandom),
-            device_account: None,
-        }))
-        .unwrap();
-        let (db, link) = session(&client, &server, alice, &settings, 1, None);
-        let first = Device {
-            client,
-            db,
-            notes: None,
-            _link: link,
-        };
+        let first = device_with_registry(&server, alice, 1, &settings, registry);
         first.status(&server, &[]);
         let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([9; 32]);
         let register = || {
@@ -4632,5 +4643,118 @@ fn a_reset_account_commits_the_root_it_registers_again() {
         pump(&server, &phone.db);
         check_root_commitment(&server, &account_id(alice), &phrase, 1);
         assert_eq!(count(&server, "__e2ee_commitments"), 2);
+    });
+}
+
+thread_local! {
+    /// Run once by [`RecoverySealHook`] when a recovery delivery is sealed.
+    static ON_RECOVERY_SEAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The built-in key sealing, except that sealing a recovery delivery first
+/// runs the closure in [`ON_RECOVERY_SEAL`], once.
+struct RecoverySealHook;
+
+impl jazz_e2ee::agility::MechanismImpl for RecoverySealHook {
+    fn mechanism(&self) -> jazz_e2ee::envelope::Mechanism<'static> {
+        jazz_e2ee::mechanisms::key_seal::MECHANISM
+    }
+}
+
+impl jazz_e2ee::agility::KeySealer for RecoverySealHook {
+    fn derive_key_pair(&self, ikm: &[u8]) -> jazz_e2ee::Result<jazz_e2ee::agility::KeyPair> {
+        jazz_e2ee::mechanisms::key_seal::Builtin.derive_key_pair(ikm)
+    }
+
+    fn seal(
+        &self,
+        recipient: &jazz_e2ee::agility::PublicKey,
+        context: &[u8],
+        key: &[u8; 32],
+        rng: &mut dyn jazz_e2ee::RandomSource,
+    ) -> jazz_e2ee::Result<Vec<u8>> {
+        let marker = b"__e2ee_recovery_deliveries";
+        if context.windows(marker.len()).any(|window| window == marker)
+            && let Some(hook) = ON_RECOVERY_SEAL.with(|hook| hook.borrow_mut().take())
+        {
+            hook();
+        }
+        jazz_e2ee::mechanisms::key_seal::Builtin.seal(recipient, context, key, rng)
+    }
+
+    fn open(
+        &self,
+        recipient: &jazz_e2ee::agility::KeyPair,
+        context: &[u8],
+        envelope: &[u8],
+    ) -> jazz_e2ee::Result<jazz_e2ee::Zeroizing<[u8; 32]>> {
+        jazz_e2ee::mechanisms::key_seal::Builtin.open(recipient, context, envelope)
+    }
+}
+
+/// Contract: a reset that lands while alice's laptop is registering her
+/// phrase (after the laptop read the account, before it committed) makes
+/// the registration fail with `device-no-longer-active`: its retry reads
+/// the new generation, where only the device that reset is active. Nothing
+/// is written: no root and no commitment, of either generation.
+///
+/// ```text
+/// alice's laptop ──register (phrase)──► reads generation 0, stages root₀ + commitment₀
+/// alice's phone ──reset──► generation 1 (the phone only)
+/// alice's laptop ──commit──► conflict; retry ──► device-no-longer-active
+/// ```
+#[test]
+fn a_reset_between_registration_attempts_fails_the_registration() {
+    within(|| {
+        let settings = EncryptionSettings {
+            allow_account_reset: true,
+            ..Default::default()
+        };
+        let server = Rc::new(secure_authority_with(&settings, None));
+        let alice = account(0xa2);
+        let phrase = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x33; 32]);
+        let mut registry = jazz_e2ee::registry::Registry::builtin();
+        registry
+            .replace_key_sealer(std::sync::Arc::new(RecoverySealHook))
+            .unwrap();
+        let laptop = device_with_registry(&server, alice, 1, &settings, registry);
+        assert_eq!(laptop.status(&server, &[]), AccountStatus::Active);
+        let phone = Rc::new(device(&server, alice, memory(), 2, &settings));
+        assert_eq!(phone.status(&server, &[]), AccountStatus::AwaitingApproval);
+
+        let reset = Rc::new(Cell::new(None));
+        let (resetting, server_db, outcome) = (phone.clone(), server.clone(), reset.clone());
+        ON_RECOVERY_SEAL.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                outcome.set(Some(drive(
+                    &server_db,
+                    &[&resetting.db],
+                    resetting.client.reset_account(&resetting.db),
+                )));
+            }));
+        });
+        let registered = drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.register_recovery(&laptop.db, &phrase),
+        );
+        assert_eq!(
+            reset
+                .take()
+                .expect("the reset ran during the registration")
+                .unwrap(),
+            AccountStatus::Active
+        );
+        assert!(
+            matches!(
+                registered,
+                Err(ClientError::Protocol(ProtocolError::DeviceNoLongerActive))
+            ),
+            "{registered:?}"
+        );
+        pump(&server, &laptop.db);
+        assert_eq!(count(&server, "__e2ee_recovery_roots"), 0);
+        assert_eq!(count(&server, "__e2ee_commitments"), 0);
     });
 }

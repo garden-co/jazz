@@ -830,6 +830,10 @@ impl E2eeClient {
                 None => {
                     let root = recovery_root(&writer, &view.state, &view.device, &keys)?;
                     let key = match commitment_key.take() {
+                        // Defence in depth: a retry cannot see another
+                        // generation today, since only a device that is not
+                        // active resets and the old generation's devices
+                        // are not active in the new one.
                         Some(key) if key.generation() == view.state.generation => key,
                         _ => RecoveryCommitmentKey::derive(secret, &domain, view.state.generation)?,
                     };
