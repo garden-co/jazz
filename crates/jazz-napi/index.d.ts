@@ -529,6 +529,13 @@ export interface DirOptions {
    * no other language's manifest is there (the npm CLI passes `"ts"`).
    */
   fallback?: string
+  /**
+   * `generateForDir`: write (or, with `check`, require) the Effect
+   * Schemas beside the TS bindings, `jazz.effect.generated.ts`, even
+   * before there is one (`--effect-schema`). Once committed, it is kept
+   * current either way.
+   */
+  effectSchema?: boolean
 }
 
 /** What `generateForDir` / `migrationsCreateForDir` did in an app's directory. */

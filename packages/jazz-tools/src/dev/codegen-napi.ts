@@ -56,6 +56,8 @@ export interface DirOptions {
   lang?: string[];
   /** The language assumed when nothing in the directory names one and no other language's manifest is there. */
   fallback?: string;
+  /** `generateForDir`: write (with `check`, require) jazz.effect.generated.ts beside the TS bindings even before there is one. */
+  effectSchema?: boolean;
 }
 
 /** What `generateForDir` / `migrationsCreateForDir` did. */

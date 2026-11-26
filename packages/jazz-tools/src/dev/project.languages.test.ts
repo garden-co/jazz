@@ -139,3 +139,41 @@ describe("generate in a Kotlin app", () => {
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/JazzApp\.kt/);
   });
 });
+
+describe("generate --effect-schema", () => {
+  it("writes jazz.effect.generated.ts once asked, then keeps it current and --check checks it", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root);
+    const effect = join(root, "jazz.effect.generated.ts");
+
+    await generateApp({ cwd: root });
+    expect(await fileExists(effect)).toBe(false);
+    await expect(generateApp({ cwd: root, check: true, effectSchema: true })).rejects.toThrow(
+      "no jazz.effect.generated.ts: run `npx jazz-tools generate --effect-schema`",
+    );
+
+    const result = await generateApp({ cwd: root, effectSchema: true });
+    expect(result.bindings).toEqual(["jazz.generated.ts", "jazz.effect.generated.ts"]);
+    expect(await readFile(effect, "utf8")).toContain('import { Schema } from "effect";');
+
+    // Its presence is the opt-in from now on.
+    const checked = await generateApp({ cwd: root, check: true });
+    expect(checked.bindings).toEqual(["jazz.generated.ts", "jazz.effect.generated.ts"]);
+    await writeFile(effect, "// edited\n");
+    await expect(generateApp({ cwd: root, check: true })).rejects.toThrow(
+      /jazz\.effect\.generated\.ts: not a module jazz-tools generated/,
+    );
+  });
+
+  it("is passed through by the CLI's generate, which names the file it wrote", async () => {
+    const { root } = await createWorkspace();
+    await writeTsApp(root);
+    const { logs } = await captureConsoleLogs(() =>
+      generate({ schemaDir: root, effectSchema: true }),
+    );
+    expect(await fileExists(join(root, "jazz.effect.generated.ts"))).toBe(true);
+    expect(logs.join("\n")).toMatch(
+      /jazz\.generated\.ts and \S*jazz\.effect\.generated\.ts from the app/,
+    );
+  });
+});
