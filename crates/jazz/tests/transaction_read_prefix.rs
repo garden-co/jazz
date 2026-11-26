@@ -666,6 +666,47 @@ mod ledger {
         assert_eq!(second.through, first.through);
     }
 
+    /// Alice's later query prepares successfully but fails serializable
+    /// validation before hydration. Its error waits for Bob's earlier read.
+    /// Alice: pin -> fetch A -> admit B -> return A -> return B's error
+    /// Bob:                              reply A
+    #[test]
+    fn early_ledger_query_error_waits_for_the_earlier_read() {
+        let (alice, bob, mut link) = fixture();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        link.pin(&alice, &bob, id);
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let join = alice
+            .prepare_query(&Query::from("notes").flat_join(
+                "history.notes",
+                "notes.id",
+                "history.notes.id",
+            ))
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&join));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(
+            poll(second.as_mut()).is_pending(),
+            "the early error must wait its turn"
+        );
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(matches!(poll(first.as_mut()), Poll::Ready(Ok(_))));
+        let Poll::Ready(Err(error)) = poll(second.as_mut()) else {
+            panic!("a serializable ledger read should refuse the flat join");
+        };
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error
+                .message
+                .contains("not supported in serializable transactions")
+        );
+    }
+
     /// Alice's first read refuses her staged row. Bob then inserts a row
     /// that Alice's first successful read sees at a fresh authority cut.
     #[test]
