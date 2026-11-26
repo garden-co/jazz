@@ -242,12 +242,14 @@ it("wakes for a write deadline while the active device is offline", async () => 
       startedAt,
       repeated: false,
     });
+    const returned = Date.now();
     expect(JSON.parse(result)).toBe("stop");
     expect(delayed.mock.calls.some(([, , name]) => name.startsWith("held-"))).toBe(true);
-    // The host's timer was due at the write's own deadline (the clock rounds
-    // up by a millisecond), not at some other wake.
+    // The timer that fired was due at the write's own deadline, not at some
+    // earlier wake: due no sooner than the deadline (less clock rounding)
+    // and no later than the call's return.
     expect(
-      firedDue.some((due) => due >= deadline - 5 && due <= deadline + 30),
+      firedDue.some((due) => due >= deadline - 5 && due <= returned),
       JSON.stringify({ deadline, fired, firedDue }),
     ).toBe(true);
   } finally {
