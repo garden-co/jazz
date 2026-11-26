@@ -383,7 +383,11 @@ wherever it enters JSON. Optional columns
 
 A commitment's `subjectKind` is `device` or `recovery-root`, and
 `subjectId` is that device's or recovery root's ID. This version writes
-only `recovery-root` commitments.
+only `recovery-root` commitments. A `commitment` under a mechanism the
+reader knows has exactly that mechanism's key length (32 bytes for
+`jazz.commit.slh-dsa-sha2-128s` v1): any other length makes the record
+invalid, even when its signature verifies. One under a mechanism or version
+the reader does not know is unsupported, not invalid.
 
 `action` is `remove-device` or `retire-recovery-root`; the matching target
 column is set. `retiredRecoveryRootIds` is an ID list (§0) of recovery root
