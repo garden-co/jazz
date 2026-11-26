@@ -2142,3 +2142,66 @@ async fn removing_space_members_requires_the_authority() {
     bob.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// Alice admits Bob at the authority while her second device is offline.
+/// That device waits for an authority read before queuing a removal. Once
+/// online, it removes the membership the authority found and counts it.
+///
+/// ```text
+/// replica ──disconnect──┐
+/// alice ──admit bob─────┼──► authority
+/// replica ──remove bob──┘    waits for read, no upload
+/// replica ──reconnect──────► authority ──find bob──► remove one
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_member_waits_for_an_authority_read_before_queuing_a_commit() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app
+        .device_of(key.clone())
+        .await
+        .durable(DurabilityTier::GlobalServer);
+    let replica = app.device_of(key).await;
+    let bob = app.device().await;
+    for device in [&alice, &replica, &bob] {
+        assert_eq!(ready(device).await, "active");
+    }
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap();
+    replica.disconnect().await.unwrap();
+    alice
+        .add_member::<Project>(project.id, bob_account)
+        .await
+        .unwrap();
+
+    let upload_revision =
+        || replica.with_client(|client| async move { Ok(client.upload_status().pending_revision) });
+    let before = upload_revision().await.unwrap();
+    let mut removal = std::pin::pin!(replica.remove_member::<Project>(project.id, bob_account));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut removal)
+            .await
+            .is_err(),
+        "the authority read waits while disconnected"
+    );
+    assert_eq!(
+        upload_revision().await.unwrap(),
+        before,
+        "a stale read must not queue an empty removal commit"
+    );
+
+    replica.reconnect().await.unwrap();
+    assert_eq!(removal.await.unwrap(), 1);
+
+    replica.shutdown().await.unwrap();
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
