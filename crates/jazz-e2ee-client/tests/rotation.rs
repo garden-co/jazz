@@ -16,7 +16,9 @@ use jazz_e2ee::{OsRandom, RandomSource};
 use jazz_e2ee_client::host::bridge::JsStore;
 use jazz_e2ee_client::host::runtime::{Built, Encryption};
 use jazz_e2ee_client::testing::StoreWithSaveHook;
-use jazz_e2ee_client::{AccountStatus, ClientConfig, E2eeClient, MemoryStore, Report};
+use jazz_e2ee_client::{
+    AccountStatus, ClientConfig, E2eeClient, MemoryStore, PrivateStore, Report,
+};
 
 /// Alice's rotation reads all deliveries for the current epoch only.
 /// A later batch reads just Alice's deliveries and cannot decide who else
@@ -374,4 +376,83 @@ fn startup_reports_delivery_failure_for_an_unwatched_space() {
         "{failures:?}"
     );
     runtime.stop();
+}
+
+/// Alice rotates her space. Her device rewrites the held-key document with
+/// the new key, keeping the records of her earlier keys byte for byte
+/// rather than sealing and signing them again (sealing is randomised, so a
+/// resealed record would differ).
+#[test]
+fn a_rotation_rewrites_only_the_new_key_record() {
+    let settings = EncryptionSettings::default();
+    let server = secure_authority_with(&settings, None);
+    let alice = account(0xa1);
+    let store = MemoryStore::new();
+    let client = open_account(Rc::new(store.clone()), alice, settings.clone(), None);
+    let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+    assert_eq!(
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+        AccountStatus::Active
+    );
+    let space = project(&db, "plans");
+    pump(&server, &db);
+    let scope = block_on(db.table_identity("projects")).unwrap().unwrap().0;
+    block_on(server.insert(
+        "__e2ee_members",
+        BTreeMap::from([
+            ("scopeId".to_owned(), Value::Uuid(scope)),
+            ("identifier".to_owned(), Value::Uuid(space)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(alice.account_id().unwrap().0),
+            ),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &db);
+    drive(
+        &server,
+        &[&db],
+        host_write(&client, &db, async || {
+            db.insert("notes", note(space, SECRET), Default::default())
+                .await
+        }),
+    )
+    .unwrap();
+    let records = || {
+        let mut records = Vec::new();
+        for scope in store.scopes() {
+            for name in block_on(store.list(&scope)).unwrap().into_iter() {
+                if !name.starts_with("held-") {
+                    continue;
+                }
+                let stored = block_on(store.load(&scope, &name)).unwrap().unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&stored.bytes).unwrap();
+                records.extend(
+                    value["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|key| key.to_string()),
+                );
+            }
+        }
+        records
+    };
+    let address = SpaceAddress {
+        scope_id: scope.to_string(),
+        identifier: space.to_string(),
+    };
+    // The first rotation also publishes the creation's key, so its record
+    // changes; the second changes neither earlier key.
+    drive(&server, &[&db], client.rotate(&db, &address)).unwrap();
+    let before = records();
+    assert_eq!(before.len(), 2);
+    assert!(before.iter().all(|record| !record.contains("unpublished")));
+
+    drive(&server, &[&db], client.rotate(&db, &address)).unwrap();
+    let after = records();
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[..2], before[..], "an earlier key was sealed again");
 }

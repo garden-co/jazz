@@ -91,6 +91,22 @@ pub struct Rejected {
     pub reason: Rejection,
 }
 
+/// The key records of one root's document as this device last sealed or
+/// loaded them, each with the key and mark it holds, so a rewrite seals
+/// again only the keys that changed ([`StoreOwner::seal_stored_document_reusing`]).
+#[derive(Clone, Default)]
+pub struct SealedKeys {
+    records: BTreeMap<usize, (HeldEntry, HeldKeyRecord)>,
+}
+
+impl core::fmt::Debug for SealedKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SealedKeys")
+            .field("depths", &self.records.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// The checked lineage and keys of a loaded document, and its skipped records.
 #[derive(Debug)]
 pub struct Loaded {
@@ -107,6 +123,8 @@ pub struct Loaded {
     /// The same document with an advanced verification depth, if any.
     /// The store must save it only against the revision that was loaded.
     pub updated_document: Option<Vec<u8>>,
+    /// The accepted key records, for the next rewrite to reuse.
+    pub sealed: SealedKeys,
 }
 
 /// The device whose store this is: its application, account and keys.
@@ -202,6 +220,8 @@ impl StoreOwner<'_> {
             envelope: Vec::new(),
             signature: Vec::new(),
         };
+        #[cfg(test)]
+        KEY_RECORDS_SEALED.set(KEY_RECORDS_SEALED.get() + 1);
         let body = record.body_bytes()?;
         let sealing = &self.device.sealing;
         let sealer = self
@@ -231,6 +251,21 @@ impl StoreOwner<'_> {
         revision: u64,
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<HeldDocument> {
+        self.seal_document_reusing(space, carried, revision, &SealedKeys::default(), rng)
+            .map(|(document, _)| document)
+    }
+
+    /// [`Self::seal_document`], reusing each record of `previous` whose key,
+    /// mark, binding, epoch and prefix are unchanged instead of sealing and
+    /// signing it again; returns the records for the next rewrite.
+    fn seal_document_reusing(
+        &self,
+        space: &HeldSpace,
+        carried: &[HeldKeyRecord],
+        revision: u64,
+        previous: &SealedKeys,
+        rng: &mut dyn RandomSource,
+    ) -> ProtocolResult<(HeldDocument, SealedKeys)> {
         if carried.iter().any(|record| record.root_id != space.root.id) {
             return Err(ProtocolError::InvalidRecord(
                 "a carried record of another root",
@@ -249,16 +284,37 @@ impl StoreOwner<'_> {
         // device's own record of an epoch replace one carried, unless the
         // carried one is `refused`.
         let prefixes = prefix_hashes(&space.root, &space.successors, space.keys.keys().copied())?;
+        let binding = self.binding()?;
         let mut keys = Vec::with_capacity(carried.len() + space.keys.len());
         keys.extend_from_slice(carried);
+        let mut sealed = SealedKeys::default();
         for ((&depth, entry), prefix) in space.keys.iter().zip(prefixes) {
-            keys.push(self.seal_key_with_prefix(space, depth, entry, prefix, rng)?);
+            let reused = previous.records.get(&depth).filter(|(held, record)| {
+                held.mark == entry.mark
+                    && bool::from(held.key.ct_eq(&*entry.key))
+                    && record.binding == binding
+                    && record.root_id == space.root.id
+                    && record.depth == depth as u64
+                    && space.epoch_at(depth) == Some(record.epoch_id.as_str())
+                    && record.prefix == prefix
+            });
+            let record = match reused {
+                Some((_, record)) => record.clone(),
+                None => self.seal_key_with_prefix(space, depth, entry, prefix, rng)?,
+            };
+            sealed
+                .records
+                .insert(depth, (entry.clone(), record.clone()));
+            keys.push(record);
         }
-        Ok(HeldDocument {
-            revision,
-            lineage,
-            keys,
-        })
+        Ok((
+            HeldDocument {
+                revision,
+                lineage,
+                keys,
+            },
+            sealed,
+        ))
     }
 
     /// Encodes the held space for the private store, authenticating the
@@ -270,18 +326,34 @@ impl StoreOwner<'_> {
         revision: u64,
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Vec<u8>> {
-        let bytes = self
-            .seal_document(space, carried, revision, rng)?
-            .encode()?;
+        self.seal_stored_document_reusing(space, carried, revision, &SealedKeys::default(), rng)
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// [`Self::seal_stored_document`], sealing again only the keys whose
+    /// records in `previous` (from the last load or save of this document)
+    /// no longer match; returns the records for the next rewrite.
+    pub fn seal_stored_document_reusing(
+        &self,
+        space: &HeldSpace,
+        carried: &[HeldKeyRecord],
+        revision: u64,
+        previous: &SealedKeys,
+        rng: &mut dyn RandomSource,
+    ) -> ProtocolResult<(Vec<u8>, SealedKeys)> {
+        let (document, sealed) =
+            self.seal_document_reusing(space, carried, revision, previous, rng)?;
+        let bytes = document.encode()?;
         let verified = space
             .verified_through
             .filter(|&verified| carried.iter().all(|record| record.depth > verified as u64));
-        match (verified, self.document_key()) {
+        let bytes = match (verified, self.document_key()) {
             (Some(depth), Some(key)) => {
-                Self::authenticate_document(&bytes[..bytes.len() - 1], depth, &key)
+                Self::authenticate_document(&bytes[..bytes.len() - 1], depth, &key)?
             }
-            _ => Ok(bytes),
-        }
+            _ => bytes,
+        };
+        Ok((bytes, sealed))
     }
 
     fn document_key(&self) -> Option<Zeroizing<[u8; 32]>> {
@@ -523,13 +595,24 @@ impl StoreOwner<'_> {
         let prefixes = prefix_hashes(&space.root, &space.successors, 0..prefix_count)?;
         let mut rejected = Vec::new();
         let mut unsupported = Vec::new();
+        let mut sealed = SealedKeys::default();
         for (index, record) in document.keys.iter().enumerate() {
             let outcome = match record {
                 Some(record) => self.check_key(&space, &prefixes, record, verified_through)?,
                 None => Err(Rejection::Malformed),
             };
             match outcome {
-                Ok((depth, entry)) => space.keep_entry(depth, entry),
+                Ok((depth, entry)) => {
+                    // A record whose entry is not the one kept (a later
+                    // duplicate under a refused mark) is never reused: the
+                    // rewrite compares the entry it holds.
+                    if let Some(record) = record {
+                        sealed
+                            .records
+                            .insert(depth, (entry.clone(), record.clone()));
+                    }
+                    space.keep_entry(depth, entry);
+                }
                 Err(reason) => {
                     if let (Rejection::Unsupported, Some(record)) = (reason, record) {
                         unsupported.push(record.clone());
@@ -550,6 +633,7 @@ impl StoreOwner<'_> {
             rejected,
             unsupported,
             updated_document: None,
+            sealed,
         })
     }
 
@@ -563,6 +647,7 @@ impl StoreOwner<'_> {
             }],
             unsupported: Vec::new(),
             updated_document: None,
+            sealed: SealedKeys::default(),
         }
     }
 }
@@ -586,6 +671,7 @@ pub(super) fn verify_stored_signature(
 #[cfg(test)]
 std::thread_local! {
     static KEY_RECORDS_VERIFIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static KEY_RECORDS_SEALED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -932,6 +1018,46 @@ mod tests {
         let space = reopened.space.unwrap();
         assert_eq!(space.held().count(), 4);
         assert_eq!(space.verified_through, Some(1), "the gap at 2 ends the run");
+    }
+
+    /// Alice reopens her space and keeps the key of one more rotation: the
+    /// rewrite seals only that key and reuses the other records byte for
+    /// byte. A key whose mark changes is sealed again.
+    #[test]
+    fn a_rewrite_seals_only_the_changed_keys() {
+        let mut rng = cycling_random();
+        let alice = Alice::new(&mut rng);
+        let owner = alice.owner();
+        let full = alice.space(10, &mut rng);
+        let bytes = owner
+            .seal_stored_document(&truncated(&full, 9), &[], 0, &mut rng)
+            .unwrap();
+        let loaded = owner.load_stored_document(&bytes).unwrap().unwrap();
+        let mut space = loaded.space.unwrap();
+        space.keep(full).unwrap();
+
+        KEY_RECORDS_SEALED.set(0);
+        let (rewritten, sealed) = owner
+            .seal_stored_document_reusing(&space, &[], 0, &loaded.sealed, &mut rng)
+            .unwrap();
+        assert_eq!(KEY_RECORDS_SEALED.get(), 1, "only the new key");
+        let before = decode_document(&bytes).unwrap().keys;
+        let after = decode_document(&rewritten).unwrap().keys;
+        assert_eq!(after.len(), 11);
+        assert_eq!(before[..], after[..10]);
+        let reopened = owner.load_stored_document(&rewritten).unwrap().unwrap();
+        assert!(reopened.rejected.is_empty());
+        assert_eq!(reopened.space.unwrap().held().count(), 11);
+
+        space.keys.get_mut(&3).unwrap().mark = KeyMark::Refused;
+        KEY_RECORDS_SEALED.set(0);
+        let (refused, _) = owner
+            .seal_stored_document_reusing(&space, &[], 0, &sealed, &mut rng)
+            .unwrap();
+        assert_eq!(KEY_RECORDS_SEALED.get(), 1, "only the changed mark");
+        let reopened = owner.load_stored_document(&refused).unwrap().unwrap();
+        assert!(reopened.rejected.is_empty());
+        assert_eq!(reopened.space.unwrap().mark(3), Some(&KeyMark::Refused));
     }
 
     /// A marker whose tag does not match the bytes is ignored: every record

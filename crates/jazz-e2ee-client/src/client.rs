@@ -19,7 +19,9 @@ use jazz_e2ee::protocol::content::local::{
     DeviceSecrets, FLOOR_FORMAT, FloorRecord, FloorVerifier, StoredApproval, StoredDevice,
     decode_device_document,
 };
-use jazz_e2ee::protocol::content::store::{HeldKeyRecord, Rejected, RejectedRecord, StoreOwner};
+use jazz_e2ee::protocol::content::store::{
+    HeldKeyRecord, Rejected, RejectedRecord, SealedKeys, StoreOwner,
+};
 use jazz_e2ee::protocol::derive;
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::AppDomain;
@@ -81,6 +83,9 @@ struct HeldDocumentState {
     carried: Vec<HeldKeyRecord>,
     /// The checked lineage when no key of the document loaded.
     lineage: Option<HeldSpace>,
+    /// The key records last read or written, reused by the next rewrite
+    /// for keys that did not change.
+    sealed: SealedKeys,
 }
 
 #[derive(Default)]
@@ -468,6 +473,7 @@ impl E2eeClient {
             removals: loaded.revision,
             carried: loaded.unsupported,
             lineage: None,
+            sealed: loaded.sealed,
         };
         if advance_verification
             && let Some(bytes) = loaded.updated_document
@@ -894,17 +900,19 @@ impl E2eeClient {
                     .space(&root_id)
                     .is_some_and(|held| held.same_stored_state(&staged))
             };
-            let bytes = if let Some(bytes) = state.confirmed_bytes.take().filter(|_| unchanged()) {
-                bytes
-            } else {
-                let device = self.shared.device()?;
-                Self::owner_of(&self.shared, &device).seal_stored_document(
-                    &staged,
-                    &state.carried,
-                    state.removals,
-                    &mut **self.shared.random.borrow_mut(),
-                )?
-            };
+            let (bytes, sealed) =
+                if let Some(bytes) = state.confirmed_bytes.take().filter(|_| unchanged()) {
+                    (bytes, state.sealed.clone())
+                } else {
+                    let device = self.shared.device()?;
+                    Self::owner_of(&self.shared, &device).seal_stored_document_reusing(
+                        &staged,
+                        &state.carried,
+                        state.removals,
+                        &state.sealed,
+                        &mut **self.shared.random.borrow_mut(),
+                    )?
+                };
             // The store still checks the incarnation and revision for reused bytes.
             match retry_save(
                 self.store
@@ -920,6 +928,7 @@ impl E2eeClient {
                 Ok(Some(revision)) => {
                     state.revision = Some(revision);
                     state.lineage = None;
+                    state.sealed = sealed;
                     self.ensure_open()?;
                     self.shared.keys.borrow_mut().held.hold(staged.clone())?;
                     state.confirmed_bytes = unchanged().then_some(bytes);
