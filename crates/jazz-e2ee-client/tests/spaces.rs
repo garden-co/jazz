@@ -2610,6 +2610,41 @@ fn two_holders_racing_write_exactly_one_delivery() {
     });
 }
 
+/// Alice's pass sends Bob the root key. A rotation commits before the
+/// pass reads its next batch, so that read verifies the newer chain.
+///
+/// ```text
+/// delivery pass ──send root key──► pause ─────────────► read again
+/// alice ────────────────────────────────rotate──► authority
+/// ```
+#[test]
+fn a_delivery_pass_replays_a_chain_that_advances_between_batches() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        let dbs = [&alice.db, &bob.db];
+        let address = space_address(&alice, space);
+        let before = alice.client.delivery_chain_replays();
+        let mut pass = std::pin::pin!(deliver_for(&alice.client, &alice.db, &address));
+        drive(&server, &dbs, async {
+            futures::future::poll_fn(|cx| {
+                if count(&server, "__e2ee_space_deliveries") == 1 {
+                    return std::task::Poll::Ready(());
+                }
+                assert!(pass.as_mut().poll(cx).is_pending());
+                std::task::Poll::Pending
+            })
+            .await;
+            assert_eq!(alice.client.delivery_chain_replays() - before, 1);
+            assert_eq!(alice.client.rotate(&alice.db, &address).await.unwrap(), 1);
+        });
+        assert_eq!(drive(&server, &dbs, pass).unwrap(), 1);
+        assert_eq!(alice.client.delivery_chain_replays() - before, 2);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        assert_eq!(count(&server, "__e2ee_space_deliveries"), 2);
+    });
+}
+
 /// Once Alice has seen the project tombstone she can still write retained
 /// notes where policy allows, without attempting a rotation of the deleted project.
 #[test]

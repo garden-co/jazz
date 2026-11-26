@@ -21,7 +21,7 @@ use jazz_e2ee::protocol::error::RefusalCode;
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::space::build::{Author, deliver, recover_rotation, rotate};
 use jazz_e2ee::protocol::space::members::{
-    DELIVERY_BATCH, lacking_held, rotation_mark, rotation_recipients,
+    DELIVERY_BATCH, DeliveryChain, lacking_held, rotation_mark, rotation_recipients,
 };
 
 use super::{ATTEMPTS, Replayed, SpaceReadPurpose, SpaceWatch, offline, protocol_address};
@@ -50,14 +50,15 @@ impl E2eeClient {
     /// that lacks a version this device holds, at most
     /// [`DELIVERY_BATCH`], read and committed in `tx`. Also evaluates the
     /// needs-rotation mark from the same read. How many deliveries it wrote.
-    async fn deliver_step(
-        &self,
+    async fn deliver_step<'a>(
+        &'a self,
         db: &Db,
         tx: OpenTransactionId,
         space: &SpaceAddress,
+        previous: &mut Option<DeliveryChain<'a>>,
     ) -> Result<usize, ClientError> {
         let mut read = self
-            .read_space_of(db, tx, space, SpaceReadPurpose::Deliver)
+            .read_space_of(db, tx, space, SpaceReadPurpose::Deliver(previous))
             .await?;
         let members = read.ledger.member_accounts().len();
         if members > MEMBER_LIMIT {
@@ -227,9 +228,10 @@ impl E2eeClient {
             return Err(offline());
         }
         let mut total = 0;
+        let mut previous = None;
         for _ in 0..MAX_BATCHES {
             let outcome = crate::account::serializable(db, ATTEMPTS, async |tx| {
-                self.deliver_step(db, tx, space).await
+                self.deliver_step(db, tx, space, &mut previous).await
             })
             .await;
             match outcome {
