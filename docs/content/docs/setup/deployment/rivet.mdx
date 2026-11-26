@@ -1,0 +1,114 @@
+---
+title: Rivet
+description: Run your app's Jazz core in a Rivet actor.
+---
+
+In order to run Jazz on Rivet, you deploy the Jazz core and the Jazz backend separately. The core is a standalone, pure-Rust application provided by the `jazz-rivet` crate. All of Jazz's data lives inside a Rivet actor's embedded SQLite database (except for large values, that can be stored in blob storage directly). The Jazz backend authenticates users and publishes the app and permissions to the actor. Clients connect to the backend's usual `/jazz` endpoint.
+
+## Running Jazz locally
+
+### Requirements
+
+- A TypeScript RivetKit app running Node.js 22.18 or newer, with the `jazz-tools` package installed.
+- A Jazz source checkout matching the app’s `jazz-tools` version to build the Rust runner.
+- Rustup, a native C/C++ build toolchain, and a Rivet 3.x Engine binary.
+
+### Running the Jazz core
+
+Generate a secret once with `openssl rand -hex 32` and set `JAZZ_CORE_SECRET` to that value in both the runner and backend environments. From the Jazz checkout, start the runner:
+
+```sh
+export RIVET_ENGINE_BINARY_PATH=/absolute/path/to/rivet-engine
+export RIVET_POOL=jazz
+cargo run --locked -p jazz-rivet
+```
+
+### Running the Jazz backend
+
+In your TypeScript Rivet app, create one Jazz backend and mount it on the registry’s application listener.
+
+```ts
+import { registry } from "./registry.js"; // Your app’s RivetKit registry.
+import { createJazz, rivet } from "jazz-tools/backend";
+import { app } from "./jazz.generated.js";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+const jazz = createJazz({
+  app,
+  permissions,
+  store: rivet({
+    endpoint: "http://127.0.0.1:6420",
+    namespace: "default",
+    token: "default", // Local engine. Use a server-side credential in production.
+    pool: "jazz",
+    key: "my-app",
+    secret: process.env.JAZZ_CORE_SECRET!,
+  }),
+  authenticate, // Your existing main backend's session callback.
+});
+
+await registry.listen({
+  application: {
+    fetch: (request) => jazz.handle(request),
+  },
+});
+```
+
+Use this listener in place of `registry.start()`. If the application already serves other routes, forward `/jazz` and its subpaths to `jazz.handle(request)` in the existing fetch handler. Opening the store gets or creates the actor in the Rivet pool. Keep its namespace and key stable across releases. A new key opens a separate database. WebSocket sessions keep the actor awake until disconnect. Its SQLite storage survives sleep.
+
+## Deploy to Rivet Cloud
+
+Deploy the TypeScript app to its usual pool (`default` below) and the Jazz core to a pool named `jazz` in the same cluster. The app serves the public `/jazz` endpoint. The core registers the `jazz` actor with Rivet.
+
+### Build and deploy the runner
+
+In a clean Jazz source checkout, save the following as `Dockerfile.jazz` at the repository root. The first stage builds the runner from the locked workspace. The runtime image contains the executable and its system dependencies.
+
+```dockerfile
+FROM rust:1.100.0-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p jazz-rivet
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/jazz-rivet /usr/local/bin/jazz-rivet
+ENTRYPOINT ["jazz-rivet"]
+```
+
+Sign in and link the checkout to your cluster. Set `JAZZ_CORE_SECRET` once, entering a newly generated `openssl rand -hex 32` value at the prompt. Both pools will reference this secret.
+
+```sh
+npx @rivetkit/cli login
+npx @rivetkit/cli link --org my-org --cluster my-cluster
+npx @rivetkit/cli cluster secret set JAZZ_CORE_SECRET
+npx @rivetkit/cli deploy --pool jazz --dockerfile Dockerfile.jazz --secret JAZZ_CORE_SECRET
+```
+
+The deploy command configures the runner pool. Rivet supplies its endpoint, token and pool name to the runner. For a multi-region cluster, pass the intended `--region` on both deploy commands. See the [Rivet CLI reference](https://rivet.dev/docs/cli/).
+
+### Deploy the TypeScript app
+
+In the local example above, replace the store options with the values for your cluster. Pass the HTTPS endpoint, namespace and server-side token separately. Set `pool` to the runner’s pool even though the app runs in `default`.
+
+```ts
+store: rivet({
+  endpoint: new URL(process.env.RIVET_ENDPOINT!).origin,
+  namespace: process.env.RIVET_NAMESPACE ?? "default",
+  token: process.env.RIVET_TOKEN!,
+  pool: "jazz",
+  key: "my-app",
+  secret: process.env.JAZZ_CORE_SECRET!,
+}),
+```
+
+From the TypeScript app directory, deploy the app’s Dockerfile to the same cluster. This example uses the `default` namespace. If the runner uses another namespace, set `RIVET_NAMESPACE` to the same value in both pools. Configure the app’s HTTP listener to serve on the port Rivet provides in `PORT`. See [Rivet’s actor node deployment guide](https://rivet.dev/docs/deploy/cloud/compute/).
+
+```sh
+npx @rivetkit/cli link --org my-org --cluster my-cluster
+npx @rivetkit/cli deploy --pool default --secret JAZZ_CORE_SECRET
+```
+
+On first use, the backend gets or creates the actor for `my-app` in the `jazz` pool. To check the deployment, sign in through the frontend, write a row, and read it back in a fresh session. Subsequent app releases can deploy to `default` independently. When upgrading the runner, redeploy to `jazz` and keep the database namespace and key stable.
