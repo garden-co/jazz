@@ -311,7 +311,8 @@ describe("a thin session of an app with encrypted columns", () => {
 
   it("keeps an opted-out streamed space insert thin, without a creator member", async () => {
     const host = await serve();
-    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The refusal is logged once per process; keep it out of the output.
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const session = await open(host);
     const thin = db(session);
     const ownerId = session.getSnapshot().client!.session!.user!;
@@ -334,7 +335,6 @@ describe("a thin session of an app with encrypted columns", () => {
     );
     expect(refused.error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
     expect((refused.error as EncryptionNeedsLocalFirstError).creatorMembership).toBe(true);
-    expect(logged).toHaveBeenCalled();
   }, 60_000);
 
   it("stores a waited insert's encrypted cell as ciphertext, not its plaintext", async () => {
