@@ -301,21 +301,39 @@ it("detects a challenge through the approval watch, without a polling timer", as
 it("wakes for a write deadline while the active device is offline", async () => {
   const { fired } = observeStoreClock();
   const host = await serve(undefined, permissions, "memory");
-  const alice = await device(host);
+  const store = memoryPrivateStore();
+  const alice = await device(host, { privateStore: store });
   const id = await makeProject(alice, "plans");
   const scopeId = (alice.db.currentRuntime() as NativeRuntimeAdapter).tableIdentity("projects");
   await alice.db.disconnect();
   fired.length = 0;
-  const started = Date.now();
-  await alice.db.encryption["native"].encryptionCall("retryWrite", {
-    scopeId,
-    identifier: id,
-    startedAt: started - 9_800,
-    repeated: true,
+
+  // Hold the first key save so the retry must wait for its own deadline.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
   });
-  expect(Date.now() - started).toBeGreaterThanOrEqual(200);
-  expect(fired.filter((delay) => delay > 0 && delay <= 201)).toHaveLength(1);
-}, 60_000);
+  const save = store.save.bind(store);
+  const delayed = vi.spyOn(store, "save").mockImplementation(async (...args) => {
+    if (args[2].startsWith("held-")) await held;
+    return save(...args);
+  });
+  try {
+    const remaining = 5_000;
+    const result = await alice.db.encryption["native"].encryptionCall("retryWrite", {
+      scopeId,
+      identifier: id,
+      startedAt: Date.now() - (10_000 - remaining),
+      repeated: false,
+    });
+    expect(JSON.parse(result)).toBe("stop");
+    expect(delayed.mock.calls.some(([, , name]) => name.startsWith("held-"))).toBe(true);
+    expect(fired.some((delay) => delay > 0 && delay <= remaining + 1)).toBe(true);
+  } finally {
+    release();
+    delayed.mockRestore();
+  }
+}, 30_000);
 
 describe("encryption on Node, end to end", () => {
   it.each([false, true])(
