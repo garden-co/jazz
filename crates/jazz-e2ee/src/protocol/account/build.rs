@@ -15,7 +15,10 @@ use crate::error::Error;
 use crate::random::RandomSource;
 use crate::registry::{Registry, Suite};
 
-use super::super::derive::{self, RecoveryKeys};
+use crate::primitives::slh_dsa::CommitmentKey;
+
+use super::super::commitment::MECHANISM as COMMITMENT_MECHANISM;
+use super::super::derive::{self, RecoveryKeys, RecoverySecret};
 use super::super::device_account::DeviceAccountIdentity;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{
@@ -35,6 +38,7 @@ use super::super::records::account::{
     approval_signed_bytes, challenge_signed_bytes, delivery_marker_context, identity_context,
     nonce_commitment, proof_signed_bytes, recovery_delivery_context, successor_context,
 };
+use super::super::records::roster::{Commitment, SubjectKind};
 use super::super::signing;
 use super::key::AccountKey;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
@@ -1114,6 +1118,37 @@ pub fn recovery_root(
     };
     root.signature = writer.sign(&signer.signing, &root.signed_bytes(&writer.application()?)?)?;
     Ok(root)
+}
+
+/// The commitment of the recovery root `secret` derives at the account's
+/// current `generation` (§2.9, "Register"): the SLH-DSA-SHA2-128s public
+/// key of the root's commitment seed, signed by the root's own signing key.
+/// It is written with the root, in the root's transaction.
+pub fn recovery_commitment(
+    writer: &AccountWriter<'_>,
+    generation: u64,
+    secret: &RecoverySecret,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<Commitment> {
+    let application = writer.application()?;
+    let recovery = RecoveryKeys::derive(secret, &application, generation)?;
+    let seed = derive::recovery_commitment_seed(secret, &application, generation);
+    let (_, public) = CommitmentKey::from_seed(&seed);
+    let mut record = Commitment {
+        id: ids::random_v4(rng)?,
+        account_id: writer.account_id.to_owned(),
+        subject_kind: SubjectKind::RecoveryRoot,
+        subject_id: recovery.root_id,
+        mechanism: COMMITMENT_MECHANISM.id.to_owned(),
+        version: COMMITMENT_MECHANISM.version,
+        commitment: public.to_vec(),
+        signature: Vec::new(),
+    };
+    record.signature = writer.sign(
+        &recovery.signing,
+        &record.signed_bytes(&application, generation)?,
+    )?;
+    Ok(record)
 }
 
 /// A recovery delivery of the current account key to `root` (§2.9, stage

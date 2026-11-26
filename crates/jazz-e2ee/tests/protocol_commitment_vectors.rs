@@ -1,10 +1,13 @@
-//! Wire fixtures for the three admission records and recovery commitment seeds.
+//! Wire fixtures for the three admission records, recovery commitment seeds
+//! and the commitment record a recovery root's registration writes.
 
 use jazz_e2ee::Zeroizing;
+use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::conformance::FixedRandom;
 use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::primitives::{sign::SigningKeyPair, slh_dsa::CommitmentKey};
+use jazz_e2ee::protocol::account::build::{AccountWriter, recovery_commitment};
 use jazz_e2ee::protocol::{
     commitment::{ENDORSEMENT_CONTEXT, MECHANISM, endorsement_digest, verify_endorsement},
     derive::{RecoveryKeys, RecoverySecret, recovery_commitment_seed},
@@ -15,6 +18,7 @@ use jazz_e2ee::protocol::{
         roster::{Commitment, Endorsement, EndorsementSignature, SubjectKind},
     },
 };
+use jazz_e2ee::registry::Registry;
 
 const APP: &str = "0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f";
 const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
@@ -112,6 +116,112 @@ fn recovery_commitment_vectors() {
         assert_eq!(keys.root_id, root);
         assert_eq!(hex(&keys.signing.public.bytes), signing);
         assert_eq!(hex(&keys.sealing.public.bytes), sealing);
+    }
+}
+
+/// Alice registers the recovery root of her fixture secret in account
+/// `ALICE`: the registration's commitment record is the same whenever the
+/// same secret registers at the same generation (only the row ID is drawn).
+/// The signed bytes are assembled here, and the seed, root ID, signing key
+/// and Ed25519 signature come from Python's keyed BLAKE2b and the
+/// `cryptography` package; the SLH-DSA key derivation is pinned above.
+#[test]
+fn recovery_root_commitment_record_vector() {
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let app = AppDomain::new(APP, Some("prod")).unwrap();
+    let registry = Registry::builtin();
+    let writer = AccountWriter {
+        account_secret_root_id: None,
+        suite: registry.select(&MechanismConfig::default()).unwrap(),
+        registry: &registry,
+        domain: &app,
+        account_id: ALICE,
+    };
+    let record = |generation| {
+        recovery_commitment(
+            &writer,
+            generation,
+            &secret,
+            &mut FixedRandom(vec![0x66; 16]),
+        )
+        .unwrap()
+    };
+    let application = domain(APP, "prod", ALICE);
+    let d = format!(r#"["{APP}","prod","{ALICE}"]"#);
+    for (generation, (seed, public, root, signing, signature)) in [
+        (
+            0,
+            (
+                "c92ea5c570d0ef791c80450b942f9bca1e49ade36de4eefd38d73167cdb5dd1c",
+                "2ae40871d9032f2c93de201fb72c8be3b5af417742ede3ea45f5bdd4ccc553d5",
+                "bdf7dfa1-160c-8e21-bee8-aef5fd8199ea",
+                "12eff1cb01120109f0b52e5e84879b3f7591703d8755a63874b14fe98f021fd3",
+                "4a45324501106a617a7a2e736f6469756d2e7369676e000000010b11e3f3411463dd689a7922b0263d9c1976b3eadffab447d431e3cd1cd51a3509b8aadb379b9c881dd545cfe5164a53f79fb831c16b5fb70abcba10efc66b04",
+            ),
+        ),
+        (
+            1,
+            (
+                "24e9d79801d9d24478c1884ac45222da7851a6be14eb7401bd75ea6456b8430c",
+                "334b6b549eb6afc4e68f0d33e45989ef4be77c7bef100ae98595f5632485f10a",
+                "526073c9-d6ca-80c1-8d14-582668dc4e22",
+                "fbc1958517baeb8bcb7630baec6f5742c7e77e69d7a5ab14bdfc8802fbaed657",
+                "4a45324501106a617a7a2e736f6469756d2e7369676e0000000115157fdc9e4887bb9626ba91c8e31fa8e9201833c55e3e24d11cfb941b4121b4998765c395fa94d178ac26f9f2a499214a9c82d7355386ed7bfe5189af2fba00",
+            ),
+        ),
+    ] {
+        let c = record(generation);
+        assert_eq!(c, record(generation), "the same secret, the same record");
+        c.validate().unwrap();
+        let commitment_seed = recovery_commitment_seed(&secret, &application, generation);
+        let keys = RecoveryKeys::derive(&secret, &application, generation).unwrap();
+        assert_eq!(hex(&commitment_seed[..]), seed);
+        assert_eq!(
+            (
+                c.id.as_str(),
+                c.account_id.as_str(),
+                c.subject_kind,
+                c.subject_id.as_str(),
+                c.mechanism.as_str(),
+                c.version,
+            ),
+            (
+                "66666666-6666-4666-a666-666666666666",
+                ALICE,
+                SubjectKind::RecoveryRoot,
+                root,
+                "jazz.commit.slh-dsa-sha2-128s",
+                1,
+            )
+        );
+        assert_eq!(hex(&c.commitment), public);
+        assert_eq!(hex(&keys.signing.public.bytes), signing);
+        let signed = fields(
+            b"JE2C\x01",
+            &[
+                d.as_bytes(),
+                b"jazz.e2ee.commitment.v1",
+                b"account",
+                ALICE.as_bytes(),
+                b"__e2ee_commitments",
+                c.id.as_bytes(),
+                b"signature",
+                generation.to_string().as_bytes(),
+                root.as_bytes(),
+                b"recovery-root",
+                &[
+                    b"JE2E\x01\x1djazz.commit.slh-dsa-sha2-128s\0\0\0\x01".as_slice(),
+                    &c.commitment,
+                ]
+                .concat(),
+            ],
+        );
+        assert_eq!(c.signed_bytes(&application, generation).unwrap(), signed);
+        assert_eq!(hex(&c.signature), signature);
+        assert_eq!(
+            registry.verify(&keys.signing.public, &signed, &c.signature),
+            Ok(true)
+        );
     }
 }
 

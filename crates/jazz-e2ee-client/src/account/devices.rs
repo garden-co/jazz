@@ -34,8 +34,8 @@ use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::build::{
     AccountWriter, Challenge, LocalDevice, RecoveryApprovalRecords, RotationTarget, approve,
-    challenge, recovery_approve, recovery_delivery, recovery_root, removal_request, respond,
-    rotate,
+    challenge, recovery_approve, recovery_commitment, recovery_delivery, recovery_root,
+    removal_request, respond, rotate,
 };
 use jazz_e2ee::protocol::account::{
     AccountKey, AccountKeyEvidence, AccountReplay, AccountState, verify_private,
@@ -821,7 +821,14 @@ impl E2eeClient {
                 Some(existing) => existing.row.clone(),
                 None => {
                     let root = recovery_root(&writer, &view.state, &view.device, &keys)?;
+                    let commitment = recovery_commitment(
+                        &writer,
+                        view.state.generation,
+                        secret,
+                        &mut SharedRandom(&self.shared.random),
+                    )?;
                     self.stage(db, tx, &root).await?;
+                    self.stage(db, tx, &commitment).await?;
                     root
                 }
             };
