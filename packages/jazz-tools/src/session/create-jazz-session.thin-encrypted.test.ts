@@ -625,6 +625,54 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(titles(rows).sort()).toEqual(["kept", "transacted"]);
   }, 90_000);
 
+  it("upgrades a thin transaction that only adds a member", async () => {
+    const host = await serve();
+    const { device, project } = await member(host);
+    pageStillLoading();
+    const gate = gatedLoader();
+    const thin = db(await open(host, device, gate.loader));
+    const accountId = crypto.randomUUID();
+    expect(isThinDb(thin)).toBe(true);
+    expect(gate.calls).toBe(0);
+
+    let runs = 0;
+    const result = settled(
+      thin.transaction((tx) => {
+        runs++;
+        return tx.encryption.members.add(app.projects, project, accountId);
+      }),
+    );
+    await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+    gate.release();
+
+    const { value, error } = await result;
+    expect(error).toBeUndefined();
+    const added = await value!.wait({ tier: "global" });
+    expect(runs).toBe(2);
+    expect(isThinDb(thin)).toBe(false);
+    expect(await thin.encryption.members.list(app.projects, project)).toContainEqual(added);
+    expect(added.accountId).toBe(accountId);
+  }, 90_000);
+
+  it("refuses a thin transaction adding a member without a loader", async () => {
+    const host = await serve();
+    const session = await open(host);
+    const accountId = session.getSnapshot().client!.session!.user!;
+
+    const { error } = await settled(
+      db(session).transaction((tx) =>
+        tx.encryption.members.add(app.projects, crypto.randomUUID(), accountId),
+      ),
+    );
+    expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect(error).toMatchObject({
+      reason: "no-loader",
+      operation: "members.add",
+      table: "projects",
+    });
+    expect((error as Error).message).toContain('client: () => import("jazz-tools/local-first")');
+  }, 60_000);
+
   it("does not rerun a callback transaction twice", async () => {
     const host = await serve();
     const gate = gatedLoader();
