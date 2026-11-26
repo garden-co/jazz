@@ -257,6 +257,60 @@
     ],
     "indexed_columns": ["accountId"]
   },
+  "__e2ee_commitments": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "subjectKind",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "subjectId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "commitment",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
   "__e2ee_device_approvals": {
     "columns": [
       {

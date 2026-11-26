@@ -48,6 +48,7 @@ pub const RECOVERY_ROOTS: &str = "__e2ee_recovery_roots";
 pub const RECOVERY_DELIVERIES: &str = "__e2ee_recovery_deliveries";
 pub const DEVICE_REMOVAL_REQUESTS: &str = "__e2ee_device_removal_requests";
 pub const ACCOUNT_KEYS: &str = "__e2ee_account_keys";
+pub const COMMITMENTS: &str = "__e2ee_commitments";
 
 /// The only system table an app touches directly: its generated code reads
 /// it and inserts and deletes its rows, and an app policy may test it with
@@ -383,6 +384,22 @@ pub fn e2ee_system_tables_v1() -> Schema {
                     req("mechanism", Text),
                     req("version", Number),
                     req("publicKey", Bytes),
+                    req("signature", Bytes),
+                ],
+                &["accountId"],
+                &[],
+            ),
+        ),
+        (
+            COMMITMENTS,
+            table(
+                &[
+                    req("accountId", Id),
+                    req("subjectKind", Text),
+                    req("subjectId", Id),
+                    req("mechanism", Text),
+                    req("version", Number),
+                    req("commitment", Bytes),
                     req("signature", Bytes),
                 ],
                 &["accountId"],
@@ -1012,6 +1029,23 @@ pub fn derive_e2ee_policies(
             ),
         );
     }
+    put(
+        COMMITMENTS,
+        immutable(
+            public(),
+            PolicyExpr::And(vec![
+                eq("accountId", me()),
+                created_by_me(),
+                PolicyExpr::Or(vec![
+                    own_request("subjectId"),
+                    exists(
+                        RECOVERY_ROOTS,
+                        vec![eq("id", this("subjectId")), eq("accountId", me())],
+                    ),
+                ]),
+            ]),
+        ),
+    );
     #[cfg(feature = "testing")]
     if schema.contains_key(&TableName::from(TEST_EVENTS)) {
         put(TEST_EVENTS, immutable(PolicyExpr::False, PolicyExpr::False));
