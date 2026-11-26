@@ -218,6 +218,11 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
+      # The published module links no lattice or SHA-3 code (the SLH-DSA
+      # dependency carries SHAKE variants that no build may use).
+      - name: Check jazz-wasm for lattice or SHA-3 symbols
+        run: node dev/gates/check-endorsement-symbols.mjs crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-pkg
