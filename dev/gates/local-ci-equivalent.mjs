@@ -378,6 +378,14 @@ export const ciPartitions = Object.freeze({
       "-lc",
       "unset RUSTC_WRAPPER; exec dev/ci/wasm-pack-test.sh --node crates/jazz-wasm",
     ]),
+    // The SLH-DSA key-generation vectors on wasm32 under Node, as the
+    // browser and Durable Object builds run them. wasm-pack would build every
+    // jazz-e2ee test target, and the libsodium cross-checks don't build for
+    // wasm32, so cargo runs just these targets under wasm-bindgen's runner.
+    command("jazz-e2ee SLH-DSA vectors on wasm32", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec dev/ci/wasm-cargo-test.sh -p jazz-e2ee --lib --test slh_dsa",
+    ]),
     // Run jazz-core's integration tests without the client encryption hooks,
     // which the workspace run above unifies on through its binding crates.
     command("jazz-core integration tests without e2ee-client", "node", [
