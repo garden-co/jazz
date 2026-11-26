@@ -7,8 +7,6 @@
 // jazz-tools npm package.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 /** The crates users install; everything they need is published with them. */
 export const ROOT_CRATES = Object.freeze([
@@ -19,11 +17,10 @@ export const ROOT_CRATES = Object.freeze([
 ]);
 
 /**
- * Published crates that are versioned apart from Jazz: vendored forks keep
- * their upstream version.
+ * Published crates that are versioned apart from Jazz: forks keep their own
+ * version.
  */
 export const INDEPENDENTLY_VERSIONED = Object.freeze({
-  "jazz-ruzstd": "the patched ruzstd 0.8.3 fork (vendor/ruzstd)",
   "jazz-wasm-tracing": "the maintained wasm-tracing fork (crates/wasm-tracing)",
 });
 
@@ -34,37 +31,6 @@ export const INDEPENDENTLY_VERSIONED = Object.freeze({
 export const PUBLISHED_OUTSIDE_CLOSURE = Object.freeze({
   "jazz-wasm-tracing": "jazz-wasm's tracing subscriber, a fork published at its own version",
 });
-
-/**
- * Vendored crates Jazz publishes that are not workspace members (their
- * upstream tests aren't vendored, so `cargo test --workspace` can't build
- * them). `withVendoredMembers` adds them to the workspace while packaging.
- */
-export const VENDORED_CRATES = Object.freeze({ "jazz-ruzstd": "vendor/ruzstd" });
-
-/**
- * Runs `fn` with the vendored crates as workspace members, so `cargo package`
- * verifies them together with the crates that depend on them. Cargo.toml and
- * Cargo.lock are restored afterwards, whatever happens.
- */
-export async function withVendoredMembers(fn, root = process.cwd()) {
-  const files = ["Cargo.toml", "Cargo.lock"].map((name) => join(root, name));
-  const saved = files.map((file) => readFileSync(file, "utf8"));
-  let manifest = saved[0];
-  for (const dir of Object.values(VENDORED_CRATES)) {
-    const excluded = `  "${dir}",\n`;
-    if (!manifest.includes(excluded)) throw new Error(`Cargo.toml doesn't exclude ${dir}`);
-    manifest = manifest
-      .replace(excluded, "")
-      .replace(/^members = \[\n/m, (start) => `${start}${excluded}`);
-  }
-  writeFileSync(files[0], manifest);
-  try {
-    return await fn();
-  } finally {
-    files.forEach((file, i) => writeFileSync(file, saved[i]));
-  }
-}
 
 export function cargoMetadata({ cwd = process.cwd(), noDeps = true, locked = true } = {}) {
   const args = ["metadata", "--format-version", "1"];

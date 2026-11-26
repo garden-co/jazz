@@ -3,7 +3,7 @@
 //! incremental decoding from storing and replaying the entire channel history.
 //! Native zstd C allocations are outside this Rust allocator receipt; its
 //! window cap is enforced separately through the native decoder parameter.
-#![cfg(any(feature = "lz4", feature = "zstd", feature = "ruzstd"))]
+#![cfg(any(feature = "lz4", feature = "zstd", feature = "zrip"))]
 use jazz_compression::stream::{Codec, StreamDecoder};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -78,7 +78,7 @@ fn warmed_decoder_memory_does_not_grow_with_channel_history() {
     let codecs = vec![
         #[cfg(feature = "lz4")]
         Codec::Lz4,
-        #[cfg(any(feature = "zstd", feature = "ruzstd"))]
+        #[cfg(any(feature = "zstd", feature = "zrip"))]
         Codec::Zstd,
     ];
     for codec in codecs {

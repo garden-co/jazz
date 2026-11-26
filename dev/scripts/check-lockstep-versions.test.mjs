@@ -35,10 +35,10 @@ function metadata(packages) {
 function workspace(version = V) {
   return [
     pkg("jazz-types", V),
-    pkg("jazz-ruzstd", "0.8.3"),
+    pkg("jazz-wasm-tracing", "3.0.0-alpha.0"),
     pkg("jazz-core", V, [
       ["jazz-types", `=${V}`],
-      ["jazz-ruzstd", "=0.8.3"],
+      ["jazz-wasm-tracing", "=3.0.0-alpha.0"],
     ]),
     pkg("jazz-codegen", V, [["jazz-core", `=${V}`]]),
     pkg("jazz-app-support", V, [
@@ -77,7 +77,7 @@ test("orders the closure so every crate follows its dependencies", () => {
   assert.ok(!plan.order.includes("jazz-sim"));
   for (const [before, after] of [
     ["jazz-types", "jazz-core"],
-    ["jazz-ruzstd", "jazz-core"],
+    ["jazz-wasm-tracing", "jazz-core"],
     ["jazz-core", "jazz-app-support"],
     ["jazz-app-support", "jazz-ffi"],
     ["jazz-codegen", "jazz-tools"],
@@ -122,5 +122,5 @@ test("reports crates behind a bumped npm version, and the Go constant", () => {
     problems.includes(`crate jazz-app-support requires jazz-core =${V}, expected =2.0.0-alpha.8`),
   );
   assert.ok(problems.some((p) => p.startsWith("Go packages/jazz-go/version.go")));
-  assert.ok(!problems.some((p) => p.includes("jazz-ruzstd is")));
+  assert.ok(!problems.some((p) => p.includes("jazz-wasm-tracing is")));
 });

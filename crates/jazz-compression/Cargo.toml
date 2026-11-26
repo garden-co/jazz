@@ -2,7 +2,7 @@
 name = "jazz-compression"
 version.workspace = true
 edition = "2024"
-description = "Transport compression codecs (lz4, zstd, ruzstd) for Jazz's sync protocol."
+description = "Transport compression codecs (lz4, zstd, zrip) for Jazz's sync protocol."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -14,11 +14,11 @@ include = ["src/**", "build.rs", "README.md"]
 default = []
 lz4 = ["dep:lz4_flex"]
 zstd = ["dep:zstd"]
-ruzstd = ["dep:ruzstd"]
+zrip = ["dep:zrip"]
 
 [dependencies]
 lz4_flex = { version = "0.11.5", default-features = false, features = ["frame"], optional = true }
-ruzstd = { package = "jazz-ruzstd", path = "../../vendor/ruzstd", version = "=0.8.3", default-features = false, optional = true }
+zrip = { version = "0.8.27", default-features = false, features = ["std", "simd"], optional = true }
 zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]

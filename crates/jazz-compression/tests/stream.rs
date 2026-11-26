@@ -94,7 +94,7 @@ fn native_zstd_persistent_fragmented_stream() {
     exercise(Codec::Zstd);
 }
 
-#[cfg(feature = "ruzstd")]
+#[cfg(feature = "zrip")]
 #[test]
 fn pure_rust_reads_flushed_native_zstd_with_bounded_output() {
     use std::io::Write;
@@ -204,7 +204,7 @@ fn multiple_blocks_and_more_than_one_window_round_trip() {
     }
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd", feature = "ruzstd"))]
+#[cfg(any(feature = "lz4", feature = "zstd", feature = "zrip"))]
 fn reject(codec: Codec, bytes: &[u8], expected: &str) {
     let mut d = StreamDecoder::new(codec).unwrap();
     let error = d.decode(bytes, &mut [0; 65536]).unwrap_err();
@@ -232,7 +232,7 @@ fn lz4_rejects_profile_and_expansion_violations() {
     reject(Codec::Lz4, &large, "channel codec:");
 }
 
-#[cfg(any(feature = "zstd", feature = "ruzstd"))]
+#[cfg(any(feature = "zstd", feature = "zrip"))]
 #[test]
 fn zstd_rejects_profile_and_expansion_violations() {
     use std::io::Write;
@@ -272,7 +272,7 @@ fn empty_stream_has_an_explicit_end_marker() {
     }
 }
 
-#[cfg(any(feature = "zstd", feature = "ruzstd"))]
+#[cfg(any(feature = "zstd", feature = "zrip"))]
 #[test]
 fn smaller_zstd_window_also_limits_the_block() {
     let mut bytes = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0]; // 1KiB window

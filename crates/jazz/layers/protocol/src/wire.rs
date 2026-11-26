@@ -945,7 +945,7 @@ fn default_transport_compression_features() -> WireFeatures {
             target_arch = "wasm32",
             any(
                 feature = "transport-compression-zstd",
-                feature = "transport-compression-ruzstd"
+                feature = "transport-compression-zrip"
             )
         )
     ))]
@@ -958,7 +958,7 @@ fn default_transport_compression_features() -> WireFeatures {
             target_arch = "wasm32",
             any(
                 feature = "transport-compression-zstd",
-                feature = "transport-compression-ruzstd"
+                feature = "transport-compression-zrip"
             )
         )
     )))]
