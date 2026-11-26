@@ -10492,9 +10492,10 @@ impl Db {
                 }
             }
         };
-        // A current answer lists its result's rows: cached rows the
-        // replica's settled view of it holds and the answer lacks lost their
-        // listing (INV-SYNC-14), though no subscription saw them leave.
+        // An answer lists its result's rows (as of `at`, for a pinned
+        // read): cached rows the replica's settled view of it holds and the
+        // answer lacks lost their listing (INV-SYNC-14), though no
+        // subscription saw them leave.
         let Some((through, _listed)) = answer else {
             return Ok(None);
         };
@@ -11418,13 +11419,17 @@ impl Db {
                             let mut once = false;
                             if let Some(read) = client.reads.get_mut(&id) {
                                 let (listed, save_after) = match &mut read.lifetime {
-                                    ReadLifetime::Once { historical } => {
+                                    // A one-shot answer lists its result, as
+                                    // of its `at` too: a pinned read's
+                                    // listing judges the cached rows as of
+                                    // that position, so a row that left the
+                                    // result by then leaves the replica,
+                                    // though nothing else would say so
+                                    // (jazz#6399). Versions past it are not
+                                    // its to judge (`evict_unanswered`).
+                                    ReadLifetime::Once { .. } => {
                                         once = true;
-                                        (
-                                            (!*historical)
-                                                .then(|| members.clone().unwrap_or_default()),
-                                            global,
-                                        )
+                                        (Some(members.clone().unwrap_or_default()), global)
                                     }
                                     ReadLifetime::Live(live) => {
                                         // Answered, it is no longer refused: a

@@ -490,3 +490,81 @@ fn failed_first_read_leaves_the_snapshot_unpinned() {
         "a read after a failed first read used the failed read's cut"
     );
 }
+
+/// Alice's replica holds row X (her own accepted insert) and no read keeps it
+/// current. Bob deletes X, or moves it out of Alice's filter. In her next
+/// serializable transaction, Alice's first read pins the snapshot; her second
+/// is answered as of it, and must not return X as her replica last had it:
+/// the answer's listing (SPEC 8 §8.4) leaves X out, so her replica drops its
+/// stale copy (jazz#6399). The transaction then commits.
+/// Alice: insert X -----------------> read A (pins) -> read "x" -> commit
+/// Bob:   accept X -> delete/move X -> answer A      -> answer   -> accept
+#[test]
+fn a_pinned_read_leaves_out_a_row_that_left_its_result_before_the_snapshot() {
+    for delete in [true, false] {
+        let (alice, bob) = fixture();
+        let a = block_on(bob.insert("notes", cells("a"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let x = block_on(alice.insert("notes", cells("x"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        exchange(&alice, &bob);
+        let by_text = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("text"), lit(Value::from("x")))))
+            .unwrap();
+        assert_eq!(
+            texts(block_on(alice.all(&by_text, ReadOpts::default())).unwrap()),
+            ["x"],
+            "Alice's replica holds X"
+        );
+        if delete {
+            block_on(bob.delete("notes", x, Default::default())).unwrap();
+        } else {
+            block_on(bob.update("notes", x, cells("moved"), Default::default())).unwrap();
+        }
+        exchange(&alice, &bob);
+
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        let qa = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(a.0)))))
+            .unwrap();
+        let first = drive(
+            &[&alice, &bob],
+            tx.all_prepared_at(&qa, false, None, ReadTier::Remote),
+        )
+        .unwrap();
+        assert_eq!(texts(first), ["a"]);
+        let second = drive(
+            &[&alice, &bob],
+            tx.all_prepared_at(&by_text, false, None, ReadTier::Remote),
+        )
+        .unwrap();
+        assert!(
+            second.is_empty(),
+            "a pinned read returned a row that left its result before the snapshot \
+             (delete: {delete}): {:?}",
+            texts(second)
+        );
+        let by_id = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(x.0)))))
+            .unwrap();
+        let third = drive(
+            &[&alice, &bob],
+            tx.all_prepared_at(&by_id, false, None, ReadTier::Remote),
+        )
+        .unwrap();
+        let expected: &[&str] = if delete { &[] } else { &["moved"] };
+        assert_eq!(texts(third), expected, "delete: {delete}");
+
+        block_on(tx.insert("notes", cells("written"), Default::default())).unwrap();
+        let receipt = block_on(alice.commit_serializable_handle(id))
+            .unwrap_or_else(|error| panic!("commit failed (delete: {delete}): {error:?}"));
+        drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        )
+        .unwrap_or_else(|error| panic!("commit refused (delete: {delete}): {error:?}"));
+    }
+}

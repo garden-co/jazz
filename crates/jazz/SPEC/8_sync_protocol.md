@@ -531,7 +531,10 @@ for one query's result:
 - `span: Live` keeps it current until `Unsubscribe` (§8.5).
 - `since` on `Read` resumes a live or current-state one-shot read (§8.11).
 - `span: Once { at }` answers it once, at the current state (`at` empty) or
-  as of position `at`.
+  as of position `at`. An answer as of `at` lists its result as of `at`, and
+  the replica judges by it the cached rows its view holds as of `at`: one the
+  listing leaves out is evicted as for a current answer, unless the replica
+  holds a version of it past `at`, which is not that answer's to judge.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
   from the relay's store, `LocalFirst` from it too while the relay asks its
   upstream, `Remote` once its upstream answered. An authority's store is the
