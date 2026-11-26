@@ -99,15 +99,19 @@ async function addMember(owner: Device, project: string, account: string) {
 function observeStoreClock() {
   const armed: number[] = [];
   const fired: number[] = [];
+  /** When each fired timer was due (`Date.now()` when armed plus its delay). */
+  const firedDue: number[] = [];
   const timeout = globalThis.setTimeout;
   const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
     if (callback.name !== "wakeAtDeadline" || delay === undefined) {
       return timeout(callback, delay, ...args);
     }
     armed.push(delay);
+    const due = Date.now() + delay;
     return timeout(
       (...values) => {
         fired.push(delay);
+        firedDue.push(due);
         callback(...values);
       },
       delay,
@@ -117,7 +121,7 @@ function observeStoreClock() {
   cleanups.push(async () => {
     spy.mockRestore();
   });
-  return { armed, fired };
+  return { armed, fired, firedDue };
 }
 
 it("waits for the first catalogue without waking the private-store clock", async () => {
@@ -208,7 +212,7 @@ it("arms the next two-second approval probe and detects a challenge", async () =
 }, 60_000);
 
 it("wakes for a write deadline while the active device is offline", async () => {
-  const { fired } = observeStoreClock();
+  const { fired, firedDue } = observeStoreClock();
   const host = await serve(undefined, permissions, "memory");
   const store = memoryPrivateStore();
   const alice = await device(host, { privateStore: store });
@@ -229,15 +233,23 @@ it("wakes for a write deadline while the active device is offline", async () => 
   });
   try {
     const remaining = 5_000;
+    const startedAt = Date.now() - (10_000 - remaining);
+    // A write retry gives up 10 s after it started.
+    const deadline = startedAt + 10_000;
     const result = await alice.db.encryption["native"].encryptionCall("retryWrite", {
       scopeId,
       identifier: id,
-      startedAt: Date.now() - (10_000 - remaining),
+      startedAt,
       repeated: false,
     });
     expect(JSON.parse(result)).toBe("stop");
     expect(delayed.mock.calls.some(([, , name]) => name.startsWith("held-"))).toBe(true);
-    expect(fired.some((delay) => delay > 0 && delay <= remaining + 1)).toBe(true);
+    // The host's timer was due at the write's own deadline (the clock rounds
+    // up by a millisecond), not at some other wake.
+    expect(
+      firedDue.some((due) => due >= deadline - 5 && due <= deadline + 30),
+      JSON.stringify({ deadline, fired, firedDue }),
+    ).toBe(true);
   } finally {
     release();
     delayed.mockRestore();
@@ -1222,6 +1234,29 @@ describe("encryption on Node, end to end", () => {
         blockedReadable.mockRestore();
       }
     },
+  );
+
+  it.each(["all", "one"] as const)(
+    "%s waiting for readability ends with closed when the database closes",
+    async (method) => {
+      const first = await serve();
+      await first.stop();
+      const alice = await device(first, { wait: false });
+      await alice.db.disconnect();
+      const read = alice.db[method](app.tasks.where({ id: crypto.randomUUID() }), {
+        tier: "local-first",
+      });
+      const settled = vi.fn();
+      void read.then(settled, settled);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).not.toHaveBeenCalled();
+
+      const closing = Date.now();
+      await alice.session.close();
+      await expect(read).rejects.toMatchObject({ code: "closed" });
+      expect(Date.now() - closing).toBeLessThan(1_000);
+    },
+    30_000,
   );
 
   it("a returning device reads its encrypted rows offline, and its live query goes on once the server is back", async () => {
