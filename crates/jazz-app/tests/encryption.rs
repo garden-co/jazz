@@ -694,6 +694,69 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
     app.stop().await;
 }
 
+/// Alice inserts a project whose encrypted name uses the project itself as
+/// its space. The write retries with the row ID used to prepare the first key.
+///
+/// ```text
+/// alice ──insert──► missing key ──save once──► retry ──► project
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_insert_reuses_the_id_of_its_encrypted_space() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+
+    let mut file: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
+    let mut self_space: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
+    ))
+    .unwrap();
+    file["tables"]["projects"] = self_space["tables"]["projects"].take();
+    let file = serde_json::to_vec(&file).unwrap();
+    let app =
+        App::start_with(AppFiles::new(file.clone(), None).with_permissions(
+            include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
+        ))
+        .await;
+    let prepared = Arc::new(AtomicUsize::new(0));
+    let store = store_with_hook({
+        let prepared = prepared.clone();
+        move |doc, expected| {
+            let prepared = prepared.clone();
+            let new_key = doc.starts_with("held-") && expected.is_none();
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                if new_key {
+                    prepared.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            })
+        }
+    });
+    let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
+    let alice = Jazz::open(AppFiles::new(file, None), config).await.unwrap();
+    ready(&alice).await;
+    let account = ObjectId::from_uuid(alice.account().unwrap().0);
+
+    let project = alice
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewProject::new("private plans", account))
+        .await
+        .expect("insert uses the ID whose key was prepared");
+    assert_eq!(prepared.load(Ordering::Relaxed), 1);
+    assert_eq!(project.name, "private plans");
+    assert_eq!(
+        alice.get::<Project>(project.id).await.unwrap(),
+        Some(project)
+    );
+
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice's application exception can quote a key refusal. Only a typed
 /// refusal from the encryption hooks lets her device repeat the write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
