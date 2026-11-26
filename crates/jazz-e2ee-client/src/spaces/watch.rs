@@ -456,10 +456,22 @@ impl E2eeClient {
         db: &Db,
         watch: &mut SpaceWatch,
     ) -> Result<Vec<(DbSpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError> {
+        // A new round of `delivery-failed` reports starts here, before
+        // anything that can fail: a sync that stops early must not leave
+        // the last round's spaces muted in this round's sweep.
+        self.shared
+            .member_watch
+            .borrow_mut()
+            .delivery_failures_told
+            .clear();
         self.ensure_open()?;
         let mut interest = self.shared.published.borrow().pending_spaces();
         interest.extend(watch.uses.keys().cloned());
         self.refresh_shared(db, watch, &interest).await?;
+        #[cfg(any(test, feature = "testing"))]
+        if std::mem::take(&mut self.shared.member_watch.borrow_mut().fail_next_sync) {
+            return Err(crate::StoreError::Failed("sync failed for the test".into()).into());
+        }
         // Member rows this client wrote that have committed: their spaces
         // are served now, in use or not (protocol §3.4).
         let committed = self.committed_member_changes(db).await?;
@@ -496,11 +508,11 @@ impl E2eeClient {
         } else {
             BTreeSet::new()
         };
-        self.shared
-            .member_watch
-            .borrow_mut()
-            .delivery_failures_told
-            .clear();
+        // A space served only because its rotation's retry came due runs
+        // that batch alone, which reads only its accounts' histories: the
+        // pass would read every member's (protocol §3.5).
+        let retry_only: BTreeSet<SpaceAddress> =
+            pending_deliveries.difference(&served).cloned().collect();
         served.extend(pending_deliveries.iter().cloned());
         let mut results = Vec::new();
         for space in served {
@@ -551,13 +563,14 @@ impl E2eeClient {
                 state = Err(error);
             }
             // The pass: members that lack a version this device holds.
-            if needs_pass
+            let pass = needs_pass && !retry_only.contains(&space);
+            if pass
                 && let Err(error) = self.deliver_pass(db, &space).await
                 && state.is_ok()
             {
                 state = Err(error);
             }
-            if (needs_pass || pending_deliveries.contains(&space))
+            if (pass || pending_deliveries.contains(&space))
                 && let Err(error) = &state
             {
                 self.tell_delivery_failed(&space, error);
@@ -570,7 +583,7 @@ impl E2eeClient {
             {
                 state = Err(error);
             }
-            if interest.contains(&space) {
+            if interest.contains(&space) && !retry_only.contains(&space) {
                 if !needs_pass || state.is_err() {
                     watch.unserved.insert(space.clone());
                 } else {
