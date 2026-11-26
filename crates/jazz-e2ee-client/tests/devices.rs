@@ -68,12 +68,13 @@ fn memory() -> Rc<dyn jazz_e2ee_client::PrivateStore> {
 fn device_with_registry(
     server: &Db,
     who: AuthorSubject,
+    store: Rc<dyn jazz_e2ee_client::PrivateStore>,
     node: u8,
     settings: &EncryptionSettings,
     registry: jazz_e2ee::registry::Registry,
 ) -> Device {
     let client = block_on(E2eeClient::open(jazz_e2ee_client::ClientConfig {
-        store: memory(),
+        store,
         declarations: declarations_with(settings.clone()),
         account_id: account_id(who),
         registry,
@@ -3722,7 +3723,7 @@ fn a_provider_failure_opening_the_recovery_delivery_fails_the_registration() {
         registry
             .replace_key_sealer(std::sync::Arc::new(RecoveryOpenFails(fails.clone())))
             .unwrap();
-        let first = device_with_registry(&server, alice, 1, &settings, registry);
+        let first = device_with_registry(&server, alice, memory(), 1, &settings, registry);
         first.status(&server, &[]);
         let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([9; 32]);
         let register = || {
@@ -3794,6 +3795,74 @@ fn rewriting_a_registered_roots_delivery_commits_nothing() {
         )
         .unwrap();
         pump(&server, &again.db);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
+        assert_eq!(count(&server, "__e2ee_commitments"), 1);
+    });
+}
+
+/// Contract: a registered root whose delivery is in a format this client
+/// does not support gets its delivery written again, and no new commitment.
+/// The server keeps one delivery per root and epoch, so the altered row
+/// stays: the write shows as a recovery delivery being sealed.
+///
+/// ```text
+/// alice's device ──register──► root + delivery + commitment
+/// server (stopped) ──delivery's envelope replaced by an unknown mechanism's──►
+/// alice's device ──register──► seals and writes a delivery, no second commitment
+/// ```
+#[test]
+fn a_recovery_delivery_of_an_unsupported_format_is_written_again() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let alice = account(0xa1);
+        let store = memory();
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([9; 32]);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            let first = device(&server, alice, store.clone(), 1, &settings);
+            first.status(&server, &[]);
+            drive(
+                &server,
+                &[&first.db],
+                first.client.register_recovery(&first.db, &secret),
+            )
+            .unwrap();
+            pump(&server, &first.db);
+            assert_eq!(count(&server, "__e2ee_commitments"), 1);
+            std::mem::forget(first);
+        }
+        let unsupported = jazz_e2ee::envelope::encode(
+            jazz_e2ee::envelope::Mechanism::new("example.unsupported", 1),
+            &[],
+        )
+        .unwrap();
+        tamper(
+            &path,
+            "__e2ee_recovery_deliveries",
+            "envelope",
+            &unsupported,
+        );
+
+        let server = secure_authority_with(&settings, Some(&path));
+        let mut registry = jazz_e2ee::registry::Registry::builtin();
+        registry
+            .replace_key_sealer(std::sync::Arc::new(RecoverySealHook))
+            .unwrap();
+        let again = device_with_registry(&server, alice, store, 1, &settings, registry);
+        again.status(&server, &[]);
+        let sealed = Rc::new(std::cell::Cell::new(false));
+        let seen = sealed.clone();
+        ON_RECOVERY_SEAL.with(|hook| *hook.borrow_mut() = Some(Box::new(move || seen.set(true))));
+        drive(
+            &server,
+            &[&again.db],
+            again.client.register_recovery(&again.db, &secret),
+        )
+        .unwrap();
+        pump(&server, &again.db);
+        assert!(sealed.get(), "the delivery is sealed again");
         assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
         assert_eq!(count(&server, "__e2ee_commitments"), 1);
     });
@@ -4718,7 +4787,7 @@ fn a_reset_between_registration_attempts_fails_the_registration() {
         registry
             .replace_key_sealer(std::sync::Arc::new(RecoverySealHook))
             .unwrap();
-        let laptop = device_with_registry(&server, alice, 1, &settings, registry);
+        let laptop = device_with_registry(&server, alice, memory(), 1, &settings, registry);
         assert_eq!(laptop.status(&server, &[]), AccountStatus::Active);
         let phone = Rc::new(device(&server, alice, memory(), 2, &settings));
         assert_eq!(phone.status(&server, &[]), AccountStatus::AwaitingApproval);
