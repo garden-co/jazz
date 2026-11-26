@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "vitest";
 import type { PrivateStore } from "../../packages/jazz-tools/src/encryption/private-store";
 
-const doc = new URL("../content/docs/e2ee/private-store.mdx", import.meta.url);
+const doc = new URL("../content/docs/e2ee/getting-started.mdx", import.meta.url);
 const errors = new URL(
   "../../packages/jazz-tools/src/encryption/private-store-errors.ts",
   import.meta.url,
@@ -14,7 +14,9 @@ const errors = new URL(
 
 async function extractSample(onCleanup: (cleanup: () => Promise<void>) => void) {
   const text = await readFile(doc, "utf8");
-  const sample = /```ts\n([\s\S]*?)\n```/.exec(text)?.[1];
+  const sample = [...text.matchAll(/```ts\n([\s\S]*?)\n```/g)]
+    .map((block) => block[1])
+    .find((code) => code?.includes("export function directoryStore"));
   if (!sample) throw new Error("Private store example is missing");
   const root = await mkdtemp(join(tmpdir(), "docs-private-store-"));
   onCleanup(() => rm(root, { force: true, recursive: true }));

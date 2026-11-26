@@ -2,10 +2,6 @@
   "title": "End-to-end Encryption",
   "pages": [
     "getting-started",
-    "bandchat-walkthrough",
-    "private-store",
-    "browser",
-    "native",
     "sharing-and-keys",
     "devices-and-recovery",
     "encrypting-existing-data",
