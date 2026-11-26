@@ -1964,6 +1964,10 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
             announced.get()
         );
         assert!(runtime.take_reports().is_empty());
+        // The first re-check: the watch must see the challenge before it.
+        let recheck = bridge
+            .next_deadline_after(web_time::Instant::now())
+            .expect("a healthy watch arms its re-check");
 
         let both = [&first.db, db.as_ref()];
         drive(
@@ -1992,6 +1996,10 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
                 futures::pending!();
             }
         });
+        assert!(
+            web_time::Instant::now() < recheck,
+            "the watch, not the re-check, must report the challenge"
+        );
         runtime.stop();
     });
 }
