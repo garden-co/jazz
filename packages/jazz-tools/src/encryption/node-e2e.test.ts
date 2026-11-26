@@ -309,6 +309,8 @@ function observeStoreClock() {
  */
 function watchPrivateStore() {
   const wakes: string[] = [];
+  /** What each `setStoreWake` call installed: a wake, or `null` to clear it. */
+  const installed: Array<"function" | "null"> = [];
   let taken = 0;
   let answered = 0;
   const proto = EncryptionRuntime.prototype as unknown as {
@@ -321,6 +323,7 @@ function watchPrivateStore() {
   const replyStore = proto.replyStore;
   const spies = [
     vi.spyOn(proto, "setStoreWake").mockImplementation(function (this: unknown, wake) {
+      installed.push(typeof wake === "function" ? "function" : "null");
       return setStoreWake.call(
         this,
         wake &&
@@ -345,6 +348,7 @@ function watchPrivateStore() {
   });
   return {
     wakes,
+    installed,
     get inFlight() {
       return taken - answered;
     },
@@ -461,6 +465,10 @@ it("waits for the first catalogue without waking the private-store clock", async
   // Waiting for its first catalogue, the device asks nothing more of its
   // store, and has no store deadline armed that could wake it later.
   await step("store idle", store.idle());
+  // The idle checks below hold vacuously if no store wake was ever installed
+  // (no wakes, so no deadline either): first prove the wake is live.
+  expect(store.installed, "setStoreWake installed a wake").toContain("function");
+  expect(store.wakes, "the private store was woken for its requests").toContain("immediate");
   expect(state().readable).toBe(false);
   const wakesWhenIdle = [...store.wakes];
   const deadlines = wakesWhenIdle.filter((urgency) => /^(after:|cancel$)/.test(urgency));
