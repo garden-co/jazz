@@ -332,3 +332,33 @@ it("names pending upload rows, keeps a core error to its call, and goes unknown 
   expect(db.pendingUploadRows("todos")).toBeNull();
   expect(execute).toHaveBeenCalledTimes(4);
 });
+
+// A subscribe answers at once and opens on the owner's next turn, so its
+// failure arrives as an event; it keeps the code a failed command carries.
+it("drains a subscription's open failure as a rejection that keeps its core code", () => {
+  const db = new NativeForegroundDb(
+    { execute: (command: Uint8Array) => command, tick: vi.fn(), close: () => true },
+    {
+      encodeNativeForegroundCommand: () => Uint8Array.of(3),
+      decodeNativeForegroundResponse: () => ({
+        type: "subscriptionEvents",
+        events: [
+          { type: "openFailed", reason: "no table", code: "schema_error", reasonName: "unknown" },
+          { type: "openFailed", reason: "bad bytes" },
+        ],
+      }),
+    } as never,
+  );
+  expect(db.drain(1)).toEqual([
+    {
+      type: "rejected",
+      reason: {
+        type: "ServerFailure",
+        code: "no table",
+        errorCode: "schema_error",
+        reasonName: "unknown",
+      },
+    },
+    { type: "rejected", reason: { type: "ServerFailure", code: "bad bytes" } },
+  ]);
+});
