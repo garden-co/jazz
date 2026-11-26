@@ -727,8 +727,12 @@ pub(crate) async fn insert_waiting<N: Insert>(
 ) -> Result<(N::Row, Option<TransactionId>)> {
     let name = <N::Row as Table>::NAME;
     let cells = new.into_cells(implementations)?;
-    let (id, values, written) =
-        crate::encryption::with_key_wait(client, || client.insert(name, cells.clone())).await?;
+    // A space may use the row's own ID to look up its encryption key.
+    let row_id = ObjectId::new();
+    let (id, values, written) = crate::encryption::with_key_wait(client, || {
+        client.insert_with_id(name, *row_id.uuid(), cells.clone())
+    })
+    .await?;
     inserted::<N>(client, id, values, written, implementations)
 }
 

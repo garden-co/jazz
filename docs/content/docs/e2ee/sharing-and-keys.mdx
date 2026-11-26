@@ -4,9 +4,11 @@ description: "Add and remove the members of an encrypted space, and when their d
 languageTabs: backend
 ---
 
-A space is a row of the table your encryption declaration names, such as a project or room. The
-account that creates a space joins it in the same transaction. To add another account, the caller
-must be able to read and update the space row.
+A space is a row of the table your encryption declaration names, such as a project or room.
+By default, a signed-in account that creates a space with `insert` joins it in the same
+transaction. With `upsert`, adding the creator takes an explicit membership write, including
+when the space is new.
+To add another account, the caller must be able to read and update the space row.
 
 ## Create a space and add members
 
@@ -41,6 +43,11 @@ Swift and Kotlin expose `addMember`, `listMembers` and `removeMember` on their
 To turn off creator membership for one space, pass `{ addCreatorAsMember: false }` as the insert's
 third argument. To turn it off for all spaces this client creates, set `addCreatorAsMember: false`
 in the client's `encryption` options.
+
+If you create a space with `upsert`, add the creator with
+`tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
+`db.encryption.members.add(app.projects, id, accountId)` after the upsert if you have permission
+to read and update the space.
 
 On a thin browser client, the first space insert that adds its creator loads the local-first
 encryption runtime. Inserts with only plaintext columns can stay on the thin client when you
