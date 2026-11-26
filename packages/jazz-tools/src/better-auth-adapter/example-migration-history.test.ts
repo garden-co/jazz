@@ -100,6 +100,12 @@ const examples = [
     "e68899aa31aa0a7d380050fc17cd78ee6b7fca5b19aed3de952e0b8813e881b5",
   ],
   [
+    "examples/stage-plan/apps/ts-effect-ui-betterauth",
+    "c338db39787fc104e3d44141878b8c54365c95970079a08c3ddf24e17e00d499",
+    "f2c0deb18cb27616ed641ba2a2f620fb74ed606a7f21237863bb479533299ee7",
+    "e68899aa31aa0a7d380050fc17cd78ee6b7fca5b19aed3de952e0b8813e881b5",
+  ],
+  [
     "examples/wequencer/apps/next-betterauth",
     "a0d57d731cd5c19c2810769738e14ba99c2b0cd2665e4b11e44d3e73d4502b67",
     "c1f2524cc44f9ca8d099559c30f3b51e230d846119cfe3e92ced05962a7fa6b3",
@@ -225,6 +231,8 @@ const preFilesSnapshotDigests: Record<string, string> = {
   "examples/stage-plan/apps/sveltekit-hybrid":
     "a986478f2f45446637f37aca7f8210aa8e5c499ee9fc7daf8444baab6bb35d80",
   "examples/stage-plan/apps/ts-effect-betterauth":
+    "a986478f2f45446637f37aca7f8210aa8e5c499ee9fc7daf8444baab6bb35d80",
+  "examples/stage-plan/apps/ts-effect-ui-betterauth":
     "a986478f2f45446637f37aca7f8210aa8e5c499ee9fc7daf8444baab6bb35d80",
   "examples/wequencer/apps/next-betterauth":
     "6e938c531dabae6716fa2e841f0ea583048e52870553c21e46e3cbc778e3d7a0",

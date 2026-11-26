@@ -103,7 +103,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3
-        version: 3.5.1(@emnapi/runtime@1.11.3)(@types/node@22.19.13)
+        version: 3.5.1(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)(@types/node@22.19.13)
       '@types/node':
         specifier: catalog:default
         version: 22.19.13
@@ -1131,8 +1131,8 @@ importers:
         specifier: ^1.19.11
         version: 1.19.12(hono@4.12.9)
       effect:
-        specifier: 4.0.0-rc.118
-        version: 4.0.0-rc.118
+        specifier: 4.1.6
+        version: 4.1.6
       jazz-napi:
         specifier: workspace:*
         version: link:../../../crates/jazz-napi
@@ -1767,7 +1767,7 @@ importers:
         version: 22.19.13
       svelte-check:
         specifier: catalog:default
-        version: 4.4.6(picomatch@4.0.5)(svelte@5.53.6)(typescript@6.0.2)
+        version: 4.4.6(picomatch@4.0.7)(svelte@5.53.6)(typescript@6.0.2)
       typescript:
         specifier: catalog:default
         version: 6.0.2
@@ -1787,8 +1787,8 @@ importers:
         specifier: 1.7.22
         version: 1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2))
       effect:
-        specifier: 4.0.0-rc.118
-        version: 4.0.0-rc.118
+        specifier: 4.1.6
+        version: 4.1.6
       hono:
         specifier: ^4.12.9
         version: 4.12.9
@@ -1804,6 +1804,58 @@ importers:
       ws:
         specifier: ^8.19.0
         version: 8.19.0
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.58.2
+        version: 1.58.2
+      '@types/node':
+        specifier: catalog:default
+        version: 22.19.13
+      concurrently:
+        specifier: ^9.1.0
+        version: 9.2.5
+      typescript:
+        specifier: catalog:default
+        version: 6.0.2
+      vite:
+        specifier: catalog:default
+        version: 8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      wait-on:
+        specifier: ^8.0.2
+        version: 8.0.5
+
+  examples/stage-plan/apps/ts-effect-ui-betterauth:
+    dependencies:
+      '@effect/ui':
+        specifier: https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe
+        version: https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe(effect@4.1.6)
+      '@garden-co/design':
+        specifier: github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2
+        version: https://codeload.github.com/garden-co/design/tar.gz/fe96522c2484b894380fab7f0217b76ee4bda3a2(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
+      '@hono/node-server':
+        specifier: ^1.19.11
+        version: 1.19.12(hono@4.12.9)
+      better-auth:
+        specifier: 1.7.22
+        version: 1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2))
+      effect:
+        specifier: 4.1.6
+        version: 4.1.6
+      hono:
+        specifier: ^4.12.9
+        version: 4.12.9
+      jazz-napi:
+        specifier: workspace:*
+        version: link:../../../../crates/jazz-napi
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../../../packages/jazz-tools
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
+      ws:
+        specifier: ^8.19.0
+        version: 8.23.0
     devDependencies:
       '@playwright/test':
         specifier: ^1.58.2
@@ -2374,6 +2426,9 @@ importers:
       '@better-auth/test-utils':
         specifier: ^1.7.22
         version: 1.7.22(@better-auth/core@1.7.22(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(@opentelemetry/api@1.9.1)(better-call@1.4.5(zod@4.3.6))(jose@6.2.2)(kysely@0.29.5)(nanostores@1.5.2))(better-auth@1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2)))(vitest@5.1.0)
+      '@effect/ui':
+        specifier: https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe
+        version: https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe(effect@4.1.6)
       '@sveltejs/package':
         specifier: ^2.0.0
         version: 2.5.7(svelte@5.53.6)(typescript@6.0.2)
@@ -2411,8 +2466,8 @@ importers:
         specifier: 1.7.22
         version: 1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2))
       effect:
-        specifier: 4.0.0-rc.118
-        version: 4.0.0-rc.118
+        specifier: 4.1.6
+        version: 4.1.6
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
@@ -3718,6 +3773,12 @@ packages:
   '@edge-runtime/vm@3.2.0':
     resolution: {integrity: sha512-0dEVyRLM/lG4gp1R/Ik5bfPl/1wX00xFwd5KcNH602tzBa09oF7pbTKETEhR1GjZ75K6OJnYFu8II2dyMhONMw==}
     engines: {node: '>=16'}
+
+  '@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe':
+    resolution: {tarball: https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe}
+    version: 0.0.0
+    peerDependencies:
+      effect: ^4.1.4
 
   '@emnapi/core@1.8.1':
     resolution: {integrity: sha512-AvT9QFpxK0Zd8J0jopedNm+w/2fIzvtPKPjqyw9jwvBaReTTqPBk9Hixaz7KbjimP+QNz605/XnjFcDAL2pqBg==}
@@ -8182,9 +8243,6 @@ packages:
   asynckit@0.4.0:
     resolution: {integrity: sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==}
 
-  axios@1.15.1:
-    resolution: {integrity: sha512-WOG+Jj8ZOvR0a3rAn+Tuf1UQJRxw5venr6DgdbJzngJE3qG7X0kL83CZGpdHMxEm+ZK3seAbvFsw4FfOfP9vxg==}
-
   axios@1.21.1:
     resolution: {integrity: sha512-6eI5Q/Y4u/Um9dDlsRoq5pY2rxnUTv+L4PpLitnbk/i4jb3MxLZ5CsN5Ih3IysbeRYK4pR+P7qfMsOQl9fwwFQ==}
 
@@ -9095,8 +9153,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  effect@4.0.0-rc.118:
-    resolution: {integrity: sha512-hxhpCd+swzrtu9lnyPpEFre2ODQzJ9qxgyL1oHIEY8NKnW4PxTbM1XzplMZXiAsLD62HO+KJc41Nqxr9T791ZQ==}
+  effect@4.1.6:
+    resolution: {integrity: sha512-P3CxMsdcSCle/7/FnPILd9GJkNqGtduKam2LX9Xsb8LoOjmeQ9Kmsuh16JwtIthaxLyiTCOzUUt+PZsXIohl+A==}
 
   electron-to-chromium@1.5.302:
     resolution: {integrity: sha512-sM6HAN2LyK82IyPBpznDRqlTQAtuSaO+ShzFiWTvoMJLHyZ+Y39r8VMfHzwbU8MVBzQ4Wdn85+wlZl2TLGIlwg==}
@@ -9654,15 +9712,6 @@ packages:
   flow-enums-runtime@0.0.6:
     resolution: {integrity: sha512-3PYnM29RFXwvAN6Pc/scUfkI7RwhQ/xqyLUyPNlXUp9S40zI8nup9tUSrTLSVnWGBN38FNiGWbwZOB6uR4OGdw==}
 
-  follow-redirects@1.16.0:
-    resolution: {integrity: sha512-y5rN/uOsadFT/JfYwhxRS5R7Qce+g3zG97+JrtFZlC9klX/W5hD7iiLzScI4nZqUS7DNUdhPgw4xI8W2LuXlUw==}
-    engines: {node: '>=4.0'}
-    peerDependencies:
-      debug: '*'
-    peerDependenciesMeta:
-      debug:
-        optional: true
-
   follow-redirects@1.16.3:
     resolution: {integrity: sha512-toOSoqN6d51Wjf1aOFJYcoVv1aND9rj/CwjLU0Vz40oDuSpWDayCeKe4JpL5NL0WdFvoOOCI3BRo69HahjbR1A==}
     engines: {node: '>=4.0'}
@@ -9678,10 +9727,6 @@ packages:
   foreground-child@3.3.1:
     resolution: {integrity: sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==}
     engines: {node: '>=14'}
-
-  form-data@4.0.5:
-    resolution: {integrity: sha512-8RipRLol37bNs2bhoV67fiTEvdTrbMUYcFTiy3+wuuOnUog2QBHCZWXDRijWQfAkhBj2Uf5UnVaiWwA5vdd82w==}
-    engines: {node: '>= 6'}
 
   form-data@4.0.6:
     resolution: {integrity: sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==}
@@ -9974,10 +10019,6 @@ packages:
 
   has-tostringtag@1.0.2:
     resolution: {integrity: sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==}
-    engines: {node: '>= 0.4'}
-
-  hasown@2.0.2:
-    resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
 
   hasown@2.0.4:
@@ -12591,16 +12632,8 @@ packages:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
 
-  shell-quote@1.10.0:
-    resolution: {integrity: sha512-w1aiOKwKuRgtwAReIIj89puqg+I7GvX4IbLrvmhXbzQsj1+Zwi4VO3+fa6ZF91TWSjIxoEkKnMeHcLEODK5ZXA==}
-    engines: {node: '>= 0.4'}
-
   shell-quote@1.12.0:
     resolution: {integrity: sha512-PcByqNyT/38F2kDNi006HAMRJaULuBzq/FOsw3qdZvX/GA9W/jamDaRskgHjubHiftXK5sIFxLNkvrXUwcof6Q==}
-    engines: {node: '>= 0.4'}
-
-  shell-quote@1.8.3:
-    resolution: {integrity: sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw==}
     engines: {node: '>= 0.4'}
 
   shiki@3.23.0:
@@ -13843,10 +13876,12 @@ packages:
   yuku-core@0.19.0:
     resolution: {integrity: sha512-kYK9e1XdfirNhkipzW0wmMcSWcVF/CWnuugodfVYRCUwvoBefweL9HzB96OiKEhsx78V5WbUxbJqlizMX869Qg==}
     engines: {node: '>=14.18.0'}
+    deprecated: 'Yuku is now one package with one core. Use "yuku" instead: https://yuku.fyi/javascript/. Existing installs keep working but get no more fixes.'
 
   yuku-parser@0.19.0:
     resolution: {integrity: sha512-XrBh9ZiQK5mJVRxZBAvD6LwRyAYrK3MFtH3+onyuxFL5hFD44EC3QOmIC1FjTj6H2MMwq46/NAI+NZxLZPZgxg==}
     engines: {node: '>=14.18.0'}
+    deprecated: 'Yuku is now one package with one core. Use "yuku" instead: https://yuku.fyi/javascript/. Existing installs keep working but get no more fixes.'
 
   zimmerframe@1.1.4:
     resolution: {integrity: sha512-B58NGBEoc8Y9MWWCQGl/gq9xBCe4IiKM0a2x7GZdQKOW5Exr8S1W24J6OgM1njK8xCRGvAJIL/MxXHf6SkmQKQ==}
@@ -15421,6 +15456,10 @@ snapshots:
       '@edge-runtime/primitives': 4.1.0
     optional: true
 
+  '@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe(effect@4.1.6)':
+    dependencies:
+      effect: 4.1.6
+
   '@emnapi/core@1.8.1':
     dependencies:
       '@emnapi/wasi-threads': 1.1.0
@@ -15745,7 +15784,7 @@ snapshots:
       node-forge: 1.4.0
       npm-package-arg: 11.0.3
       ora: 3.4.0
-      picomatch: 4.0.5
+      picomatch: 4.0.7
       pretty-bytes: 5.6.0
       pretty-format: 29.7.0
       progress: 2.0.3
@@ -15766,7 +15805,7 @@ snapshots:
       terminal-link: 2.1.1
       undici: 6.23.0
       wrap-ansi: 7.0.0
-      ws: 8.19.0
+      ws: 8.23.0
     optionalDependencies:
       react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
     transitivePeerDependencies:
@@ -15798,7 +15837,7 @@ snapshots:
       '@expo/router-server': 57.0.3(expo-constants@57.0.6(expo@57.0.7)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)))(expo-font@57.0.1(expo@57.0.7)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(expo-server@57.0.1)(expo@57.0.7)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@expo/schema-utils': 57.0.2
       '@expo/spawn-async': 1.8.0
-      '@expo/ws-tunnel': 2.0.0(ws@8.19.0)
+      '@expo/ws-tunnel': 2.0.0(ws@8.23.0)
       '@expo/xcpretty': 4.4.4
       '@react-native/dev-middleware': 0.86.0
       accepts: 1.3.8
@@ -15835,7 +15874,7 @@ snapshots:
       terminal-link: 2.1.1
       toqr: 0.1.1
       wrap-ansi: 7.0.0
-      ws: 8.19.0
+      ws: 8.23.0
       zod: 3.25.76
     optionalDependencies:
       react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
@@ -16102,8 +16141,8 @@ snapshots:
       glob: 13.0.6
       hermes-parser: 0.29.1
       jsc-safe-url: 0.2.4
-      lightningcss: 1.32.0
-      picomatch: 4.0.5
+      lightningcss: 1.33.0
+      picomatch: 4.0.7
       postcss: 8.4.49
       resolve-from: 5.0.0
     optionalDependencies:
@@ -16134,9 +16173,9 @@ snapshots:
       glob: 13.0.6
       hermes-parser: 0.36.1
       jsc-safe-url: 0.2.4
-      lightningcss: 1.32.0
+      lightningcss: 1.33.0
       picomatch: 4.0.5
-      postcss: 8.5.20
+      postcss: 8.5.33
       resolve-from: 5.0.0
     optionalDependencies:
       expo: 57.0.7(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.4(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
@@ -16310,9 +16349,9 @@ snapshots:
 
   '@expo/ws-tunnel@1.0.6': {}
 
-  '@expo/ws-tunnel@2.0.0(ws@8.19.0)':
+  '@expo/ws-tunnel@2.0.0(ws@8.23.0)':
     dependencies:
-      ws: 8.19.0
+      ws: 8.23.0
 
   '@expo/xcpretty@4.4.4':
     dependencies:
@@ -16565,7 +16604,7 @@ snapshots:
 
   '@img/sharp-wasm32@0.34.5':
     dependencies:
-      '@emnapi/runtime': 1.8.1
+      '@emnapi/runtime': 1.11.3
     optional: true
 
   '@img/sharp-wasm32@0.35.2':
@@ -17117,10 +17156,10 @@ snapshots:
 
   '@multiavatar/multiavatar@1.0.7': {}
 
-  '@napi-rs/cli@3.5.1(@emnapi/runtime@1.11.3)(@types/node@22.19.13)':
+  '@napi-rs/cli@3.5.1(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)(@types/node@22.19.13)':
     dependencies:
       '@inquirer/prompts': 8.3.0(@types/node@22.19.13)
-      '@napi-rs/cross-toolchain': 1.0.3
+      '@napi-rs/cross-toolchain': 1.0.3(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
       '@napi-rs/wasm-tools': 1.0.1
       '@octokit/rest': 22.0.1
       clipanion: 4.0.0-rc.4(typanion@3.14.0)
@@ -17132,8 +17171,9 @@ snapshots:
       semver: 7.7.4
       typanion: 3.14.0
     optionalDependencies:
-      '@emnapi/runtime': 1.11.3
+      '@emnapi/runtime': 2.0.0-beta.2
     transitivePeerDependencies:
+      - '@emnapi/core'
       - '@napi-rs/cross-toolchain-arm64-target-aarch64'
       - '@napi-rs/cross-toolchain-arm64-target-armv7'
       - '@napi-rs/cross-toolchain-arm64-target-ppc64le'
@@ -17148,12 +17188,14 @@ snapshots:
       - node-addon-api
       - supports-color
 
-  '@napi-rs/cross-toolchain@1.0.3':
+  '@napi-rs/cross-toolchain@1.0.3(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     dependencies:
-      '@napi-rs/lzma': 1.4.5
-      '@napi-rs/tar': 1.1.0
+      '@napi-rs/lzma': 1.4.5(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
+      '@napi-rs/tar': 1.1.0(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
       debug: 4.4.3
     transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
       - supports-color
 
   '@napi-rs/lzma-android-arm-eabi@1.4.5':
@@ -17195,9 +17237,12 @@ snapshots:
   '@napi-rs/lzma-linux-x64-musl@1.4.5':
     optional: true
 
-  '@napi-rs/lzma-wasm32-wasi@1.4.5':
+  '@napi-rs/lzma-wasm32-wasi@1.4.5(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.2.6(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     optional: true
 
   '@napi-rs/lzma-win32-arm64-msvc@1.4.5':
@@ -17209,7 +17254,7 @@ snapshots:
   '@napi-rs/lzma-win32-x64-msvc@1.4.5':
     optional: true
 
-  '@napi-rs/lzma@1.4.5':
+  '@napi-rs/lzma@1.4.5(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     optionalDependencies:
       '@napi-rs/lzma-android-arm-eabi': 1.4.5
       '@napi-rs/lzma-android-arm64': 1.4.5
@@ -17224,10 +17269,13 @@ snapshots:
       '@napi-rs/lzma-linux-s390x-gnu': 1.4.5
       '@napi-rs/lzma-linux-x64-gnu': 1.4.5
       '@napi-rs/lzma-linux-x64-musl': 1.4.5
-      '@napi-rs/lzma-wasm32-wasi': 1.4.5
+      '@napi-rs/lzma-wasm32-wasi': 1.4.5(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
       '@napi-rs/lzma-win32-arm64-msvc': 1.4.5
       '@napi-rs/lzma-win32-ia32-msvc': 1.4.5
       '@napi-rs/lzma-win32-x64-msvc': 1.4.5
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
 
   '@napi-rs/tar-android-arm-eabi@1.1.0':
     optional: true
@@ -17265,9 +17313,12 @@ snapshots:
   '@napi-rs/tar-linux-x64-musl@1.1.0':
     optional: true
 
-  '@napi-rs/tar-wasm32-wasi@1.1.0':
+  '@napi-rs/tar-wasm32-wasi@1.1.0(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.2.6(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     optional: true
 
   '@napi-rs/tar-win32-arm64-msvc@1.1.0':
@@ -17279,7 +17330,7 @@ snapshots:
   '@napi-rs/tar-win32-x64-msvc@1.1.0':
     optional: true
 
-  '@napi-rs/tar@1.1.0':
+  '@napi-rs/tar@1.1.0(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     optionalDependencies:
       '@napi-rs/tar-android-arm-eabi': 1.1.0
       '@napi-rs/tar-android-arm64': 1.1.0
@@ -17293,10 +17344,13 @@ snapshots:
       '@napi-rs/tar-linux-s390x-gnu': 1.1.0
       '@napi-rs/tar-linux-x64-gnu': 1.1.0
       '@napi-rs/tar-linux-x64-musl': 1.1.0
-      '@napi-rs/tar-wasm32-wasi': 1.1.0
+      '@napi-rs/tar-wasm32-wasi': 1.1.0(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)
       '@napi-rs/tar-win32-arm64-msvc': 1.1.0
       '@napi-rs/tar-win32-ia32-msvc': 1.1.0
       '@napi-rs/tar-win32-x64-msvc': 1.1.0
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
 
   '@napi-rs/wasm-runtime@1.1.1':
     dependencies:
@@ -18637,10 +18691,10 @@ snapshots:
       '@rollup/pluginutils': 5.5.1(rollup@4.59.0)
       commondir: 1.0.1
       estree-walker: 2.0.2
-      fdir: 6.5.0(picomatch@4.0.5)
+      fdir: 6.5.0(picomatch@4.0.7)
       is-reference: 1.2.1
       magic-string: 0.30.21
-      picomatch: 4.0.5
+      picomatch: 4.0.7
     optionalDependencies:
       rollup: 4.59.0
 
@@ -19018,7 +19072,7 @@ snapshots:
       jiti: 2.6.1
       lightningcss: 1.31.1
       magic-string: 0.30.21
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
       tailwindcss: 4.2.1
 
   '@tailwindcss/node@4.2.2':
@@ -19028,7 +19082,7 @@ snapshots:
       jiti: 2.6.1
       lightningcss: 1.32.0
       magic-string: 0.30.21
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
       tailwindcss: 4.2.2
 
   '@tailwindcss/oxide-android-arm64@4.2.1':
@@ -19885,7 +19939,7 @@ snapshots:
       '@vue/shared': 3.5.29
       entities: 7.0.1
       estree-walker: 2.0.2
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
 
   '@vue/compiler-dom@3.5.29':
     dependencies:
@@ -19902,7 +19956,7 @@ snapshots:
       estree-walker: 2.0.2
       magic-string: 0.30.21
       postcss: 8.5.33
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
 
   '@vue/compiler-ssr@3.5.29':
     dependencies:
@@ -20140,14 +20194,6 @@ snapshots:
       retry: 0.13.1
 
   asynckit@0.4.0: {}
-
-  axios@1.15.1:
-    dependencies:
-      follow-redirects: 1.16.0
-      form-data: 4.0.5
-      proxy-from-env: 2.1.0
-    transitivePeerDependencies:
-      - debug
 
   axios@1.21.1:
     dependencies:
@@ -20964,7 +21010,7 @@ snapshots:
   css-tree@3.1.0:
     dependencies:
       mdn-data: 2.12.2
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
 
   cssesc@3.0.0: {}
 
@@ -21150,7 +21196,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  effect@4.0.0-rc.118: {}
+  effect@4.1.6: {}
 
   electron-to-chromium@1.5.302: {}
 
@@ -21222,7 +21268,7 @@ snapshots:
       es-errors: 1.3.0
       get-intrinsic: 1.3.0
       has-tostringtag: 1.0.2
-      hasown: 2.0.2
+      hasown: 2.0.4
 
   es-toolkit@1.45.1: {}
 
@@ -21875,8 +21921,6 @@ snapshots:
 
   flow-enums-runtime@0.0.6: {}
 
-  follow-redirects@1.16.0: {}
-
   follow-redirects@1.16.3: {}
 
   fontfaceobserver@2.3.0: {}
@@ -21885,14 +21929,6 @@ snapshots:
     dependencies:
       cross-spawn: 7.0.6
       signal-exit: 4.1.0
-
-  form-data@4.0.5:
-    dependencies:
-      asynckit: 0.4.0
-      combined-stream: 1.0.8
-      es-set-tostringtag: 2.1.0
-      hasown: 2.0.2
-      mime-types: 2.1.35
 
   form-data@4.0.6:
     dependencies:
@@ -22072,7 +22108,7 @@ snapshots:
       get-proto: 1.0.1
       gopd: 1.2.0
       has-symbols: 1.1.0
-      hasown: 2.0.2
+      hasown: 2.0.4
       math-intrinsics: 1.1.0
 
   get-nonce@1.0.1: {}
@@ -22202,7 +22238,7 @@ snapshots:
       '@types/ws': 8.18.1
       entities: 7.0.1
       whatwg-mimetype: 3.0.0
-      ws: 8.19.0
+      ws: 8.23.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -22216,10 +22252,6 @@ snapshots:
   has-tostringtag@1.0.2:
     dependencies:
       has-symbols: 1.1.0
-
-  hasown@2.0.2:
-    dependencies:
-      function-bind: 1.1.2
 
   hasown@2.0.4:
     dependencies:
@@ -22538,7 +22570,7 @@ snapshots:
 
   is-core-module@2.16.1:
     dependencies:
-      hasown: 2.0.2
+      hasown: 2.0.4
 
   is-decimal@2.0.1: {}
 
@@ -23078,7 +23110,7 @@ snapshots:
       whatwg-encoding: 3.1.1
       whatwg-mimetype: 4.0.0
       whatwg-url: 14.2.0
-      ws: 8.19.0
+      ws: 8.23.0
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - bufferutil
@@ -23179,7 +23211,7 @@ snapshots:
   launch-editor@2.14.1:
     dependencies:
       picocolors: 1.1.1
-      shell-quote: 1.10.0
+      shell-quote: 1.12.0
 
   leven@3.1.0: {}
 
@@ -25089,15 +25121,15 @@ snapshots:
 
   postcss@8.4.49:
     dependencies:
-      nanoid: 3.3.16
+      nanoid: 3.3.20
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
 
   postcss@8.5.20:
     dependencies:
-      nanoid: 3.3.16
+      nanoid: 3.3.20
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.4
 
   postcss@8.5.33:
     dependencies:
@@ -25307,7 +25339,7 @@ snapshots:
 
   react-devtools-core@6.1.5:
     dependencies:
-      shell-quote: 1.8.3
+      shell-quote: 1.12.0
       ws: 7.5.13
     transitivePeerDependencies:
       - bufferutil
@@ -25912,11 +25944,7 @@ snapshots:
 
   shebang-regex@3.0.0: {}
 
-  shell-quote@1.10.0: {}
-
   shell-quote@1.12.0: {}
-
-  shell-quote@1.8.3: {}
 
   shiki@3.23.0:
     dependencies:
@@ -26192,7 +26220,7 @@ snapshots:
       lines-and-columns: 1.2.4
       mz: 2.7.0
       pirates: 4.0.7
-      tinyglobby: 0.2.15
+      tinyglobby: 0.2.17
       ts-interface-checker: 0.1.13
 
   supports-color@10.2.2: {}
@@ -26215,18 +26243,6 @@ snapshots:
       supports-color: 7.2.0
 
   supports-preserve-symlinks-flag@1.0.0: {}
-
-  svelte-check@4.4.6(picomatch@4.0.5)(svelte@5.53.6)(typescript@6.0.2):
-    dependencies:
-      '@jridgewell/trace-mapping': 0.3.31
-      chokidar: 4.0.3
-      fdir: 6.5.0(picomatch@4.0.5)
-      picocolors: 1.1.1
-      sade: 1.8.1
-      svelte: 5.53.6
-      typescript: 6.0.2
-    transitivePeerDependencies:
-      - picomatch
 
   svelte-check@4.4.6(picomatch@4.0.7)(svelte@5.53.6)(typescript@6.0.2):
     dependencies:
@@ -26346,8 +26362,8 @@ snapshots:
 
   tinyglobby@0.2.15:
     dependencies:
-      fdir: 6.5.0(picomatch@4.0.5)
-      picomatch: 4.0.5
+      fdir: 6.5.0(picomatch@4.0.7)
+      picomatch: 4.0.7
 
   tinyglobby@0.2.17:
     dependencies:
@@ -27113,13 +27129,14 @@ snapshots:
 
   wait-on@8.0.5:
     dependencies:
-      axios: 1.15.1
+      axios: 1.21.1
       joi: 18.3.1
       lodash: 4.17.23
       minimist: 1.2.8
       rxjs: 7.8.2
     transitivePeerDependencies:
       - debug
+      - supports-color
 
   walk-up-path@4.0.0: {}
 

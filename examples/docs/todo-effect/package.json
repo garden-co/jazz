@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",
-    "effect": "4.0.0-rc.118",
+    "effect": "4.1.6",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*"
   },
