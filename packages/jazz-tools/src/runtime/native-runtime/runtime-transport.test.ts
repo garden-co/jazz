@@ -122,13 +122,42 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
-  it.each(["browser", "node"])(
-    "does not wake a pending %s read for the tick its own poll asks for",
-    async (host) => {
+  // How a binding hands the host a tick its core asked for: wasm calls the
+  // scheduler during the call that asked; napi's threadsafe function calls
+  // it on a later turn, coalescing the requests made before it into one
+  // callback, and counts every request (`tickRequests`).
+  const tickDeliveries = {
+    synchronous: (deliver: () => void) => deliver(),
+    "on a microtask": (deliver: () => void) => queueMicrotask(deliver),
+    "on a later host turn": (deliver: () => void) => setImmediate(deliver),
+  };
+
+  it.each(
+    (["browser", "node"] as const).flatMap((host) =>
+      (Object.keys(tickDeliveries) as (keyof typeof tickDeliveries)[]).map(
+        (delivery) => [host, delivery] as const,
+      ),
+    ),
+  )(
+    "does not wake a pending %s read for the tick its own poll asks for, delivered %s",
+    async (host, delivery) => {
       let nativeWake!: (urgency: string) => void;
+      let requested = false;
+      let requests = 0;
+      const requestTick = () => {
+        requests += 1;
+        if (requested) return;
+        requested = true;
+        tickDeliveries[delivery](() => {
+          requested = false;
+          nativeWake("immediate");
+        });
+      };
+      let answered = false;
       // Like a read that still owes requests: every poll asks for a tick.
       const poll = vi.fn<() => Uint8Array | null>(() => {
-        nativeWake("immediate");
+        if (answered) return Uint8Array.of(0, 0);
+        requestTick();
         return null;
       });
       const runtime = NativeRuntimeAdapter.fromDb(
@@ -138,6 +167,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           setTickScheduler: (callback: (urgency: string) => void) => {
             nativeWake = callback;
           },
+          ...(delivery === "synchronous" ? {} : { tickRequests: () => requests }),
         }) as never,
         testSchema,
         new Uint8Array(16),
@@ -155,13 +185,23 @@ describe("NativeRuntimeAdapter server transport", () => {
             { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
           ],
         });
-        void runtime.query(query, null, "local-first").catch(() => undefined);
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
         // Host turns still run, and the read only polls on its fallback timer.
         for (let step = 0; step < 100; step += 1) {
           await vi.advanceTimersByTimeAsync(100);
           for (let turn = 0; turn < 20; turn += 1) await hostTurn();
         }
         expect(poll.mock.calls.length).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // Work the read didn't ask for still wakes it, with no timer.
+        answered = true;
+        requestTick();
+        for (let turn = 0; turn < 10 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
       } finally {
         vi.useRealTimers();
         vi.unstubAllGlobals();
