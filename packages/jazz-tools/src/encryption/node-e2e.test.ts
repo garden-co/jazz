@@ -127,23 +127,35 @@ function observeStoreClock() {
 it("waits for the first catalogue without waking the private-store clock", async () => {
   const first = await serve();
   await first.stop();
-  const { fired } = observeStoreClock();
+  // A test clock stands in for a minute offline. It keeps running with real
+  // time, so the timers armed on it still fire once the server is back.
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    shouldAdvanceTime: true,
+  });
+  cleanups.push(async () => {
+    vi.useRealTimers();
+  });
+  const { armed, fired } = observeStoreClock();
   const alice = await device(first, { wait: false });
   await alice.db.disconnect();
   const state = () => JSON.parse(alice.db.encryption["native"].encryptionState());
   expect(state().readable).toBe(false);
 
-  await new Promise((resolve) => setTimeout(resolve, 60_000));
-  expect(fired).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(state().readable).toBe(false);
+  expect(fired, JSON.stringify({ armed, fired })).toHaveLength(0);
 
   await serve({ dir: first.dir, port: first.port });
   try {
     await alice.db.reconnect();
-    await expect.poll(() => state().status, { timeout: 5_000 }).toBe("active");
+    // Verifying a new device account is a few dozen server round trips and
+    // two commits: give it the same budget as the device helper's wait.
+    expect(await alice.db.encryption.ready({ timeoutMs: 20_000 })).toBe("active");
   } finally {
     await alice.session.close();
   }
-}, 90_000);
+}, 60_000);
 
 it("arms verification backoff after a transient private-store error", async () => {
   const { armed, fired } = observeStoreClock();
