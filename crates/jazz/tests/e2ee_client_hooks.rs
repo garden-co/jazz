@@ -1862,16 +1862,18 @@ fn mergeable_ledger_read_is_refused_before_its_query_error() {
     );
 }
 
-/// Contract: a ledger read on a store that has never had an upstream is
-/// refused as such even when its query cannot be prepared.
+/// Contract: on a store that has never had an upstream, a ledger read
+/// whose query cannot be prepared reports the query error, not the
+/// retryable `NotObserved`: retrying never fixes the query.
 #[test]
-fn ledger_read_without_upstream_is_refused_before_its_query_error() {
+fn ledger_read_without_upstream_reports_its_query_error() {
     let fresh = client(&Fake::new());
     let id = OpenTransactionId::new();
     block_on(fresh.begin_serializable(id)).unwrap();
     let missing = Query::from("missing_table");
     let error = block_on(fresh.tx_ref(id).ledger_read_query(&missing)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::NotObserved, "{error:?}");
+    assert_eq!(error.code, ErrorCode::Query, "{error:?}");
+    assert!(error.message.contains("missing_table"), "{error:?}");
 }
 
 /// Contract: a ledger read in a transaction that is no longer open is a

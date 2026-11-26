@@ -76,9 +76,11 @@ impl TxRef<'_> {
     }
 
     /// Prepares a ledger query, deferring any preparation error until the
-    /// read's turn so it cannot overtake an earlier authority refusal. The
-    /// store's and the transaction's own refusals come first: they hold for
-    /// every ledger read this transaction could make, whatever its query.
+    /// read's turn so it cannot overtake an earlier authority refusal. A
+    /// transaction that is closed or not serializable is refused first,
+    /// whatever the query. A store without an upstream is refused only
+    /// after the query has prepared, because that refusal invites a retry
+    /// and must not hide a query error that no retry can fix.
     #[doc(hidden)]
     pub async fn ledger_read_query(&self, query: &Query) -> Result<LedgerRead, Error> {
         let prepared = self.db.prepare_query(query);
@@ -90,7 +92,6 @@ impl TxRef<'_> {
         &self,
         prepared: Result<&PreparedQuery, Error>,
     ) -> Result<LedgerRead, Error> {
-        self.db.require_upstream("a ledger read")?;
         match self
             .db
             .inner
@@ -107,6 +108,11 @@ impl TxRef<'_> {
                 ));
             }
             None => return Err(rejected("transaction is not open")),
+        }
+        // `NotObserved` lets callers retry (the native readiness loop
+        // does), so a query error that no retry fixes is reported instead.
+        if prepared.is_ok() {
+            self.db.require_upstream("a ledger read")?;
         }
         // Boxed: the read's state stays off the stack of the runtime that
         // polls it, whose own futures are deep already.
