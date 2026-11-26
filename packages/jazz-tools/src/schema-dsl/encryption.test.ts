@@ -259,7 +259,7 @@ describe("later versions of an encrypted app", () => {
     );
     expect(
       JSON.parse(await readFile(join(root, "migrations", "snapshots", sidecar), "utf8")),
-    ).toEqual({ tables: { messages: TEXT_ENTRY } });
+    ).toEqual({ format: 1, tables: { messages: TEXT_ENTRY } });
 
     const files = await secondVersion(root, chat({ rooms: ", topic: s.string().optional()" }));
     const app = JSON.parse(files.app) as {
@@ -451,7 +451,7 @@ describe("later versions of an encrypted app", () => {
     );
     for (const sidecar of sidecars)
       expect(await readFile(join(printed, "migrations", "snapshots", sidecar), "utf8")).toBe(
-        JSON.stringify({ tables: { messages: TEXT_ENTRY } }, null, 2) + "\n",
+        JSON.stringify({ format: 1, tables: { messages: TEXT_ENTRY } }, null, 2) + "\n",
       );
 
     // generate reads the printed migrations, history and declarations as the originals.
