@@ -30,9 +30,8 @@ export interface EncryptionNeedsLocalFirstDetails {
 }
 
 /**
- * An operation touched an end-to-end encrypted column while the app was on
- * the thin client, which holds no keys and so never sends or reads such a
- * column's plaintext. Nothing of the operation was sent.
+ * An operation needed the local-first client while the app was on the thin
+ * client. Nothing of the operation was sent.
  */
 export class EncryptionNeedsLocalFirstError extends Error {
   readonly reason: EncryptionNeedsLocalFirstReason;
@@ -53,14 +52,16 @@ export class EncryptionNeedsLocalFirstError extends Error {
 }
 
 function needsLocalFirstMessage(
-  { reason, table, column, creatorMembership }: EncryptionNeedsLocalFirstDetails,
+  { reason, operation, table, column, creatorMembership }: EncryptionNeedsLocalFirstDetails,
   cause: unknown,
 ): string {
   const lead = creatorMembership
     ? `Creating a space in \`${table}\` with automatic membership needs the local-first client. Pass \`addCreatorAsMember: false\` to create the space without adding its creator.`
-    : column === undefined
-      ? `\`${table}\` has end-to-end encrypted columns, which need the local-first client.`
-      : `\`${table}.${column}\` is end-to-end encrypted, which needs the local-first client.`;
+    : operation === "members.add"
+      ? `Adding a member to a space in \`${table}\` needs the local-first client.`
+      : column === undefined
+        ? `\`${table}\` has end-to-end encrypted columns, which need the local-first client.`
+        : `\`${table}.${column}\` is end-to-end encrypted, which needs the local-first client.`;
   switch (reason) {
     case "no-loader":
       return `${lead} Give Jazz a loader for it, \`client: () => import("jazz-tools/local-first")\`, where you create the client or provider, or call \`db.upgradeToLocalFirst(loader)\` first.`;

@@ -161,6 +161,8 @@ export type AuthUpdate =
 export interface Runtime {
   /** @internal The authority's catalogue identity for a table of this schema. */
   tableIdentity?(table: string): string;
+  /** @internal The thin runtime cannot resolve the space identity for a member add in a transaction. */
+  memberAddRefusal?(table: string): Error;
   /**
    * @internal Runs a write, and again after the space's key is ready when it
    * fails `key-pending` (an encrypted app only).
