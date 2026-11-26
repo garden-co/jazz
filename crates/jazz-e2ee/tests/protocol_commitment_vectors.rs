@@ -5,7 +5,9 @@ use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::conformance::FixedRandom;
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::primitives::{sign::SigningKeyPair, slh_dsa::CommitmentKey};
-use jazz_e2ee::protocol::account::build::{AccountWriter, recovery_commitment};
+use jazz_e2ee::protocol::account::build::{
+    AccountWriter, RecoveryCommitmentKey, recovery_commitment,
+};
 use jazz_e2ee::protocol::{
     commitment::MECHANISM,
     derive::{RecoveryKeys, RecoverySecret, recovery_commitment_seed},
@@ -107,16 +109,16 @@ fn recovery_root_commitment_record_vector() {
         domain: &app,
         account_id: ALICE,
     };
+    let application = domain(APP, "prod", ALICE);
     let record = |generation| {
         recovery_commitment(
             &writer,
-            generation,
             &secret,
+            &RecoveryCommitmentKey::derive(&secret, &application, generation).unwrap(),
             &mut FixedRandom(vec![0x66; 16]),
         )
         .unwrap()
     };
-    let application = domain(APP, "prod", ALICE);
     let d = format!(r#"["{APP}","prod","{ALICE}"]"#);
     for (generation, (seed, public, root, signing, signature)) in [
         (
@@ -191,6 +193,42 @@ fn recovery_root_commitment_record_vector() {
         assert_eq!(
             registry.verify(&keys.signing.public, &signed, &c.signature),
             Ok(true)
+        );
+    }
+}
+
+/// Alice's registration refuses a commitment key derived for another root:
+/// from another secret, for another account or at another generation.
+/// Nothing is signed, so no record with the wrong key can be staged.
+#[test]
+fn a_commitment_key_for_another_root_is_refused() {
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let other_secret = RecoverySecret::from_bytes([0x42; 32]);
+    let app = AppDomain::new(APP, Some("prod")).unwrap();
+    let registry = Registry::builtin();
+    let writer = AccountWriter {
+        account_secret_root_id: None,
+        suite: registry.select(&MechanismConfig::default()).unwrap(),
+        registry: &registry,
+        domain: &app,
+        account_id: ALICE,
+    };
+    let commit = |key: &RecoveryCommitmentKey| {
+        recovery_commitment(&writer, &secret, key, &mut FixedRandom(vec![0x66; 16]))
+    };
+    let key = |secret, account, generation| {
+        RecoveryCommitmentKey::derive(secret, &domain(APP, "prod", account), generation).unwrap()
+    };
+    commit(&key(&secret, ALICE, 0)).unwrap();
+    commit(&key(&secret, ALICE, 1)).unwrap();
+    for wrong in [
+        key(&other_secret, ALICE, 0),
+        key(&secret, OTHER, 0),
+        RecoveryCommitmentKey::derive(&secret, &domain(APP, "dev", ALICE), 0).unwrap(),
+    ] {
+        assert_eq!(
+            commit(&wrong),
+            Err(ProtocolError::Crypto(jazz_e2ee::Error::InvalidInput))
         );
     }
 }
