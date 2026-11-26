@@ -106,34 +106,19 @@ impl TxRef<'_> {
         // Boxed: the read's state stays off the stack of the runtime that
         // polls it, whose own futures are deep already.
         let opts = ReadOpts::default();
-        let table = prepared.as_ref().ok().map(|query| &query.query().table);
-        let rows = Box::pin(self.all_prepared_admitted(prepared, None, &opts, None, true)).await?;
-        let through = match self
-            .db
-            .inner
-            .batches
-            .borrow()
-            .get(&self.id)
-            .map(|batch| &batch.kind)
-        {
-            Some(BatchKind::Serializable { snapshot, .. }) => snapshot.seq,
-            _ => return Err(Error::new(ErrorCode::Query, "the transaction is not open")),
-        };
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let at = row.seq();
-            if !at.accepted() || at.seq > through {
-                return Err(Error::new(
-                    ErrorCode::NotObserved,
-                    format!(
-                        "a ledger read of `{}` found a row not accepted at its cut",
-                        table.expect("a successful read has a prepared query")
-                    ),
-                ));
-            }
-            out.push((row, at.seq));
-        }
-        Ok(LedgerRead { rows: out, through })
+        let (rows, snapshot) =
+            Box::pin(self.all_prepared_admitted(prepared, None, &opts, None, true)).await?;
+        let through = snapshot
+            .expect("a ledger read runs in a serializable transaction")
+            .seq;
+        let rows = rows.into_iter().map(|row| {
+            let at = row.seq().seq;
+            (row, at)
+        });
+        Ok(LedgerRead {
+            rows: rows.collect(),
+            through,
+        })
     }
 }
 

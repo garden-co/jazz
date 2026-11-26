@@ -11484,6 +11484,7 @@ struct TransactionReadTicket {
 struct TransactionRead {
     state: Rc<RefCell<TransactionReads>>,
     ticket: Rc<TransactionReadTicket>,
+    ledger: bool,
 }
 
 impl TransactionRead {
@@ -13210,25 +13211,11 @@ impl Db {
         id: OpenTransactionId,
         prepared: &PreparedQuery,
         include_deleted: bool,
-        prefix: usize,
-        identity: Option<AuthorSubject>,
+        snapshot: Pos,
         through: ReadThrough,
     ) -> Result<(), Error> {
-        // A mergeable read records nothing: peek without the store gate,
-        // so the batch's cached overlay stays for its next stage or read.
-        if !matches!(
-            self.inner.batches.borrow().get(&id),
-            Some(Batch {
-                kind: BatchKind::Serializable { .. },
-                ..
-            })
-        ) {
-            return Ok(());
-        }
-        let widened = self.widened_read(id, prefix, prepared, identity).await?;
-        let prepared = widened.as_ref().unwrap_or(prepared);
         let inner = self.inner.without_overlay();
-        let Some((snapshot, own)) = self
+        let Some((_, own)) = self
             .inner
             .batches
             .borrow()
@@ -13248,12 +13235,19 @@ impl Db {
         };
         let rows = inner.read_versions(prepared, None, &read).await?;
         if let Some(Batch {
-            kind: BatchKind::Serializable { reads, pinned, .. },
+            kind:
+                BatchKind::Serializable {
+                    snapshot: pinned_snapshot,
+                    reads,
+                    pinned,
+                    ..
+                },
             ..
         }) = self.inner.batches.borrow_mut().get_mut(&id)
         {
             // Even a LocalOnly read observes this cut. Later remote coverage
             // must not move a snapshot whose results have already escaped.
+            *pinned_snapshot = snapshot;
             *pinned = true;
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
@@ -13457,6 +13451,7 @@ impl TxRef<'_> {
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_admitted(Ok(prepared), identity, opts, coverage, false)
             .await
+            .map(|(rows, _)| rows)
     }
 
     pub(super) async fn all_prepared_admitted(
@@ -13465,8 +13460,8 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         opts: &ReadOpts,
         coverage: Option<&dyn Fn() -> bool>,
-        pipeline_ledger_fetch: bool,
-    ) -> Result<Vec<CurrentRow>, Error> {
+        ledger: bool,
+    ) -> Result<(Vec<CurrentRow>, Option<Pos>), Error> {
         let source = &opts.read_view.source;
         if let ReadViewSourceSpec::Snapshot { .. } = source {
             return Err(Error::new(
@@ -13486,6 +13481,7 @@ impl TxRef<'_> {
         let guard = TransactionRead {
             state,
             ticket: Rc::default(),
+            ledger,
         };
         guard
             .state
@@ -13525,7 +13521,7 @@ impl TxRef<'_> {
                 if !guard.is_first(&state) {
                     // The first read still owns snapshot selection. Only ledger
                     // reads can start a fetch ahead of their turn, at that cut.
-                    let pinned_ledger = pipeline_ledger_fetch
+                    let pinned_ledger = ledger
                         && matches!(
                             self.db.inner.batches.borrow().get(&self.id),
                             Some(Batch {
@@ -13591,7 +13587,7 @@ impl TxRef<'_> {
         coverage: Option<&dyn Fn() -> bool>,
         prefix: BatchPrefix,
         admission: &TransactionRead,
-    ) -> Result<Vec<CurrentRow>, Error> {
+    ) -> Result<(Vec<CurrentRow>, Option<Pos>), Error> {
         let tier = opts.tier;
         let include_deleted = opts.read_view.include_deleted;
         let source = &opts.read_view.source;
@@ -13662,8 +13658,7 @@ impl TxRef<'_> {
                 .await?;
             let hydrated = widened.as_ref().unwrap_or(prepared);
             self.db.remote_shape(&hydrated.query)?;
-            let through = self
-                .db
+            self.db
                 .fetch(
                     hydrated,
                     at,
@@ -13678,31 +13673,20 @@ impl TxRef<'_> {
                     tier == ReadTier::Remote,
                     source,
                 )
-                .await?;
-            Some(through)
+                .await?
         } else {
             None
         };
         // Only the admitted head can take the cut, read its staged
         // prefix, and record the result.
         admission.wait_turn().await;
-        if let Some(through) = answer
-            && let Some(Batch {
-                kind:
-                    BatchKind::Serializable {
-                        snapshot, pinned, ..
-                    },
-                ..
-            }) = self.db.inner.batches.borrow_mut().get_mut(&self.id)
-            && !*pinned
-        {
-            // Pinned by the authority's answer, or (offline) at the
-            // replica's known cut.
-            if let Some(through) = through {
-                *snapshot = through;
+        let snapshot = snapshot.map(|(snapshot, pinned)| {
+            if pinned {
+                snapshot
+            } else {
+                answer.unwrap_or(snapshot)
             }
-            *pinned = true;
-        }
+        });
         let non_durable = self.db.inner.non_durable.get();
         if snapshot.is_none()
             && self.db.is_client()
@@ -13762,6 +13746,11 @@ impl TxRef<'_> {
                 let rows = self
                     .db
                     .in_overlay_prefix(self.id, prefix, async |inner, cut| {
+                        // Keep the overlay's own writes at the fetched cut.
+                        let cut = cut.map(|cut| Cut {
+                            seq: snapshot.unwrap_or(cut.seq),
+                            ..cut
+                        });
                         let read = ReadSpec {
                             include_deleted,
                             cut,
@@ -13779,17 +13768,36 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db
-            .record_read(
-                self.id,
-                &prepared,
-                include_deleted,
-                prefix.ops,
-                identity,
-                through,
-            )
-            .await?;
-        Ok(rows)
+        if let Some(snapshot) = snapshot {
+            if admission.ledger
+                && rows.iter().any(|row| {
+                    let at = row.seq();
+                    !at.accepted() || at.seq > snapshot.seq
+                })
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!(
+                        "a ledger read of `{}` found a row not accepted at its cut",
+                        prepared.query.table
+                    ),
+                ));
+            }
+            let widened = self
+                .db
+                .widened_read(self.id, prefix.ops, &prepared, identity)
+                .await?;
+            self.db
+                .record_read(
+                    self.id,
+                    widened.as_ref().unwrap_or(&prepared),
+                    include_deleted,
+                    snapshot,
+                    through,
+                )
+                .await?;
+        }
+        Ok((rows, snapshot))
     }
 
     /// A point read is a one-row query, so it validates like any other read.

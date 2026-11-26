@@ -546,6 +546,84 @@ mod ledger {
         (alice, bob, link)
     }
 
+    /// Alice's first read refuses her staged row. Bob then inserts a row
+    /// that Alice's first successful read sees at a fresh authority cut.
+    #[test]
+    fn failed_first_ledger_read_leaves_the_cut_unpinned() {
+        let (alice, bob) = super::fixture();
+        let tx = alice.tx_ref(begin(&alice));
+        let pending = block_on(tx.insert("notes", cells("pending"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let query = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(pending.0)))))
+            .unwrap();
+        let error = drive(&[&alice, &bob], tx.ledger_read(&query)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotObserved);
+
+        block_on(bob.insert("notes", cells("accepted"), Default::default())).unwrap();
+        let query = alice
+            .prepare_query(
+                &Query::from("notes")
+                    .filter(eq(col("text"), lit(Value::String("accepted".into())))),
+            )
+            .unwrap();
+        let read = drive(&[&alice, &bob], tx.ledger_read(&query)).unwrap();
+        assert_eq!(
+            texts(read.rows.into_iter().map(|(row, _)| row).collect()),
+            ["accepted"]
+        );
+    }
+
+    /// Alice queues a second ledger read while the first fetch is in flight.
+    /// Bob answers the first, then inserts a row. Once Alice refuses her
+    /// staged row, the queued read fetches at a fresh cut and sees Bob's row.
+    /// Alice: stage -> read A -> queue B -> refuse A -> fetch B
+    /// Bob:                          reply A -> insert -> reply B
+    #[test]
+    fn queued_ledger_read_fetches_a_fresh_cut_after_the_first_read_fails() {
+        let (alice, bob, mut link) = fixture();
+        let tx = alice.tx_ref(begin(&alice));
+        let pending = block_on(tx.insert("notes", cells("pending"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let pending_query = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(pending.0)))))
+            .unwrap();
+        let accepted_query = alice
+            .prepare_query(
+                &Query::from("notes")
+                    .filter(eq(col("text"), lit(Value::String("accepted".into())))),
+            )
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&pending_query));
+        let mut second = pin!(tx.ledger_read(&accepted_query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1, "only the first fetch can select a cut");
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Err(error)) = poll(first.as_mut()) else {
+            panic!("the first read should refuse the staged row");
+        };
+        assert_eq!(error.code, ErrorCode::NotObserved);
+
+        block_on(bob.insert("notes", cells("accepted"), Default::default())).unwrap();
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Ok(read)) = poll(second.as_mut()) else {
+            panic!("the queued read should see the accepted row");
+        };
+        assert_eq!(
+            texts(read.rows.into_iter().map(|(row, _)| row).collect()),
+            ["accepted"]
+        );
+    }
+
     /// Alice's two in-flight reads share a cut despite Bob's subsequent
     /// update. Alice's staged insert between admissions affects only her
     /// second read, which refuses the unsettled row.
