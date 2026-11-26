@@ -1114,6 +1114,11 @@ struct Host {
     tick_scheduler: RefCell<Option<ThreadsafeFunction<String, ()>>>,
     /// A tick is requested and not yet delivered: further requests coalesce.
     tick_requested: Arc<AtomicBool>,
+    /// Every request for an immediate tick so far, coalesced or not. The
+    /// scheduler callback arrives on a later turn; comparing this count
+    /// around a call tells the host which requests that call made, so a
+    /// pending read can tell the tick its own poll asked for from news.
+    tick_requests: Cell<u64>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<FunctionRef<JsonValue, ()>>>,
     /// The same callback, told of an upload the authority refused that no
@@ -1130,6 +1135,7 @@ impl Host {
         let Some(scheduler) = scheduler.as_ref() else {
             return;
         };
+        self.tick_requests.set(self.tick_requests.get() + 1);
         if self.tick_requested.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -2902,6 +2908,18 @@ impl NapiDb {
             .binding()?
             .rollback_transaction(&open_transaction_id)
             .map_err(host_error)?)
+    }
+
+    /// How many immediate ticks this database has asked its tick callback
+    /// for, coalesced requests included (0 once closed). The callback runs on
+    /// a later turn; a host compares the count around a call to know which
+    /// requests that call made.
+    #[napi(js_name = "tickRequests")]
+    pub fn tick_requests(&self) -> f64 {
+        self.inner
+            .borrow()
+            .as_ref()
+            .map_or(0.0, |inner| inner.host.tick_requests.get() as f64)
     }
 
     /// The host's tick callback: `"immediate"` for ready sync work or
