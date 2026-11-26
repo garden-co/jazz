@@ -34,6 +34,37 @@ pub struct RecoveryKeys {
     pub signing: KeyPair,
 }
 
+fn recovery_seed(
+    secret: &RecoverySecret,
+    account_domain: &AccountDomain,
+    generation: u64,
+) -> Zeroizing<[u8; 32]> {
+    let domain = account_domain.as_str().as_bytes();
+    if generation == 0 {
+        hash::keyed_hash_parts(secret.as_bytes(), &[RECOVERY_SEED_LABEL, domain])
+    } else {
+        hash::keyed_hash_parts(
+            secret.as_bytes(),
+            &[
+                RECOVERY_GENERATION_SEED_LABEL,
+                domain,
+                &[0],
+                generation.to_string().as_bytes(),
+            ],
+        )
+    }
+}
+
+/// Commitment seed for the recovery root of this account and generation.
+pub fn recovery_commitment_seed(
+    secret: &RecoverySecret,
+    account_domain: &AccountDomain,
+    generation: u64,
+) -> Zeroizing<[u8; 32]> {
+    let seed = recovery_seed(secret, account_domain, generation);
+    hash::keyed_hash(&seed, b"jazz.e2ee.recovery-commitment-seed.v1\0")
+}
+
 impl RecoveryKeys {
     /// The root of `secret` for the account domain at account `generation`.
     ///
@@ -52,20 +83,7 @@ impl RecoveryKeys {
         account_domain: &AccountDomain,
         generation: u64,
     ) -> ProtocolResult<Self> {
-        let domain = account_domain.as_str().as_bytes();
-        let seed = if generation == 0 {
-            hash::keyed_hash_parts(secret.as_bytes(), &[RECOVERY_SEED_LABEL, domain])
-        } else {
-            hash::keyed_hash_parts(
-                secret.as_bytes(),
-                &[
-                    RECOVERY_GENERATION_SEED_LABEL,
-                    domain,
-                    &[0],
-                    generation.to_string().as_bytes(),
-                ],
-            )
-        };
+        let seed = recovery_seed(secret, account_domain, generation);
         let kem_ikm = hash::keyed_hash(&seed, RECOVERY_KEM_LABEL);
         let sign_seed = hash::keyed_hash(&seed, RECOVERY_SIGN_LABEL);
         let id_bytes = hash::keyed_hash(&seed, RECOVERY_ROOT_ID_LABEL);

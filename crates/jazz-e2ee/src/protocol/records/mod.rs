@@ -19,6 +19,7 @@
 //! accepted by replay depends on other rows and is decided by replay.
 
 pub mod account;
+pub mod roster;
 pub mod space;
 
 use crate::agility::{MechanismId, PublicKey};
