@@ -426,6 +426,69 @@ fn bulk_and_individual_reopens_authenticate_the_same_documents() {
     }
 }
 
+/// Alice's opener retries with a fresh incarnation if another tab wipes
+/// the store between opening the scope and reading its snapshot.
+///
+/// ```text
+/// opener ──open scope──► store ◄──wipe── other tab
+/// opener ◄────wiped───── load snapshot
+/// opener ──open scope──► new incarnation
+/// ```
+///
+#[test]
+fn a_wipe_during_the_snapshot_retries_open() {
+    let memory = Rc::new(MemoryStore::new());
+    let previous = open_client(memory.clone()).device().unwrap().id.clone();
+    let retired = Rc::new(Cell::new(None));
+    let store = JsStore::served_by(Rc::new({
+        let memory = memory.clone();
+        let single = serve(memory.clone());
+        let retired = retired.clone();
+        move |request| {
+            let (memory, single, retired) = (memory.clone(), single.clone(), retired.clone());
+            Box::pin(async move {
+                YieldOnce(false).await;
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") => {
+                        let incarnation = memory.open_scope(scope).await.unwrap().to_string();
+                        (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        )
+                    }
+                    Some("loadAllV1") => {
+                        let incarnation: u64 =
+                            command["incarnation"].as_str().unwrap().parse().unwrap();
+                        if let Some(old) = retired.get() {
+                            assert_ne!(incarnation, old, "the retry opened a fresh scope");
+                            assert!(memory.snapshot(scope, incarnation).unwrap().is_empty());
+                            (true, "[]".to_owned())
+                        } else {
+                            retired.set(Some(incarnation));
+                            memory.delete(scope).await.unwrap();
+                            assert_eq!(
+                                memory.snapshot(scope, incarnation),
+                                Err(jazz_e2ee_client::StoreError::Wiped)
+                            );
+                            (false, "wiped".to_owned())
+                        }
+                    }
+                    _ => single(request).await,
+                }
+            })
+        }
+    }));
+
+    let client = try_open(Rc::new(store), declarations()).unwrap();
+    assert!(retired.get().is_some());
+    let fresh = client.device().unwrap().id.clone();
+    assert_ne!(fresh, previous);
+    assert_eq!(open_client(memory).device().unwrap().id, fresh);
+}
+
 /// Contract: a wipe removes alice's device, held keys and floors from the
 /// store and closes the runtime: the device's secrets leave memory too
 /// (`device()` fails), a later keep, floor or encrypted write fails and

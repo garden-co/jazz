@@ -1036,6 +1036,102 @@ fn one_non_canonical_record_is_skipped_and_the_others_load() {
     );
 }
 
+/// Alice replaces a verified, published root record with a pending record
+/// for the same key. The new record has no verification marker. This goes
+/// through the protocol store because the client does not expose the marker.
+#[test]
+fn replacing_a_verified_root_key_clears_the_marker() {
+    let mut world = World::new(11);
+    world.account(ALICE);
+    let device = world.accounts[ALICE].device.clone();
+    let root = world.build_root(ROW, ALICE, &device).unwrap();
+    let pending = HeldSpace::from_creation(
+        &world.shared.registry,
+        &world.shared.domain,
+        &root,
+        "alice's creation",
+    )
+    .unwrap();
+    let mut published = pending.clone();
+    published.settle(CreationFate::Accepted, Some(&root.root.id));
+    let owner = owner(&world, ALICE);
+    let bytes = owner
+        .seal_stored_document(&published, &[], 0, &mut TestRandom(4))
+        .unwrap();
+    let verified = owner
+        .load_stored_document(&bytes)
+        .unwrap()
+        .unwrap()
+        .updated_document
+        .unwrap();
+    let mut space = owner
+        .load_stored_document(&verified)
+        .unwrap()
+        .unwrap()
+        .space
+        .unwrap();
+
+    space.keep(pending).unwrap();
+    assert!(matches!(space.mark(0), Some(KeyMark::Unpublished { .. })));
+    let bytes = owner
+        .seal_stored_document(&space, &[], 1, &mut TestRandom(5))
+        .unwrap();
+    let unmarked = owner
+        .seal_document(&space, &[], 1, &mut TestRandom(5))
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert!(
+        bytes == unmarked,
+        "the replacement must not inherit the old marker"
+    );
+}
+
+/// Alice carries over a record whose key envelope her build cannot open.
+/// A rewrite must not claim that depth was verified. This goes through
+/// the protocol store because the client does not expose the marker.
+#[test]
+fn a_carried_record_does_not_inherit_a_verification_marker() {
+    let (world, space, _) = alice_holding(11);
+    let owner = owner(&world, ALICE);
+    let bytes = owner
+        .seal_stored_document(&space, &[], 0, &mut TestRandom(4))
+        .unwrap();
+    let verified = owner
+        .load_stored_document(&bytes)
+        .unwrap()
+        .unwrap()
+        .updated_document
+        .unwrap();
+    let space = owner
+        .load_stored_document(&verified)
+        .unwrap()
+        .unwrap()
+        .space
+        .unwrap();
+    let mut carried = owner.seal_key(&space, 0, &mut TestRandom(5)).unwrap();
+    carried.envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, &carried.envelope);
+
+    let carried = resign_key(&world, carried);
+    let records = std::slice::from_ref(&carried);
+    let rewritten = owner
+        .seal_stored_document(&space, records, 1, &mut TestRandom(6))
+        .unwrap();
+    let unmarked = owner
+        .seal_document(&space, records, 1, &mut TestRandom(6))
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert!(
+        rewritten == unmarked,
+        "the marker must not cover the carried record"
+    );
+    let reopened = owner.load_stored_document(&rewritten).unwrap().unwrap();
+    assert_eq!(reopened.unsupported, [carried]);
+    assert_eq!(reopened.rejected[0].reason, Rejection::Unsupported);
+    assert_eq!(reopened.space.unwrap().held().count(), 2);
+}
+
 #[test]
 fn a_record_this_device_cannot_read_survives_a_rewrite() {
     let (world, space, _) = alice_holding(11);
