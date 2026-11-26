@@ -111,9 +111,9 @@ under the current key, which the removed member may hold. The runtime sends `onR
 `rotate(space)` returns once the new key and its first 100 deliveries are committed. The runtime
 then delivers the new key to the remaining members in the background, to each of them even if
 another member already sent it one (that delivery may not open). If that fails, it tries again
-after 2 seconds, then 4, 8 and so on up to a minute, and gives up after 6 failed attempts in a row;
-any member holding the new key then delivers it to those left out on its next pass. Failures
-while offline aren't counted.
+after 2 seconds, then 4, 8, 16 and 32, and gives up after 6 failed attempts in a row; any member
+holding the new key then delivers it to those left out on its next pass. Failures while offline
+aren't counted, and wait 2 seconds like a first failure.
 
 `onReport` receives a `delivery-failed` report, with the space and the reason, when the runtime
 fails to deliver keys to a space's members: for the background deliveries after a rotation (once

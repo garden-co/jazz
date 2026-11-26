@@ -43,9 +43,11 @@ const MAX_BATCHES: usize = 100;
 pub(crate) const ROTATION_ATTEMPTS: u32 = 6;
 
 /// The wait before the rest of a rotation is tried again after `failures`
-/// failed attempts in a row: 2 s, doubling, at most 60 s.
+/// failed attempts in a row: 2 s, doubling to 32 s at the fifth; the sixth
+/// gives up (see [`ROTATION_ATTEMPTS`]). An attempt that failed offline is
+/// not counted, and waits as long as a first failure.
 pub(crate) fn retry_delay(failures: u32) -> std::time::Duration {
-    std::time::Duration::from_secs((1u64 << failures.min(6)).min(60))
+    std::time::Duration::from_secs(1u64 << failures.clamp(1, ROTATION_ATTEMPTS - 1))
 }
 
 /// Which rotation to make.
@@ -704,5 +706,35 @@ impl E2eeClient {
             self.publish(db, tx).await?;
         }
         Ok(Some(written))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rest of a rotation is tried again 2 s after its first failure,
+    /// then 4, 8, 16 and 32 s, and left to the pass of any holder at the
+    /// sixth failure in a row. An attempt that failed offline waits as long
+    /// as a first failure. The guide says the same.
+    #[test]
+    fn rotation_retries_wait_2_to_32_seconds_then_give_up() {
+        let waits: Vec<u64> = (1..ROTATION_ATTEMPTS)
+            .map(|failures| retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(waits, [2, 4, 8, 16, 32]);
+        assert_eq!(ROTATION_ATTEMPTS, 6);
+        assert_eq!(retry_delay(0), retry_delay(1));
+        let guide = include_str!("../../../../docs/content/docs/e2ee/sharing-and-keys.mdx")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            guide.contains(
+                "it tries again after 2 seconds, then 4, 8, 16 and 32, and gives up after \
+                 6 failed attempts in a row"
+            ),
+            "the guide's retry schedule differs from the code's"
+        );
     }
 }
