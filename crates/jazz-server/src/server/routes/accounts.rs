@@ -102,26 +102,18 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
-/// The rule that an encrypting app serves only device accounts founded
-/// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
-/// of which namespace founded an account, so an account founded for another
-/// audience could not be told from the app's own, and no account record is
-/// accepted for it. Founding one is refused at the first point the server
-/// sees it, here, and the registry view refuses its records
-/// (`founded_for_another_audience`) for any that exist already.
+/// [`crate::portable::accounts::refuse_foreign_founding`] for this server:
+/// whether the runtime's app encrypts is asked only for a foreign namespace.
 async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result<(), &'static str> {
-    if app == *state.app_id.uuid() {
-        return Ok(());
-    }
-    let encrypts = match state.runtime() {
-        Some(runtime) => runtime.encrypts().await.unwrap_or(true),
-        None => false,
-    };
-    if encrypts {
-        Err("an app that encrypts columns serves device accounts founded for its own app id only")
+    let encrypts = if app == *state.app_id.uuid() {
+        false
     } else {
-        Ok(())
-    }
+        match state.runtime() {
+            Some(runtime) => accounts::encrypts_or_unknown(runtime.encrypts().await),
+            None => false,
+        }
+    };
+    crate::portable::accounts::refuse_foreign_founding(*state.app_id.uuid(), app, || encrypts)
 }
 
 /// The app's backend vouches for a local-first guest

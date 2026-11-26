@@ -98,16 +98,20 @@ impl ServerCore {
             .map_err(String::from)
     }
 
-    /// Initialize and publish a first deployment in the real store's scope.
-    /// No core is returned until initialization and catalogue admission commit.
+    /// Initialize and publish a first deployment in the real store's scope,
+    /// keeping `kept` (the first-time encryption declarations, checked as
+    /// [`Self::apply_catalogue_keeping`] checks them) in the same
+    /// transaction. No core is returned until initialization and catalogue
+    /// admission commit.
     pub fn open_deployment(
         schema: JazzSchema,
         file: StoreFile,
         app: Option<String>,
         chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
         change: CatalogueChange,
+        kept: crate::portable::deployment::KeptValues,
     ) -> Result<Self, CatalogueApplyError> {
-        Self::open_on(schema, file, true, app, chunk_store, Some(change))
+        Self::open_on(schema, file, true, app, chunk_store, Some((change, kept)))
     }
 
     fn open_on(
@@ -116,25 +120,55 @@ impl ServerCore {
         any_stored_catalogue: bool,
         app: Option<String>,
         chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
-        initial: Option<CatalogueChange>,
+        initial: Option<(CatalogueChange, crate::portable::deployment::KeptValues)>,
     ) -> Result<Self, CatalogueApplyError> {
         Ok(Self {
-            owner: Owner::open_on(
-                schema,
-                file,
-                any_stored_catalogue,
-                app,
-                initial.map(|change| (change, Vec::new())),
-                |config| match chunk_store {
+            owner: Owner::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
+                match chunk_store {
                     Some(store) => config.with_chunk_store(store).with_host_chunk_io(),
                     None => config,
-                },
-            )?,
+                }
+            })?,
             next_session: 1,
             edges: HashMap::new(),
             thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
             tick_wanted: false,
         })
+    }
+
+    /// Install the account registry the checks beside the E2EE account
+    /// tables' policies read (see
+    /// [`crate::portable::accounts::RegistryFounders`]), for a host whose
+    /// registry lives in its own store. Needs the core opened with an app
+    /// name; false, and nothing installed, without one.
+    pub fn install_account_registry(&mut self) -> bool {
+        self.owner.install_registry()
+    }
+
+    /// Whether the app's schema has Jazz's E2EE system tables; an error
+    /// when the schema cannot be read.
+    pub fn encrypts(&self) -> Result<bool, String> {
+        Ok(self.owner.encrypts())
+    }
+
+    /// Refuse a core that serves an encrypting app without the account
+    /// registry its checks read installed, as native refuses to open one
+    /// (`Owner::open`).
+    pub fn require_account_registry(&self) -> Result<(), String> {
+        if self.owner.registry_missing() {
+            return Err(
+                "this app encrypts columns, which needs the account registry of \
+                 an app's store; this core has none installed"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the account registry the checks beside the E2EE account
+    /// tables' policies read is installed.
+    pub fn has_account_registry(&self) -> bool {
+        self.owner.registry_installed
     }
 
     /// The core's store.
@@ -418,6 +452,21 @@ impl ServerCore {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
+        self.apply_catalogue_keeping(expected, change, &[], supersedes)
+    }
+
+    /// [`Self::apply_catalogue`], writing `kept` (host table entries) in
+    /// the same transaction as the change. A key already holding the same
+    /// value is left as it is; a key holding a different value fails the
+    /// whole change, which then leaves nothing behind
+    /// ([`jazz::db::Db::apply_catalogue_keeping`]).
+    pub fn apply_catalogue_keeping(
+        &mut self,
+        expected: &crate::portable::catalogue::CatalogueIndex,
+        change: CatalogueChange,
+        kept: &[(jazz::host::HostTable, Vec<u8>, Vec<u8>)],
+        supersedes: Option<jazz::catalogue::BundleId>,
+    ) -> Result<(), CatalogueApplyError> {
         let rows = jazz::db::block_on(self.db().catalogue())
             .map_err(|error| CatalogueApplyError::Failed(error.to_string()))?;
         if crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None) != *expected {
@@ -426,7 +475,7 @@ impl ServerCore {
                     .to_owned(),
             ));
         }
-        let (ended, result) = self.owner.apply_catalogue(change, supersedes);
+        let (ended, result) = self.owner.apply_catalogue_keeping(change, supersedes, kept);
         // Sessions that ended are gone even when a later step failed: the
         // host takes their error frames and closes their sockets, and a
         // tick moves what the change made visible.
@@ -542,6 +591,7 @@ mod tests {
             None,
             None,
             change,
+            Vec::new(),
         );
         assert!(matches!(result, Err(CatalogueApplyError::Rejected(_))));
         assert_eq!(
@@ -571,7 +621,9 @@ mod tests {
             },
             admit: vec![(schema.clone(), vec![])],
         };
-        let core = ServerCore::open_deployment(schema.clone(), file(), None, None, change).unwrap();
+        let core =
+            ServerCore::open_deployment(schema.clone(), file(), None, None, change, Vec::new())
+                .unwrap();
         assert!(
             jazz::db::block_on(core.db().catalogue())
                 .unwrap()

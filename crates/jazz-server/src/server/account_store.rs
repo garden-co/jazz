@@ -8,7 +8,6 @@
 //! that is durable before the command answers. Opening reads nothing, and a
 //! second owner of the same file cannot decide from stale state.
 
-use futures::future::LocalBoxFuture;
 use jazz::account_registry::{
     AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };
@@ -131,110 +130,10 @@ fn unix_now_ms() -> u64 {
         })
 }
 
-/// The registry as core's checks beside the account tables' policies read
-/// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
-/// inside the write's transaction: a second connection to a shared
-/// in-memory database, which has no write-ahead log, is locked out while
-/// the store's connection holds a write.
-pub(crate) struct RegistryFounders {
-    app: Uuid,
-}
-
-/// The identities of `account` in the registry's tables on `conn`, or none
-/// for a store whose registry never opened.
-async fn identities_of(
-    conn: &jazz::storage::Storage,
-    account: AccountId,
-) -> Result<Vec<(String, String)>, jazz::db::Error> {
-    let mut statement = conn
-        .prepare_cached(
-            "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
-        )
-        .map_err(registry::storage_error)?;
-    statement
-        .query_map([account.0.as_bytes()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .await
-        .map_err(registry::storage_error)?
-        .collect::<Vec<_>>()
-        .await
-        .map_err(registry::storage_error)
-}
-
-impl RegistryFounders {
-    pub(crate) fn new(app: Uuid) -> Self {
-        Self { app }
-    }
-
-    /// An account was founded by a device-account identity when one of its
-    /// device-account identities derives its id: linking a device-account
-    /// identity into another account keeps that account's id.
-    fn founded(
-        &self,
-        account: AccountId,
-        identities: Result<Vec<(String, String)>, jazz::db::Error>,
-    ) -> Result<Option<bool>, String> {
-        // A registry that cannot be read, a missing table included, is an
-        // error that refuses the write: never "an account nobody founded",
-        // which would let the session's issuer decide.
-        let identities =
-            identities.map_err(|error| format!("the account registry cannot be read: {error}"))?;
-        if identities.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(identities.iter().any(|(issuer, subject)| {
-            issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
-                && jazz::account_registry::device_account_id(self.app, subject) == account
-        })))
-    }
-}
-
-impl jazz::db::AccountRegistryView for RegistryFounders {
-    fn founded_by_device_account<'a>(
-        &'a self,
-        store: &'a jazz::storage::Storage,
-        account: AccountId,
-    ) -> LocalBoxFuture<'a, Result<Option<bool>, String>> {
-        Box::pin(async move { self.founded(account, identities_of(store, account).await) })
-    }
-
-    /// An account whose identities are all device-account identities and
-    /// none of which derives its id in this app's namespace was founded for
-    /// another audience (`found-local-first` and a guest's first admission
-    /// may name one). An encrypting app does not serve such accounts: this rule is
-    /// the documented one (E2EE protocol R5, R6), and the founding routes
-    /// refuse to create them. An account with an external identity is not
-    /// told apart from one the app founded, so it reads as the app's.
-    fn founded_for_another_audience<'a>(
-        &'a self,
-        store: &'a jazz::storage::Storage,
-        account: AccountId,
-    ) -> LocalBoxFuture<'a, Result<bool, String>> {
-        Box::pin(async move {
-            let identities = identities_of(store, account)
-                .await
-                .map_err(|error| format!("the account registry cannot be read: {error}"))?;
-            if identities.is_empty() {
-                return Ok(false);
-            }
-            let founded = identities.iter().any(|(issuer, subject)| {
-                issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
-                    && jazz::account_registry::device_account_id(self.app, subject) == account
-            });
-            if founded {
-                return Ok(false);
-            }
-            Ok(!identities
-                .iter()
-                .any(|(issuer, _)| issuer != jazz::identity::DEVICE_ACCOUNT_ISSUER))
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::accounts::RegistryFounders;
     use crate::portable::accounts::{REVOCATION_MARK_RETENTION_MS, storage_error};
     use jazz::account_registry::AccountError;
     use jazz::db::AccountRegistryView;
