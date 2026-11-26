@@ -1552,12 +1552,18 @@ impl JazzClient {
                         &prepared,
                         false,
                         session,
-                        ReadTier::LocalFirst,
+                        opts.tier,
                         &opts.read_view.source,
                     )),
             )
             .await?
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            .map_err(|error| {
+                if opts.tier == ReadTier::Remote {
+                    JazzError::QueryFailed(error)
+                } else {
+                    JazzError::Query(error.to_string())
+                }
+            })?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
         {
@@ -2206,18 +2212,37 @@ impl JazzClient {
 
     /// Commit an open transaction by transaction id.
     pub fn commit_transaction(&self, transaction_id: OpenTransactionId) -> Result<TransactionId> {
+        self.commit(transaction_id, false)
+    }
+
+    /// Commit an open transaction, allowing a serializable commit with only reads.
+    #[doc(hidden)]
+    pub fn commit_transaction_validating_reads(
+        &self,
+        transaction_id: OpenTransactionId,
+    ) -> Result<TransactionId> {
+        self.commit(transaction_id, true)
+    }
+
+    fn commit(
+        &self,
+        transaction_id: OpenTransactionId,
+        commit_read_only: bool,
+    ) -> Result<TransactionId> {
         self.ensure_transaction_open(transaction_id)?;
-        if !self.shared.state.borrow().transactions[&transaction_id] {
-            return Err(JazzError::Write(
-                "transaction cannot commit without writes".to_string(),
-            ));
-        }
         let mergeable = self
             .shared
             .state
             .borrow()
             .mergeable_transactions
             .contains(&transaction_id);
+        if (mergeable || !commit_read_only)
+            && !self.shared.state.borrow().transactions[&transaction_id]
+        {
+            return Err(JazzError::Write(
+                "transaction cannot commit without writes".to_string(),
+            ));
+        }
         let db = self.db()?;
         let receipt = if mergeable {
             crate::db::block_on(db.commit_mergeable_handle(transaction_id))

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use jazz::schema::MEMBERS_TABLE;
-use jazz::tools::Value;
 use jazz::tools::public_schema::E2eeDeclarations;
+use jazz::tools::{ReadTier, Value};
 
 use crate::{
     AccountId, Column, DurabilityTier, Error, Fields, Implementations, Insert, Jazz, NoUpdate,
@@ -154,8 +154,8 @@ impl Jazz {
         for attempt in 1.. {
             let query = query.clone();
             let result = jazz
-                .serializable_transaction(move |tx| async move {
-                    let rows = tx.all(query).await?;
+                .serializable_transaction_validating_reads(move |tx| async move {
+                    let rows = tx.all_with(query, ReadTier::Remote).await?;
                     for row in &rows {
                         tx.delete::<SpaceMember>(row.id)?;
                     }

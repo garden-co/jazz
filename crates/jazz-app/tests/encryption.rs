@@ -1943,3 +1943,85 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
     bob.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// Alice's offline replica lacks Bob's membership and must wait for the
+/// authority or report a read failure. Online, an absent member yields zero
+/// after the authority accepts the transaction.
+///
+/// ```text
+/// Alice's replica ──disconnect──┐
+/// Alice ──admit Bob──────────────┼──► authority
+/// replica ──remove Bob──────────✗│
+/// Alice ──remove absent member───┴──► authority ──accept──► zero
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_space_members_requires_the_authority() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::jazz::{db::ErrorCode, tools::JazzError};
+    use jazz_app_support::{AccountId, DurabilityTier};
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app
+        .device_of(key.clone())
+        .await
+        .durable(DurabilityTier::GlobalServer);
+    assert_eq!(ready(&alice).await, "active");
+    let replica = app.device_of(key).await;
+    let bob = app.device().await;
+    assert_eq!(ready(&replica).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    replica.disconnect().await.unwrap();
+    alice
+        .add_member::<Project>(project, bob_account)
+        .await
+        .unwrap();
+    assert!(
+        replica
+            .list_members::<Project>(project)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.account_id != ObjectId::from_uuid(bob_account.0))
+    );
+
+    let offline = tokio::time::timeout(
+        Duration::from_secs(1),
+        replica.remove_member::<Project>(project, bob_account),
+    )
+    .await;
+    assert!(
+        offline.is_err()
+            || matches!(&offline, Ok(Err(Error::Jazz(JazzError::Connection(_)))))
+            || matches!(&offline, Ok(Err(Error::Jazz(JazzError::QueryFailed(error)))) if error.code == ErrorCode::NotObserved),
+        "expected an authority read to wait or fail offline, got {offline:?}"
+    );
+
+    // An empty result alone cannot show that a commit went through sync.
+    let upload_status = || alice.with_client(|client| async move { Ok(client.upload_status()) });
+    let before = upload_status().await.unwrap();
+    let absent = AccountId(*ObjectId::new().uuid());
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, absent)
+            .await
+            .unwrap(),
+        0
+    );
+    let after = upload_status().await.unwrap();
+    assert!(after.pending_revision > before.pending_revision);
+    assert_eq!(after.pending, 0);
+    assert_eq!(after.rejected, before.rejected);
+
+    replica.shutdown().await.unwrap();
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
