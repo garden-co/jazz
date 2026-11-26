@@ -450,15 +450,17 @@ function renderMigrationBody(
   };
 }
 
-export async function renderMigrationStub(input: {
-  fromHash: string;
-  toHash: string;
-  fromSchema: WasmSchema;
-  toSchema: WasmSchema;
-  /** The `to` version's encryption entries, by table. */
-  toEncryption?: EncryptionEntries;
-}): Promise<string> {
-  const diff = await migrationDiff(input.fromSchema, input.toSchema);
+function renderMigrationStub(
+  input: {
+    fromHash: string;
+    toHash: string;
+    fromSchema: WasmSchema;
+    toSchema: WasmSchema;
+    /** The `to` version's encryption entries, by table. */
+    toEncryption?: EncryptionEntries;
+  },
+  diff: MigrationDiff,
+): string {
   const rendered = renderMigrationBody(input.fromSchema, input.toSchema, diff, input.toEncryption);
   const sections: string[] = [];
 
@@ -825,13 +827,14 @@ async function snapshotEntries(
   let index = before - 1;
   while (index >= 0 && files[index]!.toHash !== short) index--;
   const migration = files[index];
-  const steps = migration?.migration.steps.migrate;
+  const steps = migration?.migration.steps;
   if (
     migration &&
     steps &&
-    Object.values(steps).some((columns) =>
-      Object.values(columns).some((step) => "renameFrom" in step),
-    )
+    (steps.renameTables ||
+      Object.values(steps.migrate ?? {}).some((columns) =>
+        Object.values(columns).some((step) => "renameFrom" in step),
+      ))
   ) {
     const previous = await snapshotEntries(
       migrationsDir,
@@ -901,7 +904,7 @@ function pinEncryptedEnums(
   entries: EncryptionEntries,
   previous: EncryptionEntries,
   sameVersion: boolean,
-  steps?: ReadableMigrationSteps["migrate"],
+  steps?: ReadableMigrationSteps,
 ): void {
   type EnumType = { enum?: string[]; optional?: boolean };
   type EncryptedColumn = EnumType & {
@@ -921,19 +924,21 @@ function pinEncryptedEnums(
     );
   };
 
+  const renames = steps?.renameTables;
+  const migrate = steps?.migrate;
   for (const [table, entry] of Object.entries(entries)) {
-    if (!Object.hasOwn(previous, table)) continue;
-    const before = (previous[table] as unknown as Entry | undefined)?.columns;
+    const oldTable = renames && Object.hasOwn(renames, table) ? renames[table]! : table;
+    if (!Object.hasOwn(previous, oldTable)) continue;
+    const before = (previous[oldTable] as unknown as Entry | undefined)?.columns;
     if (!before) continue;
     const current = entry as unknown as Entry;
     const columns = { ...current.columns };
+    const columnSteps = migrate && Object.hasOwn(migrate, table) ? migrate[table] : undefined;
     for (const [name, column] of Object.entries(current.columns)) {
-      const step =
-        steps && Object.hasOwn(steps, table) && Object.hasOwn(steps[table]!, name)
-          ? steps[table]![name]
-          : undefined;
-      if (steps && (!step || !("renameFrom" in step))) continue;
-      const oldName = step && "renameFrom" in step ? step.renameFrom : name;
+      const step = columnSteps && Object.hasOwn(columnSteps, name) ? columnSteps[name] : undefined;
+      const renamedFrom = step && "renameFrom" in step ? step.renameFrom : undefined;
+      if (steps && renamedFrom === undefined && (oldTable === table || step)) continue;
+      const oldName = renamedFrom ?? name;
       const old = Object.hasOwn(before, oldName) ? before[oldName] : undefined;
       if (!old || typeof old !== "object" || typeof column !== "object") continue;
       const oldType = old.type ?? old;
@@ -1231,11 +1236,25 @@ export async function createMigration(options: {
   const previousEntries =
     (await snapshotEntries(migrationsDir, baseline, snapshots, files ?? [])) ?? {};
   pinEncryptedEnums(currentEntries, previousEntries, baseline.hash === current.hash);
+  let diff: MigrationDiff | undefined;
+  let checkedEntries = currentEntries;
+  if (
+    Object.keys(previousEntries).length > 0 &&
+    Object.keys(currentEntries).some((table) => !Object.hasOwn(baseline.schema, table))
+  ) {
+    diff = await migrationDiff(baseline.schema, current.schema);
+    // Preflight checks the stub's suggested renames. The snapshot keeps the
+    // declarations until the author chooses which renames to keep.
+    checkedEntries = { ...currentEntries };
+    pinEncryptedEnums(checkedEntries, previousEntries, false, {
+      renameTables: Object.fromEntries(diff.renameTables.map(({ from, to }) => [to, from])),
+    });
+  }
   await checkSnapshotEncryption(
     baseline,
     previousEntries,
-    withEntries(options.currentTables, currentEntries, toShort),
-    currentEntries,
+    withEntries(options.currentTables, checkedEntries, toShort),
+    checkedEntries,
   );
   if (baseline.hash === current.hash) return { changed: false };
   if (!(await requiresMigration(baseline.schema, current.schema))) {
@@ -1249,13 +1268,16 @@ export async function createMigration(options: {
   }
   const name = options.name ? normalizeMigrationName(options.name) : "unnamed";
   const file = `${timestamp}-${name}-${shortSchemaHash(baseline.hash)}-${toShort}.ts`;
-  const stub = await renderMigrationStub({
-    fromHash: baseline.hash,
-    toHash: current.hash,
-    fromSchema: baseline.schema,
-    toSchema: current.schema,
-    toEncryption: currentEntries,
-  });
+  const stub = renderMigrationStub(
+    {
+      fromHash: baseline.hash,
+      toHash: current.hash,
+      fromSchema: baseline.schema,
+      toSchema: current.schema,
+      toEncryption: currentEntries,
+    },
+    diff ?? (await migrationDiff(baseline.schema, current.schema)),
+  );
   await mkdir(migrationsDir, { recursive: true });
   await writeFile(join(migrationsDir, file), stub);
   const snapshot = await writeSnapshot();
