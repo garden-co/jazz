@@ -23,6 +23,7 @@ import {
   startScript,
 } from "./vercel-store.js";
 import { VERSION_ORDER } from "./fixtures/version-order.js";
+import { closedLoopbackPort } from "./fixtures/ports.js";
 
 // The start script's own version order, run in bash: it decides which core
 // a Drive runs, so it must agree with newerVersion.
@@ -84,11 +85,7 @@ describe("vercel() core download", () => {
         kind: "transient",
         stderr: "HTTP 429",
       });
-      const closed = createServer();
-      await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
-      const port = (closed.address() as AddressInfo).port;
-      await new Promise((resolve) => closed.close(resolve));
-      const refused = await download(`http://127.0.0.1:${port}/core.tgz`);
+      const refused = await download(`http://127.0.0.1:${await closedLoopbackPort()}/core.tgz`);
       expect(refused).toMatchObject({ code: 1, kind: "transient" });
       // The cause, not just "fetch failed".
       expect(refused.stderr).toContain("ECONNREFUSED");
@@ -383,12 +380,8 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   }
 
   it("tells a core that opens its store from one that listens, a start under way, and nothing", async () => {
-    const port = await new Promise<number>((resolve) => {
-      const probe = createNetServer().listen(0, "127.0.0.1", () => {
-        const { port } = probe.address() as AddressInfo;
-        probe.close(() => resolve(port));
-      });
-    });
+    // Closed until the test itself listens there, as the core would.
+    const port = await closedLoopbackPort();
     const state = () =>
       spawnSync("bash", ["-c", coreStateScript(root, port), "jazz-core-state"], {
         encoding: "utf8",

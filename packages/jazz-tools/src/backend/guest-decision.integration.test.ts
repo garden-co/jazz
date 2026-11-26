@@ -18,6 +18,7 @@ import {
   type JazzStore,
 } from "./index.js";
 import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
+import { closedLoopbackPort } from "./fixtures/ports.js";
 
 // Which local-first guests sync is the app's call alone: `authenticate`
 // returning `acceptDeviceAccounts(request)`. A core has no switch of its own
@@ -61,16 +62,11 @@ async function listening(server: Server): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
-async function freePort(): Promise<number> {
-  const server = createServer();
-  const port = await listening(server);
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
-
 /** A production core, as `serveCore` runs one: these options and its defaults. */
 async function servedCore(options: Record<string, unknown>): Promise<string> {
-  const port = await freePort();
+  // `serveCore` can't say which port it bound, so not port 0: a port only a
+  // server asking for it can take.
+  const port = await closedLoopbackPort();
   const core = serveCore({
     ...(options as Parameters<typeof serveCore>[0]),
     port,

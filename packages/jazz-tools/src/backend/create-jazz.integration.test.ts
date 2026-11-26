@@ -17,7 +17,6 @@ import {
 import { createRequire } from "node:module";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { readFileSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,36 +75,9 @@ import {
   userSession,
   watchWhile,
 } from "./fixtures/create-jazz.js";
+import { closedLoopbackPort } from "./fixtures/ports.js";
 
 runCleanupsAfterEach();
-
-/**
- * A loopback port nothing listens on, for a core that is down (and may come
- * up there later). Not one from `listen(0)`: once released, an ephemeral port
- * goes back to the pool, where any other test's `listen(0)` or outgoing
- * connection can take it before the test connects, and a core-down test then
- * reaches some other server. This one is picked below the ephemeral range,
- * which only a server asking for that exact port can take.
- */
-async function closedLoopbackPort(): Promise<number> {
-  let ephemeralStart = 32_768;
-  try {
-    const range = readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8");
-    const first = Number(range.trim().split(/\s+/)[0]);
-    if (first > 10_000) ephemeralStart = Math.min(ephemeralStart, first);
-  } catch {
-    // Not Linux: macOS and Windows hand out ephemeral ports from 49152.
-  }
-  for (;;) {
-    const port = 10_000 + Math.floor(Math.random() * (ephemeralStart - 10_000));
-    const free = await new Promise<boolean>((resolve) => {
-      const probe = createServer();
-      probe.once("error", () => resolve(false));
-      probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
-    });
-    if (free) return port;
-  }
-}
 
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
