@@ -2325,6 +2325,31 @@ mod tests {
         runtime.stop();
     }
 
+    /// Alice's delivery call wakes an idle host so the loop can answer it.
+    /// Poll the call directly because the Node wrapper drives the loop itself.
+    #[test]
+    fn a_delivery_command_wakes_an_idle_host() {
+        let store = Rc::new(JsStore::default());
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || count.set(count.get() + 1)));
+        let runtime = native_runtime(true, true, Some(store));
+        runtime.drive();
+        wakes.set(0);
+        let mut call = runtime.call("keysDeliver".to_owned(), Value::Null);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(call.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wakes.get(), 1);
+        runtime.drive();
+        assert_eq!(
+            call.as_mut().poll(&mut context),
+            Poll::Ready(Err(
+                "no-account: this device is not active in its account yet".into()
+            ))
+        );
+        runtime.stop();
+    }
+
     /// Alice queues a space watch and a delivery after the loop has taken its
     /// snapshot of work. Inject both at the bridge's end-of-iteration signal
     /// to check that the loop asks for the turn that will actually serve them.
