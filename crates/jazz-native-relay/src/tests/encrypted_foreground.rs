@@ -3,6 +3,7 @@ use crate::ForegroundDbCommandRequest as Request;
 use crate::ForegroundDbCommandResponse as Response;
 use crate::JazzNativeRelayStatus as Status;
 use jazz::db::block_on;
+use jazz::ids::RowUuid;
 use jazz::tools::deployment::artifact::AppDefinition;
 use jazz_e2ee_client::MemoryStore;
 use jazz_e2ee_client::host::bridge::{Handler, serve};
@@ -13,6 +14,252 @@ use std::time::{Duration, Instant};
 
 const APP_ID: &str = "07070707-0707-4707-8707-070707070707";
 const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
+
+/// Alice publishes her recovery root after her private store replies on a
+/// later task. Only actual store and wire traffic drives the foreground.
+///
+/// Alice ──store reply──► foreground ──recovery root──► authority
+#[test]
+fn delayed_store_replies_wake_account_verification() {
+    use std::sync::mpsc;
+
+    unsafe extern "C" fn wake(context: *mut c_void, _: u64, kind: u8, _: u64) {
+        if kind == FOREGROUND_WAKE_IMMEDIATE {
+            let sender = unsafe { &*context.cast::<mpsc::Sender<()>>() };
+            let _ = sender.send(());
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (app, schema) = encrypted_schema();
+    let (author, request) = device_account_request([0x43; 32]);
+    let store = delayed_store();
+    let (events, wakes) = mpsc::channel::<()>();
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let foreground = open_account_foreground(
+            &*lease,
+            root.path().to_str().unwrap().as_bytes(),
+            &serde_json::to_vec(&request).unwrap(),
+            &schema,
+        );
+        let execute = |command| leased_execute(&*lease, foreground, command).unwrap();
+        finish_store_open(&execute, &store);
+        let events = Box::into_raw(Box::new(events));
+        assert_eq!(
+            jazz_native_relay_host_lease_set_foreground_wake_callback(
+                lease,
+                foreground,
+                Some(wake),
+                events.cast(),
+            ),
+            Status::Ok
+        );
+        let relay = foreground_relay(&*lease, foreground);
+        let (pump, server) = connect_authority(&relay, &app, author, true);
+        let query = server
+            .db
+            .prepare_query(&jazz::query::Query::from("__e2ee_recovery_roots"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut replies = 0;
+        let registered = loop {
+            if pump() {
+                relay.pump().unwrap();
+            }
+            if !block_on(server.db.all(&query, Default::default()))
+                .unwrap()
+                .is_empty()
+            {
+                break true;
+            }
+            if wakes.recv_timeout(Duration::from_millis(2)).is_ok() {
+                replies += answer_store(&execute, &store);
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+        };
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+        drop(Box::from_raw(events));
+        assert!(replies > 0, "verification never got to the private store");
+        assert!(
+            registered,
+            "recovery registration stalled after {replies} delayed store replies"
+        );
+    }
+}
+
+/// Alice creates a project and locally settles its first encrypted note
+/// while offline. Her private store answers the key work on later tasks.
+#[test]
+fn an_offline_foreground_settles_its_first_encrypted_write() {
+    use jazz::records::{OwnedRecord, RecordDescriptor, ValueType};
+
+    let root = tempfile::tempdir().unwrap();
+    let (app, schema) = app_schema(MIXED_APP.as_bytes());
+    let author = AuthorSubject::authenticated("https://issuer.example", "alice")
+        .unwrap()
+        .with_account(jazz::account_registry::AccountId(
+            ALICE_ACCOUNT_ID.parse().unwrap(),
+        ));
+    let store = delayed_store();
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let foreground = open_account_foreground(
+            &*lease,
+            root.path().to_str().unwrap().as_bytes(),
+            &alice_request(),
+            &schema,
+        );
+        let execute = |command| leased_execute(&*lease, foreground, command).unwrap();
+        finish_store_open(&execute, &store);
+        let relay = foreground_relay(&*lease, foreground);
+        let (pump, _) = connect_authority(&relay, &app, author, true);
+        assert_eq!(
+            settle(&execute, execute(start_ready(10_000)), || {
+                pump();
+                answer_store(&execute, &store);
+            }),
+            Response::EncryptionResult {
+                json: "\"active\"".to_owned()
+            }
+        );
+        relay.set_remote_link_hint(RemoteLinkHint::Failed).unwrap();
+        let run = |command| {
+            settle(&execute, execute(command), || {
+                answer_store(&execute, &store);
+            })
+        };
+        let call = |op: &str, args: serde_json::Value| {
+            run(Request::EncryptionCall {
+                op: op.to_owned(),
+                args_json: args.to_string(),
+            })
+        };
+        assert_eq!(
+            call("setOnline", json!({"online": false})),
+            Response::EncryptionResult {
+                json: "null".to_owned()
+            }
+        );
+
+        let project = RowUuid::from_bytes([0x92; 16]);
+        let Response::EncryptionResult { json } = call(
+            "spaceRow",
+            json!({"table": "projects", "id": project.0.to_string()}),
+        ) else {
+            panic!("Alice needs the space address for her member row");
+        };
+        let address: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let uuid = |field: &str| Value::Uuid(address[field].as_str().unwrap().parse().unwrap());
+        let account = || Value::Uuid(ALICE_ACCOUNT_ID.parse().unwrap());
+        let cells = |fields: &[(&str, ValueType)], values: &[Value]| {
+            let descriptor = RecordDescriptor::new(fields.iter().cloned());
+            let raw = descriptor.create(values).unwrap();
+            jazz::binding_codec::encode_named_cells(&OwnedRecord::new(raw, descriptor)).unwrap()
+        };
+        let begin = || {
+            let Response::TransactionOpened { transaction } = run(Request::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            }) else {
+                panic!("Alice opens a transaction");
+            };
+            transaction
+        };
+        let insert = |transaction, table: &str, row_id, cells| {
+            run(Request::Insert {
+                transaction,
+                table: table.to_owned(),
+                row_id,
+                cells,
+            })
+        };
+        let transaction = begin();
+        let inserted = insert(
+            transaction,
+            "projects",
+            Some(*project.as_bytes()),
+            cells(
+                &[("name", ValueType::String)],
+                &[Value::String("offline".into())],
+            ),
+        );
+        assert!(
+            matches!(inserted, Response::Inserted { .. }),
+            "{inserted:?}"
+        );
+        let member = insert(
+            transaction,
+            "__e2ee_members",
+            None,
+            cells(
+                &[
+                    ("scopeId", ValueType::Uuid),
+                    ("identifier", ValueType::Uuid),
+                    ("accountId", ValueType::Uuid),
+                ],
+                &[uuid("scopeId"), uuid("identifier"), account()],
+            ),
+        );
+        assert!(matches!(member, Response::Inserted { .. }), "{member:?}");
+        let committed = run(Request::CommitTransaction { transaction });
+        assert!(
+            matches!(committed, Response::TransactionCommitted { .. }),
+            "{committed:?}"
+        );
+        let note = note_cells(NodeUuid(project.0), "first");
+        let started = Instant::now();
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let mut retry = false;
+        let tx_id = loop {
+            let transaction = begin();
+            let inserted = insert(transaction, "notes", None, note.clone());
+            let result = if matches!(inserted, Response::Inserted { .. }) {
+                run(Request::CommitTransaction { transaction })
+            } else {
+                run(Request::RollbackTransaction { transaction });
+                inserted
+            };
+            match result {
+                Response::TransactionCommitted { tx_id } => break tx_id,
+                Response::KeyRefusal {
+                    scope_id,
+                    identifier,
+                    ..
+                } => {
+                    let response = call(
+                        "retryWrite",
+                        json!({"scopeId": scope_id, "identifier": identifier, "startedAt": started_at, "repeated": retry}),
+                    );
+                    assert_eq!(
+                        response,
+                        Response::EncryptionResult {
+                            json: "\"retry\"".to_owned()
+                        }
+                    );
+                    retry = true;
+                }
+                other => panic!("the encrypted note must commit: {other:?}"),
+            }
+        };
+        let settled = run(Request::WaitForTransaction {
+            tx_id,
+            tier: "local".to_owned(),
+            observe_only: false,
+        });
+        assert_eq!(settled, Response::TransactionSettled { tx_id });
+        assert!(started.elapsed() < Duration::from_secs(5));
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
 
 /// Alice opens an encrypted app through the account-owned C ABI used by RN.
 /// Its foreground cannot do database work until her private store has
@@ -276,7 +523,7 @@ fn a_leased_phone_preserves_missing_recovery_evidence_at_its_deadline() {
         };
         let laptop = open(&request);
         let relay = foreground_relay(&*lease, laptop);
-        let pump = connect_authority(&relay, &app, author, false);
+        let (pump, _) = connect_authority(&relay, &app, author, false);
         let ready = |foreground, store: &Handler, timeout| {
             let execute = |cmd| leased_execute(&*lease, foreground, cmd).unwrap();
             settle(&execute, execute(start_ready(timeout)), || {
@@ -531,7 +778,7 @@ fn a_fresh_leased_phone_recovers_from_its_account_secret() {
         };
         let laptop = open();
         let relay = foreground_relay(&*lease, laptop);
-        let pump = connect_authority(&relay, &app, author, true);
+        let (pump, _) = connect_authority(&relay, &app, author, true);
         let ready = |foreground| {
             let execute = |cmd| leased_execute(&*lease, foreground, cmd).unwrap();
             let store = serve(Rc::new(MemoryStore::new()));
@@ -750,6 +997,21 @@ fn answer_store(execute: &impl Fn(Request) -> Response, store: &Handler) -> usiz
     count
 }
 
+fn delayed_store() -> Handler {
+    let store = serve(Rc::new(MemoryStore::new()));
+    Rc::new(move |request| {
+        let answer = store(request);
+        let (send, task) = futures::channel::oneshot::channel();
+        thread::spawn(move || {
+            let _ = send.send(());
+        });
+        Box::pin(async move {
+            task.await.unwrap();
+            answer.await
+        })
+    })
+}
+
 fn finish_store_open(execute: &impl Fn(Request) -> Response, store: &Handler) {
     let mut answered = 0;
     for _ in 0..32 {
@@ -771,7 +1033,7 @@ fn connect_authority(
     app: &AppDefinition,
     author: AuthorSubject,
     allow_registration: bool,
-) -> impl Fn() {
+) -> (impl Fn() -> bool, jazz::binding_host::Binding) {
     use jazz::binding_host::Binding;
     use jazz::db::{Db, DbConfig};
     use jazz::tools::deployment::artifact::system_tables;
@@ -807,13 +1069,20 @@ fn connect_authority(
     let link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
     let wire = relay.wire().unwrap();
     relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
-    move || {
-        link.receive(wire.take_outbound_encoded().unwrap());
-        block_on(server.tick()).unwrap();
-        for frame in link.take_outbound() {
-            wire.push_inbound_encoded(&frame).unwrap();
-        }
-    }
+    let authority = server.clone();
+    (
+        move || {
+            link.receive(wire.take_outbound_encoded().unwrap());
+            block_on(server.tick()).unwrap();
+            let frames = link.take_outbound();
+            let received = !frames.is_empty();
+            for frame in frames {
+                wire.push_inbound_encoded(&frame).unwrap();
+            }
+            received
+        },
+        authority,
+    )
 }
 
 fn open_account_foreground(
@@ -1023,7 +1292,7 @@ fn readiness_reads_the_authority_again(
         .with_account(jazz::account_registry::AccountId(
             ALICE_ACCOUNT_ID.parse().unwrap(),
         ));
-    let pump = connect_authority(relay, app, author, true);
+    let (pump, _) = connect_authority(relay, app, author, true);
     let call = |op: &str, args: serde_json::Value, carry: bool| {
         settle(
             &execute,
