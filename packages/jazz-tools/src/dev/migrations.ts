@@ -784,19 +784,8 @@ function entriesFile(snapshotFile: string): string {
   return snapshotFile.replace(/\.json$/i, ".encryption.json");
 }
 
-/**
- * The format of `<snapshot>.encryption.json`, a committed project file:
- * `{ "format": 1, "tables": { <table>: <encryption> } }`, each entry as
- * `jazz.app.json` (`jazz.app.v1.json`) writes a table's `encryption`, with a
- * widened enum's `sealedType`. A file without `format` is format 1 (written
- * before it was stamped). Bump it for any change an older reader would
- * misread; a reader refuses a newer format rather than drop what it doesn't
- * know. Pinned by `fixtures/encryption-sidecar/format-1.encryption.json`.
- */
-export const ENCRYPTION_SIDECAR_FORMAT = 1;
-
 export function encryptionEntriesText(entries: Record<string, unknown>): string {
-  return `${JSON.stringify({ format: ENCRYPTION_SIDECAR_FORMAT, tables: entries }, null, 2)}\n`;
+  return `${JSON.stringify({ tables: entries }, null, 2)}\n`;
 }
 
 /**
@@ -862,20 +851,16 @@ async function snapshotEntries(
   return entries;
 }
 
-/** Read a `<snapshot>.encryption.json` (see {@link ENCRYPTION_SIDECAR_FORMAT}). */
+/**
+ * Read a `<snapshot>.encryption.json`: `{ "tables": { <table>: <encryption> } }`,
+ * each entry as `jazz.app.json` writes a table's `encryption`, with a widened
+ * enum's `sealedType`. Pinned by `fixtures/encryption-sidecar/sealed-type.encryption.json`.
+ */
 export function parseEncryptionEntries(file: string, text: string): EncryptionEntries {
-  const parsed = JSON.parse(text) as { format?: unknown; tables?: EncryptionEntries };
-  const format = parsed?.format ?? 1;
-  if (typeof format !== "number" || !Number.isInteger(format) || format < 1)
-    throw new Error(`migrations/snapshots/${file}: expected "format" to be a positive integer.`);
-  if (format > ENCRYPTION_SIDECAR_FORMAT)
-    throw new Error(
-      `migrations/snapshots/${file}: format ${format} is newer than this jazz-tools reads ` +
-        `(format ${ENCRYPTION_SIDECAR_FORMAT}). Upgrade jazz-tools.`,
-    );
+  const parsed = JSON.parse(text) as { tables?: EncryptionEntries };
   if (!parsed || typeof parsed.tables !== "object" || parsed.tables === null)
     throw new Error(
-      `migrations/snapshots/${file}: expected { "format": 1, "tables": { <table>: <encryption> } }.`,
+      `migrations/snapshots/${file}: expected { "tables": { <table>: <encryption> } }.`,
     );
   return parsed.tables;
 }
