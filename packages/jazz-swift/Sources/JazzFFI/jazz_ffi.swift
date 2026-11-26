@@ -715,7 +715,9 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     
     /**
      * Admits an account to the space. Returns the membership row as JSON,
-     * with the same durability options as an insert.
+     * with the same durability options as an insert. If the account is
+     * already a member, as this client has synced, returns that member's
+     * existing row and writes nothing.
      */
     func memberAdd(table: String, id: String, accountId: String, tier: String?) throws  -> String
     
@@ -1269,7 +1271,9 @@ open func link(bearer: String)throws  -> String  {
     
     /**
      * Admits an account to the space. Returns the membership row as JSON,
-     * with the same durability options as an insert.
+     * with the same durability options as an insert. If the account is
+     * already a member, as this client has synced, returns that member's
+     * existing row and writes nothing.
      */
 open func memberAdd(table: String, id: String, accountId: String, tier: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -4543,7 +4547,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_add() != 10226) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_add() != 22407) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_list() != 47296) {
