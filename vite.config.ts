@@ -85,6 +85,9 @@ export default defineConfig({
       // The codegen's golden bindings, byte for byte what the generator writes.
       "crates/jazz-codegen/tests/apps/**",
 
+      // Stored-format byte fixtures: the exact bytes the encoder writes.
+      "crates/jazz-e2ee/src/protocol/content/fixtures/**",
+
       // Pristine upstream copy; jazz.patch must record every change to it.
       "vendor/sqlite-wasm-rs/**",
       "!vendor/sqlite-wasm-rs/JAZZ_PATCH.md",
