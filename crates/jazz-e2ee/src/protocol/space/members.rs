@@ -22,8 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::envelope::Mechanism;
 use crate::random::RandomSource;
+use crate::registry::Registry;
 
-use super::super::account::{AccountReplay, AccountState};
+use super::super::account::{AccountReplay, AccountState, PublicAccountLedger};
+use super::super::domain::AppDomain;
 use super::super::error::{
     IntrinsicContradiction, ProtocolError, ProtocolResult, UnsupportedCapability,
 };
@@ -406,6 +408,89 @@ impl std::ops::Deref for ReplayedSpaceChain {
 
     fn deref(&self) -> &SpaceChain {
         &self.0
+    }
+}
+
+/// Chain verification and its inputs retained for one delivery pass. Each
+/// batch still reads the authority and checks memberships and recipients at
+/// its own cut.
+pub struct DeliveryChain<'a> {
+    chain: SpaceChain,
+    roots: Vec<Accepted<SpaceRoot>>,
+    successors: Vec<Accepted<SpaceSuccessor>>,
+    authors: Vec<PublicAccountLedger>,
+    domain: AppDomain,
+    registry: &'a Registry,
+}
+
+impl<'a> DeliveryChain<'a> {
+    pub fn replay(
+        ledger: &SpaceLedger,
+        accounts: &AccountDirectory<'_>,
+        registry: &'a Registry,
+    ) -> ProtocolResult<Option<Self>> {
+        if !std::ptr::eq(registry, accounts.registry()) {
+            return Err(ProtocolError::InconsistentEvidence);
+        }
+        Ok(SpaceChain::replay(ledger, accounts)?.map(|chain| Self {
+            chain,
+            roots: ledger.roots.clone(),
+            successors: ledger.successors.clone(),
+            authors: Self::author_history(ledger, accounts),
+            domain: accounts.domain().clone(),
+            registry,
+        }))
+    }
+
+    pub fn verified(&self) -> ReplayedSpaceChain {
+        ReplayedSpaceChain(self.chain.clone())
+    }
+
+    /// Returns a replay for this read only if all chain evidence matches.
+    /// Author checks use rows strictly before the signed record's position.
+    /// Later account activity is still checked independently for deliveries.
+    pub fn reuse(
+        &self,
+        ledger: &SpaceLedger,
+        accounts: &AccountDirectory<'_>,
+    ) -> ProtocolResult<Option<ReplayedSpaceChain>> {
+        if ledger.address != *self.chain.address()
+            || ledger.through < self.chain.through()
+            || &self.domain != accounts.domain()
+            || !std::ptr::eq(self.registry, accounts.registry())
+            || self.roots != ledger.roots
+            || self.successors != ledger.successors
+            || self.authors != Self::author_history(ledger, accounts)
+        {
+            return Ok(None);
+        }
+        Ok(Some(ReplayedSpaceChain(
+            self.chain.at_matching_read(ledger, accounts)?,
+        )))
+    }
+
+    fn author_history(
+        ledger: &SpaceLedger,
+        accounts: &AccountDirectory<'_>,
+    ) -> Vec<PublicAccountLedger> {
+        let cut_and_author = ledger
+            .roots
+            .iter()
+            .map(|root| (root.position, &root.row.creator_account_id))
+            .chain(
+                ledger
+                    .successors
+                    .iter()
+                    .map(|successor| (successor.position, &successor.row.author_account_id)),
+            );
+        let mut cuts = BTreeMap::new();
+        for (position, author) in cut_and_author {
+            let cut = cuts.entry(author).or_insert(position);
+            *cut = (*cut).max(position);
+        }
+        cuts.into_iter()
+            .filter_map(|(author, cut)| Some(accounts.replay(author).ok()?.ledger().before(cut)))
+            .collect()
     }
 }
 
