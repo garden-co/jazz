@@ -2,7 +2,8 @@
 // in local workerd: publication, writes and reads through the backend, and
 // the object's data across a workerd restart. The core never holds a
 // transaction open, so nothing here opens one on it.
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -78,4 +79,73 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz on a Durable Object c
     ]);
     await stop();
   });
+
+  // The commit seq row (jazz#6367) on the Durable Object's own SQLite: a
+  // write through the core gives every table, history table and
+  // `_jazz_transactions` its two `seq_v1` triggers (the storage bridge
+  // accepts them), and the `commit_seq.v1` row is the newest accepted seq
+  // the data holds, so a restart reads it instead of scanning history.
+  it("keeps the commit seq row and its triggers in the object's SQLite", async () => {
+    const { jazz } = await start();
+    await jazz.db.insert(app.notes, { title: "third" }).wait({ tier: "global" });
+    await stop();
+    const files = (await readdir(persist, { recursive: true }))
+      .map(String)
+      .filter((file) => file.endsWith(".sqlite"));
+    const opened = files.map((file) => new DatabaseSync(join(persist, file), { readOnly: true }));
+    const stores = opened.filter(
+      (db) =>
+        db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = '_jazz_meta'").get()?.n ===
+        1,
+    );
+    try {
+      expect(stores.length).toBeGreaterThan(0);
+      for (const db of stores) expectCommitSeqRow(db);
+    } finally {
+      for (const db of opened) db.close();
+    }
+  });
 });
+
+/** `db` (a core's SQLite) covers every table with its commit seq row. */
+function expectCommitSeqRow(db: DatabaseSync) {
+  const clocked = (
+    db
+      .prepare(
+        "SELECT m.name AS name FROM sqlite_master AS m WHERE m.type = 'table' " +
+          "AND m.name NOT GLOB '_jazz_*' AND m.name NOT GLOB '_cf_*' " +
+          "AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = '_clock')",
+      )
+      .all() as Array<{ name: string }>
+  ).map((row) => row.name);
+  expect(clocked.length).toBeGreaterThan(0);
+  const triggers = new Set(
+    (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB '*__seq_v1_*'",
+        )
+        .all() as Array<{ name: string }>
+    ).map((row) => row.name),
+  );
+  for (const table of [...clocked, "_jazz_transactions"]) {
+    expect(triggers).toContain(`${table}__seq_v1_ins`);
+    expect(triggers).toContain(`${table}__seq_v1_upd`);
+  }
+  const row = db
+    .prepare("SELECT v, typeof(v) AS kind FROM _jazz_meta WHERE k = 'commit_seq.v1'")
+    .get() as { v: number | bigint; kind: string } | undefined;
+  expect(row?.kind).toBe("integer");
+  let newest = 0n;
+  for (const table of clocked) {
+    const max = db
+      .prepare(
+        `SELECT MAX(_clock) AS m FROM "${table.replaceAll('"', '""')}" ` +
+          "WHERE _clock >= 0 AND _clock < 4503599627370496",
+      )
+      .get() as { m: number | bigint | null };
+    if (max.m !== null && BigInt(max.m) > newest) newest = BigInt(max.m);
+  }
+  expect(newest).toBeGreaterThan(0n);
+  expect(BigInt(row!.v)).toBeGreaterThanOrEqual(newest);
+}

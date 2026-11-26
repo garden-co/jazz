@@ -11,6 +11,11 @@ mod common;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
+/// One step of the nightly older-core round trip (jazz#6367); a no-op
+/// unless `dev/gates/commit-seq-older-core.mjs` runs it.
+#[path = "compat/older_core_step.rs"]
+mod older_core_step;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -1254,7 +1259,7 @@ fn a_crash_between_a_commits_write_and_its_commit_keeps_row_and_data_together() 
             .status()
             .unwrap()
     };
-    assert!(!run("abort").success(), "the child aborts");
+    assert_aborted(run("abort"));
     {
         let db = open_file(&path, 1);
         assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
@@ -1331,9 +1336,241 @@ fn the_commit_seq_row_and_its_triggers_are_pinned() {
             .unwrap_or_else(|| panic!("{corrupt} is refused"));
         assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{corrupt}");
         assert!(
-            error.message.contains("corrupt commit seq"),
+            error.message.contains("corrupt commit seq")
+                && error.message.contains("Deleting that row is safe"),
             "{corrupt}: {}",
             error.message
         );
     }
+    // The refusal's fix works: without the row, an open scans every table
+    // and the next write records the row again.
+    raw(&path)
+        .execute_batch(&format!("DELETE FROM _jazz_meta WHERE k = '{SEQ_KEY}';"))
+        .unwrap();
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(sorted(db.seq_scans_for_test()), seq_targets(&path));
+        insert_items(&db, 10..11);
+    }
+    assert_eq!(seq_row_value(&path), Some(scanned_seq(&path)));
+    assert_eq!(
+        open_file(&path, 1).seq_scans_for_test(),
+        Vec::<String>::new()
+    );
+}
+
+/// A trigger under the encoding's name whose SQL is not the one this build
+/// writes is not trusted to keep the row: the open fails with a storage
+/// error naming it, rather than skip it as if it covered its table. Its
+/// fix, dropping it, is safe: the next open scans that table and the next
+/// write recreates the trigger.
+#[test]
+fn a_foreign_trigger_under_the_encodings_name_is_refused() {
+    let path = scratch("seq-foreign-trigger");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..3);
+    }
+    let history = format!("{}__h", items_table(&path));
+    let name = format!("{history}__seq_v1_ins");
+    raw(&path)
+        .execute_batch(&format!(
+            "DROP TRIGGER \"{name}\"; \
+             CREATE TRIGGER \"{name}\" AFTER INSERT ON \"{history}\" BEGIN SELECT 1; END;"
+        ))
+        .unwrap();
+    let error = block_on(Db::open_at(config(1), &path, FileOptions::default()))
+        .err()
+        .expect("a foreign trigger is refused");
+    assert_eq!(error.code, jazz::db::ErrorCode::Storage);
+    assert!(
+        error.message.contains(&name)
+            && error.message.contains("is not the one this build writes")
+            && error.message.contains("Dropping it is safe"),
+        "{}",
+        error.message
+    );
+    raw(&path)
+        .execute_batch(&format!("DROP TRIGGER \"{name}\";"))
+        .unwrap();
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(db.seq_scans_for_test(), vec![history.clone()]);
+        insert_items(&db, 3..4);
+    }
+    assert_eq!(
+        open_file(&path, 1).seq_scans_for_test(),
+        Vec::<String>::new()
+    );
+    let stored: String = raw(&path)
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [&name],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(stored.contains("UPDATE _jazz_meta"), "recreated: {stored}");
+}
+
+/// The child died at its injected `abort()`, not by a panic (which exits
+/// with 101 and would pass any "not success" check).
+fn assert_aborted(status: std::process::ExitStatus) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(6), "the child aborts: {status:?}");
+    }
+    #[cfg(not(unix))]
+    assert!(
+        !status.success() && status.code() != Some(101),
+        "{status:?}"
+    );
+}
+
+const COVER_CRASH_CHILD: &str = "JAZZ_SEQ_COVER_CRASH_CHILD";
+
+/// Remove the encoding from a store: every `seq_v1` trigger and the row, as
+/// a store from before it has neither.
+fn strip_commit_seq(path: &Path) {
+    let conn = raw(path);
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB '*__seq_v1_*'",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for name in names {
+        conn.execute_batch(&format!("DROP TRIGGER \"{name}\";"))
+            .unwrap();
+    }
+    conn.execute_batch(&format!("DELETE FROM _jazz_meta WHERE k = '{SEQ_KEY}';"))
+        .unwrap();
+}
+
+fn seq_trigger_count(path: &Path) -> i64 {
+    raw(path)
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name GLOB '*__seq_v1_*'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Jazz's own cover, killed: a process aborted inside the first write's
+/// cover (after it created the triggers and wrote the row, before its
+/// transaction committed) leaves neither, and no data of the write; the
+/// store is as uncovered as before, its next open scans every table, and
+/// its next write covers it.
+///
+/// ```text
+/// child: open (uncovered) ─► insert ─► cover writes triggers + row ─► abort
+/// parent: no triggers, no row, no new row; reopen scans all; write covers
+/// ```
+#[test]
+fn a_process_killed_inside_the_cover_leaves_the_store_uncovered() {
+    if let Ok(path) = std::env::var(COVER_CRASH_CHILD) {
+        let db = open_file(Path::new(&path), 1);
+        db.abort_in_seq_cover_for_test();
+        let _ = block_on(db.insert("items", item(77), Default::default()));
+        unreachable!("the cover aborts");
+    }
+    let path = scratch("seq-cover-crash");
+    {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..5);
+    }
+    strip_commit_seq(&path);
+    let before = scanned_seq(&path);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_process_killed_inside_the_cover_leaves_the_store_uncovered",
+            "--nocapture",
+        ])
+        .env(COVER_CRASH_CHILD, path.display().to_string())
+        .status()
+        .unwrap();
+    assert_aborted(status);
+    assert_eq!(
+        seq_trigger_count(&path),
+        0,
+        "the cover's triggers rolled back"
+    );
+    assert_eq!(seq_row(&path), None, "and its row");
+    assert_eq!(scanned_seq(&path), before, "the write never landed");
+    {
+        let db = open_file(&path, 1);
+        assert_eq!(sorted(db.seq_scans_for_test()), seq_targets(&path));
+        assert!(db.seq_high_water() >= before);
+        insert_items(&db, 5..6);
+    }
+    assert_eq!(
+        seq_trigger_count(&path) as usize,
+        2 * seq_targets(&path).len()
+    );
+    assert_eq!(seq_row_value(&path), Some(scanned_seq(&path)));
+    assert_eq!(
+        open_file(&path, 1).seq_scans_for_test(),
+        Vec::<String>::new()
+    );
+}
+
+const COMMIT_CRASH_CHILD: &str = "JAZZ_SEQ_COMMIT_CRASH_CHILD";
+
+/// Jazz's own commit, killed: on a covered store, a process aborted in the
+/// middle of a Jazz transaction (its writes staged, not committed) leaves
+/// the row exactly at the newest seq the data holds, and the next open
+/// reads it without a scan and numbers above everything committed.
+#[test]
+fn a_process_killed_mid_commit_leaves_the_row_matching_the_data() {
+    if let Ok(path) = std::env::var(COMMIT_CRASH_CHILD) {
+        let db = open_file(Path::new(&path), 1);
+        let _ = block_on(async {
+            let tx = db.mergeable_tx().await?;
+            for n in 100..150 {
+                tx.insert(
+                    "items",
+                    item(n),
+                    InsertOptions {
+                        row_id: Some(row(n)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            std::process::abort();
+            #[allow(unreachable_code)]
+            tx.commit().await
+        });
+        unreachable!()
+    }
+    let path = scratch("seq-commit-crash");
+    let committed = {
+        let db = open_file(&path, 1);
+        insert_items(&db, 0..20);
+        db.seq_high_water()
+    };
+    let recorded = seq_row_value(&path).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_process_killed_mid_commit_leaves_the_row_matching_the_data",
+            "--nocapture",
+        ])
+        .env(COMMIT_CRASH_CHILD, path.display().to_string())
+        .status()
+        .unwrap();
+    assert_aborted(status);
+    assert_eq!(seq_row_value(&path), Some(recorded), "the row is unchanged");
+    assert_eq!(scanned_seq(&path), recorded, "and matches the data");
+    let db = open_file(&path, 1);
+    assert_eq!(db.seq_scans_for_test(), Vec::<String>::new());
+    let next = block_on(db.insert("items", item(500), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    assert!(next > committed, "numbers above every committed seq");
 }

@@ -10802,6 +10802,15 @@ impl Db {
         self.inner.seq_scans.borrow().clone()
     }
 
+    /// Make the next commit seq cover abort the process once it has
+    /// written its triggers and row, before its transaction commits: a
+    /// crash test's injection point.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn abort_in_seq_cover_for_test(&self) {
+        self.inner.abort_in_seq_cover.set(true);
+    }
+
     /// One-shot read records, answer slots, and queued one-shot requests.
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_once_state_for_test(&self) -> (usize, usize, usize) {
