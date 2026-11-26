@@ -114,6 +114,36 @@ it("adds the creator and manages members through typed tables and transactions",
   expect(await members.remove(space, bob.account)).toBe(1);
 });
 
+it("creates a space by upsert without adding its creator automatically", async () => {
+  const host = await serve();
+  const privateStore = new Proxy(memoryPrivateStore(), {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return (value as (...values: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  const alice = await device(host, { privateStore });
+  const id = crypto.randomUUID();
+  const project = { name: "Plans", ownerId: alice.account };
+
+  await alice.db.upsert(app.projects, id, project).wait({ tier: "global" });
+  const server = host.jazz.db;
+  expect(await server.all(app.projects.where({ id }))).toEqual([{ id, ...project }]);
+  expect(await server.encryption.members.list(app.projects, id)).toEqual([]);
+
+  const withMember = crypto.randomUUID();
+  const written = await alice.db.transaction((tx) => {
+    tx.upsert(app.projects, withMember, project);
+    return tx.encryption.members.add(app.projects, withMember, alice.account);
+  });
+  const member = await written.wait({ tier: "global" });
+  expect(await server.encryption.members.list(app.projects, withMember)).toEqual([member]);
+});
+
 it("honours both creator membership opt-outs and preserves an explicit member row's id", async () => {
   const host = await serve();
   const alice = await device(host);

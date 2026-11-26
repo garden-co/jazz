@@ -91,6 +91,10 @@ fn members_in(scope_id: ObjectId, id: ObjectId) -> Query<SpaceMember> {
 impl Jazz {
     /// Admits an account to the space row `id` of `T`. Returns its membership
     /// row with the same durability as [`Jazz::insert`].
+    ///
+    /// Automatic creator membership applies to inserts. When an upsert creates
+    /// a space, explicitly add the creator in the same transaction or call this
+    /// method afterward if permissions allow it.
     pub async fn add_member<T: Table>(
         &self,
         id: ObjectId,

@@ -919,7 +919,12 @@ export class Members {
     return accountId === undefined ? at : { ...at, accountId };
   }
 
-  /** Add an account to the space. Wait on the result as you would for an insert. */
+  /**
+   * Add an account to the space. Wait on the result as you would for an insert.
+   * Automatic creator membership applies to `insert`. When `upsert` creates a
+   * space, add the creator explicitly with `tx.encryption.members.add` in the
+   * same transaction, or call this method afterward if permissions allow it.
+   */
   add(...args: AddMemberArgs): WriteResult<MemberRow> {
     if (!this.context) throw new Error("Adding members requires a database.");
     const { db, schema } = this.context;
