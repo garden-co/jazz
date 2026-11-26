@@ -544,6 +544,53 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
     result.unwrap();
 }
 
+/// Alice's UniFFI insert keeps the generated project ID while preparing the
+/// key for the project's encrypted name, which uses that same ID as its space.
+///
+/// ```text
+/// alice ──insert──► prepare key for project ID ──retry──► project
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ffi_insert_keeps_the_id_of_its_encrypted_space() {
+    use jazz_app_support::AppFiles;
+
+    let mut file = parse(&app_file());
+    let mut self_space = parse(include_str!(
+        "../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
+    ));
+    file["tables"]["projects"] = self_space["tables"]["projects"].take();
+    let file = file.to_string();
+    let app = App::start_with(AppFiles::new(file.as_bytes(), None).with_permissions(
+        include_bytes!("../../jazz-app/tests/fixtures/encrypted/jazz.permissions.json").as_slice(),
+    ))
+    .await;
+    let config = app.config_for(&file);
+    let result = tokio::task::spawn_blocking(move || {
+        let alice =
+            JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        let account = alice.account().unwrap().unwrap();
+        let project = parse(
+            &alice
+                .insert_at(
+                    "projects".into(),
+                    json!({ "name": "private plans", "ownerId": account }).to_string(),
+                    "global".into(),
+                )
+                .expect("the insert uses the ID whose key was prepared"),
+        );
+        assert_eq!(project["name"], "private plans");
+        let rows = alice
+            .all(json!({ "table": "projects" }).to_string())
+            .unwrap();
+        assert_eq!(parse(&rows), json!([project]));
+        alice.shutdown().unwrap();
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// Alice's FFI insert returns the logical defaults and nulls for encrypted
 /// fields she leaves out, matching the same row read through the FFI.
 /// An implicit read includes the ordinary column whose name looks like a
