@@ -5337,7 +5337,9 @@ export class NativeRuntimeAdapter implements Runtime {
       attempt.carrier === this.serverCarrier;
     if (isCurrent) {
       this.serverConnectionGeneration += 1;
-      this.serverPumpScheduled = false;
+      // `serverPumpScheduled` stays as it is: a scheduled pump is a microtask
+      // that always runs, clears the flag and pumps whichever link is
+      // current by then, so the replacement link is not left unpumped.
       this.serverConnectionAttempt = null;
       this.serverCarrier = null;
     }
