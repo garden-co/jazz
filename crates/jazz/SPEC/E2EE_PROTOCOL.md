@@ -1542,8 +1542,14 @@ the 32 secret bytes, created and read with user verification required
   already registered gets no new commitment; approving or restoring a
   device writes none. Only recovery roots write commitments in this
   version, and nothing reads, verifies or enforces them yet: their presence
-  or absence changes no behaviour, and a client that does not know the table
-  ignores it. Verification arrives in a later version. Fixture: `s` = bytes
+  or absence changes no behaviour. Verification arrives in a later version.
+  The table belongs to the system tables of version 1, amended before any
+  release. A client built with that amended set and no commitment support
+  works as before and ignores the table's rows. A client built with the set
+  from before the table was added is not compatible with an authority that
+  has the amended set: it does not get the authority's catalogue
+  identities, so it cannot restore a device or read encrypted rows. No client with the earlier set has been released.
+  Fixture: `s` = bytes
   `00`–`1f` and
   `Dₐ = ["0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f","prod","a11ce000-0000-5000-8000-00000000a11c"]`
   give at generation 0 root ID `bdf7dfa1-160c-8e21-bee8-aef5fd8199ea`,
