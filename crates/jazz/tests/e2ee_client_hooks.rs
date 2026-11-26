@@ -1831,6 +1831,73 @@ fn ledger_reads_return_accepted_positions_at_one_cut() {
     assert_eq!(error.code, ErrorCode::NotObserved);
 }
 
+/// A linked client, for the ledger-read refusal contracts below.
+fn linked_client(server: &Db) -> (Db, jazz::db::Upstream) {
+    let alice = client(&Fake::new());
+    let (link, _wire) = link(&alice, server);
+    pump(server, &alice);
+    (alice, link)
+}
+
+/// Contract: a ledger read outside a serializable transaction is refused
+/// as such even when its query cannot be prepared; a preparation error only
+/// waits its turn among a serializable transaction's reads.
+#[test]
+fn mergeable_ledger_read_is_refused_before_its_query_error() {
+    let server = authority();
+    let (alice, _link) = linked_client(&server);
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    let missing = Query::from("missing_table");
+    let error = drive(
+        &server,
+        &alice,
+        alice.tx_ref(id).ledger_read_query(&missing),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query, "{error:?}");
+    assert!(
+        error.message.contains("serializable transaction"),
+        "{error:?}"
+    );
+}
+
+/// Contract: a ledger read on a store that has never had an upstream is
+/// refused as such even when its query cannot be prepared.
+#[test]
+fn ledger_read_without_upstream_is_refused_before_its_query_error() {
+    let fresh = client(&Fake::new());
+    let id = OpenTransactionId::new();
+    block_on(fresh.begin_serializable(id)).unwrap();
+    let missing = Query::from("missing_table");
+    let error = block_on(fresh.tx_ref(id).ledger_read_query(&missing)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved, "{error:?}");
+}
+
+/// Contract: a ledger read in a transaction that is no longer open is a
+/// typed refusal (never a panic), whether or not its query prepares.
+#[test]
+fn ledger_read_in_a_closed_transaction_is_a_typed_refusal() {
+    let server = authority();
+    let (alice, _link) = linked_client(&server);
+    let roots = alice.prepare_query(&Query::from("space_roots")).unwrap();
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_serializable(id)).unwrap();
+    alice.abandon_transaction_handle(id).unwrap();
+    let error = drive(&server, &alice, alice.tx_ref(id).ledger_read(&roots)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
+    assert!(error.message.contains("not open"), "{error:?}");
+    let missing = Query::from("missing_table");
+    let error = drive(
+        &server,
+        &alice,
+        alice.tx_ref(id).ledger_read_query(&missing),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
+    assert!(error.message.contains("not open"), "{error:?}");
+}
+
 /// Contract: alice's provisional read marks each row accepted, at its
 /// position, or hers and pending, by her commit; accepted rows come first.
 /// A read through other tables is refused.

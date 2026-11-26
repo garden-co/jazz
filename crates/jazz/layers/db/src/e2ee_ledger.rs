@@ -4,7 +4,9 @@
 //! provisional reads over this store's own pending writes, and the durable
 //! fate of one of its commits.
 
-use super::{BatchKind, Db, Error, ErrorCode, PreparedQuery, ReadOpts, ReadSpec, ReadTier, TxRef};
+use super::{
+    BatchKind, Db, Error, ErrorCode, PreparedQuery, ReadOpts, ReadSpec, ReadTier, TxRef, rejected,
+};
 use crate::ids::NodeUuid;
 use crate::query::Query;
 use crate::values::CurrentRow;
@@ -67,13 +69,16 @@ impl TxRef<'_> {
     /// position it does not have; so does any row the encryption hooks
     /// cannot open. The read joins the transaction's read set. Once the
     /// snapshot is pinned, ledger reads may fetch from the authority together
-    /// and still finish in admission order.
+    /// and still finish in admission order. A transaction that is no longer
+    /// open is refused with [`ErrorCode::WriteRejected`].
     pub async fn ledger_read(&self, prepared: &PreparedQuery) -> Result<LedgerRead, Error> {
         self.ledger_read_prepared(Ok(prepared)).await
     }
 
     /// Prepares a ledger query, deferring any preparation error until the
-    /// read's turn so it cannot overtake an earlier authority refusal.
+    /// read's turn so it cannot overtake an earlier authority refusal. The
+    /// store's and the transaction's own refusals come first: they hold for
+    /// every ledger read this transaction could make, whatever its query.
     #[doc(hidden)]
     pub async fn ledger_read_query(&self, query: &Query) -> Result<LedgerRead, Error> {
         let prepared = self.db.prepare_query(query);
@@ -85,31 +90,34 @@ impl TxRef<'_> {
         &self,
         prepared: Result<&PreparedQuery, Error>,
     ) -> Result<LedgerRead, Error> {
-        if prepared.is_ok() {
-            self.db.require_upstream("a ledger read")?;
-            let serializable = matches!(
-                self.db
-                    .inner
-                    .batches
-                    .borrow()
-                    .get(&self.id)
-                    .map(|batch| &batch.kind),
-                Some(BatchKind::Serializable { .. })
-            );
-            if !serializable {
+        self.db.require_upstream("a ledger read")?;
+        match self
+            .db
+            .inner
+            .batches
+            .borrow()
+            .get(&self.id)
+            .map(|batch| &batch.kind)
+        {
+            Some(BatchKind::Serializable { .. }) => {}
+            Some(_) => {
                 return Err(Error::new(
                     ErrorCode::Query,
                     "a ledger read runs in a serializable transaction",
                 ));
             }
+            None => return Err(rejected("transaction is not open")),
         }
         // Boxed: the read's state stays off the stack of the runtime that
         // polls it, whose own futures are deep already.
         let opts = ReadOpts::default();
         let (rows, snapshot) =
             Box::pin(self.all_prepared_admitted(prepared, None, &opts, None, true)).await?;
+        // The transaction was serializable when the read was admitted, and
+        // closing it fails the read above; refuse rather than panic should
+        // that ever change.
         let through = snapshot
-            .expect("a ledger read runs in a serializable transaction")
+            .ok_or_else(|| rejected("transaction is no longer open"))?
             .seq;
         let rows = rows.into_iter().map(|row| {
             let at = row.seq().seq;
