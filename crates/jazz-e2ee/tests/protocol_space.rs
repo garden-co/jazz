@@ -2458,6 +2458,40 @@ fn delivery_chain_reuse_refuses_a_changed_successor() {
     );
 }
 
+/// Alice's deliveries may reuse a chain only while its author's account
+/// history at the signed records' positions still matches.
+#[test]
+fn delivery_chain_reuse_refuses_changed_author_history() {
+    let mut world = space(69, &[ALICE, BOB]);
+    world.approve_device(ALICE);
+    world.rotate(ALICE);
+    let mut read = world.read();
+    let cached =
+        DeliveryChain::replay(&read.space, &read.directory(&world), &world.shared.registry)
+            .unwrap()
+            .unwrap();
+    assert!(
+        cached
+            .reuse(&read.space, &read.directory(&world))
+            .unwrap()
+            .is_some()
+    );
+
+    let alice = read
+        .ledgers
+        .iter_mut()
+        .find(|ledger| ledger.account_id == ALICE)
+        .unwrap();
+    assert_eq!(alice.approvals.len(), 1);
+    alice.approvals.clear();
+    assert!(
+        cached
+            .reuse(&read.space, &read.directory(&world))
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Alice's current-epoch read covers its holders, mark and rotation
 /// recipients. A different epoch cannot cover those recipients, and the
 /// bounded read cannot stand in for the whole history.
