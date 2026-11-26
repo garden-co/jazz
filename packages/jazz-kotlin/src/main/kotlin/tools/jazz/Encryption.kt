@@ -163,7 +163,10 @@ public class Encryption internal constructor(
         call("approve", buildJsonObject { put("deviceId", deviceId); put("code", code) })
     }
 
-    /** Admits an account to a space and returns its membership row, as an insert would. */
+    /**
+     * Admits an account to a space and returns its membership row, as an insert would. If the
+     * account is already a member, returns that member's existing row and writes nothing.
+     */
     public suspend fun addMember(table: String, id: String, accountId: String, tier: WriteTier? = null): SpaceMember =
         jazzJson.decodeFromString(blocking { native.memberAdd(table, id, accountId, tier?.wire) })
 

@@ -6,4 +6,4 @@ Add `db.encryption.members.add`, `list`, and `remove` with typed space tables, a
 
 The first space insert with automatic membership on a thin browser client loads the local-first encryption runtime. Either opt-out keeps plaintext space inserts on the thin client.
 
-Inserting your own membership of a space you're already a member of is refused ("already a member"), so an app that still adds the creator after creating the space doesn't list it twice. Remove that insert, or opt out of automatic membership. Adding other accounts is unchanged.
+Adding a member is idempotent: adding an account that's already a member of the space, yourself included, returns its existing member row and writes nothing. So an app that still adds the creator after creating the space lists it once. Direct inserts into `__e2ee_members` don't check this.

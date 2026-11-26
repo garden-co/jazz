@@ -50,10 +50,11 @@ add the creator, whatever these options say, because they don't act as a device 
 A backend that creates a space for a user must add that user's membership itself, in the same
 transaction or afterward.
 
-Don't also insert the creator's own membership row after creating a space, as code written
-before automatic membership did. That insert is refused with an "already a member" error,
-so the creator is never listed twice. In the space's creating transaction, an explicit creator
-row is kept and the automatic one is skipped.
+Adding a member is idempotent. If this client already sees the account as a member of the space,
+`members.add` returns that member's existing row and writes nothing. So code written before
+automatic membership, which still adds the creator after creating a space, leaves one row. Direct
+inserts into `app.__e2ee_members` don't check this. In the space's creating transaction, an
+explicit creator row is kept and the automatic one is skipped.
 
 If you create a space with `upsert`, add the creator with
 `tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
