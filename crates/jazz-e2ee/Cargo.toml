@@ -33,6 +33,7 @@ sha1 = { version = "0.10.6", default-features = false }
 # SHA-256, one of the protocol's primitives; SHA-512 for the device-account
 # signing key.
 sha2 = { version = "0.11.1", default-features = false, features = ["zeroize"] }
+slh-dsa = { version = "=0.2.0-rc.5", default-features = false, features = ["zeroize"] }
 # Constant-time comparison of secret-derived values.
 subtle = { version = "2.6.1", default-features = false }
 thiserror = "2"
@@ -45,6 +46,17 @@ getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
 [dev-dependencies]
 # Builds this crate's own tests and examples with the conformance kit.
 jazz-e2ee = { path = ".", features = ["conformance"] }
+# Independent implementation used by the SLH-DSA interoperability tests.
+fips205 = { version = "=0.5.0", default-features = false, features = [
+  "slh-dsa-sha2-128s",
+  "default-rng",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 # Cross-checks only: the library itself never links libsodium. This version
 # bundles libsodium 1.0.22, the one `crates/jazz/SPEC/fixtures/e2ee-vectors.c`
 # is built against and checks for.
