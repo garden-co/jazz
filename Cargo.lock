@@ -2965,7 +2965,9 @@ dependencies = [
  "jazz-server",
  "rivetkit",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "tracing-subscriber",
 ]
 

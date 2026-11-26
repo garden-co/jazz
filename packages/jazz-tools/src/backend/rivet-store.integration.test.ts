@@ -11,12 +11,53 @@ import { rivetTestRunner } from "./fixtures/rivet-test-runner.js";
 
 const runner = rivetTestRunner();
 
-it("syncs permitted writes through a Node backend and keeps them across actor generations", async () => {
-  const schema = s.defineSchema({ notes: s.table({ title: s.string() }, {}) });
-  const rules = schema.definePermissions({ notes: { read: true, insert: { title: "shared" } } });
-  const app = testApp({ ...readableSchema(schema)! });
-  const permissions = { ...readablePermissions(rules)! };
+const schema = s.defineSchema({ notes: s.table({ title: s.string() }, {}) });
+const rules = schema.definePermissions({ notes: { read: true, insert: { title: "shared" } } });
+const app = testApp({ ...readableSchema(schema)! });
+const permissions = { ...readablePermissions(rules)! };
 
+it("persists CRUD and commits or rolls back multi-row Jazz transactions", async () => {
+  const store = { ...runner, key: randomUUID() };
+  const alice = createJazz({ app, permissions, store: rivet(store) });
+  const bob = createJazz({ app, permissions, store: rivet(store) });
+  try {
+    await alice.ready();
+    await bob.ready();
+    const read = () => bob.db.all(app.notes.orderBy("title"), { tier: "remote" });
+    const first = await alice.db.insert(app.notes, { title: "draft" }).wait({ tier: "global" });
+    expect(await read()).toEqual([{ id: first.id, title: "draft" }]);
+    await alice.db.update(app.notes, first.id, { title: "published" }).wait({ tier: "global" });
+    expect(await read()).toEqual([{ id: first.id, title: "published" }]);
+    await alice.db.delete(app.notes, first.id).wait({ tier: "global" });
+    expect(await read()).toEqual([]);
+
+    const commit = await alice.db.transaction((tx) => [
+      tx.insert(app.notes, { title: "one" }).id,
+      tx.insert(app.notes, { title: "two" }).id,
+    ]);
+    await commit.wait({ tier: "global" });
+    const [one, two] = commit.value;
+    const committed = [
+      { id: one, title: "one" },
+      { id: two, title: "two" },
+    ];
+    expect(await read()).toEqual(committed);
+
+    await expect(
+      alice.db.serializableTransaction(async (tx) => {
+        expect(await tx.one(app.notes.where({ id: one }))).toMatchObject({ title: "one" });
+        tx.update(app.notes, one, { title: "discarded" });
+        tx.delete(app.notes, two);
+        throw new Error("cancel both changes");
+      }),
+    ).rejects.toThrow("cancel both changes");
+    expect(await read()).toEqual(committed);
+  } finally {
+    await Promise.all([alice.close(), bob.close()]);
+  }
+}, 90_000);
+
+it("syncs permitted writes through a Node backend and keeps them across actor generations", async () => {
   const { endpoint, namespace, token } = runner;
   const key = randomUUID();
   const jazz = createJazz({
@@ -56,6 +97,14 @@ it("syncs permitted writes through a Node backend and keeps them across actor ge
     await expect(
       writer.db.insert(app.notes, { title: "denied" }).wait({ tier: "global" }),
     ).rejects.toThrow();
+    await expect(async () => {
+      const batch = await writer.db.transaction((tx) => {
+        tx.insert(app.notes, { title: "shared" });
+        tx.insert(app.notes, { title: "denied" });
+      });
+      await batch.wait({ tier: "global" });
+    }).rejects.toThrow();
+    expect(await reader.db.all(app.notes, { tier: "remote" })).toHaveLength(1);
     expect(events.mock.calls.some(([event]) => event === "upgrade")).toBe(true);
     for (const session of sessions.splice(0)) await session.close();
 

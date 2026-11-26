@@ -17,3 +17,7 @@ rivetkit = "3.1.1"
 serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio-util = "0.7"

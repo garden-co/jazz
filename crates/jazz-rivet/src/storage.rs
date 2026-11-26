@@ -241,3 +241,6 @@ impl Drop for Rollback {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
