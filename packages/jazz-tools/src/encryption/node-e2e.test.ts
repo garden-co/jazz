@@ -171,6 +171,41 @@ it("honours both creator membership opt-outs and preserves an explicit member ro
   expect(await alice.db.encryption.members.list(app.projects, id)).toEqual([explicit]);
 });
 
+it("a streamed space insert honours the per-insert creator membership opt-out", async () => {
+  const host = await serve();
+  const alice = await device(host);
+  async function* chunks(name: string): AsyncGenerator<string> {
+    yield name;
+  }
+  const ownerId = alice.account;
+  const added = await alice.db.insertStreaming(app.projects, {
+    name: chunks("Streamed"),
+    ownerId,
+  });
+  await added.wait({ tier: "global" });
+  const skipped = await alice.db.insertStreaming(
+    app.projects,
+    { name: chunks("Streamed, opted out"), ownerId },
+    { addCreatorAsMember: false },
+  );
+  await skipped.wait({ tier: "global" });
+  const staged = await alice.db.transaction((tx) =>
+    tx.insertStreaming(
+      app.projects,
+      { name: chunks("Staged, opted out"), ownerId },
+      { addCreatorAsMember: false },
+    ),
+  );
+  await staged.wait({ tier: "global" });
+
+  const server = host.jazz.db.encryption.members;
+  expect((await server.list(app.projects, added.value.id)).map((row) => row.accountId)).toEqual([
+    alice.account,
+  ]);
+  expect(await server.list(app.projects, skipped.value.id)).toEqual([]);
+  expect(await server.list(app.projects, staged.value.id)).toEqual([]);
+});
+
 it("creates spaces and their memberships offline after receiving the catalogue", async () => {
   const host = await serve();
   const alice = await device(host);

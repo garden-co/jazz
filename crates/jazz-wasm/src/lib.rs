@@ -1917,6 +1917,7 @@ impl WasmDb {
         head: Option<JsValue>,
         base: Option<JsValue>,
         transaction: Option<String>,
+        add_creator_as_member: Option<bool>,
     ) -> Result<WasmStreamingMutation, JsValue> {
         let head = present(head)
             .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
@@ -1925,7 +1926,7 @@ impl WasmDb {
             .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
             .transpose()?;
         let inner = self.open_inner()?;
-        let mutation = inner
+        let mut mutation = inner
             .binding
             .begin_streaming_mutation(
                 table,
@@ -1940,6 +1941,9 @@ impl WasmDb {
                 base,
                 transaction.as_deref(),
             )
+            .map_err(host_error)?;
+        mutation
+            .set_add_creator_as_member(add_creator_as_member)
             .map_err(host_error)?;
         Ok(WasmStreamingMutation {
             db: inner,

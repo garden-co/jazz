@@ -203,6 +203,8 @@ declare module "jazz-wasm" {
       updatedAtMs?: number,
       head?: unknown,
       base?: unknown,
+      transaction?: string,
+      addCreatorAsMember?: boolean,
     ): StreamingMutation;
     /** Delete a durable browser store; no database may have it open. */
     static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;
