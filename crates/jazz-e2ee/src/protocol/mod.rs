@@ -31,6 +31,7 @@
 
 pub mod account;
 mod canonical;
+pub mod commitment;
 pub mod content;
 pub mod derive;
 pub mod device_account;
