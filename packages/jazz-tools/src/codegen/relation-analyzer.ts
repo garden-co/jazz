@@ -31,7 +31,20 @@ export class AmbiguousRelationNameError extends Error {}
 export class DuplicateColumnNameError extends Error {}
 
 /** Resolve only declared relationships. Reference columns never imply aliases or inverses. */
+// A schema object is never mutated once built, so its relations are a pure function of
+// its identity. React Native clients analyse the same schema on every query they build.
+const relationsBySchema = new WeakMap<WasmSchema, Map<string, Relation[]>>();
+
 export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
+  let relations = relationsBySchema.get(schema);
+  if (!relations) {
+    relations = analyzeRelationsUncached(schema);
+    relationsBySchema.set(schema, relations);
+  }
+  return relations;
+}
+
+function analyzeRelationsUncached(schema: WasmSchema): Map<string, Relation[]> {
   const result = new Map<string, Relation[]>();
   for (const [tableName, table] of Object.entries(schema)) {
     const columns = new Set<string>();
