@@ -1036,6 +1036,57 @@ fn one_non_canonical_record_is_skipped_and_the_others_load() {
     );
 }
 
+/// Alice replaces a verified, published root record with a pending record
+/// for the same key. The new record has no verification marker. This goes
+/// through the protocol store because the client does not expose the marker.
+#[test]
+fn replacing_a_verified_root_key_clears_the_marker() {
+    let mut world = World::new(11);
+    world.account(ALICE);
+    let device = world.accounts[ALICE].device.clone();
+    let root = world.build_root(ROW, ALICE, &device).unwrap();
+    let pending = HeldSpace::from_creation(
+        &world.shared.registry,
+        &world.shared.domain,
+        &root,
+        "alice's creation",
+    )
+    .unwrap();
+    let mut published = pending.clone();
+    published.settle(CreationFate::Accepted, Some(&root.root.id));
+    let owner = owner(&world, ALICE);
+    let bytes = owner
+        .seal_stored_document(&published, &[], 0, &mut TestRandom(4))
+        .unwrap();
+    let verified = owner
+        .load_stored_document(&bytes)
+        .unwrap()
+        .unwrap()
+        .updated_document
+        .unwrap();
+    let mut space = owner
+        .load_stored_document(&verified)
+        .unwrap()
+        .unwrap()
+        .space
+        .unwrap();
+
+    space.keep(pending).unwrap();
+    assert!(matches!(space.mark(0), Some(KeyMark::Unpublished { .. })));
+    let bytes = owner
+        .seal_stored_document(&space, &[], 1, &mut TestRandom(5))
+        .unwrap();
+    let unmarked = owner
+        .seal_document(&space, &[], 1, &mut TestRandom(5))
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert!(
+        bytes == unmarked,
+        "the replacement must not inherit the old marker"
+    );
+}
+
 #[test]
 fn a_record_this_device_cannot_read_survives_a_rewrite() {
     let (world, space, _) = alice_holding(11);
