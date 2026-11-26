@@ -1,8 +1,9 @@
 //! Public account commitments, endorsement headers and endorsement signatures.
 
 use crate::context::CryptoContext;
-use crate::envelope;
-use crate::protocol::commitment::ENDORSEMENT_CONTEXT;
+use crate::envelope::{self, Mechanism};
+use crate::primitives::slh_dsa;
+use crate::protocol::commitment::{ENDORSEMENT_CONTEXT, MECHANISM};
 use crate::protocol::domain::AccountDomain;
 use crate::protocol::error::{ProtocolError, ProtocolResult};
 use crate::protocol::ids::IdForm;
@@ -45,12 +46,17 @@ impl Commitment {
         self.subject_kind.check_id(&self.subject_id)
     }
 
+    /// A known mechanism's key has its exact length. An unknown mechanism's
+    /// key is opaque: it is unsupported, not invalid, so only the generic
+    /// bound applies.
     fn check_key(&self) -> ProtocolResult<()> {
         super::ensure_mechanism(&self.mechanism, self.version)?;
-        ensure(
-            (1..=MAX_DELIVERY_BYTES).contains(&self.commitment.len()),
-            "invalid commitment length",
-        )
+        let valid = if Mechanism::new(&self.mechanism, self.version) == MECHANISM {
+            self.commitment.len() == slh_dsa::PUBLIC_KEY_BYTES
+        } else {
+            (1..=MAX_DELIVERY_BYTES).contains(&self.commitment.len())
+        };
+        ensure(valid, "invalid commitment length")
     }
 
     pub fn validate(&self) -> ProtocolResult<()> {

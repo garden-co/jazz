@@ -423,6 +423,42 @@ fn endorsement_binds_each_field() {
     assert!(!jazz_e2ee::primitives::slh_dsa::verify(&public, &m, b"other context", &raw).unwrap());
 }
 
+/// Bob refuses an SLH-DSA-SHA2-128s commitment whose key is not exactly 32
+/// bytes, as a record and as signed bytes. A key of the same lengths under a
+/// mechanism or version he doesn't know stays opaque: well formed, and
+/// unsupported only when used.
+#[test]
+fn a_known_mechanism_needs_its_exact_key_length() {
+    let application = domain(APP, "prod", ALICE);
+    let c = Commitment {
+        signature: vec![1],
+        ..commitment()
+    };
+    c.validate().unwrap();
+    let invalid = Err(ProtocolError::InvalidRecord("invalid commitment length"));
+    for len in [31, 33] {
+        let wrong = Commitment {
+            commitment: vec![0x11; len],
+            ..c.clone()
+        };
+        assert_eq!(wrong.validate(), invalid, "{len} bytes");
+        assert_eq!(
+            wrong.signed_bytes(&application, 0).map(drop),
+            invalid,
+            "{len} bytes"
+        );
+        for (mechanism, version) in [("future", 1), (MECHANISM.id, 2)] {
+            let unknown = Commitment {
+                mechanism: mechanism.into(),
+                version,
+                ..wrong.clone()
+            };
+            unknown.validate().unwrap();
+            unknown.signed_bytes(&application, 0).unwrap();
+        }
+    }
+}
+
 /// Bob can authenticate the bytes of an unknown key. Its use, or an
 /// unknown signature envelope, reports the missing capability.
 #[test]
