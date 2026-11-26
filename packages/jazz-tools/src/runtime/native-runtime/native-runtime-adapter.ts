@@ -510,6 +510,12 @@ type NativeDb = {
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
   ): void;
+  /**
+   * napi: every immediate tick the core has asked for so far, coalesced
+   * requests included. Its scheduler callback runs on a later turn, so the
+   * host compares this count around a call to know which requests it made.
+   */
+  tickRequests?(): number;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   /**
    * A durable browser store's writes to its backing storage started failing
@@ -1033,6 +1039,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeWorkSinceTick = false;
   /** A pending read is being polled: the ticks it asks for are its own. */
   private pollingRead = false;
+  /** With a binding that counts its tick requests (`NativeDb.tickRequests`,
+   * napi), the count the last scheduler callback accounted for... */
+  private tickRequestsSeen = 0;
+  /** ...and how many requests since then pending reads' polls made. napi
+   * delivers a poll's request on a later turn, after `pollingRead` is reset:
+   * the callback that covers it is news only for the requests beyond these. */
+  private readTickRequests = 0;
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1549,7 +1562,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
-      if (!this.ownerRuntime.pollingRead) this.ownerRuntime.nativeWorkSinceTick = true;
+      this.ownerRuntime.noteTickRequest(urgency);
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
@@ -4244,14 +4257,9 @@ export class NativeRuntimeAdapter implements Runtime {
         signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
         // A tick this poll asks for (to send what the read still owes) is
-        // started below; it is not news that wakes the read again.
-        owner.pollingRead = true;
-        let bytes: Uint8Array | null;
-        try {
-          bytes = result.poll();
-        } finally {
-          owner.pollingRead = false;
-        }
+        // started below; it is not news that wakes the read again, whether
+        // the binding calls back during the poll or on a later turn.
+        const bytes = owner.pollPendingRead(result);
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
@@ -4776,6 +4784,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.coreDeadlineTimer = setTimeout(() => {
         this.coreDeadlineTimer = undefined;
         this.coreDeadlineAt = undefined;
+        // A passed deadline can settle a pending read.
+        this.ownerRuntime.nativeWorkSinceTick = true;
         // This tick services every connection. Still-live later obligations
         // re-arm their remaining deadline through the same earliest timer.
         this.scheduleCoreWake("immediate");
@@ -5576,6 +5586,41 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportWorkEpoch += 1;
     this.resolveServerTransportWorkWaiters();
     this.wakePendingReads();
+  }
+
+  /** The core asked for a tick: is it news for the pending reads? */
+  private noteTickRequest(urgency: string | null | undefined): void {
+    // A synchronous binding (wasm) calls back during the poll that asked.
+    if (this.pollingRead) return;
+    // A deadline is news when it passes (its timer marks the tick then), not
+    // when announced: a pending read re-announces its own on every poll.
+    if (typeof urgency === "string" && urgency.startsWith("after:")) return;
+    const counted = urgency === "immediate" ? this.db.tickRequests?.() : undefined;
+    if (counted === undefined) {
+      this.nativeWorkSinceTick = true;
+      return;
+    }
+    // A later-turn callback (napi) covers every request since the last one.
+    const fresh = counted - this.tickRequestsSeen;
+    const own = Math.min(this.readTickRequests, fresh);
+    this.tickRequestsSeen = counted;
+    this.readTickRequests -= own;
+    if (fresh > own) this.nativeWorkSinceTick = true;
+  }
+
+  /** Poll a pending read, keeping the ticks it asks for apart from news. */
+  private pollPendingRead(result: PendingNativeRead): Uint8Array | null {
+    const before = this.db.tickRequests?.();
+    this.pollingRead = true;
+    try {
+      return result.poll();
+    } finally {
+      this.pollingRead = false;
+      if (before !== undefined) {
+        const after = this.db.tickRequests!();
+        this.readTickRequests += Math.max(0, after - Math.max(before, this.tickRequestsSeen));
+      }
+    }
   }
 
   private wakePendingReads(): void {
