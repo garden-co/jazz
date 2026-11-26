@@ -2084,11 +2084,18 @@ rotator is the only member) commit in one transaction. Right after the
 rotation is accepted, the rotator's runtime delivers
 `K'` to every remaining member in delivery transactions of up to 100
 deliveries, whether or not a delivery to it already exists (another
-member's delivery may not open); members it does not reach (without a sealing key, or the
-rotator went offline) receive `K'` later from any holder: an unfinished
-rotation needs no tracking, since any holder of the new version (the
-first-batch recipients, or the rotator on its next start) completes it
-through the pass (§3.4), the first holder to commit winning. Read-set
+member's delivery may not open). This per-sender delivery is guaranteed
+only within the rotator's session: the runtime keeps the remaining members
+in memory, retries a failed batch after a wait and stores nothing. Members
+it does not reach (without a sealing key, the rotator went offline or
+restarted, or its retries ran out) receive `K'` from any holder through the
+pass (§3.4), the first holder to commit winning. When the rotator's device
+starts again, its pass over a held space whose current version's successor
+that device signed also delivers `K'`, in the same batches, to every other
+member that lacks a delivery of it from the rotator's account, whatever
+others sent; it derives them from the ledger. So an unfinished rotation
+needs no stored tracking: no state beyond the held keys survives a
+restart. Read-set
 validation refuses a second successor of the same predecessor, and a
 rotation whose members changed meanwhile; the loser re-reads.
 

@@ -68,6 +68,7 @@ impl E2eeClient {
         tx: OpenTransactionId,
         space: &SpaceAddress,
         previous: &mut Option<DeliveryChain<'a>>,
+        resume: bool,
     ) -> Result<usize, ClientError> {
         let mut read = self
             .read_space_of(db, tx, space, SpaceReadPurpose::Deliver(previous))
@@ -222,6 +223,8 @@ impl E2eeClient {
         }
         if written > 0 {
             self.publish(db, tx).await?;
+        } else if resume {
+            self.resume_rotation(space, &chain, &read.ledger, &acquisition.keys, &deps.members)?;
         }
         if let Some(watched) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
             *watched = deps;
@@ -229,11 +232,73 @@ impl E2eeClient {
         Ok(written)
     }
 
+    /// The rest of this device's last rotation of `space`, found again after
+    /// a restart from what the pass read, with nothing stored (protocol
+    /// §3.5): when this device signed the successor of the current version
+    /// and holds it, every other member without a delivery of it from this
+    /// account is left for [`E2eeClient::finish_rotation`], whatever other
+    /// members sent. Called once the pass has nothing more to write, so
+    /// the members it served are not counted. A rest already pending in
+    /// this session is kept.
+    fn resume_rotation(
+        &self,
+        space: &SpaceAddress,
+        chain: &jazz_e2ee::protocol::space::SpaceChain,
+        ledger: &jazz_e2ee::protocol::space::SpaceLedger,
+        keys: &jazz_e2ee::protocol::space::SpaceKeys,
+        members: &BTreeSet<String>,
+    ) -> Result<(), ClientError> {
+        let current = &chain.current()?.epoch_id;
+        let device = self.shared.device()?.id.clone();
+        let rotator = ledger
+            .successors
+            .iter()
+            .any(|row| row.row.epoch_id == *current && row.row.author_device_id == device);
+        if !rotator || keys.version(current).is_none() {
+            return Ok(());
+        }
+        let own = &self.shared.account_id;
+        let served: BTreeSet<&String> = ledger
+            .deliveries
+            .iter()
+            .filter(|row| row.row.key_epoch_id == *current && row.row.sender_account_id == *own)
+            .map(|row| &row.row.recipient_account_id)
+            .collect();
+        let accounts: Vec<String> = members
+            .iter()
+            .filter(|account| *account != own && !served.contains(account))
+            .cloned()
+            .collect();
+        if !accounts.is_empty() {
+            self.shared
+                .member_watch
+                .borrow_mut()
+                .pending_deliveries
+                .entry(space.clone())
+                .or_insert(PendingRotation {
+                    accounts,
+                    ..Default::default()
+                });
+        }
+        Ok(())
+    }
+
     /// The pass over `space`.
     pub(crate) async fn deliver_pass(
         &self,
         db: &Db,
         space: &SpaceAddress,
+    ) -> Result<usize, ClientError> {
+        self.deliver_pass_with(db, space, false).await
+    }
+
+    /// The pass over `space`; with `resume`, it also finds the rest of this
+    /// device's last rotation of it (see [`E2eeClient::resume_rotation`]).
+    async fn deliver_pass_with(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        resume: bool,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
         if !self.shared.keys.borrow().online {
@@ -243,7 +308,7 @@ impl E2eeClient {
         let mut previous = None;
         for _ in 0..MAX_BATCHES {
             let outcome = crate::account::serializable(db, ATTEMPTS, async |tx| {
-                self.deliver_step(db, tx, space, &mut previous).await
+                self.deliver_step(db, tx, space, &mut previous, resume).await
             })
             .await;
             match outcome {
@@ -263,15 +328,18 @@ impl E2eeClient {
         &self,
         db: &Db,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
-        self.deliver_keys_outside_watch(db, None).await
+        self.deliver_keys_outside_watch(db, None, false).await
     }
 
     /// Retained watches catch up on reconnect. Read the authority for held
-    /// spaces without a watch-driven pass, including failed passes.
+    /// spaces without a watch-driven pass, including failed passes. At
+    /// startup (`resume`), a space whose current version this device made
+    /// also gets the rest of that rotation, in batches (protocol §3.5).
     pub(crate) async fn deliver_keys_outside_watch(
         &self,
         db: &Db,
         watch: Option<&SpaceWatch>,
+        resume: bool,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
         let held: BTreeSet<SpaceAddress> = self.held_addresses().into_iter().collect();
         let mut results = Vec::new();
@@ -279,7 +347,21 @@ impl E2eeClient {
             if watch.is_some_and(|watch| watch.covers_delivery(&space)) {
                 continue;
             }
-            let mut outcome = self.deliver_pass(db, &space).await;
+            let mut outcome = self.deliver_pass_with(db, &space, resume).await;
+            if resume
+                && let Ok(written) = outcome
+                && self
+                    .shared
+                    .member_watch
+                    .borrow()
+                    .pending_deliveries
+                    .contains_key(&space)
+            {
+                outcome = self
+                    .finish_rotation(db, &space)
+                    .await
+                    .map(|rest| written + rest);
+            }
             if outcome.is_ok()
                 && self.holds_refused_key(&space)
                 && let Err(error) = self.repair_auto(db, &space).await
