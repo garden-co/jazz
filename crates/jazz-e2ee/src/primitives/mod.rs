@@ -9,3 +9,4 @@ pub mod aead;
 pub mod hash;
 pub mod hpke;
 pub mod sign;
+pub mod slh_dsa;
