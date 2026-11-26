@@ -689,6 +689,53 @@ fn a_device_write_to_an_encrypted_column_is_refused_without_a_key() {
     );
 }
 
+/// Alice's encrypted foreground inserts a project, the space of her
+/// encrypted notes, on a relay with no authority yet. Her device adds her
+/// as the project's first member, which names the space table's catalogue
+/// identity, so the insert is refused until the catalogue arrives, and
+/// nothing is written.
+///
+/// ```text
+/// Alice (device runtime, no catalogue) ──projects + creator member ✗──► relay
+/// ```
+#[test]
+fn a_space_row_waits_for_the_catalogue_without_an_authority() {
+    use jazz::records::{OwnedRecord, RecordDescriptor, ValueType};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_, schema) = app_schema(MIXED_APP.as_bytes());
+    let store = serve(Rc::new(MemoryStore::new()));
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let foreground = open_account_foreground(
+            &*lease,
+            root.path().to_str().unwrap().as_bytes(),
+            &alice_request(),
+            &schema,
+        );
+        let execute = |command| leased_execute(&*lease, foreground, command).unwrap();
+        finish_store_open(&execute, &store);
+        let descriptor = RecordDescriptor::new([("name", ValueType::String)]);
+        let raw = descriptor.create(&[Value::String("plans".into())]).unwrap();
+        let refused = device_insert(
+            &execute,
+            &store,
+            "projects",
+            jazz::binding_codec::encode_named_cells(&OwnedRecord::new(raw, descriptor)).unwrap(),
+        );
+        assert!(
+            matches!(&refused, Response::OperationError { reason }
+                | Response::CodedOperationError { reason, .. }
+                if reason.contains("has not received its authority's catalogue")),
+            "the creator's member row needs the catalogue: {refused:?}"
+        );
+        assert_eq!(execute(Request::Close), Response::Closed { closed: true });
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
+
 /// Alice's encrypted foreground writes a row of a plain table. Her device
 /// hooks let plain data through, and the relay serves it to a peer attached
 /// without a device runtime, which holds no keys.
@@ -702,7 +749,9 @@ fn a_plain_row_relays_from_a_device_to_a_keyless_peer() {
 
     let root = tempfile::tempdir().unwrap();
     let (_, schema) = app_schema(MIXED_APP.as_bytes());
-    // This relay has no authority and therefore no catalogue table identity.
+    // This relay has no authority and therefore no catalogue table identity:
+    // without the opt-out, the space insert waits for it
+    // (`a_space_row_waits_for_the_catalogue_without_an_authority`).
     let mut schema: serde_json::Value = serde_json::from_slice(&schema).unwrap();
     schema["addCreatorAsMember"] = json!(false);
     let schema = serde_json::to_vec(&schema).unwrap();
