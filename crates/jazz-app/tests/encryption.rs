@@ -319,10 +319,10 @@ async fn raw_member_inserts_stay_plain_inserts() {
     app.stop().await;
 }
 
-/// `add_member` reads, then writes, so two concurrent adds of the same
-/// account can both find no row and both write one, directly or in a
-/// transaction. Whichever way they interleave, each returns a row Alice can
-/// list, Bob has one or two rows, and `remove_member` clears them all.
+/// `add_member` reads, then writes, so two joined adds of the same account
+/// outside a transaction can both find no row and both write one. Whichever
+/// way they interleave, each returns a row Alice can list, Bob has one or
+/// two rows, and `remove_member` clears them all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_adds_leave_rows_that_remove_member_clears() {
     use bindings::{NewProject, Project};
@@ -336,62 +336,93 @@ async fn concurrent_adds_leave_rows_that_remove_member_clears() {
     let bob_account = bob.account().unwrap();
     let bob_id = ObjectId::from_uuid(bob_account.0);
 
-    for in_transaction in [false, true] {
-        let project = alice
-            .insert(NewProject::new("plans", alice_id))
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let (first, second) = futures_util::join!(
+        alice.add_member::<Project>(project, bob_account),
+        alice.add_member::<Project>(project, bob_account)
+    );
+    let (first, second) = (first.unwrap(), second.unwrap());
+    let rows = bob_rows(&alice, project, bob_id).await;
+    assert!((1..=2).contains(&rows.len()), "{rows:?}");
+    assert!(rows.contains(&first) && rows.contains(&second));
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
             .await
-            .unwrap()
-            .id;
-        let (first, second) = if in_transaction {
-            alice
-                .transaction(move |tx| async move {
-                    let (first, second) = futures_util::join!(
-                        tx.add_member::<Project>(project, bob_account),
-                        tx.add_member::<Project>(project, bob_account)
-                    );
-                    Ok((first?, second?))
-                })
-                .await
-                .unwrap()
-        } else {
-            let (first, second) = futures_util::join!(
-                alice.add_member::<Project>(project, bob_account),
-                alice.add_member::<Project>(project, bob_account)
-            );
-            (first.unwrap(), second.unwrap())
-        };
-        let rows: Vec<_> = alice
-            .list_members::<Project>(project)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|row| row.account_id == bob_id)
-            .collect();
-        assert!(
-            (1..=2).contains(&rows.len()),
-            "in_transaction={in_transaction}: {rows:?}"
-        );
-        assert!(rows.contains(&first) && rows.contains(&second));
-        assert_eq!(
-            alice
-                .remove_member::<Project>(project, bob_account)
-                .await
-                .unwrap(),
-            rows.len()
-        );
-        assert!(
-            alice
-                .list_members::<Project>(project)
-                .await
-                .unwrap()
-                .iter()
-                .all(|row| row.account_id != bob_id)
-        );
-    }
+            .unwrap(),
+        rows.len()
+    );
+    assert!(bob_rows(&alice, project, bob_id).await.is_empty());
 
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
     app.stop().await;
+}
+
+/// Inside one Rust transaction, `add_member` calls run in turn on the
+/// client even when joined, so the second sees the row the first staged:
+/// Bob gets exactly one row, returned to both, and `remove_member` clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_adds_in_a_transaction_share_one_row() {
+    use bindings::{NewProject, Project};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let (first, second) = alice
+        .transaction(move |tx| async move {
+            let (first, second) = futures_util::join!(
+                tx.add_member::<Project>(project, bob_account),
+                tx.add_member::<Project>(project, bob_account)
+            );
+            Ok((first?, second?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(bob_rows(&alice, project, bob_id).await, vec![first]);
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(bob_rows(&alice, project, bob_id).await.is_empty());
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Bob's membership rows in `project`, as Alice lists them.
+async fn bob_rows(
+    alice: &jazz_app_support::Jazz,
+    project: ObjectId,
+    bob_id: ObjectId,
+) -> Vec<jazz_app_support::SpaceMember> {
+    alice
+        .list_members::<bindings::Project>(project)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.account_id == bob_id)
+        .collect()
 }
 
 /// Alice's app was written before creators became members automatically: it
