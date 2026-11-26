@@ -210,6 +210,80 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  it.each(["browser", "node"])(
+    "does not wake a pending %s read for its own deadline until it passes",
+    async (host) => {
+      let nativeWake!: (first: Error | null, urgency: string) => void;
+      const deadlineAt = 14_000;
+      let answered = false;
+      let requests = 0;
+      // A remote read re-announces its coverage deadline on every poll, and
+      // asks for the tick that sends what it owes. napi delivers both on a
+      // later turn, as its threadsafe function does, and counts the tick.
+      const poll = vi.fn<() => Uint8Array | null>(() => {
+        if (answered) return Uint8Array.of(0, 0);
+        const left = Math.max(0, deadlineAt - Date.now());
+        requests += 1;
+        setImmediate(() => {
+          nativeWake(null, `after:${left}`);
+          nativeWake(null, "immediate");
+        });
+        return null;
+      });
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (first: Error | null, urgency: string) => void) => {
+            nativeWake = callback;
+          },
+          tickRequests: () => requests,
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+      vi.setSystemTime(0);
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
+        // Ten seconds before the deadline: fallback polls only.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        expect(poll.mock.calls.length).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // The deadline passing is news: the read is polled at once, without
+        // waiting out its fallback timer.
+        await vi.advanceTimersByTimeAsync(deadlineAt - 1 - Date.now());
+        for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        answered = true;
+        await vi.advanceTimersByTimeAsync(1);
+        for (let turn = 0; turn < 10 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
   it("ends a parked pending read as soon as the runtime closes", async () => {
     const runtime = NativeRuntimeAdapter.fromDb(
       fakeDb({

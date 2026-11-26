@@ -4773,6 +4773,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.coreDeadlineTimer = setTimeout(() => {
         this.coreDeadlineTimer = undefined;
         this.coreDeadlineAt = undefined;
+        // A passed deadline can settle a pending read.
+        this.ownerRuntime.nativeWorkSinceTick = true;
         // This tick services every connection. Still-live later obligations
         // re-arm their remaining deadline through the same earliest timer.
         this.scheduleCoreWake("immediate");
@@ -5579,6 +5581,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private noteTickRequest(urgency: string | null | undefined): void {
     // A synchronous binding (wasm) calls back during the poll that asked.
     if (this.pollingRead) return;
+    // A deadline is news when it passes (its timer marks the tick then), not
+    // when announced: a pending read re-announces its own on every poll.
+    if (typeof urgency === "string" && urgency.startsWith("after:")) return;
     const counted = urgency === "immediate" ? this.db.tickRequests?.() : undefined;
     if (counted === undefined) {
       this.nativeWorkSinceTick = true;
