@@ -311,8 +311,17 @@ pub struct Encryption {
 #[cfg(any(test, feature = "testing"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalWatchFault {
+    /// The next approval watch fails to open.
     Install,
+    /// The approval watch's challenge stream closes once.
     Closed,
+    /// The approval watch stays open but never reports a change, for as
+    /// long as the fault is set.
+    Stalled,
+    /// The next authoritative challenge read that finds a challenge
+    /// returns `false` instead, as a read that ran ahead of the challenge
+    /// would.
+    EarlyFalse,
 }
 
 /// One runtime call at a time: two calls that each hold a database
@@ -1400,6 +1409,9 @@ async fn main_loop(this: Rc<Encryption>) {
     let mut approval: Option<(String, _)> = None;
     let mut noticed = false;
     let mut retry_challenge_at = None;
+    // The slow re-check of an open approval watch, and its backoff.
+    let mut recheck_at: Option<web_time::Instant> = None;
+    let mut recheck_backoff = APPROVAL_RECHECK_FIRST;
     loop {
         this.stage.set("waiting for its turn");
         let turn = this.gate.enter().await;
@@ -1528,6 +1540,7 @@ async fn main_loop(this: Rc<Encryption>) {
                 approval = None;
                 noticed = false;
                 retry_challenge_at = None;
+                recheck_at = None;
             }
             if approval.is_none()
                 && retry_challenge_at.is_none_or(|at| web_time::Instant::now() >= at)
@@ -1543,7 +1556,11 @@ async fn main_loop(this: Rc<Encryption>) {
                     opened
                 };
                 match opened {
-                    Ok(watch) => approval = Some(watch),
+                    Ok(watch) => {
+                        approval = Some(watch);
+                        recheck_backoff = APPROVAL_RECHECK_FIRST;
+                        recheck_at = Some(web_time::Instant::now() + recheck_backoff);
+                    }
                     Err(_) => retry_challenge_at = Some(web_time::Instant::now() + APPROVAL_RETRY),
                 }
             }
@@ -1551,23 +1568,54 @@ async fn main_loop(this: Rc<Encryption>) {
                 let (changed, challenges_closed) = challenges.changes(|_| Some(()));
                 let (proved_changed, proofs_closed) = proved.changes(|_| Some(()));
                 #[cfg(any(test, feature = "testing"))]
+                let (changed, proved_changed) =
+                    if this.approval_watch_fault.get() == Some(ApprovalWatchFault::Stalled) {
+                        challenges.rows.clear();
+                        (Default::default(), Default::default())
+                    } else {
+                        (changed, proved_changed)
+                    };
+                #[cfg(any(test, feature = "testing"))]
                 let challenges_closed = challenges_closed
                     || (this.approval_watch_fault.get() == Some(ApprovalWatchFault::Closed)
                         && this.approval_watch_fault.take().is_some());
-                if challenges.rows.is_empty() {
+                let now = web_time::Instant::now();
+                let woke = account_changed || !changed.is_empty() || !proved_changed.is_empty();
+                if woke {
+                    // Evidence moved: look again soon after, in case the
+                    // authoritative read below runs ahead of it.
+                    recheck_backoff = APPROVAL_RECHECK_FIRST;
+                    recheck_at = Some(now + recheck_backoff);
+                }
+                // A watch that stalls without closing, or a read that ran
+                // ahead of the challenge, would leave the device waiting
+                // forever: a slow re-check, backing off to
+                // APPROVAL_RECHECK_LAST, bounds that wait.
+                let recheck = recheck_at.is_some_and(|at| now >= at);
+                if challenges.rows.is_empty() && !recheck {
                     if !changed.is_empty() {
                         noticed = false;
                     }
                     retry_challenge_at = None;
-                } else if account_changed
-                    || !changed.is_empty()
-                    || !proved_changed.is_empty()
-                    || retry_challenge_at.is_some_and(|at| web_time::Instant::now() >= at)
-                {
+                } else if woke || recheck || retry_challenge_at.is_some_and(|at| now >= at) {
                     // A watch only tells us when looking could help. A
                     // challenge still needs the account's authoritative cut.
                     retry_challenge_at = None;
-                    match Box::pin(client.challenged(&db)).await {
+                    if recheck {
+                        recheck_backoff = (recheck_backoff * 2).min(APPROVAL_RECHECK_LAST);
+                        recheck_at = Some(now + recheck_backoff);
+                    }
+                    let challenged = Box::pin(client.challenged(&db)).await;
+                    #[cfg(any(test, feature = "testing"))]
+                    let challenged = if matches!(challenged, Ok(true))
+                        && this.approval_watch_fault.get() == Some(ApprovalWatchFault::EarlyFalse)
+                    {
+                        this.approval_watch_fault.set(None);
+                        Ok(false)
+                    } else {
+                        challenged
+                    };
+                    match challenged {
                         Ok(true) if !noticed => {
                             noticed = true;
                             this.reports
@@ -1583,6 +1631,7 @@ async fn main_loop(this: Rc<Encryption>) {
                 }
                 if challenges_closed || proofs_closed {
                     approval = None;
+                    recheck_at = None;
                     retry_challenge_at = Some(web_time::Instant::now() + APPROVAL_RETRY);
                 }
             }
@@ -1590,6 +1639,7 @@ async fn main_loop(this: Rc<Encryption>) {
             approval = None;
             noticed = false;
             retry_challenge_at = None;
+            recheck_at = None;
         }
         if this.status.get() != Some(AccountStatus::Active) {
             // The pass needs an active device: answer what waits for it.
@@ -1681,8 +1731,15 @@ async fn main_loop(this: Rc<Encryption>) {
         }
         this.stage.set("idle");
         // The approval watch wakes the loop when evidence changes. A retry
-        // deadline covers a failed watch or authoritative challenge read.
-        this.set_background_deadline(retry_at.into_iter().chain(retry_challenge_at).min());
+        // deadline covers a failed watch or authoritative challenge read,
+        // and the slow re-check a watch that stalls or a read that ran early.
+        this.set_background_deadline(
+            retry_at
+                .into_iter()
+                .chain(retry_challenge_at)
+                .chain(recheck_at)
+                .min(),
+        );
         drop(turn);
         // A wake from queueing work may have been consumed while this
         // iteration was suspended after its drain point. Ask for the next
@@ -1700,6 +1757,16 @@ async fn main_loop(this: Rc<Encryption>) {
 }
 
 const APPROVAL_RETRY: Duration = Duration::from_secs(2);
+
+/// The first re-check of an open approval watch, after it opens or after
+/// it last reported a change. Each re-check that follows waits twice as
+/// long, up to [`APPROVAL_RECHECK_LAST`].
+const APPROVAL_RECHECK_FIRST: Duration = Duration::from_secs(2);
+
+/// The longest wait between two re-checks of an open approval watch: one
+/// authoritative challenge read at most this often while a device waits
+/// for approval with nothing changing.
+const APPROVAL_RECHECK_LAST: Duration = Duration::from_secs(30);
 
 /// How long a call that waits for the loop's delivery pass may wait.
 const DELIVER_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
