@@ -32,8 +32,8 @@ use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::{self, Author};
 use jazz_e2ee::protocol::space::chain::select_root;
 use jazz_e2ee::protocol::space::members::{
-    self, DELIVERY_BATCH, EnvelopeSource, ReplayedSpaceChain, lacking_held, rotation_mark,
-    rotation_recipients,
+    self, DELIVERY_BATCH, DeliveryChain, EnvelopeSource, ReplayedSpaceChain, lacking_held,
+    rotation_mark, rotation_recipients,
 };
 use jazz_e2ee::protocol::space::{
     AccountDirectory, BrokenHistory, InvalidSpaceRoot, KeyCheck, Recipient, SpaceChain, SpaceKeys,
@@ -2430,6 +2430,32 @@ fn a_member_whose_history_this_client_cannot_read_is_skipped_and_reported() {
     assert_eq!(missing.lacking.err(), inconsistent);
     assert_eq!(missing.mark.err(), inconsistent);
     assert_eq!(missing.recipients.err(), inconsistent);
+}
+
+/// If the authority returns a damaged successor in the next delivery
+/// batch, Alice cannot reuse the chain she verified in the first batch.
+#[test]
+fn delivery_chain_reuse_refuses_a_changed_successor() {
+    let mut world = space(68, &[ALICE, BOB]);
+    let root = world.current();
+    let epoch = world.rotate(ALICE);
+    let mut read = world.read();
+    let cached =
+        DeliveryChain::replay(&read.space, &read.directory(&world), &world.shared.registry)
+            .unwrap()
+            .unwrap();
+    assert_eq!(cached.verified().last().epoch_id, epoch);
+
+    // Keep the author and position fixed to isolate the successor evidence.
+    read.space.successors[0].row.signature[40] ^= 1;
+    assert_eq!(read.chain(&world).unwrap().last().epoch_id, root);
+    assert!(
+        cached
+            .reuse(&read.space, &read.directory(&world))
+            .unwrap()
+            .is_none(),
+        "the cached successor would bypass the failed signature",
+    );
 }
 
 /// Alice's current-epoch read covers its holders, mark and rotation
