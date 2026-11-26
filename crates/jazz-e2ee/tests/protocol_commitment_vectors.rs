@@ -233,6 +233,77 @@ fn a_commitment_key_for_another_root_is_refused() {
     }
 }
 
+/// Bob follows the specification's recipe for the generation-0 fixture
+/// commitment (E2EE_PROTOCOL.md §2.9, "Commitment"): the encoded context
+/// `ctx{…}` (`JE2C 01` and its nine length-prefixed fields), then
+/// `frame[subjectKind, env(mechanism, commitment)]`. The context itself is
+/// not framed, unlike a recovery root's signed bytes. Those bytes are the
+/// record's, and Alice's fixture signature verifies over them and not over
+/// `frame[ctx, subjectKind, env]`.
+#[test]
+fn the_specified_commitment_signed_bytes_reproduce_the_vector() {
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let application = domain(APP, "prod", ALICE);
+    let (row, root) = (
+        "66666666-6666-4666-a666-666666666666",
+        "bdf7dfa1-160c-8e21-bee8-aef5fd8199ea",
+    );
+    let key = unhex("2ae40871d9032f2c93de201fb72c8be3b5af417742ede3ea45f5bdd4ccc553d5");
+    let signature = unhex(
+        "4a45324501106a617a7a2e736f6469756d2e7369676e000000010b11e3f3411463dd689a7922b0263d9c1976b3eadffab447d431e3cd1cd51a3509b8aadb379b9c881dd545cfe5164a53f79fb831c16b5fb70abcba10efc66b04",
+    );
+    let d = format!(r#"["{APP}","prod","{ALICE}"]"#);
+    let ctx = fields(
+        b"JE2C\x01",
+        &[
+            d.as_bytes(),
+            b"jazz.e2ee.commitment.v1",
+            b"account",
+            ALICE.as_bytes(),
+            b"__e2ee_commitments",
+            row.as_bytes(),
+            b"signature",
+            b"0",
+            root.as_bytes(),
+        ],
+    );
+    let env = [
+        b"JE2E\x01\x1djazz.commit.slh-dsa-sha2-128s\0\0\0\x01".as_slice(),
+        &key,
+    ]
+    .concat();
+    let specified = [ctx.clone(), fields(b"", &[b"recovery-root", &env])].concat();
+    let record = Commitment {
+        id: row.into(),
+        account_id: ALICE.into(),
+        subject_kind: SubjectKind::RecoveryRoot,
+        subject_id: root.into(),
+        mechanism: MECHANISM.id.into(),
+        version: MECHANISM.version,
+        commitment: key.clone(),
+        signature: signature.clone(),
+    };
+    assert_eq!(record.signed_bytes(&application, 0).unwrap(), specified);
+    let signing = RecoveryKeys::derive(&secret, &application, 0)
+        .unwrap()
+        .signing
+        .public;
+    let registry = Registry::builtin();
+    assert_eq!(registry.verify(&signing, &specified, &signature), Ok(true));
+    let framed_context = fields(b"", &[&ctx, b"recovery-root", &env]);
+    assert_eq!(
+        registry.verify(&signing, &framed_context, &signature),
+        Ok(false)
+    );
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
 // Assemble the expected bytes directly, independent of the protocol encoders.
 fn fields(prefix: &[u8], parts: &[&[u8]]) -> Vec<u8> {
     let mut out = prefix.to_vec();

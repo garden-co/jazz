@@ -1510,11 +1510,18 @@ the 32 secret bytes, created and read with user verification required
   `slh_keygen_internal(SK.seed, SK.prf, PK.seed)` for SLH-DSA-SHA2-128s
   gives the key pair, and `commitment` is its 32-byte public key `PK.seed ‖
   PK.root`. The record is signed with the root's own signing key over
-  `frame[ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
+  `C ‖ frame[subjectKind, env(mechanism, commitment)]` with
+  `C = ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
   "account", identifier: account, table: "__e2ee_commitments", row: id,
-  column: "signature", epoch: decimal g, recipient: rootId}, subjectKind,
-  env(mechanism, commitment)]` (§1.2, "Commitment and endorsement
-  contexts"). `c` and the private key are never stored. A root that is
+  column: "signature", epoch: decimal g, recipient: rootId}` (§1.2,
+  "Commitment and endorsement contexts"). Unlike the root's own signed
+  bytes above, the context is not framed: its encoding (`JE2C 01` and its
+  nine fields) is followed directly by the two framed fields, with no
+  length before it. `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs`
+  builds these bytes for the generation-0 fixture below and checks that the
+  fixture's signature verifies over them, and not over
+  `frame[C, subjectKind, env(mechanism, commitment)]`. `c` and the private
+  key are never stored. A root that is
   already registered gets no new commitment; approving or restoring a
   device writes none. Only recovery roots write commitments in this
   version, and nothing reads, verifies or enforces them yet: their presence
