@@ -17,6 +17,7 @@ import {
 import { createRequire } from "node:module";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,6 +78,34 @@ import {
 } from "./fixtures/create-jazz.js";
 
 runCleanupsAfterEach();
+
+/**
+ * A loopback port nothing listens on, for a core that is down (and may come
+ * up there later). Not one from `listen(0)`: once released, an ephemeral port
+ * goes back to the pool, where any other test's `listen(0)` or outgoing
+ * connection can take it before the test connects, and a core-down test then
+ * reaches some other server. This one is picked below the ephemeral range,
+ * which only a server asking for that exact port can take.
+ */
+async function closedLoopbackPort(): Promise<number> {
+  let ephemeralStart = 32_768;
+  try {
+    const range = readFileSync("/proc/sys/net/ipv4/ip_local_port_range", "utf8");
+    const first = Number(range.trim().split(/\s+/)[0]);
+    if (first > 10_000) ephemeralStart = Math.min(ephemeralStart, first);
+  } catch {
+    // Not Linux: macOS and Windows hand out ephemeral ports from 49152.
+  }
+  for (;;) {
+    const port = 10_000 + Math.floor(Math.random() * (ephemeralStart - 10_000));
+    const free = await new Promise<boolean>((resolve) => {
+      const probe = createServer();
+      probe.once("error", () => resolve(false));
+      probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
+    });
+    if (free) return port;
+  }
+}
 
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
@@ -3339,10 +3368,7 @@ describe("createJazz", () => {
   // route's 503 says why the store did not open (and only there).
   it("says why its store did not open in a 503, in development only", async () => {
     const appId = randomUUID();
-    const probe = createServer();
-    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-    const corePort = (probe.address() as AddressInfo).port;
-    await new Promise((resolve) => probe.close(resolve));
+    const corePort = await closedLoopbackPort();
     const coreUrl = `http://127.0.0.1:${corePort}`;
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     cleanups.push(async () => errors.mockRestore());
@@ -3384,10 +3410,7 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const adminSecret = `down-admin-${randomUUID().slice(0, 8)}`;
     // A port nothing listens on yet: the core starts there later.
-    const probe = createServer();
-    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-    const corePort = (probe.address() as AddressInfo).port;
-    await new Promise((resolve) => probe.close(resolve));
+    const corePort = await closedLoopbackPort();
     const coreUrl = `http://127.0.0.1:${corePort}`;
     const jazz = createJazz({
       app,
