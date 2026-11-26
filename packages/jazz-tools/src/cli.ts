@@ -25,6 +25,8 @@ export interface BuildOptions {
   force?: boolean;
   /** `--lang <lang>` (repeatable): the bindings' languages; by default each the app's files name. */
   lang?: string[];
+  /** `--effect-schema`: also write Effect Schemas for the rows, jazz.effect.generated.ts (kept current once there). */
+  effectSchema?: boolean;
 }
 
 export interface SchemaCompileOptions {
@@ -77,6 +79,7 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
       check: args.includes("--check"),
       force: args.includes("--force"),
       lang: langFlags(args),
+      effectSchema: args.includes("--effect-schema"),
     },
   };
 }
@@ -88,6 +91,7 @@ export async function generate(options: BuildOptions): Promise<void> {
     check: options.check,
     force: options.force,
     ...(options.lang?.length ? { lang: options.lang } : {}),
+    ...(options.effectSchema ? { effectSchema: true } : {}),
   });
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
@@ -428,8 +432,12 @@ function printHelp(): void {
     "                        --force: overwrite a jazz.app.json or jazz.permissions.json edited by hand;",
   );
   console.log(
-    "                        --lang <ts|rust|…>: the bindings' languages, by default each the app's files name)",
+    "                        --lang <ts|rust|…>: the bindings' languages, by default each the app's files name;",
   );
+  console.log(
+    "                        --effect-schema: also write Effect Schemas for the rows, jazz.effect.generated.ts,",
+  );
+  console.log("                        which generate then keeps current and --check checks)");
   console.log(
     "  migrations create     Write a migration stub for a schema change to migrations/ (--name <name>)",
   );
