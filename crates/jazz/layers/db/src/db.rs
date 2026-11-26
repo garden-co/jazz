@@ -1731,6 +1731,60 @@ impl Db {
         Self::open_on(config, storage, None).await
     }
 
+    /// An in-memory store from the bytes [`Db::image`] took of another one
+    /// opened under the same schema and migrations. It reopens as a stored
+    /// file does: every version the image admitted stays admitted, so the
+    /// genesis DDL and the migration ALTERs a fresh store replays do not
+    /// run again. The bytes are copied into an ordinary `:memory:` database
+    /// (not served from the deserialized buffer, whose memdb VFS caps the
+    /// store at 1 GiB and grows it by copying), and checked before use.
+    #[cfg(feature = "sqlite")]
+    pub async fn open_image(config: DbConfig, image: &[u8]) -> Result<Self, Error> {
+        use rusqlite::Connection;
+        let mut staged = Connection::open_in_memory().map_err(storage)?;
+        staged
+            .deserialize_read_exact(rusqlite::MAIN_DB, image, image.len(), true)
+            .map_err(storage)?;
+        let mut conn = Connection::open_in_memory().map_err(storage)?;
+        rusqlite::backup::Backup::new(&staged, &mut conn)
+            .and_then(|backup| backup.run_to_completion(i32::MAX, std::time::Duration::ZERO, None))
+            .map_err(storage)?;
+        drop(staged);
+        let check: String = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(storage)?;
+        if check != "ok" {
+            return Err(crate::format::unsupported(format_args!(
+                "a store image fails its check: {check}"
+            )));
+        }
+        let conn = Storage::native(conn);
+        crate::format::admit(&conn).await?;
+        // A fresh store that reaches its schema along the migrations retires
+        // one pending revision on the way (see `open_at`); the image skipped
+        // that walk, so it takes the same step.
+        let walked = !migration_path(&config.migrations, &config.schema, |_| false).is_empty();
+        let db = Self::open_on(config, conn, None).await?;
+        if walked {
+            let base = &db.inner.pending_revision_base;
+            base.set(base.get() + 1);
+        }
+        Ok(db)
+    }
+
+    /// The store's main database as bytes, for [`Db::open_image`]. Only a
+    /// native SQLite store has one.
+    #[cfg(feature = "sqlite")]
+    pub fn image(&self) -> Result<Vec<u8>, Error> {
+        let Some(conn) = self.inner.conn.native_conn() else {
+            return Err(crate::format::unsupported(format_args!(
+                "only a native SQLite store has an image"
+            )));
+        };
+        let data = conn.serialize(rusqlite::MAIN_DB).map_err(storage)?;
+        Ok(data.to_vec())
+    }
+
     /// A durable store in one SQLite file (WAL unless `options.journal`
     /// says otherwise). Reopening restores rows, history, the commit seq
     /// and, for a replica, its pending uploads and history baselines; they are resent

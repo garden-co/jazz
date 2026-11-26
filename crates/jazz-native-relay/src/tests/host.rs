@@ -1708,13 +1708,17 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut resets = 0;
-    for _ in 0..100 {
+    for _ in 0..300 {
         let ForegroundDbCommandResponse::SubscriptionEvents { events } = fixture.execute(
             alice,
             ForegroundDbCommandRequest::DrainSubscription { subscription },
         ) else {
             panic!("drain answers events");
         };
+        if events.is_empty() {
+            // A full buffer's drain asked the owner to refill it, later.
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             events.len() <= crate::relay::FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS,
             "a drain returned {} events",
@@ -1748,4 +1752,645 @@ fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
         "the opening, then the coalesced backlog: {resets} resets"
     );
     fixture.close(alice);
+}
+
+// ---- the JS thread never waits for the owner's work -----------------------------------
+
+const OWNER_BUSY: Duration = Duration::from_millis(800);
+/// Far under `OWNER_BUSY`: a call that queued behind the owner's work would
+/// take all of it.
+const ANSWERS_AT_ONCE: Duration = Duration::from_millis(300);
+
+impl Fixture {
+    fn occupy_owner(&self, foreground: u64) {
+        let host = unsafe { &*self.host };
+        host.lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .occupy_owner_for_test(OWNER_BUSY);
+    }
+
+    fn subscribe_todos(&self, foreground: u64) -> u64 {
+        let ForegroundDbCommandResponse::Subscribed { subscription } = self.execute(
+            foreground,
+            ForegroundDbCommandRequest::Subscribe {
+                query: todos_query(),
+                options_json: "{}".into(),
+            },
+        ) else {
+            panic!("subscription opens");
+        };
+        subscription
+    }
+
+    fn drain(&self, foreground: u64, subscription: u64) -> Vec<ForegroundSubscriptionEvent> {
+        match self.execute(
+            foreground,
+            ForegroundDbCommandRequest::DrainSubscription { subscription },
+        ) {
+            ForegroundDbCommandResponse::SubscriptionEvents { events } => events,
+            response => panic!("drain: {response:?}"),
+        }
+    }
+
+    /// Drain until the subscription's open failure arrives (`None` if it
+    /// does not within 3 s).
+    fn open_failure(
+        &self,
+        foreground: u64,
+        subscription: u64,
+    ) -> Option<ForegroundSubscriptionEvent> {
+        for _ in 0..300 {
+            for event in self.drain(foreground, subscription) {
+                if matches!(event, ForegroundSubscriptionEvent::OpenFailed { .. }) {
+                    return Some(event);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// Drain until the subscription produced its opening event.
+    fn drain_opening(&self, foreground: u64, subscription: u64) {
+        for _ in 0..300 {
+            if !self.drain(foreground, subscription).is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the subscription never opened");
+    }
+}
+
+fn delta_row_ids(events: &[ForegroundSubscriptionEvent]) -> Vec<RowUuid> {
+    let mut ids = Vec::new();
+    for event in events {
+        let (ForegroundSubscriptionEvent::Delta { delta, .. }
+        | ForegroundSubscriptionEvent::StructuredDelta { delta, .. }) = event
+        else {
+            continue;
+        };
+        let (added, updated) = decode_subscription_delta_rows(delta).unwrap();
+        ids.extend(
+            added
+                .into_iter()
+                .chain(updated)
+                .flat_map(|batch| batch.rows)
+                .map(|row| row.row_id),
+        );
+    }
+    ids
+}
+
+/// A write's echo in the writer's own subscription is drainable when the
+/// commit returns: no tick, no wait (the composer's controlled input reads
+/// its value back from it in the same JS turn).
+#[test]
+fn a_commits_echo_is_drainable_when_the_commit_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("echo.sqlite"), "alice", 0x51);
+    let alice = fixture.open(&capability);
+    let subscription = fixture.subscribe_todos(alice);
+    fixture.drain_opening(alice, subscription);
+    fixture.insert_todo(alice, [0x52; 16], "typed");
+    let ids = delta_row_ids(&fixture.drain(alice, subscription));
+    assert!(
+        ids.contains(&RowUuid::from_bytes([0x52; 16])),
+        "the echo is in the first drain after the commit: {ids:?}"
+    );
+    fixture.close(alice);
+}
+
+/// Draining takes what the owner already buffered; it does not queue behind
+/// the owner's current work.
+#[test]
+fn a_drain_answers_while_the_owner_is_busy() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("drain.sqlite"), "alice", 0x53);
+    let alice = fixture.open(&capability);
+    let subscription = fixture.subscribe_todos(alice);
+    fixture.drain_opening(alice, subscription);
+    fixture.insert_todo(alice, [0x54; 16], "buffered");
+    fixture.occupy_owner(alice);
+    let started = std::time::Instant::now();
+    let _ = fixture.drain(alice, subscription);
+    let took = started.elapsed();
+    assert!(
+        took < ANSWERS_AT_ONCE,
+        "a drain waited {took:?} for the owner"
+    );
+    fixture.close(alice);
+}
+
+/// A tick asks the owner for a turn; it does not wait for it.
+#[test]
+fn a_tick_answers_while_the_owner_is_busy() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("tick.sqlite"), "alice", 0x55);
+    let alice = fixture.open(&capability);
+    fixture.occupy_owner(alice);
+    let started = std::time::Instant::now();
+    fixture.tick(alice);
+    let took = started.elapsed();
+    assert!(
+        took < ANSWERS_AT_ONCE,
+        "a tick waited {took:?} for the owner"
+    );
+    fixture.close(alice);
+}
+
+/// Ticks while the owner is busy ask for one drive, not one each: the
+/// owner's queue does not fill up, and a command after them is served.
+#[test]
+fn ticks_while_the_owner_is_busy_queue_one_drive() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("ticks.sqlite"), "alice", 0x5d);
+    let alice = fixture.open(&capability);
+    fixture.occupy_owner(alice);
+    for _ in 0..5_000 {
+        fixture.tick(alice);
+    }
+    // A command waiting for the owner would be refused by a full queue.
+    fixture.insert_todo(alice, [0x5e; 16], "after the ticks");
+    fixture.close(alice);
+}
+
+/// An unsubscribe answers at once, and the core subscription is closed on
+/// the owner's next turn, also one the owner had not opened yet.
+#[test]
+fn an_unsubscribe_answers_while_the_owner_is_busy_and_closes_the_core_subscription() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("unsub.sqlite"), "alice", 0x5f);
+    let alice = fixture.open(&capability);
+    let opened = fixture.subscribe_todos(alice);
+    fixture.drain_opening(alice, opened);
+    fixture.occupy_owner(alice);
+    // Not opened yet: queued behind the busy owner.
+    let queued = fixture.subscribe_todos(alice);
+    for subscription in [opened, queued] {
+        let started = std::time::Instant::now();
+        let response = fixture.execute(
+            alice,
+            ForegroundDbCommandRequest::Unsubscribe { subscription },
+        );
+        let took = started.elapsed();
+        assert_eq!(
+            response,
+            ForegroundDbCommandResponse::Unsubscribed { closed: true }
+        );
+        assert!(
+            took < ANSWERS_AT_ONCE,
+            "an unsubscribe waited {took:?} for the owner"
+        );
+    }
+    assert_eq!(
+        fixture.execute(
+            alice,
+            ForegroundDbCommandRequest::Unsubscribe {
+                subscription: opened
+            }
+        ),
+        ForegroundDbCommandResponse::Unsubscribed { closed: false },
+        "a second unsubscribe closes nothing"
+    );
+    // No tick: the unsubscribes' own nudges close the core subscriptions.
+    let host = unsafe { &*fixture.host };
+    let open = host
+        .lock()
+        .unwrap()
+        .foreground_client(alice)
+        .unwrap()
+        .open_subscriptions_for_test();
+    assert_eq!(open, 0, "both core subscriptions are closed");
+    fixture.close(alice);
+}
+
+/// A subscribe answers its handle at once; the subscription opens on the
+/// owner's next turn and its opening event is drained from there.
+#[test]
+fn a_subscribe_answers_while_the_owner_is_busy() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("subscribe.sqlite"), "alice", 0x57);
+    let alice = fixture.open(&capability);
+    fixture.insert_todo(alice, [0x58; 16], "already there");
+    fixture.occupy_owner(alice);
+    let started = std::time::Instant::now();
+    let subscription = fixture.subscribe_todos(alice);
+    let took = started.elapsed();
+    assert!(
+        took < ANSWERS_AT_ONCE,
+        "a subscribe waited {took:?} for the owner"
+    );
+    let mut ids = Vec::new();
+    for _ in 0..300 {
+        ids.extend(delta_row_ids(&fixture.drain(alice, subscription)));
+        if !ids.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ids,
+        vec![RowUuid::from_bytes([0x58; 16])],
+        "the opening reaches the drain"
+    );
+    fixture.close(alice);
+}
+
+/// A subscribe the core refuses answers a handle, and the refusal arrives as
+/// the subscription's rejection: the same path as a later refusal.
+#[test]
+fn a_refused_subscribe_is_rejected_through_its_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("refused.sqlite"), "alice", 0x59);
+    let alice = fixture.open(&capability);
+    let response = fixture.execute(
+        alice,
+        ForegroundDbCommandRequest::Subscribe {
+            query: vec![0xff, 0xff, 0xff],
+            options_json: "{}".into(),
+        },
+    );
+    let ForegroundDbCommandResponse::Subscribed { subscription } = response else {
+        panic!("a subscribe answers its handle: {response:?}");
+    };
+    assert!(
+        fixture.open_failure(alice, subscription).is_some(),
+        "the refusal arrives as the subscription's open failure"
+    );
+    fixture.close(alice);
+}
+
+/// A core error refusing a subscribe keeps its stable code on the way to
+/// the JS thread, as the failed command it used to be did.
+#[test]
+fn a_refused_subscribe_keeps_its_core_error_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("coded.sqlite"), "alice", 0x5c);
+    let alice = fixture.open(&capability);
+    let response = fixture.execute(
+        alice,
+        ForegroundDbCommandRequest::Subscribe {
+            query: postcard::to_allocvec(&Query::from("no_such_table")).unwrap(),
+            options_json: "{}".into(),
+        },
+    );
+    let ForegroundDbCommandResponse::Subscribed { subscription } = response else {
+        panic!("a subscribe answers its handle: {response:?}");
+    };
+    let failure = fixture
+        .open_failure(alice, subscription)
+        .expect("the refusal arrives as the subscription's open failure");
+    let ForegroundSubscriptionEvent::OpenFailed { code, reason, .. } = failure else {
+        unreachable!()
+    };
+    assert!(code.is_some(), "the core error keeps its code: {reason}");
+    fixture.close(alice);
+}
+
+/// Once asked for, the upload status is kept current by the owner: a read
+/// right after a commit counts it, and a read does not wait for the owner.
+#[test]
+fn upload_status_answers_while_the_owner_is_busy_and_counts_a_fresh_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("status.sqlite"), "alice", 0x5b);
+    let alice = fixture.open(&capability);
+    assert_eq!(upload_status(&fixture, alice)["pending"], 0);
+    fixture.insert_todo(alice, [0x5c; 16], "unsent");
+    assert_eq!(
+        upload_status(&fixture, alice)["pending"],
+        1,
+        "the commit is counted when it returns"
+    );
+    fixture.occupy_owner(alice);
+    let started = std::time::Instant::now();
+    assert_eq!(upload_status(&fixture, alice)["pending"], 1);
+    let took = started.elapsed();
+    assert!(
+        took < ANSWERS_AT_ONCE,
+        "an upload status waited {took:?} for the owner"
+    );
+    fixture.close(alice);
+}
+
+// ---- differential: random interleavings against a model ---------------------------------
+
+/// A seeded xorshift: the same seed replays the same sequence.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// What one subscription has delivered so far, applied as the adapter
+/// applies it: a reset replaces the result, an add of a row already held
+/// without a reset in between is a duplicate.
+#[derive(Default)]
+struct Delivered {
+    rows: std::collections::BTreeSet<RowUuid>,
+    closed: bool,
+}
+
+impl Delivered {
+    fn apply(&mut self, events: Vec<ForegroundSubscriptionEvent>, context: &str) {
+        for event in events {
+            assert!(!self.closed, "{context}: an event after Closed");
+            match event {
+                ForegroundSubscriptionEvent::Delta { delta, reset, .. }
+                | ForegroundSubscriptionEvent::StructuredDelta { delta, reset, .. } => {
+                    if reset {
+                        self.rows.clear();
+                    }
+                    let (added, updated) = decode_subscription_delta_rows(&delta).unwrap();
+                    for row in added.into_iter().flat_map(|batch| batch.rows) {
+                        assert!(
+                            self.rows.insert(row.row_id),
+                            "{context}: {:?} added twice without a reset",
+                            row.row_id
+                        );
+                    }
+                    for row in updated.into_iter().flat_map(|batch| batch.rows) {
+                        assert!(
+                            self.rows.contains(&row.row_id),
+                            "{context}: an update of {:?}, never added",
+                            row.row_id
+                        );
+                    }
+                }
+                ForegroundSubscriptionEvent::Rejected { reason }
+                | ForegroundSubscriptionEvent::OpenFailed { reason, .. } => {
+                    panic!("{context}: rejected: {reason}")
+                }
+                ForegroundSubscriptionEvent::Closed => self.closed = true,
+            }
+        }
+    }
+}
+
+/// Random sequences of writes on two foregrounds of one relay, subscribes,
+/// unsubscribes, drains, ticks and owner work queued from another thread.
+/// Every subscription must end holding exactly the rows written (none lost,
+/// none twice), whatever the interleaving.
+#[test]
+fn random_interleavings_deliver_every_row_once() {
+    for seed in [
+        0x9e37_79b9_7f4a_7c15u64,
+        0xdead_beef_cafe_f00d,
+        0x0123_4567_89ab_cdef,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new();
+        let capability =
+            fixture.admit(&directory.path().join("differential.sqlite"), "alice", 0x61);
+        let foregrounds = [fixture.open(&capability), fixture.open(&capability)];
+        // The quiescing reader drains only when woken, as the JS thread does.
+        let recorders: Vec<Box<WakeRecorder>> = foregrounds
+            .iter()
+            .map(|&foreground| {
+                let recorder = Box::new(WakeRecorder {
+                    immediate: AtomicUsize::new(0),
+                });
+                let context = &*recorder as *const WakeRecorder as *mut c_void;
+                assert_eq!(
+                    unsafe {
+                        jazz_native_relay_host_lease_set_foreground_wake_callback(
+                            fixture.lease,
+                            foreground,
+                            Some(record_wake),
+                            context,
+                        )
+                    },
+                    JazzNativeRelayStatus::Ok
+                );
+                recorder
+            })
+            .collect();
+        let mut rng = Rng(seed);
+        let mut written = std::collections::BTreeSet::new();
+        let mut live: Vec<(u64, u64, Delivered)> = Vec::new();
+        let mut next_row = 0u32;
+        for step in 0..200 {
+            let context = format!("seed {seed:#x} step {step}");
+            match rng.below(7) {
+                0 | 1 => {
+                    let foreground = foregrounds[rng.below(2) as usize];
+                    next_row += 1;
+                    let mut id = [0u8; 16];
+                    id[..4].copy_from_slice(&next_row.to_be_bytes());
+                    id[15] = 0x61;
+                    fixture.insert_todo(foreground, id, &format!("row {next_row}"));
+                    written.insert(RowUuid::from_bytes(id));
+                }
+                2 if live.len() < 4 => {
+                    let foreground = foregrounds[rng.below(2) as usize];
+                    let subscription = fixture.subscribe_todos(foreground);
+                    live.push((foreground, subscription, Delivered::default()));
+                }
+                3 if !live.is_empty() => {
+                    let (foreground, subscription, _) =
+                        live.remove(rng.below(live.len() as u64) as usize);
+                    assert!(
+                        matches!(
+                            fixture.execute(
+                                foreground,
+                                ForegroundDbCommandRequest::Unsubscribe { subscription }
+                            ),
+                            ForegroundDbCommandResponse::Unsubscribed { closed: true }
+                        ),
+                        "{context}: unsubscribe closes"
+                    );
+                }
+                4 if !live.is_empty() => {
+                    let at = rng.below(live.len() as u64) as usize;
+                    let (foreground, subscription, _) = live[at];
+                    let events = fixture.drain(foreground, subscription);
+                    live[at].2.apply(events, &context);
+                }
+                5 => fixture.tick(foregrounds[rng.below(2) as usize]),
+                _ => {
+                    let host = unsafe { &*fixture.host };
+                    host.lock()
+                        .unwrap()
+                        .foreground_client(foregrounds[0])
+                        .unwrap()
+                        .queue_owner_work_for_test(Duration::from_millis(1 + rng.below(20)));
+                }
+            }
+        }
+        // Quiesce, driven by wakes alone: a woken foreground ticks and drains
+        // each subscription until a drain comes back empty; it does nothing
+        // else. Every live subscription must converge on what was written:
+        // an event buffered with no wake after it never would.
+        let mut converged = false;
+        for _ in 0..500 {
+            for (index, &foreground) in foregrounds.iter().enumerate() {
+                if recorders[index].immediate.swap(0, Ordering::AcqRel) == 0 {
+                    continue;
+                }
+                fixture.tick(foreground);
+                for (owner, subscription, delivered) in &mut live {
+                    if *owner != foreground {
+                        continue;
+                    }
+                    loop {
+                        let events = fixture.drain(foreground, *subscription);
+                        if events.is_empty() {
+                            break;
+                        }
+                        delivered.apply(events, &format!("seed {seed:#x} quiescing"));
+                    }
+                }
+            }
+            if live
+                .iter()
+                .all(|(_, _, delivered)| delivered.rows == written)
+            {
+                converged = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            converged,
+            "seed {seed:#x}: subscriptions did not converge on wakes: {:?} vs {} written",
+            live.iter()
+                .map(|(_, _, delivered)| delivered.rows.len())
+                .collect::<Vec<_>>(),
+            written.len()
+        );
+        for foreground in foregrounds {
+            fixture.close(foreground);
+        }
+        drop(recorders);
+    }
+}
+
+/// A drain that empties a full buffer asks the owner to refill it: with no
+/// tick and no other work, every event still reaches the foreground.
+#[test]
+fn a_full_buffer_refills_after_a_drain_without_a_tick() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("refill.sqlite"), "alice", 0x62);
+    let alice = fixture.open(&capability);
+    let subscription = fixture.subscribe_todos(alice);
+    fixture.drain_opening(alice, subscription);
+    for n in 0..40u8 {
+        fixture.insert_todo(alice, [0x70 + n; 16], &format!("todo {n}"));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for _ in 0..300 {
+        ids.extend(delta_row_ids(&fixture.drain(alice, subscription)));
+        if ids.len() == 40 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ids.len(),
+        40,
+        "every row reaches the foreground by drains alone"
+    );
+    fixture.close(alice);
+}
+
+/// The upload status a woken foreground reads is current: when the server
+/// accepts a commit, a wake follows, and the status read on it counts the
+/// commit as sent.
+#[test]
+fn a_wake_follows_an_accepted_upload_and_reads_it_sent() {
+    let (server, head) = server_with_history(&renamed_label_bundle());
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit_app(
+        &directory.path().join("status-wake.sqlite"),
+        "alice",
+        0x63,
+        &head,
+        Some(&renamed_label_bundle()),
+    );
+    let foreground = fixture.open(&capability);
+    let recorder = Box::new(WakeRecorder {
+        immediate: AtomicUsize::new(0),
+    });
+    let context = &*recorder as *const WakeRecorder as *mut c_void;
+    assert_eq!(
+        unsafe {
+            jazz_native_relay_host_lease_set_foreground_wake_callback(
+                fixture.lease,
+                foreground,
+                Some(record_wake),
+                context,
+            )
+        },
+        JazzNativeRelayStatus::Ok
+    );
+    assert_eq!(upload_status(&fixture, foreground)["pending"], 0);
+    fixture.insert_todo(foreground, [0x64; 16], "sent");
+    assert_eq!(upload_status(&fixture, foreground)["pending"], 1);
+    let relay = fixture.open_relay(&capability);
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x63), Default::default())).unwrap();
+    let mut read_on_wake = serde_json::Value::Null;
+    for _ in 0..200 {
+        fixture.carry(relay, &upstream);
+        std::thread::sleep(Duration::from_millis(5));
+        if recorder.immediate.swap(0, Ordering::AcqRel) > 0 {
+            read_on_wake = upload_status(&fixture, foreground)["pending"].clone();
+            if read_on_wake == 0 {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        read_on_wake, 0,
+        "the status read on the last wake counts the commit sent"
+    );
+    fixture.close(foreground);
+    drop(recorder);
+}
+
+/// An open failure's bytes, pinned with the TypeScript decoder's corpus.
+#[test]
+fn an_open_failure_has_pinned_bytes() {
+    let response = ForegroundDbCommandResponse::SubscriptionEvents {
+        events: vec![
+            ForegroundSubscriptionEvent::OpenFailed {
+                reason: "r".into(),
+                code: Some("c".into()),
+                reason_name: None,
+            },
+            ForegroundSubscriptionEvent::OpenFailed {
+                reason: "s".into(),
+                code: None,
+                reason_name: Some("n".into()),
+            },
+        ],
+    };
+    assert_eq!(
+        postcard::to_allocvec(&response).unwrap(),
+        [4, 2, 4, 1, b'r', 1, 1, b'c', 0, 4, 1, b's', 0, 1, 1, b'n']
+    );
 }

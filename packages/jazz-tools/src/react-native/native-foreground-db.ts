@@ -434,6 +434,19 @@ export class NativeForegroundDb {
     return response.events.map((event) => {
       if (event.type === "delta") return event;
       if (event.type === "closed") return event;
+      if (event.type === "openFailed") {
+        // A subscribe answers at once and opens on the owner's next turn:
+        // its failure keeps the code a failed command carries.
+        return {
+          type: "rejected",
+          reason: {
+            type: "ServerFailure",
+            code: event.reason,
+            ...(event.code === undefined ? {} : { errorCode: event.code }),
+            ...(event.reasonName === undefined ? {} : { reasonName: event.reasonName }),
+          },
+        };
+      }
       return {
         type: "rejected",
         reason: { type: "ServerFailure", code: event.reason },

@@ -7514,7 +7514,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "rejected";
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
-        | { type: "ServerFailure"; code: string; errorCode?: string }
+        | { type: "ServerFailure"; code: string; errorCode?: string; reasonName?: string }
         | { type: "InvalidAuthoritySourceClosure"; transition: string }
         | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
@@ -7557,7 +7557,7 @@ function normalizeSubscriptionRejectionReason(
   reason: unknown,
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
-  | { type: "ServerFailure"; code: string; errorCode?: string }
+  | { type: "ServerFailure"; code: string; errorCode?: string; reasonName?: string }
   | { type: "InvalidAuthoritySourceClosure"; transition: string }
   | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
@@ -7568,6 +7568,7 @@ function normalizeSubscriptionRejectionReason(
     detail?: unknown;
     code?: unknown;
     errorCode?: unknown;
+    reasonName?: unknown;
     transition?: unknown;
   };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
@@ -7580,9 +7581,15 @@ function normalizeSubscriptionRejectionReason(
   const failure = record.code ?? record.detail;
   if (record.type === "ServerFailure" && typeof failure === "string") {
     // The core error code, when the binding carries it (NAPI and WASM).
-    return typeof record.errorCode === "string"
-      ? { type: "ServerFailure", code: failure, errorCode: record.errorCode }
-      : { type: "ServerFailure", code: failure };
+    if (typeof record.errorCode !== "string") return { type: "ServerFailure", code: failure };
+    return typeof record.reasonName === "string"
+      ? {
+          type: "ServerFailure",
+          code: failure,
+          errorCode: record.errorCode,
+          reasonName: record.reasonName,
+        }
+      : { type: "ServerFailure", code: failure, errorCode: record.errorCode };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
@@ -7596,7 +7603,7 @@ function normalizeSubscriptionRejectionReason(
 function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
-    | { type: "ServerFailure"; code: string; errorCode?: string }
+    | { type: "ServerFailure"; code: string; errorCode?: string; reasonName?: string }
     | { type: "InvalidAuthoritySourceClosure"; transition: string }
     | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
@@ -7613,7 +7620,15 @@ function subscriptionRejectionError(
   // refused upstream's `authority_changed` reads as AuthorityChangedError.
   const code = reason.type === "ServerFailure" ? reason.errorCode : undefined;
   if (code === undefined) return new Error(message);
-  return upstreamRefusalError({ code, message }) ?? new Error(message);
+  const refusal = upstreamRefusalError({ code, message });
+  if (refusal) return refusal;
+  // Any other core error keeps its stable code and reason name, as the
+  // error of a failed foreground command does.
+  const error = new Error(message);
+  Object.assign(error, { code });
+  if (reason.type === "ServerFailure" && reason.reasonName !== undefined)
+    Object.assign(error, { reason: reason.reasonName });
+  return error;
 }
 
 function subscriptionSource(
