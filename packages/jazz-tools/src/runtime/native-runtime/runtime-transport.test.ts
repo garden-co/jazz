@@ -122,6 +122,54 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  it.each(["browser", "node"])(
+    "does not wake a pending %s read for the tick its own poll asks for",
+    async (host) => {
+      let nativeWake!: (urgency: string) => void;
+      // Like a read that still owes requests: every poll asks for a tick.
+      const poll = vi.fn<() => Uint8Array | null>(() => {
+        nativeWake("immediate");
+        return null;
+      });
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (urgency: string) => void) => {
+            nativeWake = callback;
+          },
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        void runtime.query(query, null, "local-first").catch(() => undefined);
+        // Host turns still run, and the read only polls on its fallback timer.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        expect(poll.mock.calls.length).toBeLessThanOrEqual(10_000 / 50 + 20);
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
   it("ends a parked pending read as soon as the runtime closes", async () => {
     const runtime = NativeRuntimeAdapter.fromDb(
       fakeDb({

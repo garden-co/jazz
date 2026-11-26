@@ -1029,6 +1029,8 @@ export class NativeRuntimeAdapter implements Runtime {
   /** The native core asked for a tick that hasn't run yet: the tick after
    * it may have answered a pending read. */
   private nativeWorkSinceTick = false;
+  /** A pending read is being polled: the ticks it asks for are its own. */
+  private pollingRead = false;
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1545,7 +1547,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
-      this.ownerRuntime.nativeWorkSinceTick = true;
+      if (!this.ownerRuntime.pollingRead) this.ownerRuntime.nativeWorkSinceTick = true;
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
@@ -4230,7 +4232,15 @@ export class NativeRuntimeAdapter implements Runtime {
           throw new Error("native read was cancelled by runtime shutdown");
         signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
-        const bytes = result.poll();
+        // A tick this poll asks for (to send what the read still owes) is
+        // started below; it is not news that wakes the read again.
+        owner.pollingRead = true;
+        let bytes: Uint8Array | null;
+        try {
+          bytes = result.poll();
+        } finally {
+          owner.pollingRead = false;
+        }
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
@@ -4254,6 +4264,9 @@ export class NativeRuntimeAdapter implements Runtime {
         clearTimeout(timer);
         transportError?.cancel();
         idleMs = woke === "work" ? 0 : Math.min(PENDING_READ_MAX_IDLE_MS, Math.max(1, idleMs * 2));
+        // Give the host a turn before polling again, so a run of wakes can
+        // never starve socket and storage events.
+        if (woke === "work" && !this.closed && !owner.closed) await hostTurn();
       }
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -6358,6 +6371,22 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
     }
     addNestedOuterColumnsToSubqueries(record.nested_arrays);
   }
+}
+
+/** One turn of the host's task queue, without a timer (no clamp, no fake clock). */
+function hostTurn(): Promise<void> {
+  if (typeof setImmediate === "function") return new Promise((resolve) => setImmediate(resolve));
+  if (typeof MessageChannel !== "undefined") {
+    return new Promise((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
+  return sleep(0);
 }
 
 function sleep(ms: number): Promise<void> {
