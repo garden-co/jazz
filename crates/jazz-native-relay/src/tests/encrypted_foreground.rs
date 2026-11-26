@@ -25,11 +25,24 @@ const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
 /// makes it slower; a quiet minute means verification stalled.
 #[test]
 fn delayed_store_replies_wake_account_verification() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
     enum Event {
         StoreRequest,
         Outbound,
+    }
+
+    struct Release<'a> {
+        done: &'a AtomicBool,
+        queued: &'a tokio::sync::Notify,
+    }
+
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::Release);
+            self.queued.notify_one();
+        }
     }
 
     unsafe extern "C" fn wake(context: *mut c_void, _: u64, kind: u8, _: u64) {
@@ -73,16 +86,22 @@ fn delayed_store_replies_wake_account_verification() {
             .prepare_query(&jazz::query::Query::from("__e2ee_recovery_roots"))
             .unwrap();
         let queued = relay.wire().unwrap().outbound_ready();
-        let done = std::sync::atomic::AtomicBool::new(false);
+        let done = AtomicBool::new(false);
         let replies = thread::scope(|scope| {
             scope.spawn(|| {
-                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                while !done.load(Ordering::Acquire) {
                     block_on(queued.notified());
                     if outbound.send(Event::Outbound).is_err() {
                         break;
                     }
                 }
             });
+            // Release the helper on every exit, a panic included: the scope
+            // joins it before the panic can leave the test.
+            let _release = Release {
+                done: &done,
+                queued: &queued,
+            };
             let mut replies = 0;
             loop {
                 // Carry whatever the relay queued for the authority, and its
@@ -104,8 +123,6 @@ fn delayed_store_replies_wake_account_verification() {
                     ),
                 }
             }
-            done.store(true, std::sync::atomic::Ordering::Release);
-            queued.notify_one();
             replies
         });
         jazz_native_relay_host_lease_free(lease);
