@@ -440,12 +440,14 @@ fn row_shapes_and_mechanisms() {
 }
 
 /// Alice's root has several commitment rows, as the table policy allows
-/// (§1.4, R11a): malformed ones, forged ones and a second valid one. Bob
-/// counts the earliest valid row by accepted position, ties by smallest ID,
-/// no earlier than the root (§2.9, "Which commitment counts"). A later
-/// valid row never replaces it, and an invalid earlier row never blocks it.
+/// (§1.4, R11a): malformed ones, forged ones, ones signed by the root for
+/// other coordinates and a second valid one. Bob counts only the root's own
+/// transaction: the valid row at the root's accepted position with the
+/// smallest ID (§2.9, "Which commitment counts"). No row before or after it
+/// ever counts, so a root written without its commitment stays uncommitted,
+/// and an invalid row never blocks a valid one.
 #[test]
-fn the_earliest_valid_commitment_counts() {
+fn only_the_roots_own_commitment_counts() {
     use jazz_e2ee::protocol::position::{Accepted, Position};
     use jazz_e2ee::protocol::records::roster::{CommittedRoot, Counted, counting_commitment};
 
@@ -514,17 +516,19 @@ fn the_earliest_valid_commitment_counts() {
         ..valid(0x11)
     });
     let at = |position, row: &Commitment| Accepted::new(Position(position), row.clone());
-    let count = |rows: &[Accepted<Commitment>]| {
-        counting_commitment(&registry, &application, &root, rows)
+    let count_for = |root: &CommittedRoot<'_>, rows: &[Accepted<Commitment>]| {
+        counting_commitment(&registry, &application, root, rows)
             .unwrap()
             .map(|counted| match counted {
                 Counted::Known(row) => ("known", row.id.clone()),
                 Counted::Unsupported(row) => ("unsupported", row.id.clone()),
             })
     };
+    let count = |rows: &[Accepted<Commitment>]| count_for(&root, rows);
     let known = |row: &Commitment| Some(("known", row.id.clone()));
 
-    // Invalid rows, before or beside the valid ones, never count.
+    // Invalid rows in the root's transaction never count, and never block
+    // a valid one there, in any read order.
     let invalid = [
         &wrong_key,
         &short_key,
@@ -533,24 +537,68 @@ fn the_earliest_valid_commitment_counts() {
         &not_a_signature,
     ];
     for row in invalid {
-        assert_eq!(count(&[at(11, row)]), None, "{row:?}");
+        assert_eq!(count(&[at(10, row)]), None, "{row:?}");
     }
-    let mut rows: Vec<_> = invalid.iter().map(|row| at(11, row)).collect();
-    rows.extend([at(13, &second), at(12, &first)]);
+    let mut rows: Vec<_> = invalid.iter().map(|row| at(10, row)).collect();
+    rows.push(at(10, &first));
     assert_eq!(count(&rows), known(&first));
-    // A later valid row never replaces the first, in any read order.
     rows.reverse();
     assert_eq!(count(&rows), known(&first));
-    // At one position, the smallest ID counts ("22…" before "66…").
-    assert_eq!(count(&[at(12, &first), at(12, &second)]), known(&second));
-    // The root's own transaction counts; a row before the root does not.
-    assert_eq!(count(&[at(10, &first), at(9, &second)]), known(&first));
+    // In the root's transaction, the smallest ID counts ("22…" before "66…").
+    assert_eq!(count(&[at(10, &first), at(10, &second)]), known(&second));
+    // Only the root's own transaction counts. A valid row before it or
+    // after it never does: a root written without its commitment stays
+    // uncommitted, whoever can sign for it later.
     assert_eq!(count(&[at(9, &second)]), None);
-    // An earliest valid row of an unknown mechanism is unsupported: Bob
-    // does not fall through to a later row of a mechanism he knows.
+    assert_eq!(count(&[at(11, &second)]), None);
+    assert_eq!(count(&[at(11, &second), at(12, &first)]), None);
+    assert_eq!(count(&[at(10, &first), at(11, &second)]), known(&first));
+    // A counting row of an unknown mechanism is unsupported: Bob does not
+    // fall through to another row of a mechanism he knows.
     assert_eq!(
-        count(&[at(12, &first), at(11, &future)]),
+        count(&[at(10, &first), at(10, &future)]),
         Some(("unsupported", future.id.clone()))
     );
-    assert_eq!(count(&[at(11, &first), at(12, &future)]), known(&first));
+
+    // Rows the root itself signed, for other coordinates. The signature
+    // covers them, so only the record checks refuse them. A root with a
+    // random ID lets a device subject carry the same ID.
+    const RANDOM_ROOT: &str = "77777777-7777-4777-8777-777777777777";
+    let random_root = CommittedRoot {
+        root_id: RANDOM_ROOT,
+        ..root
+    };
+    let for_random_root = |id_byte| {
+        signed(Commitment {
+            subject_id: RANDOM_ROOT.into(),
+            ..valid(id_byte)
+        })
+    };
+    let own = for_random_root(0x40);
+    assert_eq!(count_for(&random_root, &[at(10, &own)]), known(&own));
+    for (what, row) in [
+        (
+            "a device with the root's ID",
+            signed(Commitment {
+                subject_kind: SubjectKind::Device,
+                ..for_random_root(0x41)
+            }),
+        ),
+        (
+            "another account",
+            signed(Commitment {
+                account_id: OTHER.into(),
+                ..for_random_root(0x42)
+            }),
+        ),
+        (
+            "another root",
+            signed(Commitment {
+                subject_id: "88888888-8888-4888-8888-888888888888".into(),
+                ..for_random_root(0x43)
+            }),
+        ),
+    ] {
+        assert_eq!(count_for(&random_root, &[at(10, &row)]), None, "{what}");
+    }
 }

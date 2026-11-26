@@ -152,10 +152,11 @@ impl Commitment {
 }
 
 /// The commitment that counts for `root` among the commitment rows of a
-/// ledger read: the earliest valid one by accepted position, ties by
-/// smallest row ID, no earlier than the root itself (§2.9, "Which
-/// commitment counts"). `None` if no row is valid. Rows that are not about
-/// `root` are ignored, so `rows` can be a whole read.
+/// ledger read: of the valid rows at the root's own accepted position (its
+/// transaction), the one with the smallest row ID (§2.9, "Which commitment
+/// counts"). `None` if there is none: the root is uncommitted, and no row
+/// accepted later can change that. Rows that are not about `root` are
+/// ignored, so `rows` can be a whole read.
 pub fn counting_commitment<'a>(
     registry: &Registry,
     application: &AccountDomain,
@@ -164,7 +165,7 @@ pub fn counting_commitment<'a>(
 ) -> ProtocolResult<Option<Counted<'a>>> {
     let mut ordered: Vec<&Accepted<Commitment>> = rows
         .iter()
-        .filter(|accepted| accepted.position >= root.position)
+        .filter(|accepted| accepted.position == root.position)
         .collect();
     by_position_then_id(&mut ordered);
     for accepted in ordered {

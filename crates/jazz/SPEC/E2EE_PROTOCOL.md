@@ -608,8 +608,9 @@ Account and device tables (fixed policies):
   and `subjectId` a device request or a recovery root of the same account (a
   root inserted in the same transaction counts); readable like the other
   public tables (R10). The policy does not check the rest of the row, nor
-  that a subject has only one: which row counts is the reader's rule (§2.9,
-  "Which commitment counts").
+  that a subject has only one, nor that a root's commitment is in the root's
+  transaction: which row counts is the reader's rule (§2.9, "Which
+  commitment counts"), and only a row in the root's own transaction can.
 
 The founder, kind and `allowAccountReset` conditions of R5 and R6 are
 account-registry and configuration checks beside the policies, as Jazz's
@@ -1569,18 +1570,24 @@ the 32 secret bytes, created and read with user verification required
   exact length, any other mechanism's key of 1 to 65,536 bytes,
   a non-empty signature), and its signature verifies under the root's own
   signing key over the signed bytes above, at the root's generation. The
-  root's **counting commitment** is the earliest row valid for it by accepted
-  position, ties by smallest ID, among the rows at or after the root's
-  position (its own transaction counts). Invalid rows are ignored wherever
-  they are; a later valid row never replaces the counting one, so whoever
-  can forge the root's classical signature later cannot swap it out. If the
-  counting row's mechanism or version is one the reader does not know, the
-  root's commitment is unsupported for that reader: it does not fall through
-  to a later row of a mechanism it knows. If the root's signing mechanism is
-  unsupported or the provider fails, the reader cannot decide, rather than
-  treating the row as invalid. `counting_commitment` in
+  root's **counting commitment** is the row valid for it with the smallest
+  ID among the rows at the root's own accepted position: the commitment
+  written in the root's transaction. A root with no valid row there is
+  **uncommitted**, and stays so: no row accepted before or after the root
+  ever counts, so whoever can forge the root's classical signature later can
+  neither swap its commitment out nor give an uncommitted root one. Every
+  registration writes the root and its commitment in one transaction, and
+  re-registering an existing root writes none, so a root of this version is
+  uncommitted only if the server lost or withholds its commitment. Invalid rows are
+  ignored. If the counting row's mechanism or version is one the reader does
+  not know, the root's commitment is unsupported for that reader: it does not
+  fall through to another row of a mechanism it knows. If the root's signing
+  mechanism is unsupported or the provider fails, the reader cannot decide,
+  rather than treating the row as invalid. The rule relies on accepted
+  positions: a reader with no earlier state cannot tell a server that
+  rewrites them, as for every other ordering rule here (§0). `counting_commitment` in
   `crates/jazz-e2ee/src/protocol/records/roster.rs` is this rule, and
-  `the_earliest_valid_commitment_counts` in
+  `only_the_roots_own_commitment_counts` in
   `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs` pins it; no
   replay calls it yet.
 - **Validity.** A root is valid iff it is strictly after the account root, its
