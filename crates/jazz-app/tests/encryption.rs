@@ -262,6 +262,63 @@ async fn a_project_creator_is_admitted_even_without_update_permission() {
     assert_eq!(remaining[0].account_id, alice_id);
 }
 
+/// Raw inserts into `__e2ee_members` stay plain inserts: only the
+/// `add_member` helpers check for an existing row. Alice inserting her own
+/// member row after creating a project, in a write and in a transaction,
+/// adds a row each time; so does inserting Bob's row twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_member_inserts_stay_plain_inserts() {
+    use bindings::{NewE2eeMember, NewProject, e2ee_members};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_id = ObjectId::from_uuid(bob.account().unwrap().0);
+    let scope = alice.table_identity("projects").await.unwrap();
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap();
+    let members = e2ee_members::query().filter(e2ee_members::identifier().eq(project.id));
+    alice
+        .insert(NewE2eeMember::new(scope, project.id, alice_id))
+        .await
+        .unwrap();
+    alice
+        .transaction(
+            move |tx| async move { tx.insert(NewE2eeMember::new(scope, project.id, alice_id)) },
+        )
+        .await
+        .unwrap();
+    let rows = alice.all(members.clone()).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "the automatic row and two raw ones: {rows:?}"
+    );
+    assert!(rows.iter().all(|row| row.account_id == alice_id));
+
+    for _ in 0..2 {
+        alice
+            .insert(NewE2eeMember::new(scope, project.id, bob_id))
+            .await
+            .unwrap();
+    }
+    let rows = alice.all(members).await.unwrap();
+    assert_eq!(
+        rows.iter().filter(|row| row.account_id == bob_id).count(),
+        2
+    );
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// `add_member` reads, then writes, so two concurrent adds of the same
 /// account can both find no row and both write one, directly or in a
 /// transaction. Whichever way they interleave, each returns a row Alice can
