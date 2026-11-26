@@ -15,7 +15,7 @@ use crate::AccountId;
 use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::include::Row;
-use crate::members::{NewSpaceMember, SpaceMember, require_space};
+use crate::members::{NewSpaceMember, SpaceMember, member_rows, require_space};
 use crate::query::Query;
 use crate::table::{Implementations, Insert, Table, Updatable, Update};
 
@@ -63,15 +63,23 @@ impl Transaction {
         Ok(row)
     }
 
-    /// Stages an admission alongside the transaction's other writes.
+    /// Stages an admission alongside the transaction's other writes. If the
+    /// account is already a member, as the transaction sees the space (its
+    /// own staged writes included), returns that member's existing row and
+    /// stages nothing. Like [`Jazz::add_member`], it only sees memberships
+    /// this client has synced.
     pub async fn add_member<T: Table>(
         &self,
         id: ObjectId,
         account: AccountId,
     ) -> Result<SpaceMember> {
         require_space(self.declarations.as_deref(), T::NAME)?;
+        let scope_id = self.client.table_identity(T::NAME).await?;
+        if let Some(existing) = self.one(member_rows(scope_id, id, account)).await? {
+            return Ok(existing);
+        }
         self.insert(NewSpaceMember {
-            scope_id: self.client.table_identity(T::NAME).await?,
+            scope_id,
             identifier: id,
             account,
         })
@@ -404,7 +412,8 @@ impl OpenTransaction {
         self.on(move |tx| async move { tx.insert(new) }).await
     }
 
-    /// Stages an admission alongside the transaction's other writes.
+    /// Stages an admission alongside the transaction's other writes, as
+    /// [`Transaction::add_member`]: an existing member's row is returned.
     pub async fn add_member<T: Table>(
         &self,
         id: ObjectId,

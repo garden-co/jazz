@@ -8,7 +8,14 @@
  * from it.
  */
 import type { WasmSchema } from "../drivers/types.js";
-import { PersistedWriteRejectedError, type Runtime, type WriteResult } from "../runtime/client.js";
+import {
+  PersistedWriteRejectedError,
+  resolveWriteWaitTier,
+  validateWriteWaitTimeout,
+  type Runtime,
+  type WriteResult,
+  type WriteWaitOptions,
+} from "../runtime/client.js";
 import { bytesToHex } from "../runtime/hex.js";
 import type { Db } from "../runtime/db.js";
 import { boundApp, TypedTableQueryBuilder, type TableMeta } from "../typed-app.js";
@@ -849,6 +856,38 @@ export function memberInsert(
   ];
 }
 
+/**
+ * The result of `db.encryption.members.add`. Await it for the member row once
+ * it's applied locally, or call `wait` as on an insert's result. When the
+ * account was already a member, both give its existing row at once: nothing
+ * was written.
+ */
+export class MemberWrite implements PromiseLike<MemberRow> {
+  readonly #added: Promise<{ row: MemberRow; write?: WriteResult<MemberRow> }>;
+
+  /** @internal */
+  constructor(added: Promise<{ row: MemberRow; write?: WriteResult<MemberRow> }>) {
+    this.#added = added;
+    // A caller may never await it: the error still reaches whoever does.
+    added.catch(() => {});
+  }
+
+  /** Wait for the member row to be persisted at a given durability tier. */
+  async wait(options: WriteWaitOptions): Promise<MemberRow> {
+    resolveWriteWaitTier(options.tier);
+    validateWriteWaitTimeout(options.timeoutMs);
+    const { row, write } = await this.#added;
+    return write ? write.wait(options) : row;
+  }
+
+  then<TResult1 = MemberRow, TResult2 = never>(
+    onfulfilled?: ((value: MemberRow) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    return this.#added.then(({ row }) => row).then(onfulfilled, onrejected);
+  }
+}
+
 export class Keys {
   constructor(private readonly call: Call) {}
 
@@ -920,16 +959,28 @@ export class Members {
   }
 
   /**
-   * Add an account to the space. Wait on the result as you would for an insert.
+   * Add an account to the space. Await the result for the member row, or wait
+   * on it as you would for an insert. If this client already sees the account
+   * as a member, the result is that member's existing row and nothing is
+   * written, so adding an account twice leaves one row. The check reads this
+   * client's local data: a client that hasn't synced an existing membership
+   * yet adds a second row for the account.
    * Automatic creator membership applies to `insert`. When `upsert` creates a
    * space, add the creator explicitly with `tx.encryption.members.add` in the
    * same transaction, or call this method afterward if permissions allow it.
    */
-  add(...args: AddMemberArgs): WriteResult<MemberRow> {
+  add(...args: AddMemberArgs): MemberWrite {
     if (!this.context) throw new Error("Adding members requires a database.");
     const { db, schema } = this.context;
     const [table, row] = memberInsert(schema, (schema) => db.runtimeForEncryption(schema), args);
-    return db.insert<MemberRow, MemberAddress>(table, row);
+    return new MemberWrite(
+      (async () => {
+        const existing = await db.one(table.where(row));
+        if (existing) return { row: existing };
+        const write = db.insert<MemberRow, MemberAddress>(table, row);
+        return { row: write.value, write };
+      })(),
+    );
   }
 
   /** List the space's member rows visible to the caller. */

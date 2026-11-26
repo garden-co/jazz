@@ -382,6 +382,7 @@ type SpaceMember struct {
 }
 
 // AddMember admits an account to a space and returns its membership row, as an insert would.
+// If the account is already a member, it returns that member's existing row and writes nothing.
 func (e *Encryption) AddMember(ctx context.Context, table, id, accountID string, opts ...WriteOption) (SpaceMember, error) {
 	var member SpaceMember
 	args := withOptions(map[string]any{"table": table, "id": id, "accountId": accountID}, opts)

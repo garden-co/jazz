@@ -507,12 +507,13 @@ Use `member_add(table, id, account_id, tier)`, `member_list(table, id)` and
 
 | Method         | Arguments                                 | Result                 |
 | -------------- | ----------------------------------------- | ---------------------- |
-| `memberAdd`    | `{ "table", "id", "accountId", "tier"? }` | Inserted member row    |
+| `memberAdd`    | `{ "table", "id", "accountId", "tier"? }` | Member row             |
 | `memberList`   | `{ "table", "id" }`                       | Visible member rows    |
 | `memberRemove` | `{ "table", "id", "accountId" }`          | Number of rows removed |
 
 A member row contains `id`, `scopeId`, `identifier` (the space row ID) and `accountId`.
-Add settles like an insert, with optional `local` or `global` durability. Remove deletes
+Add settles like an insert, with optional `local` or `global` durability. Adding an account that
+is already a member returns its existing row and writes nothing. Remove deletes
 the account's visible rows for the space in a serializable transaction and waits for
 the authority to accept it. A count of zero means there were no matching rows visible
 to the caller.

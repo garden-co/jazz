@@ -102,7 +102,9 @@ impl JazzHandle {
     }
 
     /// Admits an account to the space. Returns the membership row as JSON,
-    /// with the same durability options as an insert.
+    /// with the same durability options as an insert. If the account is
+    /// already a member, as this client has synced, returns that member's
+    /// existing row and writes nothing.
     pub fn member_add(
         &self,
         table: String,
