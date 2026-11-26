@@ -238,10 +238,13 @@ impl Registry {
         "stream cipher"
     );
 
-    /// For tests only: replaces the registered key sealer of `sealer`'s
-    /// mechanism, a built-in included, so a test can wrap it (for example
-    /// to inject a provider failure). [`Error::InvalidInput`] when no sealer
-    /// of that mechanism is registered.
+    /// For tests only; must not be used in production. Replaces the
+    /// registered key sealer of `sealer`'s mechanism, a built-in included,
+    /// in this registry alone (other registries keep theirs), so a test can
+    /// wrap it (for example to inject a provider failure).
+    /// [`Error::InvalidInput`] when no sealer of that mechanism is
+    /// registered.
+    #[doc(hidden)]
     #[cfg(feature = "conformance")]
     pub fn replace_key_sealer(&mut self, sealer: Arc<dyn KeySealer>) -> Result<()> {
         let mechanism = sealer.mechanism();

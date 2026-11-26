@@ -8,9 +8,17 @@
 //   skipped: its flags are the browser build's).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The jazz-wasm crate. */
@@ -137,7 +145,8 @@ function wasmOpt(label) {
  * Build `outName` (`${outName}.js`, `${outName}_bg.wasm`) into `outDir` with
  * cargo `features` (with the crate's default features unless
  * `noDefaultFeatures`), size-tuned, at `wasmOptLevel`. `patchGlue(glue)` runs
- * on the generated JS after wasm-opt.
+ * on the generated JS after wasm-opt. `unstrippedDir` keeps a copy of the
+ * module from before wasm-opt, which still has its function names.
  */
 export function sizeTunedBuild({
   label,
@@ -147,6 +156,7 @@ export function sizeTunedBuild({
   outName,
   wasmOptLevel,
   patchGlue,
+  unstrippedDir,
 }) {
   run("wasm-pack", [
     "build",
@@ -166,6 +176,10 @@ export function sizeTunedBuild({
     features,
   ]);
   const wasm = join(outDir, `${outName}_bg.wasm`);
+  if (unstrippedDir) {
+    mkdirSync(unstrippedDir, { recursive: true });
+    copyFileSync(wasm, join(unstrippedDir, basename(wasm)));
+  }
   run(wasmOpt(label), [
     `-${wasmOptLevel}`,
     "--strip-debug",
