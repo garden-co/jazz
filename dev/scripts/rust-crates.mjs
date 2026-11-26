@@ -16,6 +16,7 @@ export const ROOT_CRATES = Object.freeze([
   "jazz-tools",
   "jazz-codegen",
   "jazz-ffi",
+  "jazz-rivet",
 ]);
 
 /**
