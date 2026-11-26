@@ -1,7 +1,8 @@
 import { mkdtemp, readFile } from "node:fs/promises";
+import { createServer as createNetServer, connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NapiDb } from "jazz-napi";
+import { EncryptionRuntime, NapiDb } from "jazz-napi";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import appFile from "../../tests/fixtures/encrypted/jazz.app.json";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
@@ -124,38 +125,195 @@ function observeStoreClock() {
   return { armed, fired, firedDue };
 }
 
-it("waits for the first catalogue without waking the private-store clock", async () => {
-  const first = await serve();
-  await first.stop();
-  // A test clock stands in for a minute offline. It keeps running with real
-  // time, so the timers armed on it still fire once the server is back.
-  vi.useFakeTimers({
-    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
-    shouldAdvanceTime: true,
+/**
+ * What the runtime asks of the app's private store, observed at the native
+ * boundary: its wakes by urgency, the requests taken and the answers given.
+ * Each request arms the runtime's 30 s answer deadline (`after:30000`) and
+ * the answer cancels it.
+ */
+function watchPrivateStore() {
+  const wakes: string[] = [];
+  let taken = 0;
+  let answered = 0;
+  const proto = EncryptionRuntime.prototype as unknown as {
+    setStoreWake(wake: ((urgency: string) => void) | null): void;
+    takeStoreRequests(): string[];
+    replyStore(id: string, ok: boolean, payload: string): boolean;
+  };
+  const setStoreWake = proto.setStoreWake;
+  const takeStoreRequests = proto.takeStoreRequests;
+  const replyStore = proto.replyStore;
+  const spies = [
+    vi.spyOn(proto, "setStoreWake").mockImplementation(function (this: unknown, wake) {
+      return setStoreWake.call(
+        this,
+        wake &&
+          ((urgency: string) => {
+            wakes.push(urgency);
+            wake(urgency);
+          }),
+      );
+    }),
+    vi.spyOn(proto, "takeStoreRequests").mockImplementation(function (this: unknown) {
+      const requests = takeStoreRequests.call(this);
+      taken += requests.length;
+      return requests;
+    }),
+    vi.spyOn(proto, "replyStore").mockImplementation(function (this: unknown, ...args) {
+      answered += 1;
+      return replyStore.apply(this, args);
+    }),
+  ];
+  cleanups.push(async () => {
+    for (const spy of spies) spy.mockRestore();
+  });
+  return {
+    wakes,
+    get inFlight() {
+      return taken - answered;
+    },
+    get taken() {
+      return taken;
+    },
+    /**
+     * Resolves once every request taken is answered and no wake arrives for
+     * ten host turns. napi delivers each wake on a later turn, so a chain of
+     * requests (the next asked once the last is answered) shows within one.
+     */
+    async idle(): Promise<void> {
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      for (let quiet = 0, seen = -1; quiet < 10;) {
+        await hostTurn();
+        quiet = taken === answered && wakes.length === seen ? quiet + 1 : 0;
+        seen = wakes.length;
+      }
+    },
+  };
+}
+
+/**
+ * A fixed loopback address in front of a server that goes away and comes
+ * back. The server can return on any port: a released port can be taken by
+ * any other connection in the meantime (`EADDRINUSE` when the server tries
+ * to listen on it again). Until opened, it drops each connection on accept.
+ */
+async function serverGate() {
+  let target: number | undefined;
+  const sockets = new Set<Socket>();
+  const track = (socket: Socket) => {
+    sockets.add(socket);
+    socket.on("error", () => undefined);
+    socket.once("close", () => sockets.delete(socket));
+  };
+  const gate = createNetServer((client) => {
+    track(client);
+    if (target === undefined) return void client.destroy();
+    const upstream = connect(target, "127.0.0.1");
+    track(upstream);
+    client.once("close", () => upstream.destroy());
+    upstream.once("close", () => client.destroy());
+    client.pipe(upstream).pipe(client);
+  });
+  await new Promise<void>((resolve, reject) => {
+    gate.once("error", reject);
+    gate.listen(0, "127.0.0.1", () => {
+      gate.off("error", reject);
+      resolve();
+    });
   });
   cleanups.push(async () => {
-    vi.useRealTimers();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => gate.close(resolve));
   });
-  const { armed, fired } = observeStoreClock();
-  const alice = await device(first, { wait: false });
-  await alice.db.disconnect();
+  const { port } = gate.address() as AddressInfo;
+  return {
+    serverUrl: `http://127.0.0.1:${port}/jazz`,
+    open(server: { port: number }) {
+      target = server.port;
+    },
+  };
+}
+
+/**
+ * Runs the test's steps against one generous deadline for a real hang, and
+ * names the step that stalled instead of timing out anonymously.
+ */
+function stepsWithin(totalMs: number) {
+  const started = Date.now();
+  const done: string[] = [];
+  return async <T>(name: string, work: Promise<T>): Promise<T> => {
+    const left = totalMs - (Date.now() - started);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stepStarted = Date.now();
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `stalled in ${name} for ${Date.now() - stepStarted} ms (after ${done.join(", ")})`,
+                ),
+              ),
+            Math.max(0, left),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      done.push(`${name} ${Date.now() - stepStarted} ms`);
+    }
+  };
+}
+
+it("waits for the first catalogue without waking the private-store clock", async () => {
+  // Real timers throughout, except one fully controlled minute below; the
+  // only time budget is this one, for a real hang.
+  const step = stepsWithin(80_000);
+  const store = watchPrivateStore();
+  const gate = await serverGate();
+  const first = await step("serve", serve());
+  await step("stop", first.stop());
+  const alice = await step(
+    "open the device",
+    device({ ...first, serverUrl: gate.serverUrl }, { wait: false }),
+  );
+  await step("disconnect", alice.db.disconnect());
   const state = () => JSON.parse(alice.db.encryption["native"].encryptionState());
-  expect(state().readable).toBe(false);
 
-  await vi.advanceTimersByTimeAsync(60_000);
+  // Waiting for its first catalogue, the device asks nothing more of its
+  // store, and has no store deadline armed that could wake it later.
+  await step("store idle", store.idle());
   expect(state().readable).toBe(false);
-  expect(fired, JSON.stringify({ armed, fired })).toHaveLength(0);
+  const wakesWhenIdle = [...store.wakes];
+  const deadlines = wakesWhenIdle.filter((urgency) => /^(after:|cancel$)/.test(urgency));
+  expect(deadlines.at(-1) ?? "cancel", JSON.stringify(wakesWhenIdle)).toBe("cancel");
 
-  await serve({ dir: first.dir, port: first.port });
+  // A minute offline on a clock only the test moves. No store request is in
+  // flight, so the jump can't expire one; nothing may wake the store.
+  expect(store.inFlight).toBe(0);
+  const takenWhenIdle = store.taken;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   try {
-    await alice.db.reconnect();
-    // Verifying a new device account is a few dozen server round trips and
-    // two commits: give it the same budget as the device helper's wait.
-    expect(await alice.db.encryption.ready({ timeoutMs: 20_000 })).toBe("active");
+    await vi.advanceTimersByTimeAsync(60_000);
   } finally {
-    await alice.session.close();
+    vi.useRealTimers();
   }
-}, 60_000);
+  expect(store.wakes).toEqual(wakesWhenIdle);
+  expect(store.taken).toBe(takenWhenIdle);
+  expect(state().readable).toBe(false);
+
+  gate.open(await step("serve again", serve({ dir: first.dir })));
+  try {
+    await step("reconnect", alice.db.reconnect());
+    await step("first catalogue", alice.db.encryption.readable());
+    // Verification has no budget of its own: the step deadline is for a hang.
+    expect(await step("ready", alice.db.encryption.ready({ timeoutMs: Infinity }))).toBe("active");
+  } finally {
+    await step("close", alice.session.close());
+  }
+}, 90_000);
 
 it("arms verification backoff after a transient private-store error", async () => {
   const { armed, fired } = observeStoreClock();
