@@ -526,14 +526,19 @@ impl E2eeClient {
         }]);
     }
 
-    /// When the next rest of a rotation is due again after a failure.
+    /// When the next rest of a rotation is due again after a failure. Only
+    /// a retry time still ahead counts: one that passed while offline waits
+    /// for the reconnect, and as the runtime's earliest deadline the host
+    /// would drop it as past, and with it every later timer.
     pub(crate) fn next_rotation_retry(&self) -> Option<web_time::Instant> {
+        let now = self.shared.now();
         self.shared
             .member_watch
             .borrow()
             .pending_deliveries
             .values()
             .filter_map(|pending| pending.retry_at)
+            .filter(|at| *at > now)
             .min()
     }
 

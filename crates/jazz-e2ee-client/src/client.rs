@@ -694,6 +694,30 @@ impl E2eeClient {
             .await
     }
 
+    /// Leaves the rest of a rotation of `space` pending, with a retry time
+    /// already past: what a failed batch leaves when its wait ends while
+    /// the client is offline, where nothing serves it.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn stale_rotation_retry_for_test(
+        &self,
+        space: &jazz::e2ee::SpaceAddress,
+    ) -> Result<(), ClientError> {
+        let now = self.shared.now();
+        self.shared.member_watch.borrow_mut().pending_deliveries.insert(
+            crate::spaces::protocol_address(space)?,
+            crate::state::PendingRotation {
+                accounts: vec![uuid::Uuid::new_v4().to_string()],
+                failures: 1,
+                retry_at: Some(
+                    now.checked_sub(std::time::Duration::from_secs(1))
+                        .unwrap_or(now),
+                ),
+            },
+        );
+        Ok(())
+    }
+
     /// Public account histories requested since the last call.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
