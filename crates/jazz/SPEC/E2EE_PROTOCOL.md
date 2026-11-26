@@ -1475,20 +1475,37 @@ the 32 secret bytes, created and read with user verification required
   generation 2.
 - **Register.** After bootstrap (§2.3), and whenever the recovery secret is
   first available on an active device, the SDK registers the root derived
-  for the account's current generation unless a valid root with that ID
-  exists. Two publications. Stage
-  `recovery-root`: an active device holding the account key inserts the root
-  `{id: rootId, accountId, epochId: current, signerId, keys…}` signed over
-  `frame[ctx{application: D, policy: "jazz.e2ee.recovery.v1", scope:
-  "account", identifier: account, table: "__e2ee_recovery_roots", row:
-  rootId, column: json(["root", signerId]), epoch}, env(signingMechanism,
-  signingPublicKey), env(mechanism, publicKey)]`. An existing root with the
-  same ID must match exactly. Stage `recovery-delivery`: unless a usable
-  delivery exists, insert `{rootId, epochId: current, envelope:
-  seal(root.pub, R, K)}` with `R = ctx{application: D, policy:
-  "jazz.e2ee.recovery.v1", scope: "account", identifier: account, table:
-  "__e2ee_recovery_deliveries", row: deliveryId, column: "envelope", epoch,
-  recipient: rootId}`. An unknown outcome of the first stage is not retried.
+  for the account's current generation. It reads the account and writes in
+  one serializable transaction, published once, and decides from that read:
+  - A retired root stays retired (§2.9, "Retiring a derived root"): nothing
+    is written. A device account's start goes on; an explicit registration
+    fails with `recovery-root-mismatch`.
+  - A valid root with that ID, with a delivery for the current epoch that
+    opens with the recovery key: nothing is written. A delivery row that is
+    there but does not open does not count.
+  - No valid root with that ID: stage `recovery-root`. An active device
+    holding the account key inserts the root `{id: rootId, accountId,
+    epochId: current, signerId, keys…}` signed over `frame[ctx{application:
+    D, policy: "jazz.e2ee.recovery.v1", scope: "account", identifier:
+    account, table: "__e2ee_recovery_roots", row: rootId, column:
+    json(["root", signerId]), epoch}, env(signingMechanism,
+    signingPublicKey), env(mechanism, publicKey)]`, its commitment (below)
+    and its delivery, all three in that one transaction.
+  - A valid root with that ID but no delivery for the current epoch that
+    opens (for example, the server lost it): stage `recovery-delivery`. The
+    device inserts only a new delivery, and no second commitment.
+
+  The delivery is `{rootId, epochId: current, envelope: seal(root.pub, R,
+  K)}` with `R = ctx{application: D, policy: "jazz.e2ee.recovery.v1", scope:
+  "account", identifier: account, table: "__e2ee_recovery_deliveries", row:
+  deliveryId, column: "envelope", epoch, recipient: rootId}`. The
+  transaction is all or nothing: if an insert is refused or the provider
+  fails, the registration fails and none of its rows is written. A conflict
+  (another writer changed what the transaction read) reads again and
+  decides again, up to five attempts in all; the last conflict is the error.
+  A registration whose outcome is unknown can be run again: it reads what
+  was accepted and writes only what is missing.
+
 - **Commitment.** Every root registration also commits the root to a
   post-quantum signing key, so that a later version can verify the account's
   history after a break of its classical signatures. In the
