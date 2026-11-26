@@ -20,7 +20,7 @@
 //! wakes it through the platform callback.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -311,6 +311,42 @@ pub struct NativeRelay {
     inner: Arc<RelayInner>,
 }
 
+/// Names one relay without keeping it open.
+#[derive(Clone)]
+pub(crate) struct WeakRelay(std::sync::Weak<RelayInner>);
+
+impl NativeRelay {
+    pub(crate) fn downgrade(&self) -> WeakRelay {
+        WeakRelay(Arc::downgrade(&self.inner))
+    }
+}
+
+/// The stores a relay owner thread holds open right now (tests only).
+#[cfg(test)]
+pub(crate) static LIVE_OWNERS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Lists its store in [`LIVE_OWNERS`] for as long as the owner thread runs.
+#[cfg(test)]
+struct LiveOwner(PathBuf);
+
+#[cfg(test)]
+impl LiveOwner {
+    fn new(path: PathBuf) -> Self {
+        LIVE_OWNERS.lock().unwrap().push(path.clone());
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl Drop for LiveOwner {
+    fn drop(&mut self) {
+        let mut live = LIVE_OWNERS.lock().unwrap();
+        if let Some(at) = live.iter().position(|path| *path == self.0) {
+            live.remove(at);
+        }
+    }
+}
+
 struct RelayInner {
     commands: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
@@ -375,9 +411,14 @@ impl NativeRelay {
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
         let (started_tx, started_rx) = mpsc::channel();
         let owner_alive = Arc::clone(&alive);
+        #[cfg(test)]
+        let live_path = sqlite_path.clone();
         let join = thread::Builder::new()
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
+                // Declared first, dropped last: after the worker's store.
+                #[cfg(test)]
+                let _live = LiveOwner::new(live_path);
                 let _alive = OwnerAlive(owner_alive);
                 let mut worker = match RelayWorker::open(config) {
                     Ok(worker) => {
@@ -542,6 +583,21 @@ impl NativeRelay {
             worker.retire_socket_upstream(generation);
             Ok(())
         })
+    }
+
+    /// Queue the spare foreground open without waiting.
+    pub(crate) fn prepare_spare(&self) -> Result<(), RelayError> {
+        let job: RelayJob = Box::new(|worker| worker.prepare_spare());
+        let commands = self
+            .inner
+            .commands
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?;
+        commands
+            .as_ref()
+            .ok_or(RelayError::Closed)?
+            .try_send(RelayCommand::Run(job))
+            .map_err(|_| RelayError::OwnerQueueFull)
     }
 
     /// Queue `operation` on the owner thread without waiting, and say
@@ -1348,6 +1404,9 @@ pub(crate) struct RelayWorker {
     redrive: bool,
     /// When time-bound waits were last evaluated.
     timed: Instant,
+    /// A foreground Db a prewarm opened ahead of the first attach, under
+    /// this relay's identity; the attach rebinds it.
+    spare: Option<Db>,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it.
@@ -1454,7 +1513,27 @@ impl RelayWorker {
             rebuilt: false,
             redrive: false,
             timed: Instant::now(),
+            spare: None,
         })
+    }
+
+    /// Open the next foreground's Db now, under this relay's own identity
+    /// (the attach rebinds it), so the first attach does not wait for it. A
+    /// failure leaves the attach to open its own.
+    fn prepare_spare(&mut self) {
+        if self.spare.is_none() {
+            self.spare = self.open_foreground_db(self.identity).ok();
+        }
+    }
+
+    /// A foreground client's in-memory store, opened fresh.
+    fn open_foreground_db(&self, identity: DbIdentity) -> Result<Db, RelayError> {
+        block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
+        .map_err(|error| RelayError::Host(error.into()))
     }
 
     fn run(&mut self, receiver: mpsc::Receiver<RelayCommand>) {
@@ -1540,12 +1619,14 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(relay_db_config(
-            self.schema.clone(),
-            identity,
-            &self.migrations,
-        )))
-        .map_err(|error| RelayError::Host(error.into()))?;
+        let spare = self
+            .spare
+            .take()
+            .and_then(|mut db| db.rebind_identity(identity).then_some(db));
+        let db = match spare {
+            Some(db) => db,
+            None => self.open_foreground_db(identity)?,
+        };
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -2741,26 +2822,142 @@ fn wait_for_write(
 #[derive(Default)]
 pub struct NativeRelayRegistry {
     relays: Mutex<BTreeMap<RelayScope, NativeRelay>>,
+    /// Relays a prewarm opened from the last launch's record that no
+    /// admission has claimed yet. Lock order: `relays`, then this.
+    speculative: Mutex<BTreeSet<RelayScope>>,
 }
 
 impl NativeRelayRegistry {
+    /// The scopes with an open relay, and whether each is still speculative.
+    #[cfg(test)]
+    pub(crate) fn open_scopes(&self) -> Vec<(RelayScope, bool)> {
+        let relays = self.relays.lock().unwrap();
+        let speculative = self.speculative.lock().unwrap();
+        relays
+            .keys()
+            .map(|scope| (scope.clone(), speculative.contains(scope)))
+            .collect()
+    }
+
+    /// Open `config`'s relay ahead of its admission, as speculative, and
+    /// queue its spare foreground Db. `None` if the scope is already open.
+    pub(crate) fn prewarm(
+        &self,
+        config: RelayOpenConfig,
+    ) -> Result<Option<NativeRelay>, RelayError> {
+        config.validate()?;
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        if relays.contains_key(&config.scope)
+            || relays
+                .values()
+                .any(|relay| relay.inner.sqlite_path == config.sqlite_path)
+        {
+            return Ok(None);
+        }
+        let relay = NativeRelay::spawn(config.clone())?;
+        relay.prepare_spare()?;
+        relays.insert(config.scope.clone(), relay.clone());
+        self.speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .insert(config.scope);
+        Ok(Some(relay))
+    }
+
+    /// The identity of a prewarmed relay no admission has claimed yet.
+    pub fn speculative_identity(&self, scope: &RelayScope) -> Option<DbIdentity> {
+        let relays = self.relays.lock().ok()?;
+        let speculative = self.speculative.lock().ok()?;
+        if !speculative.contains(scope) {
+            return None;
+        }
+        relays.get(scope).map(|relay| relay.inner.identity)
+    }
+
+    /// An admission of `scope` disproves every other guess: close the
+    /// speculative relays of other scopes. Joined here, under the registry
+    /// lock, so nothing opens or deletes their files before they let go.
+    pub(crate) fn retire_speculation_except(&self, scope: &RelayScope) -> Result<(), RelayError> {
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let mut speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let others: Vec<RelayScope> = speculative
+            .iter()
+            .filter(|s| *s != scope)
+            .cloned()
+            .collect();
+        for other in others {
+            speculative.remove(&other);
+            if let Some(relay) = relays.remove(&other) {
+                relay.inner.shutdown();
+            }
+        }
+        Ok(())
+    }
+
+    /// Close `relay` if it is still `scope`'s unclaimed prewarm: the launch
+    /// admitted nothing it guessed (a signed-out screen, a headless start).
+    pub(crate) fn retire_unclaimed(
+        &self,
+        scope: &RelayScope,
+        relay: &WeakRelay,
+    ) -> Result<bool, RelayError> {
+        let mut relays = self
+            .relays
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let mut speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let ours = relays
+            .get(scope)
+            .is_some_and(|open| std::ptr::eq(Arc::as_ptr(&open.inner), relay.0.as_ptr()));
+        if !ours || !speculative.remove(scope) {
+            return Ok(false);
+        }
+        if let Some(open) = relays.remove(scope) {
+            open.inner.shutdown();
+        }
+        Ok(true)
+    }
+
     pub fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
             .relays
             .lock()
             .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let speculative = self
+            .speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .remove(&config.scope);
         if let Some(existing) = relays.get(&config.scope) {
-            if existing.inner.sqlite_path != config.sqlite_path
+            let mismatch = existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.migrations != config.migrations_key()
-                || existing.inner.identity != config.identity
-            {
+                || existing.inner.identity != config.identity;
+            if mismatch && speculative {
+                // The guess was this scope under another schema (an app
+                // update) or node: replace it, joined before the reopen.
+                existing.inner.shutdown();
+                relays.remove(&config.scope);
+            } else if mismatch {
                 return Err(RelayError::ScopeConfigurationMismatch);
-            }
-            if existing.is_alive() {
+            } else if existing.is_alive() {
                 return Ok(existing.clone());
             }
+        }
+        if let Some(existing) = relays.get(&config.scope) {
             existing.inner.shutdown();
             relays.remove(&config.scope);
         }
@@ -2783,6 +2980,10 @@ impl NativeRelayRegistry {
             .relays
             .lock()
             .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        self.speculative
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay registry"))?
+            .remove(scope);
         let Some(relay) = relays.remove(scope) else {
             return Ok(false);
         };
