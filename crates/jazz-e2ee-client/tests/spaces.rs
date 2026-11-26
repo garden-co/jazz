@@ -22,12 +22,16 @@ use jazz::records::Value;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::KeyMark;
 use jazz_e2ee::protocol::error::RefusalCode;
+use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 use jazz_e2ee_client::{
     AccountStatus, ClientError, E2eeClient, MEMBER_LIMIT, MemoryStore, PrivateStore, Report,
     SpaceKeyState,
 };
 
 const SPACES: &str = "__e2ee_spaces";
+
+/// Each space a sync served, with its key state or error.
+type Synced = Vec<(jazz::e2ee::SpaceAddress, Result<SpaceKeyState, ClientError>)>;
 const MEMBERS: &str = "__e2ee_members";
 
 /// Runs `test` on its own thread; a hang fails after a minute, saying so.
@@ -135,8 +139,7 @@ impl Device {
         &self,
         server: &Db,
         watch: &mut jazz_e2ee_client::SpaceWatch,
-    ) -> Result<Vec<(jazz::e2ee::SpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError>
-    {
+    ) -> Result<Synced, ClientError> {
         drive(
             server,
             &[&self.db],
@@ -361,10 +364,11 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
     });
 }
 
-/// Alice rotates a deep space. The first transaction reads only the
-/// deliveries of the outgoing version, even with another batch to send.
+/// Alice rotates a deep space after adding enough members to require a
+/// follow-up batch. The first transaction reads only the deliveries of the
+/// outgoing version, and the follow-up only her own of the new one.
 #[test]
-fn rotation_reads_only_current_deliveries() {
+fn rotation_and_follow_up_read_only_current_deliveries() {
     let server = secure_authority_with(&EncryptionSettings::default(), None);
     let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
     alice.activate(&server);
@@ -391,6 +395,151 @@ fn rotation_reads_only_current_deliveries() {
     // One current-epoch read for selection and one for acquisition.
     // Alice wrote the successor, so her acquisition reads no delivery rows.
     assert_eq!(alice.client.take_delivery_reads(), (49, 0, 2));
+    // The follow-up batch reads only Alice's own deliveries of the new
+    // version, to acquire it: none.
+    assert_eq!(
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.finish_rotation_for_test(&alice.db, &address)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(alice.client.take_delivery_reads(), (0, 0, 1));
+}
+
+/// Alice rotates for 101 other members. The follow-up transaction reads
+/// only Alice's history and that of its one remaining recipient.
+#[test]
+fn rotation_follow_up_reads_only_the_accounts_it_uses() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    for seed in 1..=101 {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+    }
+    pump(&server, &alice.db);
+
+    let address = space_address(&alice, space);
+    alice.client.take_public_account_reads();
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 100);
+    // Everyone for selection, and Alice for acquisition.
+    assert_eq!(alice.client.take_public_account_reads(), 102 + 1);
+    assert_eq!(
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.finish_rotation_for_test(&alice.db, &address)
+        )
+        .unwrap(),
+        1
+    );
+    // Alice and the final recipient for the follow-up.
+    assert_eq!(alice.client.take_public_account_reads(), 2);
+}
+
+/// Mallory, a member who holds the space's key, gets the new version in
+/// the first batch of Alice's rotation and writes deliveries that do not
+/// open to the members left for the follow-up. Alice's background pass
+/// still delivers to each of them, since a rotator delivers to every
+/// remaining member whether or not a delivery to it exists (protocol §3.5),
+/// and they read the space.
+///
+/// ```text
+/// alice ──successor + 100 deliveries (mallory first)──► authority
+/// mallory ──junk deliveries to the 2 left over──────► authority
+/// alice's background pass ──2 deliveries anyway─────► authority
+/// the 2 ──acquire──► held
+/// ```
+#[test]
+fn a_rotators_follow_up_delivers_past_another_members_junk_delivery() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+    let address = space_address(&alice, space);
+    // Mallory holds the current version, so the rotation picks her first.
+    let mallory = device(&server, account(0xb0), MemoryStore::new(), 0xb0);
+    mallory.activate(&server);
+    add_member(&server, &alice, space, &mallory.id());
+    assert_eq!(deliver(&server, &alice, &[&mallory], space), 1);
+    let mut others = Vec::new();
+    for seed in 1..=u8::try_from(DELIVERY_BATCH).unwrap() {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+        others.push(member);
+    }
+    pump(&server, &alice.db);
+
+    assert_eq!(alice.rotate(&server, &address).unwrap(), DELIVERY_BATCH);
+    let successor = all(&server, Query::from("__e2ee_space_successors"))
+        .unwrap()
+        .remove(0);
+    let epoch = successor.cell("epochId").unwrap();
+    let delivered: Vec<Value> = all(
+        &server,
+        Query::from("__e2ee_space_deliveries").filter(eq(col("keyEpochId"), lit(epoch.clone()))),
+    )
+    .unwrap()
+    .iter()
+    .map(|row| row.cell("recipientAccountId").unwrap())
+    .collect();
+    let mallory_id = Value::Uuid(uuid::Uuid::parse_str(&mallory.id()).unwrap());
+    assert!(delivered.contains(&mallory_id));
+    let left: Vec<&Device> = others
+        .iter()
+        .filter(|member| {
+            !delivered.contains(&Value::Uuid(uuid::Uuid::parse_str(&member.id()).unwrap()))
+        })
+        .collect();
+    assert_eq!(left.len(), 1);
+    mallory.follow_notes(&server);
+    assert_eq!(
+        mallory.acquire(&server, &address).unwrap(),
+        SpaceKeyState::Held
+    );
+    for member in &left {
+        junk_delivery(&mallory, member, space, epoch.clone());
+    }
+    pump(&server, &mallory.db);
+    pump(&server, &alice.db);
+
+    let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+    let synced = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        matches!(synced.as_slice(), [(at, Ok(SpaceKeyState::Held))] if *at == address),
+        "{synced:?}"
+    );
+    for member in left {
+        let from_alice = all(
+            &server,
+            Query::from("__e2ee_space_deliveries")
+                .filter(eq(col("keyEpochId"), lit(epoch.clone())))
+                .filter(eq(
+                    col("recipientAccountId"),
+                    lit(Value::Uuid(uuid::Uuid::parse_str(&member.id()).unwrap())),
+                ))
+                .filter(eq(
+                    col("senderAccountId"),
+                    lit(Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap())),
+                )),
+        )
+        .unwrap();
+        assert_eq!(from_alice.len(), 1, "alice delivered to {}", member.id());
+        member.follow_notes(&server);
+        assert_eq!(
+            member.acquire(&server, &address).unwrap(),
+            SpaceKeyState::Held
+        );
+    }
 }
 
 /// Alice rotates for eight other members. Selection reads everyone's
@@ -2350,10 +2499,12 @@ fn explicit_rotation_refuses_when_a_root_row_is_skipped() {
     });
 }
 
-/// Alice refuses to rotate when the authority returns a delivery with an
-/// undecodable envelope column for the current epoch.
+/// Alice still rotates when the authority returns a delivery with an
+/// undecodable envelope column for the current epoch: the row is skipped,
+/// as any unreadable row is. Deliveries only order the first batch, and one
+/// malformed row must not stop the rotation that protects a removal.
 #[test]
-fn rotation_refuses_an_undecodable_current_delivery() {
+fn rotation_skips_an_undecodable_current_delivery() {
     within(|| {
         let table = "__e2ee_space_deliveries";
         let settings = EncryptionSettings::default();
@@ -2423,19 +2574,13 @@ fn rotation_refuses_an_undecodable_current_delivery() {
             cells.insert(name.to_owned(), root.cell(name).unwrap());
         }
         block_on(server.insert(table, cells, Default::default())).unwrap();
-        let error = alice
-            .rotate(&server, &space_address(&alice, space))
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ClientError::Protocol(ProtocolError::Refused(
-                    RefusalCode::RotationKeyStateUnconfirmed
-                ))
-            ),
-            "{error}"
+        assert_eq!(
+            alice
+                .rotate(&server, &space_address(&alice, space))
+                .unwrap(),
+            0
         );
-        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
     });
 }
 
@@ -4121,6 +4266,40 @@ fn a_holder_of_a_skipped_version_delivers_it_without_the_current_one() {
         });
         // The skipped K1 and, through its history, K0; not the current K2.
         assert_eq!(depths, [0, 1], "dave holds the skipped version");
+    });
+}
+
+/// Bob, removed while Alice rotated the space two and then five times, is
+/// added back and recovers. His recovery reads the newer versions' deliveries
+/// to him in one query, however many versions he missed.
+#[test]
+fn recovery_reads_missed_versions_in_one_query() {
+    within(|| {
+        let mut counts = Vec::new();
+        for rotations in [2, 5] {
+            let server = secure_authority_with(&EncryptionSettings::default(), None);
+            let (alice, bob, space) = shared_space(&server);
+            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+            block_on(server.delete(MEMBERS, member_row(&server, &bob.id()), Default::default()))
+                .unwrap();
+            for _ in 0..rotations {
+                alice
+                    .rotate(&server, &space_address(&alice, space))
+                    .unwrap();
+            }
+            server_member(&server, &alice, space, &bob.id());
+            pump(&server, &bob.db);
+            bob.client.take_delivery_reads();
+            drive(
+                &server,
+                &[&bob.db],
+                bob.client
+                    .recover_rotation(&bob.db, &space_address(&bob, space)),
+            )
+            .unwrap();
+            counts.push(bob.client.take_delivery_reads().2);
+        }
+        assert_eq!(counts[0], counts[1], "{counts:?}");
     });
 }
 

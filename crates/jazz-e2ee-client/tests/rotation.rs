@@ -106,7 +106,8 @@ impl RandomSource for FailingDeliveryIds {
 /// Alice rotates a space with one more member than fits in the first batch.
 /// The call returns after the first batch and Alice can immediately write
 /// under the new key. The background pass serves the remaining member in
-/// this unwatched space. A failure on the next rotation reaches her once.
+/// this unwatched space. A failure on the next rotation reaches her once
+/// per attempt, and is retried after a wait that doubles until it works.
 /// At depth four, the foreground and background saves share one sealing,
 /// and the writing and empty batches share one verified chain.
 ///
@@ -313,9 +314,45 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
         panic!("expected a background delivery failure, got {failed:?}");
     };
     assert_eq!(failed_space, &address);
-    assert_eq!(*reports.borrow(), [(address, error.to_string())]);
+    assert_eq!(*reports.borrow(), [(address.clone(), error.to_string())]);
+    // Not tried again before its retry wait, so not reported again.
     assert!(sync().is_empty());
     assert_eq!(reports.borrow().len(), 1);
+    // Tried again after it: still failing, reported once more, and the
+    // wait doubles.
+    client.advance_settle_clock(std::time::Duration::from_secs(2));
+    assert!(matches!(sync().as_slice(), [(space, Err(_))] if *space == address));
+    assert_eq!(reports.borrow().len(), 2);
+    client.advance_settle_clock(std::time::Duration::from_secs(2));
+    assert!(sync().is_empty());
+    // Once delivery works again, the retry delivers to the member left over.
+    fails.set(false);
+    client.advance_settle_clock(std::time::Duration::from_secs(2));
+    let before = deliveries().len();
+    assert!(matches!(
+        sync().as_slice(),
+        [(space, Ok(jazz_e2ee_client::SpaceKeyState::Held))] if *space == address
+    ));
+    let epoch = all(
+        &server,
+        Query::from("__e2ee_space_successors")
+            .filter(eq(col("identifier"), lit(Value::Uuid(space)))),
+    )
+    .unwrap()
+    .into_iter()
+    .max_by_key(|row| row.seq())
+    .unwrap()
+    .cell("epochId")
+    .unwrap();
+    let newest = all(
+        &server,
+        Query::from("__e2ee_space_deliveries").filter(eq(col("keyEpochId"), lit(epoch))),
+    )
+    .unwrap();
+    assert_eq!(newest.len(), DELIVERY_BATCH + 1);
+    assert_eq!(deliveries().len(), before);
+    assert_eq!(reports.borrow().len(), 2);
+    assert!(sync().is_empty());
 }
 
 /// Alice starts with a held key for an unwatched space. When she cannot
@@ -373,5 +410,120 @@ fn startup_reports_delivery_failure_for_an_unwatched_space() {
         && reason.contains("this client is offline")),
         "{failures:?}"
     );
+    runtime.stop();
+}
+
+/// Alice's app has a space open whose member Bob lacks its key, and her
+/// deliveries fail. At startup the watched space's pass and the sweep over
+/// held spaces both fail for it, and she is told `delivery-failed` once.
+#[test]
+fn startup_reports_a_watched_space_delivery_failure_once() {
+    let settings = EncryptionSettings::default();
+    let server = secure_authority_with(&settings, None);
+    let alice = account(0xa1);
+    let fails = Rc::new(Cell::new(false));
+    let client = Rc::new(
+        block_on(E2eeClient::open(ClientConfig {
+            store: Rc::new(MemoryStore::new()),
+            declarations: declarations_with(settings.clone()),
+            account_id: account_id(alice),
+            registry: jazz_e2ee::registry::Registry::builtin(),
+            random: Box::new(FailingDeliveryIds(fails.clone())),
+            device_account: None,
+        }))
+        .unwrap(),
+    );
+    let (db, _link) = session(&client, &server, alice, &settings, 0xa1, None);
+    assert_eq!(
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+        AccountStatus::Active
+    );
+    let project = project(&db, "plans");
+    pump(&server, &db);
+    let at = address(&db, project);
+    let scope = block_on(db.table_identity("projects")).unwrap().unwrap().0;
+    block_on(server.insert(
+        "__e2ee_members",
+        BTreeMap::from([
+            ("scopeId".to_owned(), Value::Uuid(scope)),
+            ("identifier".to_owned(), Value::Uuid(project)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(alice.account_id().unwrap().0),
+            ),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &db);
+    drive(
+        &server,
+        &[&db],
+        host_write(&client, &db, async || {
+            db.insert("notes", note(project, SECRET), Default::default())
+                .await
+        }),
+    )
+    .unwrap();
+    pump(&server, &db);
+    let bob = account(0xb0);
+    let runtime_bob = open_account(Rc::new(MemoryStore::new()), bob, settings.clone(), None);
+    let (bob_db, _bob_link) = session(&runtime_bob, &server, bob, &settings, 0xb0, None);
+    assert_eq!(
+        drive(&server, &[&bob_db], runtime_bob.ensure_account(&bob_db)).unwrap(),
+        AccountStatus::Active
+    );
+    block_on(server.insert(
+        "__e2ee_members",
+        BTreeMap::from([
+            ("scopeId".to_owned(), Value::Uuid(scope)),
+            ("identifier".to_owned(), Value::Uuid(project)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(bob.account_id().unwrap().0),
+            ),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &db);
+    fails.set(true);
+    let reports = observe_reports(&client);
+    let db = Rc::new(db);
+    let runtime = Encryption::new(
+        Built {
+            spaces: serde_json::json!({}),
+            client,
+            reports: Rc::default(),
+        },
+        Rc::new(JsStore::default()),
+        db.clone(),
+    );
+    runtime.use_space(true, "projects".to_owned(), project.to_string());
+    let failures = || {
+        reports
+            .borrow()
+            .iter()
+            .filter(|report| {
+                matches!(report, Report::DeliveryFailed { space, .. }
+                if space.scope_id == at.scope_id && space.identifier == at.identifier)
+            })
+            .count()
+    };
+    let mut turns = 0;
+    drive(&server, &[&db], async {
+        loop {
+            runtime.drive();
+            runtime.take_reports();
+            let state = runtime.state();
+            if state["stage"] == "idle" && failures() > 0 {
+                break;
+            }
+            turns += 1;
+            assert!(turns < 10_000, "no delivery failure: {state}");
+            futures::pending!();
+        }
+    });
+    assert_eq!(failures(), 1, "{:?}", reports.borrow());
     runtime.stop();
 }

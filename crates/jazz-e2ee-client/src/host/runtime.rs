@@ -1666,11 +1666,10 @@ async fn main_loop(this: Rc<Encryption>) {
                     match client.deliver_keys_outside_watch(&db, retained).await {
                         Ok(results) => {
                             for (space, result) in results {
-                                if let Err(error) = result {
-                                    client.shared.flush(vec![Report::DeliveryFailed {
-                                        space,
-                                        reason: error.to_string(),
-                                    }]);
+                                if let (Err(error), Ok(address)) =
+                                    (result, crate::spaces::protocol_address(&space))
+                                {
+                                    client.tell_delivery_failed(&address, &error);
                                 }
                             }
                         }
@@ -1682,7 +1681,14 @@ async fn main_loop(this: Rc<Encryption>) {
         this.stage.set("idle");
         // The approval watch wakes the loop when evidence changes. A retry
         // deadline covers a failed watch or authoritative challenge read.
-        this.set_background_deadline(retry_at.into_iter().chain(retry_challenge_at).min());
+        // So does the retry wait of a rotation's remaining deliveries.
+        this.set_background_deadline(
+            retry_at
+                .into_iter()
+                .chain(retry_challenge_at)
+                .chain(client.next_rotation_retry())
+                .min(),
+        );
         drop(turn);
         // A wake from queueing work may have been consumed while this
         // iteration was suspended after its drain point. Ask for the next

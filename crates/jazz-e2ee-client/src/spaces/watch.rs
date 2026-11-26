@@ -20,9 +20,7 @@ use super::{SpaceKeyState, space_query};
 use crate::account::rows::{self, account_id_cell, row_account_id, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
-use crate::state::{
-    MEMBER_CHANGE_WAIT, Report, WatchedRows, db_address, row_space, unchecked_address,
-};
+use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, db_address, row_space, unchecked_address};
 
 /// Live subscriptions to the rows that bring this device its keys: always
 /// its own member rows and the deliveries addressed to it, and, for the
@@ -483,11 +481,26 @@ impl E2eeClient {
         watch.interest.clone_from(&interest);
         watch.unserved.retain(|space| interest.contains(space));
         served.extend(members_changed.intersection(&interest).cloned());
-        let pending_deliveries = if self.shared.keys.borrow().online {
-            std::mem::take(&mut self.shared.member_watch.borrow_mut().pending_deliveries)
+        // Rotations this device made with members left to deliver to,
+        // each due now or after its retry wait (protocol §3.5).
+        let pending_deliveries: BTreeSet<SpaceAddress> = if self.shared.keys.borrow().online {
+            let now = self.shared.now();
+            self.shared
+                .member_watch
+                .borrow()
+                .pending_deliveries
+                .iter()
+                .filter(|(_, pending)| pending.retry_at.is_none_or(|at| now >= at))
+                .map(|(space, _)| space.clone())
+                .collect()
         } else {
             BTreeSet::new()
         };
+        self.shared
+            .member_watch
+            .borrow_mut()
+            .delivery_failures_told
+            .clear();
         served.extend(pending_deliveries.iter().cloned());
         let mut results = Vec::new();
         for space in served {
@@ -529,17 +542,25 @@ impl E2eeClient {
                     Err(error) => state = Err(error),
                 }
             }
+            // The rest of this device's rotation: every remaining member,
+            // whether or not another member's delivery reached it.
+            if pending_deliveries.contains(&space)
+                && state.is_ok()
+                && let Err(error) = self.finish_rotation(db, &space).await
+            {
+                state = Err(error);
+            }
             // The pass: members that lack a version this device holds.
-            if needs_pass && let Err(error) = self.deliver_pass(db, &space).await {
+            if needs_pass
+                && let Err(error) = self.deliver_pass(db, &space).await
+                && state.is_ok()
+            {
                 state = Err(error);
             }
             if (needs_pass || pending_deliveries.contains(&space))
                 && let Err(error) = &state
             {
-                self.shared.flush(vec![Report::DeliveryFailed {
-                    space: db_address(&space),
-                    reason: error.to_string(),
-                }]);
+                self.tell_delivery_failed(&space, error);
             }
             // Rows written under a refused creation's key, now that the real
             // key may be held (protocol §3.2).

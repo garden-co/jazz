@@ -137,7 +137,10 @@ pub enum Report {
         space: DbSpaceAddress,
         reason: String,
     },
-    /// A background pass could not deliver keys to members of the space.
+    /// The runtime could not deliver keys to members of the space: the
+    /// rest of a rotation (once per attempt), a pass after the space's
+    /// members or keys changed, or the startup or reconnect pass over held
+    /// spaces. At most once per space per round of these.
     DeliveryFailed {
         space: DbSpaceAddress,
         reason: String,
@@ -676,9 +679,26 @@ pub(crate) struct MemberWatch {
     pub streams: BTreeMap<&'static str, AccountStream>,
     pub spaces: BTreeMap<SpaceAddress, WatchedMembers>,
     pub changed: BTreeSet<SpaceAddress>,
-    /// Rotations with more deliveries to send, including in unwatched spaces.
-    pub pending_deliveries: BTreeSet<SpaceAddress>,
+    /// Rotations this device made with deliveries still to send, including
+    /// in unwatched spaces (protocol §3.5).
+    pub pending_deliveries: BTreeMap<SpaceAddress, PendingRotation>,
+    /// Spaces told `delivery-failed` in the current round: one sync and the
+    /// startup or reconnect sweep that follows it.
+    pub delivery_failures_told: BTreeSet<SpaceAddress>,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
+}
+
+/// The rest of a rotation this device made: the members it still delivers
+/// the new version to, each whether or not a delivery to it exists, since
+/// another member's delivery may not open (protocol §3.5).
+#[derive(Debug, Default)]
+pub(crate) struct PendingRotation {
+    /// Members not yet delivered to, in the rotation's order.
+    pub accounts: Vec<String>,
+    /// Failed attempts in a row, offline attempts not counted.
+    pub failures: u32,
+    /// No attempt before this, after a failure.
+    pub retry_at: Option<web_time::Instant>,
 }
 
 impl MemberWatch {
