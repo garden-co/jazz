@@ -42,7 +42,7 @@ use jazz_e2ee::protocol::account::{
 };
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
-use jazz_e2ee::protocol::error::{RecoveryFailure, RefusalCode};
+use jazz_e2ee::protocol::error::{RecoveryFailure, RefusalCode, UnsupportedCapability};
 use jazz_e2ee::protocol::position::Position;
 use jazz_e2ee::protocol::records::account::{DeviceProof, DeviceRequest, approval_code};
 use jazz_e2ee::protocol::{Accepted, ProtocolError};
@@ -804,16 +804,24 @@ impl E2eeClient {
             // nothing to write, so a binding may call this at every start.
             // The delivery must open with the recovery key: a row that is
             // merely there (junk from the server) would leave recovery
-            // silently broken.
+            // silently broken. Only a delivery that is missing or does not
+            // open for this client is written again; a provider failure, or
+            // any other error, stops the registration and writes nothing.
             if view.state.recovery_root(&keys.root_id).is_some() {
                 let replay =
                     AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
                 let evidence = verify_private(&replay, &view.state, &read.private)?;
-                let opens = AccountKeyEvidence::new(&replay, &view.state, &evidence)?
+                match AccountKeyEvidence::new(&replay, &view.state, &evidence)?
                     .acquire_with_recovery(&keys, &read.private.recovery_deliveries)
-                    .is_ok();
-                if opens {
-                    return Ok(());
+                {
+                    Ok(_) => return Ok(()),
+                    Err(
+                        ProtocolError::Recovery(
+                            RecoveryFailure::DeliveryMissing | RecoveryFailure::DeliveryUnusable,
+                        )
+                        | ProtocolError::Unsupported(UnsupportedCapability::AccountKeyEnvelope),
+                    ) => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
             let writer = self.writer()?;
@@ -822,6 +830,10 @@ impl E2eeClient {
                 None => {
                     let root = recovery_root(&writer, &view.state, &view.device, &keys)?;
                     let key = match commitment_key.take() {
+                        // Defence in depth: a retry cannot see another
+                        // generation today, since only a device that is not
+                        // active resets and the old generation's devices
+                        // are not active in the new one.
                         Some(key) if key.generation() == view.state.generation => key,
                         _ => RecoveryCommitmentKey::derive(secret, &domain, view.state.generation)?,
                     };

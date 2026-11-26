@@ -2,11 +2,13 @@
 // Check that no lattice or SHA-3 code is linked: the function names in a WASM
 // module and the defined symbols of an unstripped native library.
 //
-//   check-endorsement-symbols.mjs [--list] RELEASE.wasm NATIVE_LIBRARY
+//   check-endorsement-symbols.mjs [--list] RELEASE.wasm [NATIVE_LIBRARY]
 //   check-endorsement-symbols.mjs [--list] --correctness-artifacts
 //
-// The second form checks the WASM module and Node binding of the sealed
-// correctness artifacts the TypeScript partitions build, as CI runs it.
+// The first form, with the WASM module alone, is how the package build checks
+// the published module. The second form checks the WASM module and Node
+// binding of the sealed correctness artifacts the TypeScript partitions build,
+// as CI runs it.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { readdirSync, readFileSync } from "node:fs";
@@ -43,8 +45,12 @@ async function main(argv) {
     allowPositionals: true,
   });
   const usage =
-    "Usage: check-endorsement-symbols.mjs [--list] (RELEASE.wasm NATIVE_LIBRARY | --correctness-artifacts)";
-  if (values["correctness-artifacts"] ? positionals.length !== 0 : positionals.length !== 2)
+    "Usage: check-endorsement-symbols.mjs [--list] (RELEASE.wasm [NATIVE_LIBRARY] | --correctness-artifacts)";
+  if (
+    values["correctness-artifacts"]
+      ? positionals.length !== 0
+      : positionals.length < 1 || positionals.length > 2
+  )
     throw new Error(usage);
   const [wasm, native] = values["correctness-artifacts"]
     ? correctnessArtifactPaths(resolve(fileURLToPath(new URL("../..", import.meta.url))))
@@ -62,6 +68,7 @@ async function main(argv) {
   if (!names.length) throw new Error(`No function names in ${wasm}`);
   for (const name of names) inspect(name);
   console.log(`${wasm}: ${names.length} function names`);
+  if (!native) return;
 
   const nm = spawn("nm", ["-C", "--defined-only", native], {
     stdio: ["ignore", "pipe", "inherit"],

@@ -83,6 +83,39 @@ test("the check fails on a prohibited WASM function name or native symbol", (t) 
   assert.match(String(native.stderr), /Prohibited symbol: .*sha3/i);
 });
 
+test("the check of a WASM module alone fails on a prohibited function name", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "symbols-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const clean = path.join(dir, "clean.wasm");
+  const planted = path.join(dir, "planted.wasm");
+  fs.writeFileSync(clean, moduleWithNames(["jazz_wasm::run", "sha2::sha256::compress256"]));
+  fs.writeFileSync(planted, moduleWithNames(["jazz_wasm::run", "keccak::f1600"]));
+  const run = (wasm) => spawnSync(process.execPath, [script, wasm]);
+
+  assert.equal(run(clean).status, 0);
+  const wasm = run(planted);
+  assert.equal(wasm.status, 1);
+  assert.match(String(wasm.stderr), /Prohibited symbol: keccak::f1600/);
+});
+
+test("the package build checks the published WASM module after building it", () => {
+  const workflow = fs.readFileSync(
+    path.join(root, ".github/workflows/build-jazz-packages.yml"),
+    "utf8",
+  );
+  const job = workflow.slice(workflow.indexOf("\n  build-wasm:\n"));
+  const end = job.indexOf("\n  build-", 1);
+  const steps = end === -1 ? job : job.slice(0, end);
+  const build = steps.indexOf("run: pnpm --filter jazz-wasm build\n");
+  const check = steps.indexOf(
+    "run: node dev/gates/check-endorsement-symbols.mjs crates/jazz-wasm/pkg/jazz_wasm_bg.wasm\n",
+  );
+  const upload = steps.indexOf("name: jazz-wasm-pkg");
+  assert.ok(build >= 0, "the build-wasm job builds the release package");
+  assert.ok(check > build, "the build-wasm job checks the module after building it");
+  assert.ok(upload > check, "before uploading it");
+});
+
 test("CI checks the symbols of the artifacts the TypeScript examples partition produced", () => {
   const partition = planFor({ partition: "typescript-examples" });
   const check = partition.find((item) => item.label === label);
