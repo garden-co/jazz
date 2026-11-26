@@ -45,7 +45,7 @@ const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(() => cleanUpTestApp(cleanups));
 
 async function serve(
-  again?: { dir: string; port: number },
+  again?: { dir: string; port?: number },
   served = permissions,
   storage: "sqlite" | "memory" = "sqlite",
 ) {
