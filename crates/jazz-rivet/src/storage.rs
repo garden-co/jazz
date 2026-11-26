@@ -128,22 +128,17 @@ impl Cursor for Rows {
 #[async_trait::async_trait(?Send)]
 impl Backend for Connection {
     async fn query(&self, sql: &str, params: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
-        // Rivet returns a complete result. Bound it inside SQLite, before transfer.
-        const MAX_ROWS: usize = 4096;
         let sql = sql.trim().trim_end_matches(';');
         let upper = sql
             .split_whitespace()
             .next()
             .unwrap_or("")
             .to_ascii_uppercase();
-        let query = match upper.as_str() {
-            "SELECT" | "WITH" => format!("SELECT * FROM ({sql}\n) LIMIT {}", MAX_ROWS + 1),
+        match upper.as_str() {
+            "SELECT" | "WITH" => {}
             "PRAGMA"
                 if sql.to_ascii_lowercase().starts_with("pragma table_info(")
-                    || sql.eq_ignore_ascii_case("PRAGMA schema_version") =>
-            {
-                sql.to_string()
-            }
+                    || sql.eq_ignore_ascii_case("PRAGMA schema_version") => {}
             _ => {
                 return Err(error(format!(
                     "Reading {upper} statements is not supported in Rivet storage yet"
@@ -152,17 +147,9 @@ impl Backend for Connection {
         };
         let args = bind(params)?;
         let result = match &self.transaction {
-            Some(tx) => self.run(tx.execute(query, args)).await?.into_query_result(),
-            None => self.run(self.db.query(query, args)).await?,
+            Some(tx) => self.run(tx.execute(sql, args)).await?.into_query_result(),
+            None => self.run(self.db.query(sql, args)).await?,
         };
-        if result.rows.len() > MAX_ROWS {
-            return Err(backend_error(
-                18,
-                format!(
-                    "Reading more than {MAX_ROWS} rows in one SQL cursor is not supported in Rivet storage yet"
-                ),
-            ));
-        }
         Ok(Box::new(Rows {
             columns: result.columns,
             rows: result.rows.into_iter(),
