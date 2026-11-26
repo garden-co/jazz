@@ -3634,6 +3634,110 @@ fn a_recovery_delivery_that_does_not_open_does_not_skip_the_registration() {
     });
 }
 
+/// The built-in key sealing, except that opening a recovery delivery is a
+/// provider failure while `fails` is set.
+struct RecoveryOpenFails(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl jazz_e2ee::agility::MechanismImpl for RecoveryOpenFails {
+    fn mechanism(&self) -> jazz_e2ee::envelope::Mechanism<'static> {
+        jazz_e2ee::mechanisms::key_seal::MECHANISM
+    }
+}
+
+impl jazz_e2ee::agility::KeySealer for RecoveryOpenFails {
+    fn derive_key_pair(&self, ikm: &[u8]) -> jazz_e2ee::Result<jazz_e2ee::agility::KeyPair> {
+        jazz_e2ee::mechanisms::key_seal::Builtin.derive_key_pair(ikm)
+    }
+
+    fn seal(
+        &self,
+        recipient: &jazz_e2ee::agility::PublicKey,
+        context: &[u8],
+        key: &[u8; 32],
+        rng: &mut dyn jazz_e2ee::RandomSource,
+    ) -> jazz_e2ee::Result<Vec<u8>> {
+        jazz_e2ee::mechanisms::key_seal::Builtin.seal(recipient, context, key, rng)
+    }
+
+    fn open(
+        &self,
+        recipient: &jazz_e2ee::agility::KeyPair,
+        context: &[u8],
+        envelope: &[u8],
+    ) -> jazz_e2ee::Result<jazz_e2ee::Zeroizing<[u8; 32]>> {
+        let marker = b"__e2ee_recovery_deliveries";
+        if self.0.load(std::sync::atomic::Ordering::SeqCst)
+            && context.windows(marker.len()).any(|window| window == marker)
+        {
+            return Err(jazz_e2ee::Error::CryptoFailure);
+        }
+        jazz_e2ee::mechanisms::key_seal::Builtin.open(recipient, context, envelope)
+    }
+}
+
+/// Contract: registering a root that is already registered fails with the
+/// provider's error when the provider fails while opening the root's
+/// delivery, and writes nothing. Only a delivery that is missing or does not
+/// open is written again.
+///
+/// ```text
+/// alice's device ──register──► root + delivery
+/// provider fails opening recovery deliveries
+/// alice's device ──register──► provider failure, still one delivery
+/// ```
+#[test]
+fn a_provider_failure_opening_the_recovery_delivery_fails_the_registration() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let fails = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = jazz_e2ee::registry::Registry::builtin();
+        registry
+            .replace_key_sealer(std::sync::Arc::new(RecoveryOpenFails(fails.clone())))
+            .unwrap();
+        let client = block_on(E2eeClient::open(jazz_e2ee_client::ClientConfig {
+            store: memory(),
+            declarations: declarations_with(settings.clone()),
+            account_id: account_id(alice),
+            registry,
+            random: Box::new(jazz_e2ee::OsRandom),
+            device_account: None,
+        }))
+        .unwrap();
+        let (db, link) = session(&client, &server, alice, &settings, 1, None);
+        let first = Device {
+            client,
+            db,
+            notes: None,
+            _link: link,
+        };
+        first.status(&server, &[]);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([9; 32]);
+        let register = || {
+            drive(
+                &server,
+                &[&first.db],
+                first.client.register_recovery(&first.db, &secret),
+            )
+        };
+        register().unwrap();
+        pump(&server, &first.db);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
+        fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            register(),
+            Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+        ));
+        pump(&server, &first.db);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
+        fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        register().unwrap();
+        pump(&server, &first.db);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
+    });
+}
+
 /// Contract: a root that is already registered gets no new commitment, even
 /// when its registration has to write the root's delivery again (here the
 /// server lost it).
