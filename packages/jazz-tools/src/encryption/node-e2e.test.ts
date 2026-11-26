@@ -1456,3 +1456,31 @@ describe("encryption on Node, end to end", () => {
     expect(listed.filter((device) => device.isThisDevice)).toHaveLength(1);
   }, 90_000);
 });
+
+// Review repro: alice goes offline, creates a project and writes its first
+// task. The write needs the new space's key, which her own device makes.
+it("writes the first row of a new space while offline", async () => {
+  const host = await serve(undefined, permissions, "memory");
+  // A store that answers on a later task, as a disk or IndexedDB store does.
+  const privateStore = new Proxy(memoryPrivateStore(), {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return (value as (...values: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }) as PrivateStore;
+  const alice = await device(host, { privateStore });
+  await alice.db.disconnect();
+  const id = crypto.randomUUID();
+  const self = await alice.db.encryption.members.row({ table: "projects", id }, alice.account);
+  const started = Date.now();
+  await alice.db.transaction((tx) => {
+    tx.insert(app.projects, { name: "offline", ownerId: alice.account }, { id });
+    tx.insert(app.__e2ee_members, self);
+  });
+  await alice.db.insert(app.tasks, { projectId: id, title: "first" }).wait({ tier: "local" });
+  expect(Date.now() - started).toBeLessThan(2_000);
+}, 30_000);
