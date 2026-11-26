@@ -730,6 +730,13 @@ fn a_space_row_waits_for_the_catalogue_without_an_authority() {
                 if reason.contains("has not received its authority's catalogue")),
             "the creator's member row needs the catalogue: {refused:?}"
         );
+        for table in ["projects", jazz::schema::MEMBERS_TABLE] {
+            assert_eq!(
+                local_rows(&execute, &store, table),
+                0,
+                "the refused insert wrote nothing to {table}"
+            );
+        }
         assert_eq!(execute(Request::Close), Response::Closed { closed: true });
         jazz_native_relay_host_lease_free(lease);
         jazz_native_relay_host_free(host);
@@ -917,6 +924,25 @@ fn device_insert(
     }) {
         Response::Inserted { .. } => run(Request::CommitTransaction { transaction }),
         refused => refused,
+    }
+}
+
+/// How many rows of `table` the device's own store holds.
+fn local_rows(execute: &impl Fn(Request) -> Response, store: &Handler, table: &str) -> usize {
+    let all = Request::All {
+        query: postcard::to_allocvec(&jazz::query::Query::from(table)).unwrap(),
+        options_json: "{}".into(),
+        transaction: None,
+    };
+    match settle(execute, execute(all), || {
+        answer_store(execute, store);
+    }) {
+        Response::Rows { rows } => jazz::binding_codec::decode_rows(&rows)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.rows.len())
+            .sum(),
+        other => panic!("the device could not read {table}: {other:?}"),
     }
 }
 
