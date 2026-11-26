@@ -607,7 +607,9 @@ Account and device tables (fixed policies):
 - R11a. `__e2ee_commitments`: insert only with `accountId = session account`
   and `subjectId` a device request or a recovery root of the same account (a
   root inserted in the same transaction counts); readable like the other
-  public tables (R10).
+  public tables (R10). The policy does not check the rest of the row, nor
+  that a subject has only one: which row counts is the reader's rule (§2.9,
+  "Which commitment counts").
 
 The founder, kind and `allowAccountReset` conditions of R5 and R6 are
 account-registry and configuration checks beside the policies, as Jazz's
@@ -1539,7 +1541,7 @@ the 32 secret bytes, created and read with user verification required
   key are never stored. A root that is
   already registered gets no new commitment; approving or restoring a
   device writes none. Only recovery roots write commitments in this
-  version, and nothing reads, verifies or enforces them yet: their presence
+  version, and no replay reads, verifies or enforces them yet: their presence
   or absence changes no behaviour. Verification arrives in a later version.
   The table belongs to the system tables of version 1, amended before any
   release. A client built with that amended set and no commitment support
@@ -1558,6 +1560,29 @@ the 32 secret bytes, created and read with user verification required
   `c = 24e9d79801d9d24478c1884ac45222da7851a6be14eb7401bd75ea6456b8430c`
   and commitment
   `334b6b549eb6afc4e68f0d33e45989ef4be77c7bef100ae98595f5632485f10a`.
+- **Which commitment counts.** The table policy (§1.4, R11a) checks only
+  the account and the subject, so a root can have several commitment rows,
+  some of them malformed. A reader decides alone. A commitment row is
+  **valid for** a valid root iff its `accountId` is the root's account, its
+  `subjectKind` is `recovery-root` and its `subjectId` the root's ID, the
+  record is well formed (IDs of their forms, a known mechanism's key at its
+  exact length, any other mechanism's key of 1 to 65,536 bytes,
+  a non-empty signature), and its signature verifies under the root's own
+  signing key over the signed bytes above, at the root's generation. The
+  root's **counting commitment** is the earliest row valid for it by accepted
+  position, ties by smallest ID, among the rows at or after the root's
+  position (its own transaction counts). Invalid rows are ignored wherever
+  they are; a later valid row never replaces the counting one, so whoever
+  can forge the root's classical signature later cannot swap it out. If the
+  counting row's mechanism or version is one the reader does not know, the
+  root's commitment is unsupported for that reader: it does not fall through
+  to a later row of a mechanism it knows. If the root's signing mechanism is
+  unsupported or the provider fails, the reader cannot decide, rather than
+  treating the row as invalid. `counting_commitment` in
+  `crates/jazz-e2ee/src/protocol/records/roster.rs` is this rule, and
+  `the_earliest_valid_commitment_counts` in
+  `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs` pins it; no
+  replay calls it yet.
 - **Validity.** A root is valid iff it is strictly after the account root, its
   `epochId` was the account epoch at its position, its signer was active then
   with a supported signing mechanism, and its signature verifies. In an app

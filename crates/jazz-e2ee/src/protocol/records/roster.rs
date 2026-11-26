@@ -1,5 +1,6 @@
 //! Public account commitments.
 
+use crate::agility::PublicKey;
 use crate::context::CryptoContext;
 use crate::envelope::Mechanism;
 use crate::primitives::slh_dsa;
@@ -8,6 +9,9 @@ use crate::protocol::domain::AccountDomain;
 use crate::protocol::error::ProtocolResult;
 use crate::protocol::ids::IdForm;
 use crate::protocol::json::MAX_DELIVERY_BYTES;
+use crate::protocol::position::{Accepted, Position, by_position_then_id};
+use crate::protocol::signing;
+use crate::registry::Registry;
 
 use super::{
     append_framed, context, ensure, ensure_account, ensure_bytes, ensure_id, env, row_id,
@@ -97,3 +101,83 @@ impl Commitment {
 }
 
 row_id!(Commitment);
+
+/// A valid recovery root, as replay accepted it: what a reader needs to
+/// decide which of its commitment rows counts.
+#[derive(Debug, Clone, Copy)]
+pub struct CommittedRoot<'a> {
+    pub account_id: &'a str,
+    pub root_id: &'a str,
+    pub generation: u64,
+    /// The root's accepted position.
+    pub position: Position,
+    /// The root's own signing key.
+    pub signing: &'a PublicKey,
+}
+
+/// The commitment that counts for a recovery root (§2.9, "Which commitment
+/// counts").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counted<'a> {
+    /// The counting row is of the mechanism this version knows.
+    Known(&'a Commitment),
+    /// The counting row is of a mechanism or version this reader does not
+    /// know. No later row is considered in its place.
+    Unsupported(&'a Commitment),
+}
+
+impl Commitment {
+    /// Whether this row is a valid commitment of `root` (§2.9, "Which
+    /// commitment counts"): of its account and subject, with a well-formed
+    /// record (known mechanisms at their exact key length) and a signature
+    /// by the root's own key that verifies. A malformed row is invalid; a
+    /// failure to verify (an unsupported signing mechanism, a provider
+    /// failure) is an error, never "invalid".
+    pub fn is_valid_for(
+        &self,
+        registry: &Registry,
+        application: &AccountDomain,
+        root: &CommittedRoot<'_>,
+    ) -> ProtocolResult<bool> {
+        if self.account_id != root.account_id
+            || self.subject_kind != SubjectKind::RecoveryRoot
+            || self.subject_id != root.root_id
+            || self.validate().is_err()
+        {
+            return Ok(false);
+        }
+        let bytes = self.signed_bytes(application, root.generation)?;
+        signing::verify(registry, root.signing, &bytes, &self.signature)
+    }
+}
+
+/// The commitment that counts for `root` among the commitment rows of a
+/// ledger read: the earliest valid one by accepted position, ties by
+/// smallest row ID, no earlier than the root itself (§2.9, "Which
+/// commitment counts"). `None` if no row is valid. Rows that are not about
+/// `root` are ignored, so `rows` can be a whole read.
+pub fn counting_commitment<'a>(
+    registry: &Registry,
+    application: &AccountDomain,
+    root: &CommittedRoot<'_>,
+    rows: &'a [Accepted<Commitment>],
+) -> ProtocolResult<Option<Counted<'a>>> {
+    let mut ordered: Vec<&Accepted<Commitment>> = rows
+        .iter()
+        .filter(|accepted| accepted.position >= root.position)
+        .collect();
+    by_position_then_id(&mut ordered);
+    for accepted in ordered {
+        let row = &accepted.row;
+        if row.is_valid_for(registry, application, root)? {
+            return Ok(Some(
+                if Mechanism::new(&row.mechanism, row.version) == MECHANISM {
+                    Counted::Known(row)
+                } else {
+                    Counted::Unsupported(row)
+                },
+            ));
+        }
+    }
+    Ok(None)
+}
