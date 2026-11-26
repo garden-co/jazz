@@ -36,13 +36,17 @@ export class Auth extends Context.Service<
       const session = atom.get() as { isPending: boolean; data: unknown };
       return session.isPending ? "pending" : session.data ? "signed-in" : "signed-out";
     };
-    const attempt = (run: () => Promise<{ error: { message?: string } | null }>) =>
+    // Better Auth answers `{ data, error }` rather than rejecting.
+    type Answer = { readonly error: { readonly message?: string | undefined } | null };
+    const attempt = (run: () => Promise<unknown>) =>
       Effect.tryPromise({
-        try: run,
+        try: () => run() as Promise<Answer>,
         catch: (cause) => new AuthFailed({ message: String(cause) }),
       }).pipe(
         Effect.flatMap(({ error }) =>
-          error ? Effect.fail(new AuthFailed({ message: error.message ?? "Sign-in failed" })) : Effect.void,
+          error
+            ? Effect.fail(new AuthFailed({ message: error.message ?? "Sign-in failed" }))
+            : Effect.void,
         ),
       );
     return Auth.of({

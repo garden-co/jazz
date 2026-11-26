@@ -37,14 +37,12 @@ export const App = Html.component({
   },
   view: (h, { auth, session }) => {
     const status = (message: string, error = false) =>
-      h.main
-        .class("shell")
-        .children(
-          h.p
-            .class(error ? "status error" : "status")
-            .attr("role", error ? "alert" : "status")
-            .children(message),
-        );
+      h.main.class("shell").children(
+        h.p
+          .class(error ? "status error" : "status")
+          .attr("role", error ? "alert" : "status")
+          .children(message),
+      );
     if (auth === "pending") return status("Opening StagePlan…");
     if (auth === "signed-out") return SignIn(h, {});
     switch (session._tag) {

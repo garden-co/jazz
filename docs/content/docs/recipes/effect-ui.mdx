@@ -1,0 +1,158 @@
+---
+title: Effect UI
+description: "Learn how to use Jazz in Effect UI apps: live queries as Subscriptions, writes as Commands."
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+`jazz-tools/effect-ui` connects Jazz to [Effect UI](https://ui.effect.website) (`@effect/ui`), the
+Elm-style UI framework for Effect v4. It builds on the [Effect bindings](/docs/recipes/effect) and
+adds no reactive primitive of its own. Live queries are Subscriptions, writes are Commands, and who is
+signed in comes from a service.
+
+<Callout type="warn">
+  Experimental. `@effect/ui` has no npm release yet: install a snapshot build pinned to one commit,
+  such as `pnpm add https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fe`. This module follows it, and
+  its API may change in any release. Effect UI needs `effect@^4.1.4`.
+</Callout>
+
+The StagePlan example
+([`examples/stage-plan/apps/ts-effect-ui-betterauth`](https://github.com/garden-co/jazz/tree/main/examples/stage-plan/apps/ts-effect-ui-betterauth))
+uses everything on this page.
+
+## Row Schemas
+
+Effect UI messages are Schemas, so it can log and replay them, so rows from a query need Effect Schemas
+too. Run `npx jazz-tools generate --effect-schema` once. It writes `jazz.effect.generated.ts` next to
+`jazz.generated.ts`, with a Schema for each row (for example `Task`), and plain `generate` keeps it current from then on.
+See [Effect Schemas](/docs/tooling/cli-and-mcp#effect-schemas).
+
+The errors from `jazz-tools/effect` (`JazzError`, `JazzWriteRejected`) are Schema classes, so they can
+be part of a message too.
+
+## Live queries
+
+`liveQuery(name, deps, options)` is a keyed Subscription over `jazz.stream`. List it in a component's
+`subscriptions`. It delivers each complete result as a message, and the component keeps the rows in its
+Model. The query is built from the deps only, and they are part of the Subscription's key: when
+`props.showId` changes, the old show's subscription closes and the new one starts.
+
+```ts
+import { UiSchema } from "@effect/ui";
+import { Html } from "@effect/ui/html";
+import { Schema } from "effect";
+import { JazzError } from "jazz-tools/effect";
+import { liveQuery } from "jazz-tools/effect-ui";
+import { app } from "./jazz.generated";
+import { Task } from "./jazz.effect.generated";
+
+const Message = UiSchema.TaggedEnum({
+  GotTasks: { tasks: Schema.Array(Task) },
+  FailedTasks: { error: JazzError },
+});
+
+export const TaskList = Html.component({
+  name: "TaskList",
+  props: Schema.Struct({ showId: Schema.String }),
+  model: Schema.Struct({ tasks: Schema.Array(Task) }),
+  message: Message,
+}).make({
+  init: () => ({ tasks: [] }),
+  subscriptions: ({ props }) => [
+    liveQuery("tasks", props.showId, {
+      query: (showId) => app.tasks.where({ showId }),
+      onRows: (tasks) => Message.GotTasks({ tasks }),
+      onError: (error) => Message.FailedTasks({ error }),
+    }),
+  ],
+  update: {
+    GotTasks: ($, { tasks }) => $.evolve({ tasks }),
+    FailedTasks: ($) => $.model,
+  },
+  view: (h, model) =>
+    h.ul.children(model.tasks.map((task) => h.li.key(task.id).children(task.title))),
+});
+```
+
+The Subscription requires the `Jazz` service. `onError` is required: a failed subscription becomes a
+message and the Subscription ends. To retry, change its key, or stop listing it and then list it again.
+
+## Writes
+
+A write is a `Command.Service` whose body uses `Jazz`. Match its errors to messages:
+
+```ts
+import { Command } from "@effect/ui";
+import { Effect, Schema } from "effect";
+import { Jazz, JazzError, JazzWriteRejected } from "jazz-tools/effect";
+
+export class AddTask extends Command.Service<AddTask>()("tasks/AddTask", {
+  args: { showId: Schema.String, title: Schema.String },
+  success: Message, // with CompletedWrite: {} and FailedWrite: { error: ... }
+  mode: "queue",
+}) {
+  static readonly layer = this.toLayer(
+    Effect.gen(function* () {
+      const jazz = yield* Jazz;
+      return ({ showId, title }) =>
+        jazz.insert(app.tasks, { showId, title, status: "todo", rank: 0 }).pipe(
+          Effect.match({
+            onSuccess: () => Message.CompletedWrite(),
+            onFailure: (error) => Message.FailedWrite({ error }),
+          }),
+        );
+    }),
+  );
+}
+```
+
+The write applies locally at once, and every `liveQuery` it affects delivers its new result. A Command
+over Jazz therefore needs no `invalidates` and no optimistic patch. Pass `{ wait: "global" }` to finish
+only once the server has accepted the write. A rejection then arrives as `JazzWriteRejected`.
+
+## Sessions
+
+For an app whose user signs in and out, provide `JazzSession.layer(config)` once, at the root. It opens a
+Jazz session for the app's lifetime:
+
+```ts
+import { BrowserHost } from "@effect/ui/html";
+import { Effect, Layer } from "effect";
+import { JazzSession } from "jazz-tools/effect-ui";
+
+const Main = BrowserHost.mount(App, {}, document.getElementById("app")!).pipe(
+  Layer.provide(JazzSession.layer({ serverUrl: "/jazz" })),
+);
+Layer.launch(Main).pipe(Effect.runFork);
+```
+
+- `sessionState(toMessage)` is a Subscription of the session's state, a `JazzSessionState` Schema value:
+  `Starting`, `Ready` (with `accountId`), `SignedOut`, `Transitioning`, `Failed` or `Closed`. Render each
+  screen from it in the root component.
+- `JazzSession.jazz` is a Layer that provides `Jazz` for the account that is signed in. The session
+  replaces its database when the user changes, so provide the layer to a component keyed on the account.
+  A new account then mounts a new instance, with a new `Jazz`:
+
+  ```ts
+  export const Planner = Component.provide(
+    PlannerView,
+    {
+      key: (props) => props.account,
+      layer: () =>
+        Layer.mergeAll(AddTask.layer, MoveTask.layer).pipe(Layer.provideMerge(JazzSession.jazz)),
+    },
+    { onFailure: () => Message.FailedJazz(), server: false },
+  );
+  ```
+
+- `refresh`, `signOut`, `createDeviceAccount` and `retry` on the `JazzSession` service are Effects. For
+  example, after your own sign-in a Command calls `refresh`, and Jazz asks your backend who is signed
+  in now.
+
+For a device-only app that never switches users, provide `Jazz.layer({ initial: "device", ... })` at the
+root instead.
+
+## Server rendering
+
+Subscriptions don't run on the server, so a page rendered there shows no live rows: they arrive once
+the client is running. Provide `JazzSession.jazz` with `server: false`, as above.

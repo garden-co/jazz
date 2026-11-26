@@ -1,4 +1,4 @@
-import { Command, UiSchema } from "@effect/ui";
+import { Command, Component, UiSchema } from "@effect/ui";
 import { Html } from "@effect/ui/html";
 import { Effect, Redacted, Schema } from "effect";
 import { JazzSession } from "jazz-tools/effect-ui";
@@ -34,7 +34,10 @@ export class SubmitSignIn extends Command.Service<SubmitSignIn>()("stage-plan/Su
       const auth = yield* Auth;
       const session = yield* JazzSession;
       return ({ signingUp, name, email, password }) =>
-        (signingUp ? auth.signUp({ name, email, password }) : auth.signIn({ email, password })).pipe(
+        (signingUp
+          ? auth.signUp({ name, email, password })
+          : auth.signIn({ email, password })
+        ).pipe(
           Effect.andThen(session.refresh),
           Effect.match({
             onSuccess: () => SignInMessage.SucceededSignIn(),
@@ -45,7 +48,7 @@ export class SubmitSignIn extends Command.Service<SubmitSignIn>()("stage-plan/Su
   );
 }
 
-export const SignIn = Html.component({
+const SignInView = Html.component({
   name: "SignIn",
   model: Schema.Struct({
     signingUp: Schema.Boolean,
@@ -124,11 +127,12 @@ export const SignIn = Html.component({
                 SignInMessage.ChangedPassword({ value: Redacted.make(value) }),
               ),
           ),
-          model.error !== undefined && h.p.class("error").attr("role", "alert").children(model.error),
+          model.error !== undefined &&
+            h.p.class("error").attr("role", "alert").children(model.error),
           h.button
             .attr("type", "submit")
             .class("primary")
-            .attr("disabled", model.submitting)
+            .disabled(model.submitting)
             .children(model.signingUp ? "Create account" : "Sign in"),
           h.button
             .attr("type", "button")
@@ -138,3 +142,5 @@ export const SignIn = Html.component({
         ),
     ),
 });
+
+export const SignIn = SignInView.pipe(Component.provide(SubmitSignIn.layer));

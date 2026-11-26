@@ -1,4 +1,4 @@
-import { Cause, Chunk, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect";
+import { Cause, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 import { testApp } from "../testing/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -6,7 +6,13 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import type { JazzClient } from "../web/registered-jazz-client.js";
 import type { JazzSession as CoreSession, JazzSessionSnapshot } from "../session/jazz-session.js";
 import { Jazz, JazzError, JazzWriteRejected } from "../effect/index.js";
-import { JazzNotSignedIn, JazzSession, JazzSessionState, liveQuery, sessionState } from "./index.js";
+import {
+  JazzNotSignedIn,
+  JazzSession,
+  JazzSessionState,
+  liveQuery,
+  sessionState,
+} from "./index.js";
 
 const app = testApp({
   tables: { todos: { columns: { title: "string", done: "boolean" } } },
@@ -23,7 +29,10 @@ function trackedJazz(name: string) {
     Jazz,
     Effect.acquireRelease(
       Effect.promise(async () =>
-        createDb({ ...(await localAccountConfig(`effect-ui-${name}`)), driver: { type: "memory" } }),
+        createDb({
+          ...(await localAccountConfig(`effect-ui-${name}`)),
+          driver: { type: "memory" },
+        }),
       ),
       (db) => Effect.promise(() => db.shutdown()),
     ).pipe(
@@ -76,7 +85,7 @@ describe("liveQuery", { timeout: 30_000 }, () => {
         yield* Effect.sleep("20 millis");
         yield* jazz.insert(app.todos, { title: "eggs", done: false });
         yield* jazz.insert(app.todos, { title: "done already", done: true });
-        return Chunk.toReadonlyArray(yield* Fiber.join(fiber));
+        return yield* Fiber.join(fiber);
       }).pipe(Effect.provide(layer)),
     );
     expect(messages).toEqual([{ _tag: "Rows", titles: ["eggs", "milk"] }]);
@@ -110,8 +119,8 @@ describe("liveQuery", { timeout: 30_000 }, () => {
     const messages = await Effect.runPromise(
       broken.stream.pipe(Stream.runCollect, Effect.provide(layer)),
     );
-    const [message] = Chunk.toReadonlyArray(messages);
-    expect(Chunk.size(messages)).toBe(1);
+    const [message] = messages;
+    expect(messages.length).toBe(1);
     expect(message?._tag).toBe("Failed");
     expect(message?._tag === "Failed" && message.error).toBeInstanceOf(JazzError);
   });
@@ -174,7 +183,7 @@ describe("JazzSession", () => {
           client: { db: {} } as JazzClient,
           error: new Error("offline"),
         });
-        return Chunk.toReadonlyArray(yield* Fiber.join(fiber));
+        return yield* Fiber.join(fiber);
       }).pipe(Effect.provide(JazzSession.layerSession(fake.session))),
     );
     expect(states).toEqual([
@@ -226,9 +235,7 @@ describe("errors as Schemas", () => {
     const failed = new JazzError({ operation: "insert", cause: new Error("boom") });
 
     const roundTrip = (error: typeof Errors.Type) =>
-      Schema.decodeUnknownSync(codec)(
-        JSON.parse(JSON.stringify(Schema.encodeSync(codec)(error))),
-      );
+      Schema.decodeUnknownSync(codec)(JSON.parse(JSON.stringify(Schema.encodeSync(codec)(error))));
 
     expect(roundTrip(rejected)).toEqual(rejected);
     const decoded = roundTrip(failed);

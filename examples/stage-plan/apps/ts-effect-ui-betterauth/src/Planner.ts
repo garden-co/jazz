@@ -7,7 +7,7 @@ import { app } from "../jazz.generated";
 import { Auth } from "./auth";
 import { AddChecklist, AddTask, Board, Me, MoveTask } from "./Board";
 import { createShow } from "./model";
-import { Crew, Show } from "./rows";
+import { Crew, Show } from "../jazz.effect.generated";
 import { field } from "./view";
 
 const ShowForm = Schema.Struct({
@@ -25,7 +25,10 @@ export const PlannerMessage = UiSchema.TaggedEnum({
   FailedQuery: { error: JazzError },
   ChangedProfileName: { value: Schema.String },
   SubmittedProfile: {},
-  ChangedShowForm: { field: Schema.Literals(["name", "venue", "date", "doors"]), value: Schema.String },
+  ChangedShowForm: {
+    field: Schema.Literals(["name", "venue", "date", "doors"]),
+    value: Schema.String,
+  },
   SubmittedShow: {},
   CreatedShow: { show: Show },
   CompletedWrite: {},
@@ -138,7 +141,9 @@ const PlannerView = Html.component({
     ChangedShowForm: ($, { field, value }) =>
       $.evolve({ showForm: (form) => ({ ...form, [field]: value }) }),
     SubmittedShow: ($) => {
-      const profile = Option.flatMap($.model.profiles, (profiles) => Option.fromNullishOr(profiles[0]));
+      const profile = Option.flatMap($.model.profiles, (profiles) =>
+        Option.fromNullishOr(profiles[0]),
+      );
       const input = { ...$.model.showForm, name: $.model.showForm.name.trim() };
       if (Option.isNone(profile) || !input.name) return $.model;
       return $.evolve({ showForm: emptyShowForm }).run(
@@ -167,7 +172,8 @@ const PlannerView = Html.component({
           .on("input", ({ value }) => PlannerMessage.ChangedShowForm({ field: key, value })),
       );
     const body = Option.match(model.profiles, {
-      onNone: () => h.p.class("status").attr("role", "status").children("Loading your crew profile…"),
+      onNone: () =>
+        h.p.class("status").attr("role", "status").children("Loading your crew profile…"),
       onSome: () =>
         Option.match(profile, {
           onNone: () =>
@@ -206,13 +212,15 @@ const PlannerView = Html.component({
                         )
                       : [h.li.class("secondary").children("No shows yet. Add your first one.")],
                   ),
-                  h.form.on("submit", PlannerMessage.SubmittedShow()).children(
-                    showField("Show", "name", "text", "Album launch"),
-                    showField("Venue", "venue", "text", "The Lantern"),
-                    showField("Date", "date", "date"),
-                    showField("Doors", "doors", "time"),
-                    h.button.attr("type", "submit").class("primary").children("Add show"),
-                  ),
+                  h.form
+                    .on("submit", PlannerMessage.SubmittedShow())
+                    .children(
+                      showField("Show", "name", "text", "Album launch"),
+                      showField("Venue", "venue", "text", "The Lantern"),
+                      showField("Date", "date", "date"),
+                      showField("Doors", "doors", "time"),
+                      h.button.attr("type", "submit").class("primary").children("Add show"),
+                    ),
                 ),
               // Keyed on the show: switching shows mounts a fresh board and
               // closes the old one's live query.
@@ -224,18 +232,22 @@ const PlannerView = Html.component({
             ),
         }),
     });
-    return h.main.class("shell").children(
-      h.header.class("top").children(
-        h.h1.children("StagePlan"),
-        h.button
-          .attr("type", "button")
-          .class("ghost")
-          .on("click", PlannerMessage.ClickedSignOut())
-          .children("Sign out"),
-      ),
-      model.error !== undefined && h.p.class("error").attr("role", "alert").children(model.error),
-      h.div.class("shell-body").children(body),
-    );
+    return h.main
+      .class("shell")
+      .children(
+        h.header
+          .class("top")
+          .children(
+            h.h1.children("StagePlan"),
+            h.button
+              .attr("type", "button")
+              .class("ghost")
+              .on("click", PlannerMessage.ClickedSignOut())
+              .children("Sign out"),
+          ),
+        model.error !== undefined && h.p.class("error").attr("role", "alert").children(model.error),
+        h.div.class("shell-body").children(body),
+      );
   },
 });
 

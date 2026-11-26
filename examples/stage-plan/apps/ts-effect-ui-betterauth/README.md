@@ -31,7 +31,7 @@ UI already has:
   with `JazzSession.jazz` (`src/Planner.ts`). After a sign-in or sign-out, a
   Command calls `JazzSession.refresh`. A new account then mounts a new
   planner, which gets its own `Jazz`.
-- **Rows travel in messages**, so they need Effect Schemas (`src/rows.ts`).
+- **Rows travel in messages**, so they need Effect Schemas: `jazz.effect.generated.ts`, which `jazz-tools generate --effect-schema` wrote and plain `generate` keeps current.
   Messages are logged, replayed and shown in Effect UI's devtools like any
   others. The errors from `jazz-tools/effect` are Schema classes for the same
   reason.

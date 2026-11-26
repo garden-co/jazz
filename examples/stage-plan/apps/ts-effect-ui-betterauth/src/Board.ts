@@ -6,7 +6,7 @@ import { liveQuery } from "jazz-tools/effect-ui";
 import { app } from "../jazz.generated";
 import { TASK_STATUSES, type TaskStatus } from "../app-extras";
 import { addTask, moveTask, rankAfter, STATUS_LABELS } from "./model";
-import { Crew, Show, Task, TaskStatus as TaskStatusSchema } from "./rows";
+import { Crew, Show, Task, TaskStatus as TaskStatusSchema } from "../jazz.effect.generated";
 import { field } from "./view";
 
 export const Me = Schema.Struct({ account: Schema.String, profile: Crew });
@@ -87,7 +87,7 @@ export class AddChecklist extends Command.Service<AddChecklist>()("stage-plan/Ad
   );
 }
 
-const column = (tasks: ReadonlyArray<Task>, status: TaskStatus) =>
+const column = (tasks: ReadonlyArray<typeof Task.Type>, status: TaskStatus) =>
   tasks.filter((task) => task.status === status).toSorted((a, b) => a.rank - b.rank);
 
 export const Board = Html.component({
@@ -165,7 +165,7 @@ export const Board = Html.component({
             h.button.attr("type", "submit").class("primary").children("Add task"),
             h.button
               .attr("type", "button")
-              .attr("disabled", model.addingChecklist)
+              .disabled(model.addingChecklist)
               .on("click", BoardMessage.ClickedChecklist())
               .children("Add standard checklist"),
           ),
@@ -197,7 +197,10 @@ export const Board = Html.component({
                           )
                           .children(
                             TASK_STATUSES.map((option) =>
-                              h.option.key(option).attr("value", option).children(STATUS_LABELS[option]),
+                              h.option
+                                .key(option)
+                                .attr("value", option)
+                                .children(STATUS_LABELS[option]),
                             ),
                           ),
                       ),

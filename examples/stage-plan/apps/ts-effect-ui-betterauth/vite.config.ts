@@ -14,7 +14,8 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/api": { target: backend },
-      "/jazz": { target: backend, ws: true },
+      // Anchored: a bare "/jazz" prefix would also proxy /jazz.generated.ts.
+      "^/jazz(?:/|\\?|$)": { target: backend, ws: true },
     },
   },
 });

@@ -4,18 +4,18 @@ import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import { Jazz } from "../effect/jazz.js";
 import type { JazzError } from "../effect/errors.js";
 
-export interface LiveQueryOptions<D extends Subscription.Deps, T, Msg> {
+export interface LiveQueryOptions<D extends Subscription.Deps, T, RowsMsg, ErrorMsg> {
   /** The query, from the Subscription's deps only (never the Model). */
   readonly query: (deps: D) => QueryBuilder<T>;
   /** Read options, such as a durability tier. */
   readonly options?: QueryOptions | undefined;
   /** The message for each complete result. */
-  readonly onRows: (rows: ReadonlyArray<T>) => Msg;
+  readonly onRows: (rows: ReadonlyArray<T>) => RowsMsg;
   /**
    * The message for a failed subscription. The Subscription ends after it;
    * change its key (or stop listing it and list it again) to retry.
    */
-  readonly onError: (error: JazzError) => Msg;
+  readonly onError: (error: JazzError) => ErrorMsg;
 }
 
 /**
@@ -39,11 +39,16 @@ export interface LiveQueryOptions<D extends Subscription.Deps, T, Msg> {
  * ]
  * ```
  */
-export const liveQuery = <const D extends Subscription.Deps, T extends { id: string }, Msg>(
+export const liveQuery = <
+  const D extends Subscription.Deps,
+  T extends { id: string },
+  RowsMsg,
+  ErrorMsg,
+>(
   name: string,
   deps: D,
-  { query, options, onRows, onError }: LiveQueryOptions<D, T, Msg>,
-): Subscription.Subscription<Msg, Jazz> =>
+  { query, options, onRows, onError }: LiveQueryOptions<D, T, RowsMsg, ErrorMsg>,
+): Subscription.Subscription<RowsMsg | ErrorMsg, Jazz> =>
   Subscription.make(name, deps, (deps: D) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -51,7 +56,7 @@ export const liveQuery = <const D extends Subscription.Deps, T extends { id: str
         return jazz.stream(query(deps), options);
       }),
     ).pipe(
-      Stream.map(onRows),
-      Stream.catch((error) => Stream.succeed(onError(error))),
+      Stream.map((rows): RowsMsg | ErrorMsg => onRows(rows)),
+      Stream.catch((error) => Stream.succeed<RowsMsg | ErrorMsg>(onError(error))),
     ),
   );

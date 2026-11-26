@@ -181,7 +181,5 @@ export const sessionState = <Msg>(
       Effect.gen(function* () {
         return (yield* JazzSession).state;
       }),
-    ).pipe(
-      Stream.map(toMessage),
-    ),
+    ).pipe(Stream.map(toMessage)),
   );

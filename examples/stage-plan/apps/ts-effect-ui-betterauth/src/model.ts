@@ -28,7 +28,13 @@ const activityEntry = (
   task: Pick<Task, "id" | "showId">,
   kind: ActivityKind,
   detail?: string,
-) => ({ showId: task.showId, taskId: task.id, actorId: me.profile.id, kind, detail });
+) => ({
+  showId: task.showId,
+  taskId: task.id,
+  actorId: me.profile.id,
+  kind,
+  detail: detail ?? null,
+});
 
 /** Creates a show with its creator as crew chief and a first invite, in one transaction. */
 export const createShow = (jazz: JazzDb, me: Me, input: ShowInput) =>
