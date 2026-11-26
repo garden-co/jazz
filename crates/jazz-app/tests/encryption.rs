@@ -1119,6 +1119,60 @@ async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
     alice.shutdown().await.unwrap();
 }
 
+/// Alice creates and deletes a project in one transaction. The authority
+/// accepts the transaction without creating a membership for Alice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_deleted_in_its_creation_transaction_has_no_creator_member() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+    use jazz_app_support::jazz::tools::PolicyExpr;
+    use jazz_app_support::jazz::tools::deployment::artifact::{self, ArtifactInput};
+
+    let fixture = artifact::load(
+        include_bytes!("fixtures/encrypted/jazz.app.json"),
+        include_bytes!("fixtures/encrypted/jazz.permissions.json"),
+    )
+    .unwrap();
+    let mut permissions = fixture.permissions().clone();
+    let projects = permissions.get_mut(&TableName::new("projects")).unwrap();
+    *projects = projects.clone().with_delete(PolicyExpr::True);
+    let files = artifact::write(ArtifactInput {
+        current: fixture.current_hash().to_string(),
+        schemas: vec![fixture.current_schema().clone()],
+        migrations: Vec::new(),
+        permissions,
+        codegen: fixture.codegen().clone(),
+    })
+    .unwrap();
+    let app = App::start_with(AppFiles::new(
+        files.app,
+        Some(files.permissions.into_bytes()),
+    ))
+    .await;
+    let alice = app.device().await.durable(DurabilityTier::GlobalServer);
+    assert_eq!(ready(&alice).await, "active");
+    let account = ObjectId::from_uuid(alice.account().unwrap().0);
+    let id = alice
+        .transaction(move |tx| async move {
+            let project = tx.insert(NewProject::new("discarded plans", account))?;
+            tx.delete::<Project>(project.id)?;
+            Ok(project.id)
+        })
+        .await
+        .unwrap();
+    let members = alice
+        .all_with(
+            bindings::e2ee_members::query().filter(bindings::e2ee_members::identifier().eq(id)),
+            ReadTier::Remote,
+        )
+        .await
+        .unwrap();
+    assert!(members.is_empty(), "{members:?}");
+
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Contract: an app written against the generated bindings manages a space's
 /// members as typed rows: alice adds bob with a typed member insert, a typed
 /// read of the members table lists the project's members, and bob, delivered
@@ -2082,6 +2136,69 @@ async fn removing_space_members_requires_the_authority() {
     assert!(after.pending_revision > before.pending_revision);
     assert_eq!(after.pending, 0);
     assert_eq!(after.rejected, before.rejected);
+
+    replica.shutdown().await.unwrap();
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Alice admits Bob at the authority while her second device is offline.
+/// That device waits for an authority read before queuing a removal. Once
+/// online, it removes the membership the authority found and counts it.
+///
+/// ```text
+/// replica ──disconnect──┐
+/// alice ──admit bob─────┼──► authority
+/// replica ──remove bob──┘    waits for read, no upload
+/// replica ──reconnect──────► authority ──find bob──► remove one
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_member_waits_for_an_authority_read_before_queuing_a_commit() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app
+        .device_of(key.clone())
+        .await
+        .durable(DurabilityTier::GlobalServer);
+    let replica = app.device_of(key).await;
+    let bob = app.device().await;
+    for device in [&alice, &replica, &bob] {
+        assert_eq!(ready(device).await, "active");
+    }
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap();
+    replica.disconnect().await.unwrap();
+    alice
+        .add_member::<Project>(project.id, bob_account)
+        .await
+        .unwrap();
+
+    let upload_revision =
+        || replica.with_client(|client| async move { Ok(client.upload_status().pending_revision) });
+    let before = upload_revision().await.unwrap();
+    let mut removal = std::pin::pin!(replica.remove_member::<Project>(project.id, bob_account));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut removal)
+            .await
+            .is_err(),
+        "the authority read waits while disconnected"
+    );
+    assert_eq!(
+        upload_revision().await.unwrap(),
+        before,
+        "a stale read must not queue an empty removal commit"
+    );
+
+    replica.reconnect().await.unwrap();
+    assert_eq!(removal.await.unwrap(), 1);
 
     replica.shutdown().await.unwrap();
     alice.shutdown().await.unwrap();
