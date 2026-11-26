@@ -12591,10 +12591,9 @@ impl Store {
                         binding,
                         include_deleted,
                         view,
-                        span: ReadSpan::Once { at },
+                        span: ReadSpan::Once { .. },
                         ..
                     } = &fetch.ask
-                        && at.is_none()
                     {
                         answers.push((
                             (**query).clone(),
@@ -13602,8 +13601,9 @@ impl Db {
         // are served from this store first, in the order they came.
         self.inner.without_overlay().relayed_refusals(index);
         let (relayed, answers) = self.inner.without_overlay().relayed_fetches_ready(index);
-        // The upstream's answers list their results' rows: cached rows
-        // they left out are not served as the reader's (INV-SYNC-14).
+        // The upstream's answers list their results' rows (as of `at`, for
+        // a pinned read): cached rows they left out are not served as the
+        // reader's (INV-SYNC-14).
         for (query, binding, include_deleted, view, listed, through) in answers {
             self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)
                 .await?;
