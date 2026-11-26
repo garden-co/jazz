@@ -757,7 +757,10 @@ test("foreground wake lifecycle clears native callbacks before close or runtime 
     foregroundRuntime,
     /jazz_native_relay_host_lease_set_foreground_wake_callback\([\s\S]*nullptr, nullptr\)/,
   );
-  assert.match(foregroundRuntime, /if \(!active_ \|\| !pending_\) return;/);
+  assert.match(
+    foregroundRuntime,
+    /if \(!active_ \|\| \(!pending_ && !pendingEncryptionState_\)\) return;/,
+  );
   assert.match(foregroundRuntime, /if \(kind == kWakeCancelled\) \{[\s\S]*active_ = false;/);
   assert.match(foregroundRuntime, /catch \(\.\.\.\) \{[\s\S]*scheduled_ = false;/);
   // Native handle close/revoke reaches the same clear-before-free operation;

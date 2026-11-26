@@ -152,8 +152,18 @@ Automatic rotation happens just before a write. If rotation fails, the write can
 under the current key, which the removed member may hold. The runtime sends `onReport` a
 `rotation-failed` report with the space and the `reason`.
 
-If background delivery after a rotation fails, `onReport` receives a `delivery-failed` report
-with the space and the reason.
+`rotate(space)` returns once the new key and its first 100 deliveries are committed. The runtime
+then delivers the new key to the remaining members in the background, to each of them even if
+another member already sent it one (that delivery may not open). If that fails, it tries again
+after 2 seconds, then 4, 8 and so on up to a minute, and gives up after 6 failed attempts in a row;
+any member holding the new key then delivers it to those left out on its next pass. Failures
+while offline aren't counted.
+
+`onReport` receives a `delivery-failed` report, with the space and the reason, when the runtime
+fails to deliver keys to a space's members: for the background deliveries after a rotation (once
+per attempt), for the pass it runs when a space's members or keys change, and for the pass over
+every held space when the app starts or reconnects. A space is reported at most once per round
+of these, so starting offline reports each held space once.
 
 The next write can retry after a transient rotation failure. After a permission denial, this client stops
 trying to rotate that space automatically for the rest of the session. A member with permission can
