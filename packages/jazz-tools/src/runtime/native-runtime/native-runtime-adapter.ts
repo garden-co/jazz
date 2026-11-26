@@ -161,6 +161,8 @@ export { encodeSchema } from "./schema-codec.js";
 const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
+/** The longest an idle pending read sleeps between polls when no work wakes it. */
+const PENDING_READ_MAX_IDLE_MS = 50;
 const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   none: "none",
   connecting: "attempting",
@@ -1022,6 +1024,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly pendingNativeReadCancels = new Set<() => void>();
+  /** Pending native reads parked until the core can have made progress. */
+  private readonly pendingReadWakes = new Set<() => void>();
+  /** The native core asked for a tick that hasn't run yet: the tick after
+   * it may have answered a pending read. */
+  private nativeWorkSinceTick = false;
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1538,6 +1545,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
+      this.ownerRuntime.nativeWorkSinceTick = true;
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
@@ -4205,12 +4213,20 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
-    const cancel = () => result.cancel();
-    this.ownerRuntime.pendingNativeReadCancels.add(cancel);
-    let pollChannel: MessageChannel | undefined;
+    const owner = this.ownerRuntime;
+    let wake: (() => void) | undefined;
+    // Closing the runtime cancels the read and ends its wait at once.
+    const cancel = () => {
+      result.cancel();
+      wake?.();
+    };
+    const onAbort = () => wake?.();
+    owner.pendingNativeReadCancels.add(cancel);
+    signal?.addEventListener("abort", onAbort);
+    let idleMs = 0;
     try {
       for (;;) {
-        if (this.closed || this.ownerRuntime.closed)
+        if (this.closed || owner.closed)
           throw new Error("native read was cancelled by runtime shutdown");
         signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
@@ -4220,21 +4236,29 @@ export class NativeRuntimeAdapter implements Runtime {
         // read itself may be what lets that pass resume.
         this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
-        if (typeof location !== "undefined" && typeof MessageChannel !== "undefined") {
-          // Let WebSocket and storage events run without nesting browser timers.
-          const channel = (pollChannel ??= new MessageChannel());
-          await new Promise<void>((resolve) => {
-            channel.port1.onmessage = () => resolve();
-            channel.port2.postMessage(null);
-          });
-        } else {
-          await sleep(0);
-        }
+        // Park until the core can have made progress: a server frame, or a
+        // tick the native core asked for (peer frames, chunk requests, a
+        // local write). The timer is only a fallback for progress nothing
+        // announces; it backs off so an idle read costs a few polls a second
+        // instead of a busy loop.
+        const transportError = tier ? this.waitForServerTransportError(tier) : null;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const woke = await new Promise<"work" | "idle">((resolve) => {
+          wake = () => resolve("work");
+          owner.pendingReadWakes.add(wake);
+          transportError?.promise.catch(() => resolve("work"));
+          timer = setTimeout(() => resolve("idle"), idleMs);
+        });
+        if (wake) owner.pendingReadWakes.delete(wake);
+        wake = undefined;
+        clearTimeout(timer);
+        transportError?.cancel();
+        idleMs =
+          woke === "work" ? 0 : Math.min(PENDING_READ_MAX_IDLE_MS, Math.max(1, idleMs * 2));
       }
     } finally {
-      pollChannel?.port1.close();
-      pollChannel?.port2.close();
-      this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
+      signal?.removeEventListener("abort", onAbort);
+      owner.pendingNativeReadCancels.delete(cancel);
       cancel();
       // A suspended read may have held the owner while queued commands
       // yielded. Resume those commands even without a network pump.
@@ -4831,6 +4855,9 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
+        const owner = this.ownerRuntime;
+        const nativeWork = owner.nativeWorkSinceTick;
+        owner.nativeWorkSinceTick = false;
         try {
           await this.db.tick();
         } catch (error) {
@@ -4849,6 +4876,7 @@ export class NativeRuntimeAdapter implements Runtime {
         // A server pass drains the output of the tick it is already awaiting.
         if (!this.serverPumpRunning) this.scheduleServerPump();
         this.notifyPeerTransportWork(false, true);
+        if (nativeWork) this.wakePendingReads();
         if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
@@ -5522,6 +5550,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private notifyServerTransportWork(): void {
     this.serverTransportWorkEpoch += 1;
     this.resolveServerTransportWorkWaiters();
+    this.wakePendingReads();
+  }
+
+  private wakePendingReads(): void {
+    const wakes = [...this.ownerRuntime.pendingReadWakes];
+    this.ownerRuntime.pendingReadWakes.clear();
+    for (const wake of wakes) wake();
   }
 
   private resolveServerTransportWorkWaiters(): void {

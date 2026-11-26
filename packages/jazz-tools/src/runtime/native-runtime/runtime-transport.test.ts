@@ -65,21 +65,73 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  it("polls a pending browser read again without a timer", async () => {
-    const poll = vi
-      .fn<() => Uint8Array | null>()
-      .mockReturnValueOnce(null)
-      .mockReturnValue(Uint8Array.of(0, 0));
+  it.each(["browser", "node"])(
+    "parks a pending %s read until the core has work, without a busy loop",
+    async (host) => {
+      let answered = false;
+      const poll = vi.fn<() => Uint8Array | null>(() => (answered ? Uint8Array.of(0, 0) : null));
+      let nativeWake!: (urgency: string) => void;
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (urgency: string) => void) => {
+            nativeWake = callback;
+          },
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
+        // Ten idle seconds, over many host turns: the read sleeps between
+        // fallback polls instead of polling on every turn.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        const idlePolls = poll.mock.calls.length;
+        expect(idlePolls).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // Native work wakes the read on the tick that follows, with no timer.
+        answered = true;
+        nativeWake("immediate");
+        for (let turn = 0; turn < 5 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
+  it("ends a parked pending read as soon as the runtime closes", async () => {
     const runtime = NativeRuntimeAdapter.fromDb(
-      fakeDb({ all: () => ({ poll, cancel: () => undefined }), tick: () => undefined }) as never,
+      fakeDb({ all: () => ({ poll: () => null, cancel: () => undefined }), tick: () => undefined }) as never,
       testSchema,
       new Uint8Array(16),
       TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
-    vi.stubGlobal("location", new URL("https://example.test"));
-    const timer = vi.spyOn(globalThis, "setTimeout");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const query = JSON.stringify({
         table: "todos",
@@ -87,13 +139,14 @@ describe("NativeRuntimeAdapter server transport", () => {
           { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
         ],
       });
-      expect(await runtime.query(query, null, "local-first")).toEqual([]);
-      expect(poll).toHaveBeenCalledTimes(2);
-      expect(timer).not.toHaveBeenCalledWith(expect.any(Function), 0);
+      const read = runtime.query(query, null, "local-first");
+      void read.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const closing = runtime.close();
+      await expect(read).rejects.toThrow("cancelled by runtime shutdown");
+      await closing;
     } finally {
-      timer.mockRestore();
-      vi.unstubAllGlobals();
-      await runtime.close();
+      vi.useRealTimers();
     }
   });
 
