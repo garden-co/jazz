@@ -209,6 +209,13 @@ export declare class NapiDb {
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openTransactionId: string): void
   /**
+   * How many immediate ticks this database has asked its tick callback
+   * for, coalesced requests included (0 once closed). The callback runs on
+   * a later turn; a host compares the count around a call to know which
+   * requests that call made.
+   */
+  tickRequests(): number
+  /**
    * The host's tick callback: `"immediate"` for ready sync work or
    * `"after:<milliseconds>"` for pending work with a deadline.
    */
