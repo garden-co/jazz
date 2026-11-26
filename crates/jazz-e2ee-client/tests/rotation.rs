@@ -111,7 +111,8 @@ impl RandomSource for FailingDeliveryIds {
 /// this unwatched space. A failure on the next rotation reaches her once
 /// per attempt, and is retried after a wait that doubles until it works.
 /// At depth four, the foreground and background saves share one sealing,
-/// and the writing and empty batches share one verified chain.
+/// and the background sync runs only the rotation's batch, not the pass,
+/// so it replays no delivery chain.
 ///
 /// ```text
 /// alice ──successor + first batch──► authority ──accepts──► rotate returns
@@ -293,8 +294,8 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
                 client.delivery_chain_replays() - replays_before,
                 saved[0] == saved[1]
             ),
-            (1, true),
-            "expected one chain replay and reuse of the first sealing",
+            (0, true),
+            "expected the batch alone, without the pass's chain replay, and reuse of the first sealing",
         );
     }
     let reports = Rc::new(RefCell::new(Vec::new()));
