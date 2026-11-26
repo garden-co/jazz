@@ -303,7 +303,9 @@ impl StoreOwner<'_> {
             });
             let record = match reused {
                 Some((_, record)) => record.clone(),
-                None => self.seal_key_with_prefix(space, depth, entry, prefix, binding.clone(), rng)?,
+                None => {
+                    self.seal_key_with_prefix(space, depth, entry, prefix, binding.clone(), rng)?
+                }
             };
             sealed
                 .records
