@@ -949,6 +949,7 @@ struct Foreground {
     /// a relay answers its own subscribers' advice requests `Unknown`.
     authority: Binding,
     dirty: Rc<Cell<bool>>,
+    deadline: Rc<Cell<Option<Instant>>>,
     /// The foreground's upstream link to the relay.
     link: Link,
     /// The relay's subscriber link serving it.
@@ -1147,6 +1148,7 @@ pub(crate) struct RelayWorker {
     migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
+    persistent_deadline: Rc<Cell<Option<Instant>>>,
     upstream: Option<UpstreamConnection>,
     generation: u64,
     clients: BTreeMap<u64, Foreground>,
@@ -1178,12 +1180,21 @@ pub(crate) struct RelayWorker {
     keyless: Option<Rc<dyn jazz::e2ee::E2eeHooks>>,
 }
 
-/// A binding's tick requests set `dirty`; the owner's drive ticks it.
-fn hook(binding: &Binding) -> Rc<Cell<bool>> {
+/// The owner services immediate ticks and the earliest delayed tick per binding.
+fn hook(binding: &Binding) -> (Rc<Cell<bool>>, Rc<Cell<Option<Instant>>>) {
     let dirty = Rc::new(Cell::new(true));
     let flag = Rc::clone(&dirty);
     *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
-    dirty
+    let deadline = Rc::new(Cell::new(None));
+    let next = Rc::clone(&deadline);
+    *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+        if let Some(at) = Instant::now().checked_add(Duration::from_millis(ms))
+            && next.get().is_none_or(|current| at < current)
+        {
+            next.set(Some(at));
+        }
+    }));
+    (dirty, deadline)
 }
 
 /// Refuse a file a pre-SQLite native relay wrote: its ordered-KV tables
@@ -1279,12 +1290,13 @@ impl RelayWorker {
         ))
         .map_err(|error| RelayError::Host(error.into()))?;
         let persistent = block_on(Binding::new(db, config.identity, false));
-        let persistent_dirty = hook(&persistent);
+        let (persistent_dirty, persistent_deadline) = hook(&persistent);
         Ok(Self {
             schema: config.schema,
             migrations: config.migrations,
             persistent,
             persistent_dirty,
+            persistent_deadline,
             upstream: None,
             generation: 0,
             clients: BTreeMap::new(),
@@ -1307,15 +1319,15 @@ impl RelayWorker {
         let mut clock_checked = Instant::now();
         loop {
             let deadline = self
-                .clients
-                .values()
-                .filter_map(|client| {
-                    client
-                        .encryption
-                        .as_ref()?
-                        .bridge_store()
-                        .next_deadline_after(clock_checked)
-                })
+                .persistent_deadline
+                .get()
+                .into_iter()
+                .chain(self.clients.values().flat_map(|client| {
+                    let store_deadline = client.encryption.as_ref().and_then(|encryption| {
+                        encryption.bridge_store().next_deadline_after(clock_checked)
+                    });
+                    client.deadline.get().into_iter().chain(store_deadline)
+                }))
                 .min();
             let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
             let wait = if self.awaits_time() {
@@ -1326,7 +1338,11 @@ impl RelayWorker {
             } else {
                 wait
             };
-            let command = if self.redrive {
+            // Encryption can request another tick after the database tick rounds.
+            let command = if self.redrive
+                || self.persistent_dirty.get()
+                || self.clients.values().any(|client| client.dirty.get())
+            {
                 match receiver.try_recv() {
                     Ok(command) => Some(command),
                     Err(mpsc::TryRecvError::Empty) => None,
@@ -1440,7 +1456,7 @@ impl RelayWorker {
         block_on(db.set_identity_claims(identity.author, claims.clone()));
         let binding = block_on(Binding::new(db, identity, false));
         block_on(binding.set_non_durable_client());
-        let dirty = hook(&binding);
+        let (dirty, deadline) = hook(&binding);
         let encryption = runtime.map(|built| {
             let flag = Rc::clone(&dirty);
             built.store.set_wake(Box::new(move || flag.set(true)));
@@ -1479,6 +1495,7 @@ impl RelayWorker {
                 binding,
                 authority: self.persistent.clone(),
                 dirty,
+                deadline,
                 link,
                 served,
                 subscriptions: BTreeMap::new(),
@@ -1717,7 +1734,7 @@ impl RelayWorker {
         let claims = self.claims.clone().unwrap_or_default();
         block_on(db.set_identity_claims(author, claims.clone()));
         self.persistent = block_on(Binding::new(db, self.identity, false));
-        self.persistent_dirty = hook(&self.persistent);
+        (self.persistent_dirty, self.persistent_deadline) = hook(&self.persistent);
         for client in self.clients.values_mut() {
             client.authority = self.persistent.clone();
             client.served = block_on(self.persistent.accept_subscriber(author, claims.clone()))
@@ -1735,6 +1752,7 @@ impl RelayWorker {
     /// Tick what asked for a tick and move frames until nothing moves.
     pub(crate) fn drive(&mut self) {
         self.redrive = false;
+        let now = Instant::now();
         for round in 0.. {
             if round == NATIVE_RELAY_DRIVE_ROUNDS {
                 self.redrive = true;
@@ -1749,7 +1767,9 @@ impl RelayWorker {
                 }
             }
             for client in self.clients.values() {
-                if client.dirty.replace(false) {
+                if client.dirty.replace(false) || client.deadline.get().is_some_and(|at| at <= now)
+                {
+                    client.deadline.set(None);
                     if let Err(error) = block_on(client.binding.tick()) {
                         self.drive_error = Some(error.to_string());
                     }
@@ -1761,7 +1781,10 @@ impl RelayWorker {
                     progressed = true;
                 }
             }
-            if self.persistent_dirty.replace(false) {
+            if self.persistent_dirty.replace(false)
+                || self.persistent_deadline.get().is_some_and(|at| at <= now)
+            {
+                self.persistent_deadline.set(None);
                 if let Err(error) = block_on(self.persistent.tick()) {
                     self.drive_error = Some(error.to_string());
                 }
@@ -3534,6 +3557,101 @@ mod relay_config_tests {
         let config = relay_db_config(schema, identity, &Migrations::default());
         assert!(config.chunk_store.is_none());
         assert!(!config.host_chunk_io);
+    }
+
+    /// Alice's local-first read settles on the relay when the authority
+    /// stays silent. Use the core subscriber directly so the foreground's
+    /// pending-operation polling cannot supply the missing database tick.
+    ///
+    /// Alice ──read──► relay ──read──► silent authority
+    /// Alice ◄──local settlement on deadline── relay
+    #[test]
+    fn an_unanswered_read_settles_at_the_relay_deadline() {
+        use jazz::db::{ReadSpan, ReadTier, SyncMessage, Transport};
+        use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+        struct Peer {
+            read: Option<SyncMessage>,
+            settled: mpsc::Sender<Instant>,
+        }
+
+        impl Transport for Peer {
+            fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+                if matches!(
+                    message,
+                    SyncMessage::Settled {
+                        id: 1,
+                        global: false,
+                        ..
+                    }
+                ) {
+                    let _ = self.settled.send(Instant::now());
+                }
+                Ok(())
+            }
+
+            fn try_recv(&mut self) -> Option<SyncMessage> {
+                self.read.take()
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let author = AuthorSubject::for_test_bytes([2; 16]);
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("notes").column("title", ColumnType::Text))
+            .build();
+        let relay = NativeRelay::spawn(RelayOpenConfig::new(
+            NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            directory.path().join("relay.sqlite"),
+            JazzSchema::new(&schema).unwrap(),
+            Migrations::default(),
+            DbIdentity {
+                node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+                author,
+            },
+        ))
+        .unwrap();
+        let _upstream = relay.wire().unwrap();
+        relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
+        let (settled, answer) = mpsc::channel();
+        let started = Instant::now();
+        relay
+            .run(move |worker| {
+                let read = SyncMessage::Read {
+                    id: 1,
+                    query: Box::new(jazz::query::Query::from("notes")),
+                    binding: BTreeMap::new(),
+                    include_deleted: false,
+                    tier: ReadTier::LocalFirst,
+                    wait: Some(150),
+                    view: Box::new(jazz::protocol::ReadViewSourceSpec::Current),
+                    since: None,
+                    span: ReadSpan::Live,
+                };
+                block_on(worker.persistent.db.accept_subscriber(
+                    Box::new(Peer {
+                        read: Some(read),
+                        settled,
+                    }),
+                    author,
+                ))
+                .unwrap();
+                worker.persistent_dirty.set(true);
+                Ok(())
+            })
+            .unwrap();
+        let settled = answer
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the relay must wake at the database's read deadline");
+        assert!(settled.duration_since(started) >= Duration::from_millis(150));
     }
 }
 
