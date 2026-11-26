@@ -827,7 +827,7 @@ function requireSpaceTable(tables: Set<string>, table: string): void {
 /** @internal Lower a member insert using the runtime's already observed catalogue. */
 export function memberInsert(
   fallbackSchema: WasmSchema | null,
-  runtime: (schema: WasmSchema) => Runtime | null,
+  runtime: (schema: WasmSchema, spaceTable: string) => Runtime | null,
   args: AddMemberArgs,
 ): [table: TypedTableQueryBuilder<MemberTable>, data: MemberAddress] {
   const [table, idOrAccount, account] = args;
@@ -835,7 +835,7 @@ export function memberInsert(
   if (!schema) throw new EncryptionNotDeclaredError();
   const space = memberSpace(table, idOrAccount);
   requireSpaceTable(spaceTables(schema), space.table);
-  const client = runtime(schema);
+  const client = runtime(schema, space.table);
   if (!client?.tableIdentity) throw new Error("The runtime cannot resolve space table identities.");
   let scopeId: string;
   try {

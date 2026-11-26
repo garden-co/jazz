@@ -1825,13 +1825,24 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private openingPrerequisite?: TransactionAdmission;
   private encryptionSchema: WasmSchema | null = null;
+  private memberAddRefusal?: Error;
 
   readonly encryption = {
     members: {
       add: (...args: AddMemberArgs): MemberRow => {
         const [table, row] = memberInsert(
           this.encryptionSchema,
-          (schema) => this.resolveClient(schema).getRuntime(),
+          (schema, spaceTable) => {
+            const client = this.resolveClient(schema);
+            const runtime = client.getRuntime();
+            if (runtime.memberAddRefusal) {
+              if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
+              this.requireBinding("encryption.members.add");
+              throw (this.memberAddRefusal ??=
+                this.refusal() ?? runtime.memberAddRefusal(spaceTable));
+            }
+            return runtime;
+          },
           args,
         );
         return this.insert<MemberRow, MemberAddress>(table, row);
@@ -1926,7 +1937,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   refusal(): Error | undefined {
     const binding = dbTxHandleBindings.get(this);
-    return binding?.ownerClient.transactionRefusal(binding.openTransactionId);
+    return (
+      this.memberAddRefusal ?? binding?.ownerClient.transactionRefusal(binding.openTransactionId)
+    );
   }
 
   /**
@@ -1937,12 +1950,18 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const { ownerClient, openTransactionId, preparation } = binding;
     if (binding.committing) throw new Error("Transaction commit has already been requested.");
     if (preparation.pending || preparation.failed) binding.committing = true;
-    const txId =
-      preparation.pending || preparation.failed || this.pendingReads.size > 0
-        ? Promise.all([preparation.drain(), ...this.pendingReads]).then(
-            () => ownerClient.commitTransaction(openTransactionId).txId,
-          )
-        : ownerClient.commitTransaction(openTransactionId).txId;
+    let txId: Promise<TxId>;
+    if (this.memberAddRefusal) {
+      void this.rollback().catch(() => {});
+      txId = Promise.reject(this.memberAddRefusal);
+    } else {
+      txId =
+        preparation.pending || preparation.failed || this.pendingReads.size > 0
+          ? Promise.all([preparation.drain(), ...this.pendingReads]).then(
+              () => ownerClient.commitTransaction(openTransactionId).txId,
+            )
+          : ownerClient.commitTransaction(openTransactionId).txId;
+    }
     this.committing = true;
     const finishCommit = () => {
       this.committing = false;
@@ -3302,8 +3321,8 @@ export class Db {
 
   /**
    * A callback transaction runs once more, on the local-first client, when
-   * the thin client refused it (an operation in it touched an encrypted
-   * column), once that client has loaded; or when this Db handed over to
+   * the thin client refused an operation that needs local-first, once that
+   * client has loaded; or when this Db handed over to
    * that client while the transaction waited, so the closed thin runtime
    * ended it before anything of it was sent. At most once: `rerun` itself
    * never runs it again, except while the local-first client refuses it as

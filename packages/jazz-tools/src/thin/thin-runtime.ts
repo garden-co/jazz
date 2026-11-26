@@ -1360,6 +1360,16 @@ export class ThinRuntime implements Runtime {
 
   // ---- transactions -----------------------------------------------------
 
+  /** @internal Adding a member needs the space table's catalogue identity. */
+  memberAddRefusal(table: string): EncryptionNeedsLocalFirstError {
+    const refusal = new EncryptionNeedsLocalFirstError({
+      reason: this.refusalReason(),
+      operation: "members.add",
+      table,
+    });
+    return this.refusalReview?.(refusal, true) ?? refusal;
+  }
+
   beginTransaction(
     kind: TransactionKind,
     id: OpenTransactionId,
