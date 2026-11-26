@@ -137,7 +137,11 @@ impl Transaction {
 
     /// Every row `query` matches, as the transaction sees them.
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
-        let opts = crate::handle::read_opts(&query, ReadTier::LocalFirst);
+        self.all_with(query, ReadTier::LocalFirst).await
+    }
+
+    pub(crate) async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+        let opts = crate::handle::read_opts(&query, tier);
         let rows = self
             .client
             .query_with_opts(query.into_untyped()?, opts)
@@ -180,7 +184,7 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
-        self.run_transaction(true, body).await
+        self.run_transaction(true, false, body).await
     }
 
     /// Runs `body` in a serializable transaction, as TS's
@@ -194,10 +198,28 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
-        self.run_transaction(false, body).await
+        self.run_transaction(false, false, body).await
     }
 
-    async fn run_transaction<F, Fut, R>(&self, mergeable: bool, body: F) -> Result<R>
+    /// Commit a serializable transaction even when the only work is validating its reads.
+    pub(crate) async fn serializable_transaction_validating_reads<F, Fut, R>(
+        &self,
+        body: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        self.run_transaction(false, true, body).await
+    }
+
+    async fn run_transaction<F, Fut, R>(
+        &self,
+        mergeable: bool,
+        commit_read_only: bool,
+        body: F,
+    ) -> Result<R>
     where
         F: FnOnce(Transaction) -> Fut + Send + 'static,
         Fut: Future<Output = Result<R>> + 'static,
@@ -232,8 +254,12 @@ impl Jazz {
                     )))
                 });
             match outcome {
-                Ok(result) if wrote.get() => {
-                    let committed = scoped.commit_transaction(id)?;
+                Ok(result) if wrote.get() || commit_read_only => {
+                    let committed = if commit_read_only {
+                        scoped.commit_transaction_validating_reads(id)?
+                    } else {
+                        scoped.commit_transaction(id)?
+                    };
                     settle.settle(&client, Some(committed)).await?;
                     Ok(result)
                 }
