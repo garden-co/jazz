@@ -494,7 +494,18 @@ std::thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agility::MechanismConfig;
+    use crate::protocol::account::build::{
+        self as account_build, AccountWriter, LocalDevice, RootAuthority,
+    };
+    use crate::protocol::account::{
+        AccountKeyEvidence, PrivateAccountLedger, PublicAccountLedger, verify_private,
+    };
     use crate::protocol::domain::AppDomain;
+    use crate::protocol::space::build::{self as space_build, Author, SpaceWriter};
+    use crate::protocol::space::{KeyCheck, SpaceKeys, acquire};
+    use crate::random::OsRandom;
+    use crate::registry::Registry;
 
     /// Alice follows the history of her rotated space. Count epoch lookups
     /// here because the public API exposes only the resulting path.
@@ -568,5 +579,130 @@ mod tests {
         HISTORY_EPOCH_PROBES.set(0);
         assert_eq!(chain.history_path(100), (0..=100).rev().collect::<Vec<_>>());
         assert_eq!(HISTORY_EPOCH_PROBES.get(), 100);
+    }
+
+    /// Alice authenticates a held key and acquires it from her account
+    /// envelope after 100 rotations. Both walks recover every key with
+    /// one epoch lookup per history link. The public results expose the
+    /// recovered keys, so count lookups here to catch repeated scans.
+    #[test]
+    fn space_key_authentication_and_acquisition_look_up_each_link_once() {
+        const DEPTH: usize = 100;
+        let alice = "a11ce000-0000-5000-8000-00000000a11c";
+        let domain = AppDomain::new("0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f", None).unwrap();
+        let registry = Registry::builtin();
+        let suite = registry.select(&MechanismConfig::default()).unwrap();
+        let mut rng = OsRandom;
+        let device =
+            LocalDevice::generate(&suite, &registry, &domain.account(alice).unwrap(), &mut rng)
+                .unwrap();
+        let account_writer = AccountWriter {
+            account_secret_root_id: None,
+            suite,
+            registry: &registry,
+            domain: &domain,
+            account_id: alice,
+        };
+        let mut public = PublicAccountLedger::new(alice, Position(1));
+        let mut private = PrivateAccountLedger::new(Position(1));
+        public.keys.push(Accepted::new(
+            Position(1),
+            device.keys_row(&mut rng).unwrap(),
+        ));
+        private
+            .requests
+            .push(Accepted::new(Position(1), device.request()));
+        let permit =
+            account_build::check_bootstrap(&account_writer, &device, &public, &private).unwrap();
+        let account = account_build::account_root(
+            &account_writer,
+            &device,
+            &permit,
+            RootAuthority::App,
+            &mut rng,
+        )
+        .unwrap();
+        public.roots.push(Accepted::new(Position(2), account.root));
+        public
+            .account_keys
+            .push(Accepted::new(Position(2), account.account_key));
+        private
+            .identities
+            .push(Accepted::new(Position(2), account.identity));
+
+        let through = Position(3 + DEPTH as u64);
+        public.through = through;
+        private.through = through;
+        let accounts =
+            AccountDirectory::new(std::slice::from_ref(&public), &domain, &registry, through)
+                .unwrap();
+        let replay = accounts.replay(alice).unwrap();
+        let state = replay.current().unwrap().unwrap();
+        let private = verify_private(replay, &state, &private).unwrap();
+        let evidence = AccountKeyEvidence::new(replay, &state, &private).unwrap();
+        let account_key = evidence
+            .acquire(&device.id, std::slice::from_ref(&device.sealing))
+            .unwrap();
+        let own = evidence.epoch_keys(&account_key).unwrap();
+
+        let address = SpaceAddress::new(
+            "5c0e1d2a-3b4c-7d5e-8f60-718293a4b5c6",
+            "018f2e3d-4c5b-7a69-8877-665544332211",
+        )
+        .unwrap();
+        let writer = SpaceWriter {
+            suite,
+            registry: &registry,
+            domain: &domain,
+            account_id: alice,
+        };
+        let author = Author::new(&accounts, alice, &account_key, &device).unwrap();
+        let root = space_build::space_root(&writer, &address, &author, &mut rng).unwrap();
+        let mut ledger = SpaceLedger::whole_space(address, through);
+        ledger.roots.push(Accepted::new(Position(3), root.root));
+        let mut chain = SpaceChain::replay(&ledger, &accounts).unwrap().unwrap();
+        let mut newest_key = root.key;
+        let mut held = SpaceKeys::new(&chain);
+        for depth in 1..=DEPTH {
+            assert_eq!(
+                held.authenticate(&chain, &registry, &chain.last().epoch_id, &newest_key)
+                    .unwrap(),
+                KeyCheck::Accepted,
+            );
+            let rotation =
+                space_build::rotate(&writer, &chain, &held, &author, &[], &mut rng).unwrap();
+            newest_key = rotation.key;
+            let successor = Accepted::new(Position(3 + depth as u64), rotation.successor);
+            ledger.successors.push(successor.clone());
+            chain.versions.push(SpaceVersion {
+                epoch_id: successor.row.epoch_id.clone(),
+                position: successor.position,
+                successor: Some(successor),
+            });
+        }
+        let chain = SpaceChain::replay(&ledger, &accounts).unwrap().unwrap();
+        assert_eq!(chain.current_depth().unwrap(), DEPTH);
+
+        let mut authenticated = SpaceKeys::new(&chain);
+        HISTORY_EPOCH_PROBES.set(0);
+        assert_eq!(
+            authenticated
+                .authenticate(&chain, &registry, &chain.last().epoch_id, &newest_key)
+                .unwrap(),
+            KeyCheck::Accepted,
+        );
+        let authentication_probes = HISTORY_EPOCH_PROBES.get();
+
+        HISTORY_EPOCH_PROBES.set(0);
+        let acquired = acquire(&chain, &ledger, &accounts, &own).unwrap();
+        let acquisition_probes = HISTORY_EPOCH_PROBES.get();
+
+        assert!(authenticated.depths().eq(0..=DEPTH));
+        assert!(acquired.keys.depths().eq(0..=DEPTH));
+        assert_eq!(
+            (authentication_probes, acquisition_probes),
+            (DEPTH, DEPTH),
+            "epoch probes during held-key authentication and envelope acquisition",
+        );
     }
 }
