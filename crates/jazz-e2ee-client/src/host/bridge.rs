@@ -135,7 +135,11 @@ impl JsStore {
 
     fn earliest_deadline(&self) -> Option<Instant> {
         let operation = self.operation_deadlines.borrow().keys().next().copied();
-        self.background_deadline.get().into_iter().chain(operation).min()
+        self.background_deadline
+            .get()
+            .into_iter()
+            .chain(operation)
+            .min()
     }
 
     pub(super) fn announced_deadline(&self) -> Option<Instant> {

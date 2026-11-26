@@ -4253,8 +4253,7 @@ export class NativeRuntimeAdapter implements Runtime {
         wake = undefined;
         clearTimeout(timer);
         transportError?.cancel();
-        idleMs =
-          woke === "work" ? 0 : Math.min(PENDING_READ_MAX_IDLE_MS, Math.max(1, idleMs * 2));
+        idleMs = woke === "work" ? 0 : Math.min(PENDING_READ_MAX_IDLE_MS, Math.max(1, idleMs * 2));
       }
     } finally {
       signal?.removeEventListener("abort", onAbort);

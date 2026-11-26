@@ -124,7 +124,10 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("ends a parked pending read as soon as the runtime closes", async () => {
     const runtime = NativeRuntimeAdapter.fromDb(
-      fakeDb({ all: () => ({ poll: () => null, cancel: () => undefined }), tick: () => undefined }) as never,
+      fakeDb({
+        all: () => ({ poll: () => null, cancel: () => undefined }),
+        tick: () => undefined,
+      }) as never,
       testSchema,
       new Uint8Array(16),
       TEST_RUNTIME_AUTHOR,
