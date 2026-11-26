@@ -464,6 +464,24 @@ impl E2eeClient {
         })
     }
 
+    /// Exposes the ledger's coverage to the rotation integration test.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn rotation_read_for_test(
+        &self,
+        db: &Db,
+        address: &DbSpaceAddress,
+        batch: Option<&[String]>,
+    ) -> Result<(Option<ReplayedSpaceChain>, SpaceLedger), ClientError> {
+        let address = protocol_address(address)?;
+        crate::account::serializable(db, ATTEMPTS, async |tx| {
+            let purpose = batch.map_or(SpaceReadPurpose::Rotate, SpaceReadPurpose::RotationBatch);
+            let read = self.read_space_of(db, tx, &address, purpose).await?;
+            Ok((read.chain, read.ledger))
+        })
+        .await
+    }
+
     /// Reuse a replay only while the live watch covers the space's roots and
     /// successors. Confirm the signed records and positions still match the
     /// authority and probe the predecessor index for an extension that has
