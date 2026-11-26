@@ -590,110 +590,154 @@ mod tests {
     use crate::conformance::FixedRandom;
     use crate::protocol::records::space::{SpaceRoot, SpaceSuccessor};
 
+    const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
+
+    fn test_id(number: usize) -> String {
+        format!("00000000-0000-4000-8000-{number:012x}")
+    }
+
+    /// Alice's device, with what a [`StoreOwner`] borrows.
+    struct Alice {
+        domain: AppDomain,
+        registry: Registry,
+        device: LocalDevice,
+    }
+
+    impl Alice {
+        fn new(rng: &mut dyn RandomSource) -> Self {
+            let domain = AppDomain::new(&test_id(1), Some("dev")).unwrap();
+            let registry = Registry::builtin();
+            let suite = registry.select(&MechanismConfig::default()).unwrap();
+            let application = domain.account(ALICE).unwrap();
+            let device = LocalDevice::generate(&suite, &registry, &application, rng).unwrap();
+            Self {
+                domain,
+                registry,
+                device,
+            }
+        }
+
+        fn owner(&self) -> StoreOwner<'_> {
+            StoreOwner {
+                registry: &self.registry,
+                domain: &self.domain,
+                account_id: ALICE,
+                device: &self.device,
+            }
+        }
+
+        /// Alice's space rotated `rotations` times, holding every key
+        /// (the key at depth `d` is `[d; 32]`).
+        fn space(&self, rotations: usize, rng: &mut dyn RandomSource) -> HeldSpace {
+            let suite = self.registry.select(&MechanismConfig::default()).unwrap();
+            let mechanism = suite.key_wrap.mechanism();
+            let application = self.domain.account(ALICE).unwrap();
+            let mut root = SpaceRoot {
+                id: test_id(2),
+                scope_id: test_id(3),
+                identifier: test_id(4),
+                creator_account_id: ALICE.into(),
+                device_id: self.device.id.clone(),
+                account_epoch_id: test_id(5),
+                epoch_id: test_id(1000),
+                mechanism: mechanism.id.into(),
+                version: mechanism.version,
+                verification: Vec::new(),
+                account_envelope: vec![1],
+                signature: vec![1],
+            };
+            let root_key = [0; 32];
+            root.verification = suite
+                .key_wrap
+                .wrap(
+                    &root_key,
+                    &root.marker_context(&application).unwrap(),
+                    &[0; 32],
+                    rng,
+                )
+                .unwrap();
+            let mut space = HeldSpace {
+                application,
+                scope: root.scope().unwrap(),
+                root,
+                successors: Vec::new(),
+                keys: BTreeMap::from([(
+                    0,
+                    HeldEntry {
+                        key: Zeroizing::new(root_key),
+                        mark: KeyMark::Published,
+                    },
+                )]),
+                verified_through: None,
+            };
+            for depth in 1..=rotations {
+                let predecessor = space.epoch_at(depth - 1).unwrap().to_owned();
+                let mut successor = SpaceSuccessor {
+                    id: test_id(100 + depth),
+                    scope_id: space.root.scope_id.clone(),
+                    identifier: space.root.identifier.clone(),
+                    predecessor: predecessor.clone(),
+                    history_epoch_id: predecessor,
+                    epoch_id: test_id(1000 + depth),
+                    author_account_id: ALICE.into(),
+                    author_device_id: self.device.id.clone(),
+                    author_epoch_id: space.root.account_epoch_id.clone(),
+                    verification: Vec::new(),
+                    history: vec![1],
+                    account_envelope: vec![1],
+                    signature: vec![1],
+                };
+                let key = Zeroizing::new([depth as u8; 32]);
+                let context = successor
+                    .marker_context(&space.application, &space.scope)
+                    .unwrap();
+                successor.verification =
+                    suite.key_wrap.wrap(&key, &context, &[0; 32], rng).unwrap();
+                space.successors.push(successor);
+                space.keep_entry(
+                    depth,
+                    HeldEntry {
+                        key,
+                        mark: KeyMark::Published,
+                    },
+                );
+            }
+            space
+        }
+    }
+
+    /// `space` as it was after `rotations` rotations.
+    fn truncated(space: &HeldSpace, rotations: usize) -> HeldSpace {
+        let mut earlier = space.clone();
+        earlier.successors.truncate(rotations);
+        earlier.keys.retain(|&depth, _| depth <= rotations);
+        earlier
+    }
+
+    fn cycling_random() -> FixedRandom {
+        FixedRandom((0..=255).cycle().take(65_536).collect())
+    }
+
     /// Alice reopens each held version of her rotated space. The prefix work
     /// is counted here because the store's public API exposes only the keys.
     #[test]
     fn loading_rotations_encodes_each_prefix_row_once() {
-        let id = |number: usize| format!("00000000-0000-4000-8000-{number:012x}");
-        let alice = "a11ce000-0000-5000-8000-00000000a11c";
-        let domain = AppDomain::new(&id(1), Some("dev")).unwrap();
-        let application = domain.account(alice).unwrap();
-        let registry = Registry::builtin();
-        let suite = registry.select(&MechanismConfig::default()).unwrap();
-        let mechanism = suite.key_wrap.mechanism();
-        let mut rng = FixedRandom((0..=255).cycle().take(65_536).collect());
-        let device = LocalDevice::generate(&suite, &registry, &application, &mut rng).unwrap();
-        let owner = StoreOwner {
-            registry: &registry,
-            domain: &domain,
-            account_id: alice,
-            device: &device,
-        };
-        let mut root = SpaceRoot {
-            id: id(2),
-            scope_id: id(3),
-            identifier: id(4),
-            creator_account_id: alice.into(),
-            device_id: device.id.clone(),
-            account_epoch_id: id(5),
-            epoch_id: id(1000),
-            mechanism: mechanism.id.into(),
-            version: mechanism.version,
-            verification: Vec::new(),
-            account_envelope: vec![1],
-            signature: vec![1],
-        };
-        let root_key = [0; 32];
-        root.verification = suite
-            .key_wrap
-            .wrap(
-                &root_key,
-                &root.marker_context(&application).unwrap(),
-                &[0; 32],
-                &mut rng,
-            )
-            .unwrap();
-        let mut space = HeldSpace {
-            application,
-            scope: root.scope().unwrap(),
-            root,
-            successors: Vec::new(),
-            keys: BTreeMap::from([(
-                0,
-                HeldEntry {
-                    key: Zeroizing::new(root_key),
-                    mark: KeyMark::Published,
-                },
-            )]),
-            verified_through: None,
-        };
+        let mut rng = cycling_random();
+        let alice = Alice::new(&mut rng);
+        let owner = alice.owner();
+        let rotated = alice.space(100, &mut rng);
         let mut encoded = Vec::new();
-        for depth in 1..=100 {
-            let predecessor = space.epoch_at(depth - 1).unwrap().to_owned();
-            let mut successor = SpaceSuccessor {
-                id: id(100 + depth),
-                scope_id: space.root.scope_id.clone(),
-                identifier: space.root.identifier.clone(),
-                predecessor: predecessor.clone(),
-                history_epoch_id: predecessor,
-                epoch_id: id(1000 + depth),
-                author_account_id: alice.into(),
-                author_device_id: device.id.clone(),
-                author_epoch_id: space.root.account_epoch_id.clone(),
-                verification: Vec::new(),
-                history: vec![1],
-                account_envelope: vec![1],
-                signature: vec![1],
-            };
-            let key = Zeroizing::new([depth as u8; 32]);
-            let context = successor
-                .marker_context(&space.application, &space.scope)
-                .unwrap();
-            successor.verification = suite
-                .key_wrap
-                .wrap(&key, &context, &[0; 32], &mut rng)
-                .unwrap();
-            space.successors.push(successor);
-            space.keep_entry(
-                depth,
-                HeldEntry {
-                    key,
-                    mark: KeyMark::Published,
-                },
-            );
-
-            if depth == 10 || depth == 100 {
-                let mut document = owner.seal_document(&space, &[], 0, &mut rng).unwrap();
-                document.keys.reverse();
-                let document = decode_document(&document.encode().unwrap()).unwrap();
-                PREFIX_ROWS_ENCODED.set(0);
-                let loaded = owner.load(&document).unwrap();
-                assert!(loaded.rejected.is_empty());
-                assert_eq!(loaded.space.unwrap().held().count(), depth + 1);
-                encoded.push(PREFIX_ROWS_ENCODED.get());
-
-                assert_verified_history(&owner, &space, depth, &mut rng);
-            }
+        for depth in [10, 100] {
+            let space = truncated(&rotated, depth);
+            let mut document = owner.seal_document(&space, &[], 0, &mut rng).unwrap();
+            document.keys.reverse();
+            let document = decode_document(&document.encode().unwrap()).unwrap();
+            PREFIX_ROWS_ENCODED.set(0);
+            let loaded = owner.load(&document).unwrap();
+            assert!(loaded.rejected.is_empty());
+            assert_eq!(loaded.space.unwrap().held().count(), depth + 1);
+            encoded.push(PREFIX_ROWS_ENCODED.get());
+            assert_verified_history(&owner, &space, depth, &mut rng);
         }
         assert_eq!(encoded, [11, 101]);
     }
@@ -838,6 +882,35 @@ mod tests {
         }
     }
 
+    /// A marker whose tag does not match the bytes is ignored: every record
+    /// is checked again, and the reopen writes a correct marker.
+    #[test]
+    fn a_marker_with_a_wrong_tag_checks_every_record() {
+        let mut rng = cycling_random();
+        let alice = Alice::new(&mut rng);
+        let owner = alice.owner();
+        let space = alice.space(3, &mut rng);
+        let bytes = owner
+            .seal_stored_document(&space, &[], 0, &mut rng)
+            .unwrap();
+        let marked = owner
+            .load_stored_document(&bytes)
+            .unwrap()
+            .unwrap()
+            .updated_document
+            .unwrap();
+        let (_, body, verification) = decode_stored_document(&marked).unwrap();
+        let (depth, mut tag) = verification.unwrap();
+        assert_eq!(depth, 3);
+        tag[0] ^= 1;
+        let forged = encode_verified_document(body, depth, &tag).unwrap();
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(&forged).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 4);
+        assert!(reopened.rejected.is_empty());
+        assert_eq!(reopened.updated_document, Some(marked));
+    }
+
     /// The byte fixture pins the optional field, domain, depth framing and
     /// tag without needing a full lineage or access to real device secrets.
     #[test]
@@ -867,5 +940,47 @@ mod tests {
             )
             .as_bytes()
         );
+    }
+
+    /// A document with the verification field and real records, as Alice's
+    /// device writes it on reopen: two published keys, checked through
+    /// depth 1. The tag can be
+    /// recomputed outside Rust from the signing seed `[7; 32]`.
+    #[test]
+    fn verified_document_with_records_is_pinned() {
+        let mut rng = FixedRandom((0..=255).cycle().take(65_536).collect());
+        let mut alice = Alice::new(&mut rng);
+        let suite = alice.registry.select(&MechanismConfig::default()).unwrap();
+        alice.device.signing = suite.signature.derive_key_pair(&[7; 32]).unwrap();
+        let owner = alice.owner();
+        let space = alice.space(1, &mut rng);
+        let unmarked = owner
+            .seal_stored_document(&space, &[], 4, &mut rng)
+            .unwrap();
+        let marked = owner
+            .load_stored_document(&unmarked)
+            .unwrap()
+            .unwrap()
+            .updated_document
+            .unwrap();
+        let fixture = include_bytes!("fixtures/held-space-v1-verified.json");
+        if marked != fixture {
+            std::fs::write(
+                std::env::temp_dir().join("held-space-v1-verified.json"),
+                &marked,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(marked).unwrap(),
+            std::str::from_utf8(fixture).unwrap()
+        );
+
+        KEY_RECORDS_VERIFIED.set(0);
+        let reopened = owner.load_stored_document(fixture).unwrap().unwrap();
+        assert_eq!(KEY_RECORDS_VERIFIED.get(), 0);
+        assert!(reopened.rejected.is_empty());
+        assert_eq!(reopened.revision, 4);
+        assert_eq!(reopened.space.unwrap().held().count(), 2);
     }
 }
