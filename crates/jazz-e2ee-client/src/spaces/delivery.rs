@@ -28,7 +28,7 @@ use super::{ATTEMPTS, Replayed, SpaceReadPurpose, SpaceWatch, offline, protocol_
 use crate::account::has_removed_devices;
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
-use crate::state::{Report, db_address};
+use crate::state::{PendingRotation, Report, db_address};
 
 /// More member accounts than this in a space is beyond the first release's
 /// design (protocol §3.8): reported once per space, and the runtime goes on.
@@ -37,6 +37,16 @@ pub const MEMBER_LIMIT: usize = 1_000;
 /// Batches of deliveries one pass writes at most, a bound that stops a
 /// misbehaving server from keeping a pass busy forever.
 const MAX_BATCHES: usize = 100;
+
+/// Failed attempts in a row after which the rest of a rotation is left to
+/// the pass of any holder (protocol §3.4).
+pub(crate) const ROTATION_ATTEMPTS: u32 = 6;
+
+/// The wait before the rest of a rotation is tried again after `failures`
+/// failed attempts in a row: 2 s, doubling, at most 60 s.
+pub(crate) fn retry_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << failures.min(6)).min(60))
+}
 
 /// Which rotation to make.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -372,12 +382,21 @@ impl E2eeClient {
             }
             Err(error) => return Err(self.forget_account_on(error)),
         };
-        if kind == Rotation::Ordinary && !rest.is_empty() {
-            self.shared
-                .member_watch
-                .borrow_mut()
-                .pending_deliveries
-                .insert(space.clone());
+        if kind == Rotation::Ordinary {
+            // The rest is delivered in the background; a newer rotation by
+            // this device replaces an older one's rest.
+            let mut watch = self.shared.member_watch.borrow_mut();
+            if rest.is_empty() {
+                watch.pending_deliveries.remove(space);
+            } else {
+                watch.pending_deliveries.insert(
+                    space.clone(),
+                    PendingRotation {
+                        accounts: rest.clone(),
+                        ..Default::default()
+                    },
+                );
+            }
         }
         // Learn and keep the new version before returning. The mark is
         // cleared once the new version is held: until then a write
@@ -399,12 +418,123 @@ impl E2eeClient {
         }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
-            written += crate::account::serializable(db, ATTEMPTS, async |tx| {
+            let Some(count) = crate::account::serializable(db, ATTEMPTS, async |tx| {
                 self.batch_step(db, tx, space, batch).await
             })
-            .await?;
+            .await?
+            else {
+                break;
+            };
+            written += count;
         }
         Ok(written)
+    }
+
+    /// The rest of a rotation this device made (protocol §3.5): its
+    /// remaining members get the current version from this device in
+    /// batches of [`DELIVERY_BATCH`], each whether or not a delivery to it
+    /// already exists, since another member's delivery may not open. Each
+    /// batch reads only its accounts' histories. A failure keeps the members
+    /// not yet served for a retry after [`retry_delay`]; after
+    /// [`ROTATION_ATTEMPTS`] failures in a row, or once this device is no
+    /// longer a member, they are left to the pass of any holder (§3.4).
+    /// How many deliveries it wrote; zero with nothing pending.
+    pub(crate) async fn finish_rotation(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+    ) -> Result<usize, ClientError> {
+        self.ensure_open()?;
+        let mut written = 0;
+        loop {
+            let batch: Vec<String> = {
+                let mut watch = self.shared.member_watch.borrow_mut();
+                let Some(pending) = watch.pending_deliveries.get(space) else {
+                    return Ok(written);
+                };
+                if pending.accounts.is_empty() {
+                    watch.pending_deliveries.remove(space);
+                    return Ok(written);
+                }
+                pending
+                    .accounts
+                    .iter()
+                    .take(DELIVERY_BATCH)
+                    .cloned()
+                    .collect()
+            };
+            let outcome = if self.shared.keys.borrow().online {
+                crate::account::serializable(db, ATTEMPTS, async |tx| {
+                    self.batch_step(db, tx, space, &batch).await
+                })
+                .await
+            } else {
+                Err(offline())
+            };
+            let mut watch = self.shared.member_watch.borrow_mut();
+            let Some(pending) = watch.pending_deliveries.get_mut(space) else {
+                // A rotation in the meantime replaced or ended this one.
+                drop(watch);
+                return outcome.map(|count| written + count.unwrap_or(0));
+            };
+            match outcome {
+                Ok(Some(count)) => {
+                    written += count;
+                    // A newer rotation may have replaced the rest meanwhile.
+                    if pending.accounts.starts_with(&batch) {
+                        pending.accounts.drain(..batch.len());
+                    }
+                    pending.failures = 0;
+                    pending.retry_at = None;
+                }
+                Ok(None) => {
+                    watch.pending_deliveries.remove(space);
+                    return Ok(written);
+                }
+                Err(error) => {
+                    if self.shared.keys.borrow().online {
+                        pending.failures += 1;
+                    }
+                    if pending.failures >= ROTATION_ATTEMPTS {
+                        watch.pending_deliveries.remove(space);
+                    } else {
+                        pending.retry_at = Some(self.shared.now() + retry_delay(pending.failures));
+                    }
+                    drop(watch);
+                    return Err(self.forget_account_on(error));
+                }
+            }
+        }
+    }
+
+    /// Tells the app `delivery-failed` for `space`, at most once per round:
+    /// a sync of the watched spaces and the startup or reconnect sweep that
+    /// follows it.
+    pub(crate) fn tell_delivery_failed(&self, space: &SpaceAddress, error: &ClientError) {
+        if !self
+            .shared
+            .member_watch
+            .borrow_mut()
+            .delivery_failures_told
+            .insert(space.clone())
+        {
+            return;
+        }
+        self.shared.flush(vec![Report::DeliveryFailed {
+            space: db_address(space),
+            reason: error.to_string(),
+        }]);
+    }
+
+    /// When the next rest of a rotation is due again after a failure.
+    pub(crate) fn next_rotation_retry(&self) -> Option<web_time::Instant> {
+        self.shared
+            .member_watch
+            .borrow()
+            .pending_deliveries
+            .values()
+            .filter_map(|pending| pending.retry_at)
+            .min()
     }
 
     /// One rotation transaction: the successor and the first batch. Its
@@ -442,9 +572,12 @@ impl E2eeClient {
         if !member {
             return Err(ProtocolError::Refused(RefusalCode::NotAMember).into());
         }
-        if read.skipped_deliveries {
-            return Err(ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into());
-        }
+        // A current-version delivery row that cannot be decoded is skipped:
+        // deliveries only order the first batch (holders first) and lead
+        // this device to its own key, so a missing one costs at most that
+        // order or a `rotation-needs-key`. Refusing instead would let one
+        // malformed row stop every rotation of the space, the removal's
+        // protection (protocol §3.5).
         if kind == Rotation::Ordinary && chain.is_none() {
             // A skipped row could be the root. A locally held key also
             // contradicts a read that shows membership but no root.
@@ -506,16 +639,18 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &SpaceAddress,
         accounts: &[String],
-    ) -> Result<usize, ClientError> {
+    ) -> Result<Option<usize>, ClientError> {
+        // The batch reads only this device's own deliveries, to acquire the
+        // key: a row it cannot decode is skipped like any unreadable row.
         let mut read = self
             .read_space_of(db, tx, address, SpaceReadPurpose::RotationBatch(accounts))
             .await?;
-        if read.skipped_deliveries {
-            return Err(ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into());
-        }
         let (
             Replayed {
-                chain, acquisition, ..
+                chain,
+                member,
+                acquisition,
+                ..
             },
             directory,
         ) = self
@@ -526,14 +661,19 @@ impl E2eeClient {
                 &read.accounts,
             )
             .await?;
+        // A device no longer a member, or without the key, leaves the rest
+        // to the pass of any holder (§3.4).
+        if !member {
+            return Ok(None);
+        }
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
-            return Ok(0);
+            return Ok(None);
         };
         let suite = self.shared.registry.select(&self.shared.selected)?;
         let writer = self.space_writer(suite);
         let current = chain.current()?.epoch_id.clone();
         let Some(version) = acquisition.keys.version(&current) else {
-            return Ok(0);
+            return Ok(None);
         };
         let members = read.ledger.member_accounts();
         let mut written = 0;
@@ -558,6 +698,6 @@ impl E2eeClient {
         if written > 0 {
             self.publish(db, tx).await?;
         }
-        Ok(written)
+        Ok(Some(written))
     }
 }

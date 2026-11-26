@@ -681,6 +681,19 @@ impl E2eeClient {
         std::mem::take(&mut self.shared.member_watch.borrow_mut().delivery_reads)
     }
 
+    /// Runs the rest of this device's last rotation of `space` now, as the
+    /// runtime's background pass would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn finish_rotation_for_test(
+        &self,
+        db: &jazz::db::Db,
+        space: &jazz::e2ee::SpaceAddress,
+    ) -> Result<usize, ClientError> {
+        self.finish_rotation(db, &crate::spaces::protocol_address(space)?)
+            .await
+    }
+
     /// Public account histories requested since the last call.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]

@@ -464,11 +464,30 @@ impl<'a> DeliveryChain<'a> {
         {
             return Ok(None);
         }
-        Ok(Some(ReplayedSpaceChain(
-            self.chain.at_matching_read(ledger, accounts)?,
-        )))
+        let reused = self.chain.at_matching_read(ledger, accounts)?;
+        // The invariant `author_history` relies on, checked where it is cheap
+        // to: a reused chain is the chain a fresh replay of this read gives.
+        debug_assert_eq!(
+            SpaceChain::replay(ledger, accounts)?.as_ref(),
+            Some(&reused),
+            "a reused delivery chain differs from a fresh replay"
+        );
+        Ok(Some(ReplayedSpaceChain(reused)))
     }
 
+    /// The account evidence the chain's verification depended on, compared
+    /// on reuse. Per author of a root or successor it keeps the account's
+    /// rows strictly before that author's latest record. This relies on an
+    /// invariant of `AccountDirectory::verify_author`: a record's check
+    /// depends only on whether the author's whole history replays, and on
+    /// its rows strictly before the record's position (`state_at`). Rows
+    /// are append-only by position, so the rows before an author's earlier
+    /// record are a prefix of those before its latest one, and equal
+    /// prefixes at the latest cut give equal checks for every record. An
+    /// author whose history does not replay is left out: its records were
+    /// skipped, and they stay skipped while it is left out of both reads;
+    /// once it replays it appears in only one, and the comparison fails.
+    /// Debug builds check the result against a fresh replay in [`Self::reuse`].
     fn author_history(
         ledger: &SpaceLedger,
         accounts: &AccountDirectory<'_>,

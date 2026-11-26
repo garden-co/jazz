@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, Error, ErrorCode};
 use jazz::e2ee::{SpaceAddress as DbSpaceAddress, Unreadable, UnreadableCode};
-use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::query::{Operand, OrderDirection, Predicate, Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
@@ -95,7 +95,6 @@ pub(crate) struct SpaceRead {
     /// accounts' histories are not counted: they make an account invalid,
     /// not the space incomplete.
     pub(crate) skipped: usize,
-    skipped_deliveries: bool,
 }
 
 pub(super) enum SpaceReadPurpose<'a, 'registry> {
@@ -164,6 +163,33 @@ pub fn epoch_deliveries_query(
         query = query.filter(eq(col("recipientAccountId"), lit(id(account)?)));
     }
     Ok(query)
+}
+
+/// The deliveries of `epochs` in one query, `None` for no epochs: an
+/// equality for one epoch, a set for more.
+pub fn epochs_deliveries_query(
+    address: &SpaceAddress,
+    epochs: &BTreeSet<String>,
+    account: Option<&str>,
+) -> Result<Option<Query>, ClientError> {
+    let mut epochs_iter = epochs.iter();
+    let (Some(first), None) = (epochs_iter.next(), epochs_iter.next()) else {
+        if epochs.is_empty() {
+            return Ok(None);
+        }
+        let id = |s: &str| uuid_cell(s).ok_or(ProtocolError::InconsistentEvidence);
+        let ids = epochs
+            .iter()
+            .map(|epoch| Ok(Operand::Literal(id(epoch)?)))
+            .collect::<Result<Vec<_>, ProtocolError>>()?;
+        let mut query = space_query(rows::SPACE_DELIVERIES, address)?
+            .filter(Predicate::In(Operand::Column("keyEpochId".to_owned()), ids));
+        if let Some(account) = account {
+            query = query.filter(eq(col("recipientAccountId"), lit(id(account)?)));
+        }
+        return Ok(Some(query));
+    };
+    epoch_deliveries_query(address, first, account).map(Some)
 }
 
 pub(crate) fn offline() -> ClientError {
@@ -322,12 +348,10 @@ impl E2eeClient {
             Ok::<_, ClientError>(acquire(chain, ledger, &directory, &own.epoch_keys)?)
         };
         let mut acquisition = None;
-        let mut skipped_deliveries = false;
         let mut rotation_epochs = None;
         if rotating {
             let mut epochs = BTreeSet::new();
             if let Some(chain) = &chain {
-                let before = skipped.get();
                 let current = &chain.last().epoch_id;
                 let batch = matches!(purpose, SpaceReadPurpose::RotationBatch(_));
                 let own = Some(self.shared.account_id.as_str());
@@ -346,11 +370,16 @@ impl E2eeClient {
                     let last = chain.versions.len() - 1;
                     // Only a newer version can change which key recovery wraps.
                     if first < last {
-                        for version in &chain.versions[first..last] {
-                            let query = epoch_deliveries_query(address, &version.epoch_id, own)?;
-                            let (found, _) = self.read_rows(db, tx, &skipped, query).await?;
-                            ledger.deliveries.extend(found);
-                        }
+                        // One read for every newer version, however far
+                        // behind this device is.
+                        let newer: BTreeSet<String> = chain.versions[first..last]
+                            .iter()
+                            .map(|version| version.epoch_id.clone())
+                            .collect();
+                        let query = epochs_deliveries_query(address, &newer, own)?
+                            .ok_or(ProtocolError::InconsistentEvidence)?;
+                        let (found, _) = self.read_rows(db, tx, &skipped, query).await?;
+                        ledger.deliveries.extend(found);
                         acquisition = Some(acquire_read(chain, &ledger)?);
                     } else {
                         acquisition = Some(acquired);
@@ -358,23 +387,21 @@ impl E2eeClient {
                 } else if batch {
                     acquisition = Some(acquire_read(chain, &ledger)?);
                 }
-                skipped_deliveries = skipped.get() != before;
             }
             rotation_epochs = Some(epochs);
         } else {
             let mut epochs = BTreeSet::new();
+            // One read for all the epochs, however many versions behind.
             let epoch_deliveries = async |epochs: &BTreeSet<String>, own_only: bool| {
-                let mut rows = Vec::new();
-                for epoch in epochs {
-                    let query = epoch_deliveries_query(
-                        address,
-                        epoch,
-                        own_only.then_some(&self.shared.account_id),
-                    )?;
-                    let (found, _) = self.read_rows(db, tx, &skipped, query).await?;
-                    rows.extend(found);
-                }
-                Ok::<_, ClientError>(rows)
+                let Some(query) = epochs_deliveries_query(
+                    address,
+                    epochs,
+                    own_only.then_some(&self.shared.account_id),
+                )?
+                else {
+                    return Ok::<_, ClientError>(Vec::new());
+                };
+                Ok(self.read_rows(db, tx, &skipped, query).await?.0)
             };
             if let Some(chain) = &chain {
                 epochs.insert(chain.last().epoch_id.clone());
@@ -460,7 +487,6 @@ impl E2eeClient {
             ledger,
             accounts,
             skipped: skipped.get(),
-            skipped_deliveries,
         })
     }
 
