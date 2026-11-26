@@ -470,6 +470,7 @@ type NativeDb = {
     head?: unknown,
     base?: unknown,
     transaction?: OpenTransactionId,
+    addCreatorAsMember?: boolean,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -2381,6 +2382,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const addCreatorAsMember = writeContext
+      ? (JSON.parse(writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember
+      : undefined;
     rejectAttributedBranchWrite(attribution, branchView);
     if (tx) {
       this.assertTransactionAttribution(tx, attribution);
@@ -2431,6 +2435,7 @@ export class NativeRuntimeAdapter implements Runtime {
           branchView?.head,
           branchView?.base,
           tx?.id,
+          mutation === "insert" ? addCreatorAsMember : undefined,
         );
       });
       const upload = opening instanceof Promise ? await opening : opening;

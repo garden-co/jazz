@@ -340,3 +340,59 @@ fn grouped_aggregate_ordering_is_logical_before_windows() {
         failures.join("\n")
     );
 }
+
+/// A count named after a bytes column of a plaintext table orders the groups
+/// by the count: ordering by an aggregate's alias reads its result, not the
+/// source column, so the column's type puts no limit on it. Ordering by the
+/// bytes column itself is still refused.
+#[test]
+fn an_aggregate_alias_named_after_a_bytes_column_orders_by_the_aggregate() {
+    use jazz::query::Aggregate;
+
+    let policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True);
+    let source = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("items")
+                .column("group", ColumnType::Text)
+                .nullable_column("payload", ColumnType::Bytea)
+                .policies(policies),
+        )
+        .build();
+    let schema = JazzSchema::new(&source).expect("compile public schema");
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x72; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .expect("open db");
+    for (index, group) in ["alpha", "bravo", "bravo", "charlie", "charlie", "charlie"]
+        .iter()
+        .enumerate()
+    {
+        insert(&db, Value::String((*group).to_owned()), index as u8 + 1);
+    }
+
+    let refused = Query::from("items").order_by("payload", OrderDirection::Asc);
+    let error = db.prepare_query(&refused).unwrap_err();
+    assert!(
+        error.message.contains("bytes column \"payload\""),
+        "{error:?}"
+    );
+
+    let query = Query::from("items")
+        .aggregate([Aggregate::count().alias("payload")])
+        .group_by("group")
+        .order_by("payload", OrderDirection::Desc);
+    let prepared = db.prepare_query(&query).expect("prepare");
+    let rows = block_on(db.all(&prepared, local())).expect("read");
+    assert_eq!(
+        groups(rows),
+        text(&[("charlie", 3), ("bravo", 2), ("alpha", 1)])
+    );
+}

@@ -535,7 +535,7 @@ export interface InsertOptions extends TimestampOverrideOptions {
   /** Set to false to create an encryption space without adding its creator. */
   addCreatorAsMember?: boolean;
 }
-export type StreamingInsertOptions = Omit<InsertOptions, "branch" | "addCreatorAsMember">;
+export type StreamingInsertOptions = Omit<InsertOptions, "branch">;
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;

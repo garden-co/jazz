@@ -1954,7 +1954,15 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
         // The host can sleep until its announced deadline, with no polling.
         std::thread::sleep(delay);
         wait_for_idle();
-        assert_eq!(announced.get(), None, "a healthy watch needs no timer");
+        // A healthy watch arms only its slow re-check, two seconds after it
+        // opened.
+        assert!(
+            announced
+                .get()
+                .is_some_and(|delay| delay <= std::time::Duration::from_secs(2)),
+            "a healthy watch arms only the re-check: {:?}",
+            announced.get()
+        );
         assert!(runtime.take_reports().is_empty());
 
         let both = [&first.db, db.as_ref()];
@@ -1967,7 +1975,13 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
         drive(&server, &both, async {
             loop {
                 runtime.drive();
-                assert_eq!(announced.get(), None);
+                assert!(
+                    announced
+                        .get()
+                        .is_some_and(|delay| delay <= std::time::Duration::from_secs(30)),
+                    "only the slow re-check may be armed: {:?}",
+                    announced.get()
+                );
                 if runtime
                     .take_reports()
                     .iter()
@@ -1978,6 +1992,111 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
                 futures::pending!();
             }
         });
+        runtime.stop();
+    });
+}
+
+/// Alice's second device has an approval watch that stays open but never
+/// reports the challenge. The slow re-check still finds the first device's
+/// challenge.
+#[test]
+fn the_host_rechecks_for_a_challenge_when_the_approval_watch_stalls() {
+    challenge_found_despite(ApprovalWatchFault::Stalled);
+}
+
+/// Alice's second device sees the challenge on its watch, but the
+/// authoritative read that follows has not caught up and finds none. The
+/// watch reports nothing more, and the re-check finds the challenge.
+#[test]
+fn the_host_rechecks_after_a_challenge_read_that_ran_early() {
+    challenge_found_despite(ApprovalWatchFault::EarlyFalse);
+}
+
+fn challenge_found_despite(fault: ApprovalWatchFault) {
+    within(move || {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, memory(), 2, &settings);
+        let requester = second.id();
+        let db = Rc::new(second.db);
+        let bridge = Rc::new(JsStore::default());
+        let announced = Rc::new(Cell::new(None));
+        bridge.set_store_wake(Some(Box::new({
+            let announced = announced.clone();
+            move |wake| {
+                if let StoreWake::Deadline(delay) = wake {
+                    announced.set(delay);
+                }
+            }
+        })));
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client: Rc::new(second.client),
+                reports: Rc::default(),
+            },
+            bridge.clone(),
+            db.clone(),
+        );
+        runtime.fail_approval_watch_once(fault);
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                let state = runtime.state();
+                assert!(state["error"].is_null(), "{state}");
+                if state["status"] == "awaiting-approval" && state["stage"] == "idle" {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        let both = [&first.db, db.as_ref()];
+        drive(
+            &server,
+            &both,
+            first.client.challenge_device(&first.db, &requester),
+        )
+        .unwrap();
+        // Drive as a host woken by its deadlines would: the re-check must
+        // find the challenge within a few of its first, short waits.
+        let started = web_time::Instant::now();
+        let mut armed = false;
+        loop {
+            // One pass of the loop, with the server answering its reads.
+            let found = drive(&server, &both, async {
+                loop {
+                    runtime.drive();
+                    if runtime
+                        .take_reports()
+                        .iter()
+                        .any(|report| report == r#"{"type":"challenged"}"#)
+                    {
+                        return true;
+                    }
+                    if runtime.state()["stage"] == "idle" {
+                        return false;
+                    }
+                    futures::pending!();
+                }
+            });
+            if found {
+                break;
+            }
+            // The host is told when to wake for the re-check.
+            armed |= announced
+                .get()
+                .is_some_and(|delay| delay <= std::time::Duration::from_secs(30));
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the challenge was not found in 20 s (deadline announced: {:?})",
+                announced.get()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(armed, "the host was given no deadline for the re-check");
         runtime.stop();
     });
 }

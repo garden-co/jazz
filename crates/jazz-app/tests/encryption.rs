@@ -262,6 +262,62 @@ async fn a_project_creator_is_admitted_even_without_update_permission() {
     assert_eq!(remaining[0].account_id, alice_id);
 }
 
+/// Alice's app was written before creators became members automatically: it
+/// still inserts her own member row after creating a project. That insert is
+/// refused, naming the opt-out, and she stays a member once. The same insert
+/// in a later transaction is refused too. Admitting Bob still follows plain
+/// insert semantics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_creator_member_row_is_refused_not_duplicated() {
+    use bindings::{E2eeMember, NewE2eeMember, NewProject, e2ee_members};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_id = ObjectId::from_uuid(bob.account().unwrap().0);
+    let scope = alice.table_identity("projects").await.unwrap();
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap();
+    let members = e2ee_members::query().filter(e2ee_members::identifier().eq(project.id));
+    let refused = |result: Result<E2eeMember, Error>| {
+        let message = format!("{:?}", result.unwrap_err());
+        assert!(
+            message.contains("already a member") && message.contains("addCreatorAsMember"),
+            "{message}"
+        );
+    };
+    refused(
+        alice
+            .insert(NewE2eeMember::new(scope, project.id, alice_id))
+            .await,
+    );
+    let in_transaction = alice
+        .transaction(
+            move |tx| async move { tx.insert(NewE2eeMember::new(scope, project.id, alice_id)) },
+        )
+        .await;
+    refused(in_transaction);
+    let own = alice.all(members.clone()).await.unwrap();
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].account_id, alice_id);
+
+    alice
+        .insert(NewE2eeMember::new(scope, project.id, bob_id))
+        .await
+        .unwrap();
+    alice
+        .insert(NewE2eeMember::new(scope, project.id, bob_id))
+        .await
+        .unwrap();
+    assert_eq!(alice.all(members).await.unwrap().len(), 3);
+}
+
 /// Alice can count the encrypted tasks in her project through the native app's untyped client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_device_app_counts_tasks_with_a_plaintext_filter() {

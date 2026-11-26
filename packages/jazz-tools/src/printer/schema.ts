@@ -116,6 +116,28 @@ const PRINTED_COLUMN_KEYS = new Set([
   "$comment",
 ]);
 
+/**
+ * Whether a column's `sealedType` is the pin `jazz-tools generate` keeps in
+ * the snapshot sidecar: an enum whose variants the declared enum extends,
+ * with the same nullability. Any other pin would be dropped on regeneration.
+ */
+function isEnumPin(column: Record<string, unknown>): boolean {
+  type EnumType = { enum?: unknown; optional?: unknown };
+  const sealed = column.sealedType as EnumType | undefined;
+  const declared = (column.type ?? column) as EnumType | undefined;
+  if (typeof sealed !== "object" || sealed === null) return false;
+  if (typeof declared !== "object" || declared === null) return false;
+  const before = sealed.enum;
+  const after = declared.enum;
+  return (
+    Array.isArray(before) &&
+    Array.isArray(after) &&
+    (sealed.optional ?? false) === (declared.optional ?? false) &&
+    before.length < after.length &&
+    before.every((variant, index) => variant === after[index])
+  );
+}
+
 /** Report what a table's encryption entry holds that the TS DSL can't declare yet. */
 function refuseUnprintedEncryption(
   encryption: NonNullable<TableJson["encryption"]>,
@@ -133,6 +155,15 @@ function refuseUnprintedEncryption(
   for (const [name, column] of Object.entries(encryption.columns)) {
     if (typeof column !== "object") continue;
     for (const field of Object.keys(column)) {
+      if (field === "sealedType" && !isEnumPin(column as Record<string, unknown>)) {
+        options.unsupported.push({
+          path: `${at}.columns.${name}.${field}`,
+          text: JSON.stringify((column as Record<string, unknown>)[field]),
+          reason:
+            "Printing sealedType is supported only for an encrypted enum whose declared type appends variants to it; `jazz-tools generate` would not keep any other pin",
+        });
+        continue;
+      }
       if (PRINTED_COLUMN_KEYS.has(field)) continue;
       options.unsupported.push({
         path: `${at}.columns.${name}.${field}`,
