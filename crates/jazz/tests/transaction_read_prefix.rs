@@ -546,6 +546,77 @@ mod ledger {
         (alice, bob, link)
     }
 
+    /// Bob answers Alice's second fetch first. Alice returns both results
+    /// and sends their read records to Bob in the order she admitted them.
+    /// Alice: pin -> admit A -> admit B -> return A -> return B -> commit
+    /// Bob:                     reply B -> reply A
+    #[test]
+    fn successful_overlapping_ledger_reads_record_and_return_in_admission_order() {
+        let (alice, bob, mut link) = fixture();
+        let first_row = block_on(bob.insert("notes", cells("first"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let second_row = block_on(bob.insert("notes", cells("second"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        let cut = link.pin(&alice, &bob, id);
+        let first_query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(first_row.0)))),
+            )
+            .unwrap();
+        let second_query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(second_row.0)))),
+            )
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&first_query));
+        let mut second = pin!(tx.ledger_read(&second_query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let mut requests = link.requests(&alice);
+        assert_eq!(requests.len(), 2);
+        link.reply(&bob, [requests.pop().unwrap()]);
+        block_on(alice.tick()).unwrap();
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(
+            poll(second.as_mut()).is_pending(),
+            "the second reply arrived before the first"
+        );
+
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        for (read, expected) in [(&mut first, first_row), (&mut second, second_row)] {
+            let Poll::Ready(Ok(read)) = poll(read.as_mut()) else {
+                panic!("the authority has answered both reads");
+            };
+            assert_eq!(read.through, cut);
+            assert_eq!(read.rows.len(), 1);
+            assert_eq!(read.rows[0].0.row_uuid(), expected);
+        }
+
+        // The outgoing commit exposes the order of the recorded reads.
+        block_on(tx.insert("notes", cells("staged"), Default::default())).unwrap();
+        block_on(alice.commit_serializable_handle(id)).unwrap();
+        block_on(alice.tick()).unwrap();
+        let reads = std::iter::from_fn(|| link.client.try_recv())
+            .find_map(|message| match message {
+                SyncMessage::Commit {
+                    kind: jazz::db::WireKind::Serializable { reads, .. },
+                    ..
+                } => Some(reads),
+                _ => None,
+            })
+            .expect("the transaction sends a serializable commit");
+        assert_eq!(reads.len(), 3);
+        assert_eq!(reads[1].rows.len(), 1);
+        assert_eq!(reads[2].rows.len(), 1);
+        assert_eq!(reads[1].rows[0].0, *first_row.0.as_bytes());
+        assert_eq!(reads[2].rows[0].0, *second_row.0.as_bytes());
+    }
+
     /// Alice's first read refuses her staged row. Bob then inserts a row
     /// that Alice's first successful read sees at a fresh authority cut.
     #[test]
