@@ -448,3 +448,45 @@ fn pending_read_replaces_its_task_waker() {
     assert_eq!(current.0.load(Ordering::SeqCst), 1);
     assert!(matches!(poll(read.as_mut()), Poll::Ready(Err(_))));
 }
+
+/// Alice's first read fetches Bob's chunked row, then fails: her replica has
+/// none of its chunks yet. The failed read must leave her snapshot unpinned,
+/// so her next read pins a fresh cut and sees the row Bob accepted since.
+/// Alice: read A (fetch, then missing chunks) ------------> read B
+/// Bob:          answer A                  -> insert "accepted" -> answer B
+#[test]
+fn failed_first_read_leaves_the_snapshot_unpinned() {
+    let (alice, bob) = fixture();
+    block_on(bob.insert(
+        "notes",
+        cells(&"chunked-é😀".repeat(10_000)),
+        Default::default(),
+    ))
+    .unwrap();
+    let id = begin(&alice);
+    let tx = alice.tx_ref(id);
+    let all = alice.prepare_query(&Query::from("notes")).unwrap();
+    let error = drive(
+        &[&alice, &bob],
+        tx.all_prepared_at(&all, false, None, ReadTier::Remote),
+    )
+    .expect_err("the first read needs chunks Alice has not pulled yet");
+    assert!(error.is_missing_chunks(), "{error:?}");
+
+    let accepted = block_on(bob.insert("notes", cells("accepted"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let query = alice
+        .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(accepted.0)))))
+        .unwrap();
+    let rows = drive(
+        &[&alice, &bob],
+        tx.all_prepared_at(&query, false, None, ReadTier::Remote),
+    )
+    .unwrap();
+    assert_eq!(
+        texts(rows),
+        ["accepted"],
+        "a read after a failed first read used the failed read's cut"
+    );
+}
