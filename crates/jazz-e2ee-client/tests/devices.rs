@@ -4039,3 +4039,325 @@ fn approved_device_first_load_keeps_its_reads_plaintext_and_refusal() {
         assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
     });
 }
+
+/// The commitments on `server` for the recovery root `secret` derives for
+/// `who` at `generation`, after checking the one there is: written in the
+/// root's transaction (the authority accepted both at one position), well
+/// formed, holding the SLH-DSA-SHA2-128s key of the root's commitment seed,
+/// and signed under the root's published signing key.
+fn check_root_commitment(
+    server: &Db,
+    who: &str,
+    secret: &jazz_e2ee::protocol::derive::RecoverySecret,
+    generation: u64,
+) {
+    use jazz_e2ee::primitives::slh_dsa::CommitmentKey;
+    use jazz_e2ee::protocol::commitment::MECHANISM;
+    use jazz_e2ee::protocol::derive::{RecoveryKeys, recovery_commitment_seed};
+    use jazz_e2ee::protocol::domain::AppDomain;
+    use jazz_e2ee::protocol::records::KeyColumns;
+    use jazz_e2ee::protocol::records::roster::{Commitment, SubjectKind};
+
+    let domain = AppDomain::new(
+        &app_id().as_object_id().uuid().to_string(),
+        Some(ENVIRONMENT),
+    )
+    .unwrap()
+    .account(who)
+    .unwrap();
+    let keys = RecoveryKeys::derive(secret, &domain, generation).unwrap();
+    let root_id = uuid::Uuid::parse_str(&keys.root_id).unwrap();
+    let root = all(server, Query::from("__e2ee_recovery_roots"))
+        .unwrap()
+        .into_iter()
+        .find(|row| row.row_uuid().0 == root_id)
+        .expect("the root is registered");
+    let mut rows = all(server, Query::from("__e2ee_commitments"))
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.cell("subjectId") == Some(Value::Uuid(root_id)));
+    let (Some(row), None) = (rows.next(), rows.next()) else {
+        panic!("one commitment for the root");
+    };
+    assert_eq!(row.seq(), root.seq(), "written in the root's transaction");
+    let uuid = |row: &jazz::db::CurrentRow, column| match row.cell(column) {
+        Some(Value::Uuid(id)) => id.to_string(),
+        other => panic!("{column}: {other:?}"),
+    };
+    let string = |row: &jazz::db::CurrentRow, column| match row.cell(column) {
+        Some(Value::String(text)) => text,
+        other => panic!("{column}: {other:?}"),
+    };
+    let bytes = |row: &jazz::db::CurrentRow, column| match row.cell(column) {
+        Some(Value::Bytes(bytes)) => bytes,
+        other => panic!("{column}: {other:?}"),
+    };
+    let number = |row: &jazz::db::CurrentRow, column| match row.cell(column) {
+        Some(Value::I64(n)) => u32::try_from(n).unwrap(),
+        other => panic!("{column}: {other:?}"),
+    };
+    let commitment = Commitment {
+        id: row.row_uuid().0.to_string(),
+        account_id: uuid(&row, "accountId"),
+        subject_kind: SubjectKind::parse(&string(&row, "subjectKind")).unwrap(),
+        subject_id: uuid(&row, "subjectId"),
+        mechanism: string(&row, "mechanism"),
+        version: number(&row, "version"),
+        commitment: bytes(&row, "commitment"),
+        signature: bytes(&row, "signature"),
+    };
+    commitment.validate().unwrap();
+    assert_eq!(commitment.account_id, who);
+    assert_eq!(commitment.subject_kind, SubjectKind::RecoveryRoot);
+    assert_eq!(
+        (commitment.mechanism.as_str(), commitment.version),
+        (MECHANISM.id, MECHANISM.version)
+    );
+    let seed = recovery_commitment_seed(secret, &domain, generation);
+    assert_eq!(
+        commitment.commitment,
+        CommitmentKey::from_seed(&seed).1,
+        "the key the secret derives"
+    );
+    let published = KeyColumns {
+        signing_mechanism: string(&root, "signingMechanism"),
+        signing_version: number(&root, "signingVersion"),
+        signing_public_key: bytes(&root, "signingPublicKey"),
+        mechanism: string(&root, "mechanism"),
+        version: number(&root, "version"),
+        public_key: bytes(&root, "publicKey"),
+    };
+    assert_eq!(published.signing_public_key, keys.signing.public.bytes);
+    assert_eq!(
+        jazz_e2ee::protocol::signing::verify(
+            &jazz_e2ee::registry::Registry::builtin(),
+            &published.signing_key(),
+            &commitment.signed_bytes(&domain, generation).unwrap(),
+            &commitment.signature,
+        ),
+        Ok(true),
+        "signed by the root's own key"
+    );
+}
+
+/// Contract: every recovery root alice's app account registers is committed
+/// to in the root's own transaction, without anything more from her: the
+/// commitment holds the post-quantum key her secret derives and is signed
+/// by the root. Registering the same secret again, retiring a root,
+/// approving a device and restoring one write no commitment; a new secret
+/// (rotation) writes a new one.
+///
+/// ```text
+/// alice's laptop ──register (phrase)──► root + delivery + commitment
+/// alice's laptop ──register (phrase) again──► nothing
+/// alice's laptop ──register (new phrase), retire old──► root + commitment
+/// alice's laptop ──approve phone──► no commitment
+/// alice's tablet ──restore (new phrase)──► no commitment
+/// ```
+#[test]
+fn every_recovery_root_an_app_account_registers_is_committed() {
+    within(|| {
+        use jazz_e2ee::protocol::derive::RecoverySecret;
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let laptop = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(laptop.status(&server, &[]), AccountStatus::Active);
+        let commitments = || count(&server, "__e2ee_commitments");
+        assert_eq!(commitments(), 0, "a device's bootstrap commits nothing");
+
+        let phrase = RecoverySecret::from_bytes([0x31; 32]);
+        drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.register_recovery(&laptop.db, &phrase),
+        )
+        .unwrap();
+        pump(&server, &laptop.db);
+        check_root_commitment(&server, &account_id(alice), &phrase, 0);
+        assert_eq!(commitments(), 1);
+
+        drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.register_recovery(&laptop.db, &phrase),
+        )
+        .unwrap();
+        pump(&server, &laptop.db);
+        assert_eq!(commitments(), 1, "registering again writes nothing");
+
+        let new_phrase = RecoverySecret::from_bytes([0x32; 32]);
+        drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.register_recovery(&laptop.db, &new_phrase),
+        )
+        .unwrap();
+        laptop.status(&server, &[]);
+        let old_root = laptop
+            .client
+            .with_account(|account| {
+                account
+                    .state
+                    .recovery_roots
+                    .iter()
+                    .map(|root| root.row.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        let domain = jazz_e2ee::protocol::domain::AppDomain::new(
+            &app_id().as_object_id().uuid().to_string(),
+            Some(ENVIRONMENT),
+        )
+        .unwrap()
+        .account(&account_id(alice))
+        .unwrap();
+        let old_root_id = jazz_e2ee::protocol::derive::RecoveryKeys::derive(&phrase, &domain, 0)
+            .unwrap()
+            .root_id;
+        assert!(old_root.contains(&old_root_id));
+        drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.retire_recovery_root(&laptop.db, &old_root_id),
+        )
+        .unwrap();
+        pump(&server, &laptop.db);
+        check_root_commitment(&server, &account_id(alice), &new_phrase, 0);
+        assert_eq!(
+            commitments(),
+            2,
+            "the new root's, and nothing at retirement"
+        );
+
+        let phone = device(&server, alice, memory(), 2, &settings);
+        assert_eq!(
+            phone.status(&server, &[&laptop]),
+            AccountStatus::AwaitingApproval
+        );
+        approve(&server, &laptop, &phone);
+        assert_eq!(phone.status(&server, &[&laptop]), AccountStatus::Active);
+        pump(&server, &laptop.db);
+        assert_eq!(commitments(), 2, "an approval writes none");
+
+        let tablet = device(&server, alice, memory(), 3, &settings);
+        assert_eq!(
+            tablet.status(&server, &[&laptop]),
+            AccountStatus::AwaitingApproval
+        );
+        let status = drive(
+            &server,
+            &[&tablet.db, &laptop.db],
+            tablet.client.recover_device(&tablet.db, &new_phrase),
+        )
+        .unwrap();
+        assert_eq!(status, AccountStatus::Active);
+        pump(&server, &tablet.db);
+        assert_eq!(commitments(), 2, "a restore writes none");
+    });
+}
+
+/// Contract: lena's device account commits to its recovery root at its
+/// first start, in the root's transaction, from the account secret it was
+/// opened with; starting again, and a new device restoring with the secret,
+/// write no further commitment.
+///
+/// ```text
+/// lena's first device ──start (secret)──► root + delivery + commitment
+/// lena's first device ──start again──► nothing
+/// lena's new device ──recover (secret)──► no commitment
+/// ```
+#[test]
+fn a_device_account_commits_its_recovery_root_at_first_start() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x7f; 32]);
+        let (first, lena) = lena_device(&server, 0x7f, 1);
+        let start = || {
+            drive(
+                &server,
+                &[&first.db],
+                first.client.start_device_account(&first.db, &secret),
+            )
+            .unwrap()
+        };
+        assert_eq!(start(), AccountStatus::Active);
+        pump(&server, &first.db);
+        check_root_commitment(&server, &account_id(lena), &secret, 0);
+        assert_eq!(start(), AccountStatus::Active);
+        pump(&server, &first.db);
+        assert_eq!(count(&server, "__e2ee_commitments"), 1);
+
+        let (second, _) = lena_device(&server, 0x7f, 2);
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db, &first.db],
+                second.client.start_device_account(&second.db, &secret),
+            )
+            .unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        let status = drive(
+            &server,
+            &[&second.db, &first.db],
+            second.client.recover_device(&second.db, &secret),
+        )
+        .unwrap();
+        assert_eq!(status, AccountStatus::Active);
+        pump(&server, &second.db);
+        assert_eq!(
+            count(&server, "__e2ee_commitments"),
+            1,
+            "a restore writes none"
+        );
+    });
+}
+
+/// Contract: after alice's account is reset, registering her phrase again
+/// registers the root of the new generation, and commits to it with the key
+/// her phrase derives for that generation.
+///
+/// ```text
+/// alice's laptop ──register (phrase)──► root₀ + commitment₀
+/// alice's phone ──reset──► generation 1
+/// alice's phone ──register (phrase)──► root₁ + commitment₁
+/// ```
+#[test]
+fn a_reset_account_commits_the_root_it_registers_again() {
+    within(|| {
+        let settings = EncryptionSettings {
+            allow_account_reset: true,
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa2);
+        let phrase = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x33; 32]);
+        let laptop = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(laptop.status(&server, &[]), AccountStatus::Active);
+        drive(
+            &server,
+            &[&laptop.db],
+            laptop.client.register_recovery(&laptop.db, &phrase),
+        )
+        .unwrap();
+        pump(&server, &laptop.db);
+        check_root_commitment(&server, &account_id(alice), &phrase, 0);
+
+        let phone = device(&server, alice, memory(), 2, &settings);
+        assert_eq!(phone.status(&server, &[]), AccountStatus::AwaitingApproval);
+        assert_eq!(
+            drive(&server, &[&phone.db], phone.client.reset_account(&phone.db)).unwrap(),
+            AccountStatus::Active
+        );
+        drive(
+            &server,
+            &[&phone.db],
+            phone.client.register_recovery(&phone.db, &phrase),
+        )
+        .unwrap();
+        pump(&server, &phone.db);
+        check_root_commitment(&server, &account_id(alice), &phrase, 1);
+        assert_eq!(count(&server, "__e2ee_commitments"), 2);
+    });
+}

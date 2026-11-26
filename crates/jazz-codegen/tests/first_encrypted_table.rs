@@ -48,7 +48,7 @@ fn a_plain_app_adds_its_first_encrypted_table() {
 fn system_table_versions_survive_codegen_and_two_migrations() {
     let file = include_str!("apps/encrypted/jazz.app.json");
     let shipped = include_str!("apps/encrypted/jazz.generated.ts");
-    let old_hash = "912a9aa6f088c330ad4cb16c7a4d746edb0014ec4c969a2bc1d55ebb49b34424";
+    let old_hash = "efa8966b106e7c6d98e20c503003d2af950b9680693b477a12c123eab9d8e598";
     let old = App::load(file.as_bytes()).unwrap();
     assert_eq!(old.compiled.current.to_string(), old_hash);
     assert_eq!(

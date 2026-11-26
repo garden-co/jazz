@@ -19,6 +19,7 @@ use jazz_e2ee::protocol::records::account::{
     DeviceProof, DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval,
     RecoveryDelivery, RecoveryRoot,
 };
+use jazz_e2ee::protocol::records::roster::{Commitment, SubjectKind};
 use jazz_e2ee::protocol::records::space::{SpaceDelivery, SpaceMember, SpaceRoot, SpaceSuccessor};
 
 /// The cells of one row, by column.
@@ -94,6 +95,13 @@ macro_rules! sample_column {
         *$seed = $seed.wrapping_add(1);
         u32::from(value) + 100
     }};
+    ($seed:ident, $optionals:ident, subject_kind) => {
+        if $optionals {
+            SubjectKind::RecoveryRoot
+        } else {
+            SubjectKind::Device
+        }
+    };
     ($seed:ident, $optionals:ident, maybe_id) => {{
         if $optionals {
             Some(sample_id($seed))
@@ -277,10 +285,11 @@ impl Write {
 }
 
 pub(crate) use jazz::tools::deployment::artifact::system_tables::{
-    ACCOUNT_IDENTITIES, ACCOUNT_KEYS, ACCOUNT_ROOTS, ACCOUNT_SUCCESSORS, DEVICE_APPROVALS,
-    DEVICE_CHALLENGES, DEVICE_DELIVERIES, DEVICE_KEYS, DEVICE_PROOFS, DEVICE_REMOVAL_REQUESTS,
-    DEVICE_REQUESTS, MEMBERS as SPACE_MEMBERS, PUBLIC_ACCOUNT_SUCCESSORS, PUBLIC_DEVICE_APPROVALS,
-    RECOVERY_DELIVERIES, RECOVERY_ROOTS, SPACE_DELIVERIES, SPACE_SUCCESSORS, SPACES as SPACE_ROOTS,
+    ACCOUNT_IDENTITIES, ACCOUNT_KEYS, ACCOUNT_ROOTS, ACCOUNT_SUCCESSORS, COMMITMENTS,
+    DEVICE_APPROVALS, DEVICE_CHALLENGES, DEVICE_DELIVERIES, DEVICE_KEYS, DEVICE_PROOFS,
+    DEVICE_REMOVAL_REQUESTS, DEVICE_REQUESTS, MEMBERS as SPACE_MEMBERS, PUBLIC_ACCOUNT_SUCCESSORS,
+    PUBLIC_DEVICE_APPROVALS, RECOVERY_DELIVERIES, RECOVERY_ROOTS, SPACE_DELIVERIES,
+    SPACE_SUCCESSORS, SPACES as SPACE_ROOTS,
 };
 
 /// One column of a record's cells, written by its kind.
@@ -310,6 +319,9 @@ macro_rules! write_column {
         $w.number($c, $v.into())
     };
     ($w:expr, $v:expr, action, $c:literal) => {
+        $w.text($c, $v.as_str())
+    };
+    ($w:expr, $v:expr, subject_kind, $c:literal) => {
         $w.text($c, $v.as_str())
     };
 }
@@ -342,6 +354,9 @@ macro_rules! read_column {
     };
     ($r:expr, action, $c:literal) => {
         AccountAction::parse(&$r.text($c)?).ok()?
+    };
+    ($r:expr, subject_kind, $c:literal) => {
+        SubjectKind::parse(&$r.text($c)?).ok()?
     };
 }
 
@@ -702,6 +717,18 @@ row! {
 }
 
 row! {
+    Commitment => COMMITMENTS {
+        account_id: id "accountId",
+        subject_kind: subject_kind "subjectKind",
+        subject_id: id "subjectId",
+        mechanism: text "mechanism",
+        version: version "version",
+        commitment: bytes "commitment",
+        signature: bytes "signature",
+    }
+}
+
+row! {
     SpaceDelivery => SPACE_DELIVERIES {
         scope_id: id "scopeId",
         identifier: id "identifier",
@@ -810,6 +837,7 @@ mod tests {
         sample!(RecoveryDelivery);
         sample!(AccountSealingKey);
         sample!(DeviceRemovalRequest);
+        sample!(Commitment);
         sample!(SpaceMember);
         sample!(SpaceRoot);
         sample!(SpaceSuccessor);

@@ -1773,6 +1773,103 @@ fn account_records_are_read_by_their_account_or_by_signed_in_sessions() {
     }
 }
 
+/// Alice can publish commitments for her device and recovery root, and a
+/// root's commitment in the root's own transaction. Bob can read them but
+/// cannot publish one for Alice, reuse her subject IDs or file his own
+/// subjects under her account. Nobody changes or deletes a commitment.
+///
+/// ```text
+/// alice ──root + commitment (one commit)──► server ──read──► bob
+/// ```
+#[test]
+fn commitments_require_the_sessions_own_subject() {
+    use system_tables::*;
+    let world = World::new();
+    let device = world.device(alice());
+    let root = world
+        .insert(alice(), RECOVERY_ROOTS, recovery_root(alice(), device))
+        .unwrap();
+    let commitment = |who, kind, subject| {
+        cells(&[
+            ("accountId", account(who)),
+            ("subjectKind", text(kind)),
+            ("subjectId", id_of(subject)),
+            ("mechanism", text("jazz.commit.slh-dsa-sha2-128s")),
+            ("version", Value::I64(1)),
+            ("commitment", Value::Bytes(vec![1; 32])),
+            ("signature", bytes("s")),
+        ])
+    };
+    for (kind, subject) in [("device", device), ("recovery-root", root)] {
+        world
+            .insert(bob(), COMMITMENTS, commitment(alice(), kind, subject))
+            .expect_err("Bob cannot publish for Alice's account");
+        world
+            .insert(bob(), COMMITMENTS, commitment(bob(), kind, subject))
+            .expect_err("Bob cannot commit to another account's subject");
+        let row = world
+            .insert(alice(), COMMITMENTS, commitment(alice(), kind, subject))
+            .unwrap();
+        assert!(world.reads(bob(), COMMITMENTS).contains(&row));
+        assert!(!world.reads(anonymous(), COMMITMENTS).contains(&row));
+    }
+    world
+        .insert(
+            alice(),
+            COMMITMENTS,
+            commitment(alice(), "device", new_row()),
+        )
+        .expect_err("an unknown subject has no commitment");
+    let bobs_device = world.device(bob());
+    let bobs_root = world
+        .insert(bob(), RECOVERY_ROOTS, recovery_root(bob(), bobs_device))
+        .unwrap();
+    for (kind, subject) in [("device", bobs_device), ("recovery-root", bobs_root)] {
+        world
+            .insert(bob(), COMMITMENTS, commitment(alice(), kind, subject))
+            .expect_err("Bob cannot file his own subject under Alice's account");
+    }
+
+    let new_root = new_row();
+    world
+        .commit(
+            alice(),
+            &[
+                (RECOVERY_ROOTS, new_root, recovery_root(alice(), device)),
+                (
+                    COMMITMENTS,
+                    new_row(),
+                    commitment(alice(), "recovery-root", new_root),
+                ),
+            ],
+        )
+        .expect("a root and its commitment are written together");
+
+    let session = || WriteIdentity::Session(alice());
+    let row = world
+        .insert(alice(), COMMITMENTS, commitment(alice(), "device", device))
+        .unwrap();
+    block_on(world.server.update(
+        COMMITMENTS,
+        row,
+        BTreeMap::from([("commitment".to_owned(), Value::Bytes(vec![2; 32]))]),
+        UpdateOptions {
+            identity: session(),
+            ..Default::default()
+        },
+    ))
+    .expect_err("a commitment is never updated");
+    block_on(world.server.delete(
+        COMMITMENTS,
+        row,
+        DeleteOptions {
+            identity: session(),
+            ..Default::default()
+        },
+    ))
+    .expect_err("a commitment is never deleted");
+}
+
 /// R5: the first identity is the account's own row id, made from the
 /// account's own device request, at ledger version 1.
 #[test]

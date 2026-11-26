@@ -48,7 +48,7 @@ fn the_shipped_encrypted_app_file_round_trips_under_the_new_loader() {
     let loaded = load_app(APP).unwrap();
     assert_eq!(
         loaded.current_hash().to_string(),
-        "15d53d22acfd0ba8e973039c13ef98b5e60cebe5e582bb408cffae1f5275a09a"
+        "71a73f94cdad1f10e679873b41494ab0a7fdf1aa7ab863c632bfcf254c33dfd5"
     );
     let written = rewrite(APP, PERMS, Some(GENERATED_BY_TS)).unwrap();
     assert_eq!(written.app.as_bytes(), APP);
