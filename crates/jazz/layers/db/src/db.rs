@@ -12319,25 +12319,11 @@ impl Db {
         id: OpenTransactionId,
         prepared: &PreparedQuery,
         include_deleted: bool,
-        prefix: usize,
-        identity: Option<AuthorSubject>,
+        snapshot: Pos,
         through: ReadThrough,
     ) -> Result<(), Error> {
-        // A mergeable read records nothing: peek without the store gate,
-        // so the batch's cached overlay stays for its next stage or read.
-        if !matches!(
-            self.inner.batches.borrow().get(&id),
-            Some(Batch {
-                kind: BatchKind::Serializable { .. },
-                ..
-            })
-        ) {
-            return Ok(());
-        }
-        let widened = self.widened_read(id, prefix, prepared, identity).await?;
-        let prepared = widened.as_ref().unwrap_or(prepared);
         let inner = self.inner.without_overlay();
-        let Some((snapshot, own)) = self
+        let Some((_, own)) = self
             .inner
             .batches
             .borrow()
@@ -12357,13 +12343,29 @@ impl Db {
         };
         let rows = inner.read_versions(prepared, None, &read).await?;
         if let Some(Batch {
-            kind: BatchKind::Serializable { reads, pinned, .. },
+            kind:
+                BatchKind::Serializable {
+                    snapshot: pinned_snapshot,
+                    reads,
+                    pinned,
+                    ..
+                },
             ..
         }) = self.inner.batches.borrow_mut().get_mut(&id)
         {
+            // Only a read that succeeded pins its cut: one that failed or
+            // was cancelled after its fetch leaves the next read a fresh one.
             // Even a LocalOnly read observes this cut. Later remote coverage
             // must not move a snapshot whose results have already escaped.
-            *pinned = true;
+            // A read only starts once its predecessors are done, so one that
+            // found the batch unpinned is the only read that can pin it, and
+            // one that found it pinned read at the pinned cut.
+            if *pinned {
+                debug_assert_eq!(*pinned_snapshot, snapshot, "a read moved a pinned cut");
+            } else {
+                *pinned_snapshot = snapshot;
+                *pinned = true;
+            }
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
@@ -12724,6 +12726,7 @@ impl TxRef<'_> {
             Some(_) => Some(self.read_view(source, include_deleted).await?),
             None => None,
         };
+        let mut answer = None;
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
@@ -12737,7 +12740,7 @@ impl TxRef<'_> {
                 .await?;
             let hydrated = widened.as_ref().unwrap_or(prepared);
             self.db.remote_shape(&hydrated.query)?;
-            let through = self
+            answer = self
                 .db
                 .fetch(
                     hydrated,
@@ -12754,23 +12757,17 @@ impl TxRef<'_> {
                     source,
                 )
                 .await?;
-            if let Some(Batch {
-                kind:
-                    BatchKind::Serializable {
-                        snapshot, pinned, ..
-                    },
-                ..
-            }) = self.db.inner.batches.borrow_mut().get_mut(&self.id)
-                && !*pinned
-            {
-                // Pinned by the authority's answer, or (offline) at the
-                // replica's known cut.
-                if let Some(through) = through {
-                    *snapshot = through;
-                }
-                *pinned = true;
-            }
         }
+        // The cut this read reads at: the pinned one, else the authority's
+        // answer, else (offline, or not hydrated) the replica's known cut.
+        // It stays local to this read until the read is recorded.
+        let snapshot = snapshot.map(|(snapshot, pinned)| {
+            if pinned {
+                snapshot
+            } else {
+                answer.unwrap_or(snapshot)
+            }
+        });
         let non_durable = self.db.inner.non_durable.get();
         if snapshot.is_none()
             && self.db.is_client()
@@ -12830,6 +12827,11 @@ impl TxRef<'_> {
                 let rows = self
                     .db
                     .in_overlay_prefix(self.id, prefix, async |inner, cut| {
+                        // Read the overlay at this read's cut.
+                        let cut = cut.map(|cut| Cut {
+                            seq: snapshot.unwrap_or(cut.seq),
+                            ..cut
+                        });
                         let read = ReadSpec {
                             include_deleted,
                             cut,
@@ -12845,16 +12847,22 @@ impl TxRef<'_> {
                 Ok((rows, prepared))
             })
             .await?;
-        self.db
-            .record_read(
-                self.id,
-                &prepared,
-                include_deleted,
-                prefix.ops,
-                identity,
-                through,
-            )
-            .await?;
+        // A mergeable read records nothing.
+        if let Some(snapshot) = snapshot {
+            let widened = self
+                .db
+                .widened_read(self.id, prefix.ops, &prepared, identity)
+                .await?;
+            self.db
+                .record_read(
+                    self.id,
+                    widened.as_ref().unwrap_or(&prepared),
+                    include_deleted,
+                    snapshot,
+                    through,
+                )
+                .await?;
+        }
         Ok(rows)
     }
 
