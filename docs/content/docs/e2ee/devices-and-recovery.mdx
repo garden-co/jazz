@@ -57,6 +57,10 @@ async function approveWhenAnswered() {
 }
 ```
 
+The new device hears of a challenge as soon as it syncs. In case it misses one, it also checks with
+the server 2 s after its last change, then less often, at least every 30 s while it waits; so
+`onChallenge` fires within about 30 seconds even then.
+
 `confirmMatchingCodes` is your UI prompt. Show the code on the trusted device and ask the user to
 confirm it matches the new device's screen. A wrong code approves nothing. See the
 [BandChat approval flow](https://github.com/garden-co/jazz/blob/94cd8e1e45/examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#L342-L386).

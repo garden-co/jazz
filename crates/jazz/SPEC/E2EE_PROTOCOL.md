@@ -2765,15 +2765,17 @@ a held-key record skipped as unsupported is carried over unchanged, since it
 may hold a key only this device has, such as a `refused` key written by a
 newer client; a record that failed any other check may be dropped.
 
-The optional `verification` field records the inclusive depth of a
-consecutive prefix of published keys checked by the device on reopen.
-For the built-in Ed25519 device signing mechanism, let `k` be
-BLAKE2b-256 keyed with the device's 32-byte signing seed over
+The optional `verification` field records the inclusive depth through
+which the device checked a consecutive run of published keys, starting at
+the shallowest key held: a member who joined after rotations holds nothing
+below that key. For the built-in Ed25519 device signing mechanism, let `k`
+be BLAKE2b-256 keyed with the device's 32-byte signing seed over
 `UTF8("jazz.e2ee.held-document-authentication.v1") ‖ 00`. The tag is
-BLAKE2b-256 keyed with `k` over `u64be(depth) ‖ body`, where `body`
-is the exact canonical document bytes without the verification field and
-without the final right brace. Depth is a JSON number and the 32-byte tag
-is a JSON byte array.
+BLAKE2b-256 keyed with `k` over `u64be(depth) ‖ body`, where `body` is the
+exact canonical document bytes without the verification field and without
+the final right brace. Depth is a JSON number and the 32-byte tag is a JSON
+byte array. A device whose signer holds no seed writes no verification
+field.
 
 If the tag verifies, the device still checks the lineage, opens the
 envelopes, and checks for a supported marker mechanism. At covered depths
@@ -2782,17 +2784,19 @@ epoch marker. A missing or failed tag uses all the per-record checks
 above, so damage to one record does not discard the others. Each save of
 an advanced depth names the store revision of the bytes checked. A save
 that fails or loses a race may be tried on the next reopen. A new or
-changed key must pass the per-record checks on its first reopen, and a gap,
-refused key or unpublished key bounds the verified prefix.
-Reset and recovery clear the stored depth when the device retains its
-keys. Wipe and re-enrolment remove the document with the device. Sign-out
-keeps the depth when it keeps the held keys.
+changed key must pass the per-record checks on its first reopen: keeping
+one at or below the stored depth lowers the depth below it, and a gap,
+refused key or unpublished key ends the run. Reset and recovery clear the
+stored depth when the device retains its keys. Wipe and re-enrolment
+remove the document with the device. Sign-out keeps the depth when it
+keeps the held keys.
 
-This pre-release addition retains the local document's format name.
-Readers with this field accept older documents and check every record on
-first reopen. Older readers reject documents containing the new field as
-unrecognised. The lineage and held-key record bytes and the sync protocol
-are unchanged.
+`jazz-e2ee-held-space-v1` has not been released, so the optional
+`verification` field was added to it in place rather than under a new
+format name. Once it ships, a further change to the document's encoding
+takes a new format name, as below. The lineage and held-key record bytes
+and the sync protocol are unchanged. Byte fixtures pin a document with the
+field (`content/store.rs`, `content/fixtures/`).
 
 Unsupported here means a record of this format whose envelope or signature
 uses a mechanism this client lacks. A newer client that changes the
