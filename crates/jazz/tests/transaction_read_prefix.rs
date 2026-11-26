@@ -546,6 +546,231 @@ mod ledger {
         (alice, bob, link)
     }
 
+    /// Bob answers Alice's second fetch first. Alice returns both results
+    /// and sends their read records to Bob in the order she admitted them.
+    /// Alice: pin -> admit A -> admit B -> return A -> return B -> commit
+    /// Bob:                     reply B -> reply A
+    #[test]
+    fn successful_overlapping_ledger_reads_record_and_return_in_admission_order() {
+        let (alice, bob, mut link) = fixture();
+        let first_row = block_on(bob.insert("notes", cells("first"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let second_row = block_on(bob.insert("notes", cells("second"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        let cut = link.pin(&alice, &bob, id);
+        let first_query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(first_row.0)))),
+            )
+            .unwrap();
+        let second_query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(second_row.0)))),
+            )
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&first_query));
+        let mut second = pin!(tx.ledger_read(&second_query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let mut requests = link.requests(&alice);
+        assert_eq!(requests.len(), 2);
+        link.reply(&bob, [requests.pop().unwrap()]);
+        block_on(alice.tick()).unwrap();
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(
+            poll(second.as_mut()).is_pending(),
+            "the second reply arrived before the first"
+        );
+
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        for (read, expected) in [(&mut first, first_row), (&mut second, second_row)] {
+            let Poll::Ready(Ok(read)) = poll(read.as_mut()) else {
+                panic!("the authority has answered both reads");
+            };
+            assert_eq!(read.through, cut);
+            assert_eq!(read.rows.len(), 1);
+            assert_eq!(read.rows[0].0.row_uuid(), expected);
+        }
+
+        // The outgoing commit exposes the order of the recorded reads.
+        block_on(tx.insert("notes", cells("staged"), Default::default())).unwrap();
+        block_on(alice.commit_serializable_handle(id)).unwrap();
+        block_on(alice.tick()).unwrap();
+        let reads = std::iter::from_fn(|| link.client.try_recv())
+            .find_map(|message| match message {
+                SyncMessage::Commit {
+                    kind: jazz::db::WireKind::Serializable { reads, .. },
+                    ..
+                } => Some(reads),
+                _ => None,
+            })
+            .expect("the transaction sends a serializable commit");
+        assert_eq!(reads.len(), 3);
+        assert_eq!(reads[1].rows.len(), 1);
+        assert_eq!(reads[2].rows.len(), 1);
+        assert_eq!(reads[1].rows[0].0, *first_row.0.as_bytes());
+        assert_eq!(reads[2].rows[0].0, *second_row.0.as_bytes());
+    }
+
+    /// Alice admits B while A selects a snapshot from Bob. Only after A
+    /// succeeds may B send a fetch, and it must ask at A's cut.
+    /// Alice: admit A -> admit B -> pin A -> fetch B
+    /// Bob:                     reply A          -> reply B
+    #[test]
+    fn queued_ledger_read_waits_for_the_first_successful_pin() {
+        let (alice, bob, mut link) = fixture();
+        let tx = alice.tx_ref(begin(&alice));
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [SyncMessage::Read {
+                    span: ReadSpan::Once { at: None },
+                    ..
+                }]
+            ),
+            "only the first read may fetch before the snapshot is pinned"
+        );
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(poll(second.as_mut()).is_pending());
+        assert!(
+            link.requests(&alice).is_empty(),
+            "a reply alone does not pin the snapshot"
+        );
+        let Poll::Ready(Ok(first)) = poll(first.as_mut()) else {
+            panic!("the first read should pin the snapshot");
+        };
+
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert!(matches!(
+            requests.as_slice(),
+            [SyncMessage::Read { span: ReadSpan::Once { at: Some(at) }, .. }] if *at == first.through
+        ));
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Ok(second)) = poll(second.as_mut()) else {
+            panic!("the second read should use the pinned snapshot");
+        };
+        assert_eq!(second.through, first.through);
+    }
+
+    /// Alice's later query prepares successfully but fails serializable
+    /// validation before hydration. Its error waits for Bob's earlier read.
+    /// Alice: pin -> fetch A -> admit B -> return A -> return B's error
+    /// Bob:                              reply A
+    #[test]
+    fn early_ledger_query_error_waits_for_the_earlier_read() {
+        let (alice, bob, mut link) = fixture();
+        let id = begin(&alice);
+        let tx = alice.tx_ref(id);
+        link.pin(&alice, &bob, id);
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let join = alice
+            .prepare_query(&Query::from("notes").flat_join(
+                "history.notes",
+                "notes.id",
+                "history.notes.id",
+            ))
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&query));
+        let mut second = pin!(tx.ledger_read(&join));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(
+            poll(second.as_mut()).is_pending(),
+            "the early error must wait its turn"
+        );
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        assert!(matches!(poll(first.as_mut()), Poll::Ready(Ok(_))));
+        let Poll::Ready(Err(error)) = poll(second.as_mut()) else {
+            panic!("a serializable ledger read should refuse the flat join");
+        };
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error
+                .message
+                .contains("not supported in serializable transactions")
+        );
+    }
+
+    /// Ordinary serializable snapshots retain Alice's own pending commits
+    /// from transaction start, even if Bob accepts one past the pinned cut.
+    /// A ledger read must refuse that row once it has a newer position.
+    /// Alice: insert -> begin -> pin with empty read -> read inserted row
+    /// Bob:                       reply at cut -> accept insert
+    #[test]
+    fn ledger_read_refuses_own_commit_accepted_after_the_pinned_cut() {
+        let (alice, bob, mut link) = fixture();
+        let write = block_on(alice.insert("notes", cells("pending"), Default::default())).unwrap();
+        let tx = alice.tx_ref(begin(&alice));
+        block_on(alice.tick()).unwrap();
+        let commit = loop {
+            match link.client.try_recv().expect("Alice has sent her commit") {
+                message @ SyncMessage::Commit { .. } => break message,
+                message => link.server.send(message).unwrap(),
+            }
+        };
+
+        let empty = alice
+            .prepare_query(&Query::from("notes").filter(eq(col("text"), lit("missing"))))
+            .unwrap();
+        let mut first = pin!(tx.ledger_read(&empty));
+        assert!(poll(first.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(Ok(first)) = poll(first.as_mut()) else {
+            panic!("the empty read should pin the cut");
+        };
+        assert!(first.rows.is_empty());
+
+        link.reply(&bob, [commit]);
+        block_on(alice.tick()).unwrap();
+        let at = drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        assert!(at > first.through);
+
+        let query = alice
+            .prepare_query(
+                &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(write.row_uuid().0)))),
+            )
+            .unwrap();
+        let mut second = pin!(tx.ledger_read(&query));
+        assert!(poll(second.as_mut()).is_pending());
+        let requests = link.requests(&alice);
+        assert_eq!(requests.len(), 1);
+        link.reply(&bob, requests);
+        block_on(alice.tick()).unwrap();
+        let Poll::Ready(result) = poll(second.as_mut()) else {
+            panic!("Bob answered the read at the pinned cut");
+        };
+        let error = result.expect_err("the row was accepted after the ledger cut");
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        assert!(
+            error
+                .message
+                .contains("found a row not accepted at its cut")
+        );
+    }
+
     /// Alice's first read refuses her staged row. Bob then inserts a row
     /// that Alice's first successful read sees at a fresh authority cut.
     #[test]
