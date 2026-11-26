@@ -67,7 +67,8 @@ impl Transaction {
     /// account is already a member, as the transaction sees the space (its
     /// own staged writes included), returns that member's existing row and
     /// stages nothing. Like [`Jazz::add_member`], it only sees memberships
-    /// this client has synced.
+    /// this client has synced, and two concurrent calls for the same account
+    /// (in `join!`, say) can both stage a row.
     pub async fn add_member<T: Table>(
         &self,
         id: ObjectId,

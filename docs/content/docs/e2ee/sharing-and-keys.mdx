@@ -58,8 +58,10 @@ TypeScript, await `members.add` for the member row, or call `.wait({ tier })` on
 insert's result.
 
 The check reads this client's local data. A client that hasn't synced an existing membership yet
-(it's offline, or another device has just added it) adds a second row for the account. Removing
-the member deletes all of its rows. Direct inserts into `app.__e2ee_members` aren't checked.
+(it's offline, or another device has just added it) adds a second row for the account. So can two
+concurrent adds of the same account, such as two calls in `Promise.all` (or `join!` in Rust), in
+or out of a transaction: both may check before either writes. Removing the member deletes all of
+its rows. Direct inserts into `app.__e2ee_members` aren't checked.
 
 If you create a space with `upsert`, add the creator with
 `tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
