@@ -700,8 +700,9 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
+            let row_id = id.unwrap_or_else(jazz_app_support::ObjectId::new);
             let (id, values, committed) = jazz_app_support::with_key_wait(&client, || {
-                client.insert_with_id(&name, id.map(|id| *id.uuid()), cells.clone())
+                client.insert_with_id(&name, *row_id.uuid(), cells.clone())
             })
             .await?;
             mark_wrote(tx);
