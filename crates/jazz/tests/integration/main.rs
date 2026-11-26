@@ -69,6 +69,8 @@ mod flat_joins;
 mod follow_memo;
 #[path = "../follow_memo_policy.rs"]
 mod follow_memo_policy;
+#[path = "../foreground_image.rs"]
+mod foreground_image;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]

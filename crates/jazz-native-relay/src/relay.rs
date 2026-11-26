@@ -1457,6 +1457,79 @@ impl RelayWorker {
         })
     }
 
+    /// A foreground client's in-memory store. A fresh one replays the
+    /// genesis DDL and every migration's ALTERs (each a full schema
+    /// reparse); the image of the first one this engine build, schema and
+    /// migrations produced, kept beside the relay's file, opens without them.
+    fn open_foreground_db(&self, identity: DbIdentity) -> Result<Db, RelayError> {
+        let config = || relay_db_config(self.schema.clone(), identity, &self.migrations);
+        let scope = self.foreground_image_scope();
+        let key = self.foreground_image_key();
+        let path = self
+            .sqlite_path
+            .parent()
+            .filter(|_| !FOREGROUND_IMAGE_OFF.load(std::sync::atomic::Ordering::Relaxed))
+            .filter(|dir| !images_off_in(dir))
+            .map(|dir| dir.join(format!("foreground-{scope}-{key}.image")));
+        if let Some(path) = &path
+            && let Ok(file) = std::fs::read(path)
+        {
+            // The image is only a shortcut: a panic on its way in must not take the worker
+            // (and with it the store and the link) down. It turns the shortcut off for the
+            // rest of the process and the open goes the fresh way.
+            let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                foreground_image_body(&file).map(|image| block_on(Db::open_image(config(), image)))
+            }));
+            match opened {
+                Ok(Some(Ok(db))) => return Ok(db),
+                // Refused or damaged: open fresh, and the write below
+                // replaces it.
+                Ok(Some(Err(_))) | Ok(None) => {
+                    let _ = std::fs::remove_file(path);
+                }
+                Err(_) => {
+                    FOREGROUND_IMAGE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let db = block_on(Db::open(config())).map_err(|error| RelayError::Host(error.into()))?;
+        if let Some(path) = &path
+            && let Ok(image) = db.image()
+        {
+            // Only a shortcut for the next open: a failed write costs that one.
+            let _ = write_foreground_image(path, &scope, &image);
+        }
+        Ok(db)
+    }
+
+    /// Which relay's images a file belongs to: the scopes that share a directory each keep
+    /// their own, and a write replaces only its own scope's older ones.
+    fn foreground_image_scope(&self) -> String {
+        let name = self
+            .sqlite_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        foreground_image_scope_of(&name)
+    }
+
+    /// What shapes a fresh foreground store: this engine build, the schema
+    /// and every migration schema in full (not only their version ids:
+    /// defaults and indexes are outside those), and the lenses.
+    fn foreground_image_key(&self) -> String {
+        let mut material = Vec::new();
+        material.extend_from_slice(b"foreground-image-2\0");
+        material.extend_from_slice(env!("JAZZ_RELAY_BUILD_ID").as_bytes());
+        for schema in std::iter::once(&self.schema).chain(self.migrations.schemas.iter()) {
+            material.push(0);
+            material.extend(serde_json::to_vec(schema.public_schema()).unwrap_or_default());
+        }
+        material.push(0);
+        material.extend_from_slice(format!("{:?}", self.migrations.lenses).as_bytes());
+        jazz::sha256::hash(&material).to_hex()[..32].to_owned()
+    }
+
     fn run(&mut self, receiver: mpsc::Receiver<RelayCommand>) {
         loop {
             let command = if self.redrive {
@@ -1540,12 +1613,7 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(relay_db_config(
-            self.schema.clone(),
-            identity,
-            &self.migrations,
-        )))
-        .map_err(|error| RelayError::Host(error.into()))?;
+        let db = self.open_foreground_db(identity)?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -3550,6 +3618,94 @@ mod sorted_union_len_tests {
     }
 }
 
+const FOREGROUND_IMAGE_MAGIC: &[u8; 8] = b"JZFGIMG1";
+
+/// Set once an image load panicked: no further image is read in this process.
+static FOREGROUND_IMAGE_OFF: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The image inside a file `write_foreground_image` wrote, if its length and
+/// digest still match.
+pub(crate) fn foreground_image_body(file: &[u8]) -> Option<&[u8]> {
+    let header = 8 + 8 + 32;
+    if file.len() < header || &file[..8] != FOREGROUND_IMAGE_MAGIC {
+        return None;
+    }
+    let len = u64::from_le_bytes(file[8..16].try_into().ok()?) as usize;
+    let body = &file[header..];
+    if body.len() != len || jazz::sha256::hash(body).as_bytes()[..] != file[16..48] {
+        return None;
+    }
+    Some(body)
+}
+
+/// Remove the foreground images of the relay at `sqlite_path`, and their
+/// tmp files: its store is gone.
+pub(crate) fn forget_foreground_images(sqlite_path: &std::path::Path) {
+    let (Some(dir), Some(name)) = (sqlite_path.parent(), sqlite_path.file_name()) else {
+        return;
+    };
+    let scope = foreground_image_scope_of(&name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if file.starts_with(&format!("foreground-{scope}-"))
+            && (file.ends_with(".image") || file.ends_with(".tmp"))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn foreground_image_scope_of(store_file_name: &str) -> String {
+    jazz::sha256::hash(store_file_name.as_bytes()).to_hex()[..12].to_owned()
+}
+
+/// Write an image durably next to the store, replacing this scope's other
+/// images there (an earlier engine's or schema's) and its own stale tmp files.
+fn write_foreground_image(
+    path: &std::path::Path,
+    scope: &str,
+    image: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(FOREGROUND_IMAGE_MAGIC)?;
+        file.write_all(&(image.len() as u64).to_le_bytes())?;
+        file.write_all(jazz::sha256::hash(image).as_bytes())?;
+        file.write_all(image)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let other = entry.path();
+            let name = other.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let ours = name.starts_with(&format!("foreground-{scope}-"));
+            let image = name.ends_with(".image");
+            // Only this process's tmp files: another one may be writing its own.
+            let own_tmp =
+                name.ends_with(".tmp") && name.contains(&format!(".{}-", std::process::id()));
+            if other != path && ours && (image || own_tmp) {
+                let _ = std::fs::remove_file(other);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 impl NativeRelayClient {
     /// Occupy the owner thread for `duration`, as a long drive does: the
@@ -3584,5 +3740,22 @@ impl NativeRelayClient {
                 Ok(())
             });
         });
+    }
+}
+
+/// Test seam: store directories whose relays open every foreground fresh,
+/// the reference side of the image differential.
+#[cfg(test)]
+pub(crate) static IMAGES_OFF_IN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn images_off_in(dir: &std::path::Path) -> bool {
+    #[cfg(test)]
+    {
+        return IMAGES_OFF_IN.lock().unwrap().iter().any(|off| off == dir);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = dir;
+        false
     }
 }

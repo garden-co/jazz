@@ -46,6 +46,8 @@ rusqlite = { optional = true, version = "0.40", features = [
   "functions",
   "hooks",
   "limits",
+  "serialize",
+  "backup",
 ] }
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"

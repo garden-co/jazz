@@ -2240,6 +2240,7 @@ impl NativeRelayHost {
         }
         // Closes the store synchronously, before its files go.
         self.registry.close(&scope).map_err(relay_status)?;
+        relay::forget_foreground_images(&sqlite_path);
         relay::delete_store_files(&sqlite_path)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         relay::forget_rebuilt_marker(&sqlite_path);
@@ -3282,6 +3283,7 @@ mod tests {
             );
         }
     }
+    mod foreground_image;
     mod snapshot_capture_codec;
     mod socket_worker;
 
