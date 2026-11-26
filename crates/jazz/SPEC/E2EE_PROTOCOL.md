@@ -68,7 +68,9 @@ implemented in pure Rust on every target, byte-compatible with libsodium; the
 vectors of the format specs pin that compatibility. Keys are sealed to public
 keys with HPKE (RFC 9180, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
 ChaCha20Poly1305; see the crypto format), and large values use RustCrypto's
-STREAM construction over XChaCha20-Poly1305 (see the large-value format). A
+STREAM construction over XChaCha20-Poly1305 (see the large-value format).
+SLH-DSA-SHA2-128s (FIPS 205) is used only for post-quantum commitments
+(§2.9, "Commitment"); it is not a registry mechanism. A
 crypto provider failure (as opposed to a provable authentication failure)
 fails the operation loudly; it is never reported as an unavailable key or an
 invalid proof. The mechanism interfaces therefore distinguish the two: a
@@ -299,8 +301,7 @@ replay. "Before `p`" always means strictly earlier position.
   recovery keypair (envelope + signing). The private half is derived from a
   **recovery secret** (§2.9): for a device account, the account secret
   itself; for an externally authenticated account, a separate secret backed up
-  in a passkey. Exported **recovery material** holding the keypair directly is
-  the fallback. A recovery root can receive the account epoch key and
+  in a passkey. A recovery root can receive the account epoch key and
   authorise a new device.
 - **Space.** The encryption scope of rows: one application row, the **space
   row** (for example a `projects` row), and the encrypted rows that name it
@@ -378,6 +379,11 @@ wherever it enters JSON. Optional columns
 | `__e2ee_recovery_deliveries`       | `rootId`, `epochId`, `envelope`                                                                                                                                                           | random          | private    | Account epoch key sealed to a recovery root.                                                            |
 | `__e2ee_device_removal_requests`   | `accountId`, `epochId`, `deviceId`, `signature`                                                                                                                                           | random          | public     | A device's signed request to be removed; another active device completes it (§2.8).                     |
 | `__e2ee_account_keys`              | `accountId`, `epochId`, `signerId`, `mechanism`, `version`, `publicKey`, `signature`                                                                                                      | random          | public     | An account epoch's sealing public key (§2.12), signed by an active device.                              |
+| `__e2ee_commitments`               | `accountId`, `subjectKind`, `subjectId`, `mechanism`, `version`, `commitment`, `signature`                                                                                                | random          | public     | A post-quantum commitment of a device or recovery root, signed by that subject (§2.9, "Commitment").    |
+
+A commitment's `subjectKind` is `device` or `recovery-root`, and
+`subjectId` is that device's or recovery root's ID. This version writes
+only `recovery-root` commitments.
 
 `action` is `remove-device` or `retire-recovery-root`; the matching target
 column is set. `retiredRecoveryRootIds` is an ID list (§0) of recovery root
@@ -595,11 +601,15 @@ Account and device tables (fixed policies):
   same account. Recovery deliveries: the root's `accountId` is the session
   account; read by creator.
 - R10. Public tables (roots, device keys, public approvals, public successors,
-  recovery roots, account keys, removal requests) readable by every `device-account` or `external`
+  recovery roots, account keys, removal requests, commitments) readable by every `device-account` or `external`
   session, so other accounts can replay an account's history.
 - R11. `__e2ee_account_keys`: insert only with `accountId = session account`
   and a signer request of the same account; readable like the other public
   tables (R10).
+- R11a. `__e2ee_commitments`: insert only with `accountId = session account`
+  and `subjectId` a device request or a recovery root of the same account (a
+  root inserted in the same transaction counts); readable like the other
+  public tables (R10).
 
 The founder, kind and `allowAccountReset` conditions of R5 and R6 are
 account-registry and configuration checks beside the policies, as Jazz's
@@ -1316,7 +1326,7 @@ recipient}`. Insert atomically:
 
 **Removing a device retires the recovery roots it held.** In an app
 account, a device held a recovery root's key pair, and so the recovery
-secret or material, when it registered that root (it derived or generated
+secret, when it registered that root (it derived or generated
 the key pair to sign the root's keys) and when it became active by a
 recovery approval with it (§2.9). Removing it therefore also retires, in the
 same rotation, every root of the current generation that is still valid and
@@ -1419,7 +1429,7 @@ the 32 secret bytes, created and read with user verification required
   derived:
   - **Device accounts:** `s` is the account secret's 32 bytes. Restoring
     the account secret (by passkey or recovery phrase) restores E2EE access;
-    there is no separate recovery material.
+    there is no separate recovery secret.
   - **Externally authenticated accounts** (the application's own sign-in):
     `s` is a random 32-byte secret in the same `jazz-auth-v1:` format,
     generated once per account. By default the SDK backs it up with the same
@@ -1429,7 +1439,7 @@ the 32 secret bytes, created and read with user verification required
     account (creating a passkey needs a user gesture).
   - The passkey module is browser-only today (WebAuthn platform
     authenticators). Where it is unavailable, the recovery phrase of `s` is
-    the default export, and exported material (below) remains.
+    the export.
 - **Derivation.** Let `Dₐ = Dₐ(account)` and `g` the account's current
   generation (§2.11). At `g = 0`,
   `seed = BLAKE2b-256(key = s, input = UTF8("jazz.e2ee.recovery-seed.v1") ‖
@@ -1479,28 +1489,54 @@ the 32 secret bytes, created and read with user verification required
   "jazz.e2ee.recovery.v1", scope: "account", identifier: account, table:
   "__e2ee_recovery_deliveries", row: deliveryId, column: "envelope", epoch,
   recipient: rootId}`. An unknown outcome of the first stage is not retried.
-- **Exported recovery material (fallback).** For platforms without passkeys
-  and for applications that want a root independent of any secret, the
-  previous material remains. **Prepare** generates a random recipient keypair,
-  signing keypair and root ID; nothing is published. The material is a secret
-  string `json({format: "jazz-e2ee-recovery-v1", scope: Dₐ(account), rootId,
-  mechanism, version, publicKey, privateKey, signingMechanism, signingVersion,
-  signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
-  the user and kept outside the application. Generating material is not
-  evidence that recovery is active. **Decode / inspect:** at most 2,000,000
-  characters; exactly those eleven keys; matching scope and mechanisms; byte
-  arrays 1–65,536. Inspect is read-only and reports the current epoch, active
-  devices and recovery roots. Its root is registered exactly as
-  above. (The recovery phrase of the recovery secret is the preferred export
-  where passkeys are missing; material is for roots not derived from a
-  secret.)
+- **Commitment.** Every root registration also commits the root to a
+  post-quantum signing key, so that a later version can verify the account's
+  history after a break of its classical signatures. In the
+  `recovery-root` stage, in the root's transaction, the device inserts into
+  `__e2ee_commitments` `{id: random, accountId, subjectKind:
+  "recovery-root", subjectId: rootId, mechanism:
+  "jazz.commit.slh-dsa-sha2-128s", version: 1, commitment, signature}`. The
+  key comes from the recovery secret, which is in memory for the
+  registration, so the user is asked for nothing more; if the insert fails,
+  the registration fails as for any of its rows. The commitment seed is
+  `c = BLAKE2b-256(key = seed, input =
+  UTF8("jazz.e2ee.recovery-commitment-seed.v1") ‖ 0x00)`, from the `seed` of
+  the derivation above, so it binds the application, account and generation.
+  From `c`, `SK.seed`, `SK.prf` and `PK.seed` are the first 16 bytes of
+  `BLAKE2b-256(key = c, input = UTF8(label) ‖ 0x00)` for the labels
+  `jazz.e2ee.slh-dsa-sha2-128s.sk-seed.v1`,
+  `jazz.e2ee.slh-dsa-sha2-128s.sk-prf.v1` and
+  `jazz.e2ee.slh-dsa-sha2-128s.pk-seed.v1`; FIPS 205
+  `slh_keygen_internal(SK.seed, SK.prf, PK.seed)` for SLH-DSA-SHA2-128s
+  gives the key pair, and `commitment` is its 32-byte public key `PK.seed ‖
+  PK.root`. The record is signed with the root's own signing key over
+  `frame[ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
+  "account", identifier: account, table: "__e2ee_commitments", row: id,
+  column: "signature", epoch: decimal g, recipient: rootId}, subjectKind,
+  env(mechanism, commitment)]` (§1.2, "Commitment and endorsement
+  contexts"). `c` and the private key are never stored. A root that is
+  already registered gets no new commitment; approving or restoring a
+  device writes none. Only recovery roots write commitments in this
+  version, and nothing reads, verifies or enforces them yet: their presence
+  or absence changes no behaviour, and a client that does not know the table
+  ignores it. Verification arrives in a later version. Fixture: `s` = bytes
+  `00`–`1f` and
+  `Dₐ = ["0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f","prod","a11ce000-0000-5000-8000-00000000a11c"]`
+  give at generation 0 root ID `bdf7dfa1-160c-8e21-bee8-aef5fd8199ea`,
+  `c = c92ea5c570d0ef791c80450b942f9bca1e49ade36de4eefd38d73167cdb5dd1c`
+  and commitment
+  `2ae40871d9032f2c93de201fb72c8be3b5af417742ede3ea45f5bdd4ccc553d5`; at
+  generation 1, root ID `526073c9-d6ca-80c1-8d14-582668dc4e22`,
+  `c = 24e9d79801d9d24478c1884ac45222da7851a6be14eb7401bd75ea6456b8430c`
+  and commitment
+  `334b6b549eb6afc4e68f0d33e45989ef4be77c7bef100ae98595f5632485f10a`.
 - **Validity.** A root is valid iff it is strictly after the account root, its
   `epochId` was the account epoch at its position, its signer was active then
   with a supported signing mechanism, and its signature verifies. In an app
   account, removing the registering device retires it (§2.8), since that
   device held its key pair; a device account's removals retire nothing.
 - **Never persisted.** A device MUST NOT persist the recovery secret, the
-  recovery seed, the recovery key pairs or exported material: they exist in
+  recovery seed, the commitment seed or the recovery key pairs: they exist in
   memory for one registration or restore and are erased when it ends (a
   device account's secret is stored for sign-in by local-first auth, not
   by E2EE). Removing a device that registered a recovery root, or restored
@@ -1508,8 +1544,8 @@ the 32 secret bytes, created and read with user verification required
 - **Restore.** The device first obtains the recovery key pair: for a
   device account, by restoring the account secret (passkey or recovery
   phrase) and deriving; for an external account, by signing in with the
-  application and restoring the recovery secret from its passkey (or phrase);
-  or from exported material. The new device must have a request and not be
+  application and restoring the recovery secret from its passkey (or phrase).
+  The new device must have a request and not be
   removed. If it is
   already active with the same key, nothing is written. Otherwise it obtains
   the current key from a recovery delivery for the current epoch (each tried in
@@ -1529,7 +1565,7 @@ the 32 secret bytes, created and read with user verification required
 - **Retire.** An account rotation with action `retire-recovery-root` (§2.8).
   Retirement is permanent: rows are immutable, a retired root receives no
   further deliveries and approvals using it at or after its retirement are
-  ignored. A lost material file can still be retired by ID.
+  ignored.
 - **Retiring a derived root.** Because the derivation is fixed, a retired
   derived root can never be registered again from the same secret in the
   same generation.
