@@ -1,3 +1,4 @@
+import { appendsEnumVariants } from "../encryption/sealed-enum.js";
 import { hasSystemTables } from "../encryption/table-names.js";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -921,16 +922,7 @@ function pinEncryptedEnums(
     default?: ReadableJson;
   };
   type Entry = { columns: Record<string, EncryptedColumn | string> };
-  const appends = (before: EnumType, after: EnumType) => {
-    const variants = after.enum;
-    return (
-      Array.isArray(before.enum) &&
-      Array.isArray(variants) &&
-      (before.optional ?? false) === (after.optional ?? false) &&
-      before.enum.length < variants.length &&
-      before.enum.every((variant, index) => variant === variants[index])
-    );
-  };
+  const appends = appendsEnumVariants;
 
   const renames = steps?.renameTables;
   const migrate = steps?.migrate;

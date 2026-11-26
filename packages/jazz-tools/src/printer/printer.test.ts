@@ -439,6 +439,40 @@ describe("the schema printer", () => {
     ]);
   });
 
+  it("reports every sealedType that isn't an appended-enum pin", () => {
+    const pinned = (status: Record<string, unknown>) =>
+      printSchemaTs(
+        app({
+          rooms: {
+            columns: { status: "bytes" },
+            encryption: { space: "id", scope: "rooms", columns: { status } },
+          } as AppJson["tables"][string],
+        }),
+        { format: 1, tables: { rooms: {} } },
+      ).unsupported.map((entry) => entry.path);
+    const refused = ["tables.rooms.encryption.columns.status.sealedType"];
+    const enumOf = (...variants: string[]) => ({ enum: variants });
+
+    expect(pinned({ type: enumOf("draft", "sent"), sealedType: enumOf("draft") })).toEqual([]);
+    expect(
+      pinned({
+        type: { ...enumOf("draft", "sent"), optional: true },
+        sealedType: { ...enumOf("draft"), optional: true },
+      }),
+    ).toEqual([]);
+    // An enum declared without a `type` wrapper.
+    expect(pinned({ ...enumOf("draft", "sent"), sealedType: enumOf("draft") })).toEqual([]);
+
+    expect(pinned({ type: enumOf("draft"), sealedType: enumOf("draft") })).toEqual(refused);
+    expect(pinned({ type: enumOf("draft"), sealedType: enumOf("draft", "sent") })).toEqual(refused);
+    expect(pinned({ type: enumOf("sent", "draft"), sealedType: enumOf("draft") })).toEqual(refused);
+    expect(
+      pinned({ type: { ...enumOf("draft", "sent"), optional: true }, sealedType: enumOf("draft") }),
+    ).toEqual(refused);
+    expect(pinned({ type: "string", sealedType: enumOf("draft") })).toEqual(refused);
+    expect(pinned({ type: enumOf("draft", "sent"), sealedType: "string" })).toEqual(refused);
+  });
+
   it("prints a pinned encrypted enum without history and generates the same pin", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-print-enum-"));
     const path = join(dir, "jazz.app.json");
