@@ -1119,6 +1119,60 @@ async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
     alice.shutdown().await.unwrap();
 }
 
+/// Alice creates and deletes a project in one transaction. The authority
+/// accepts the transaction without creating a membership for Alice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_deleted_in_its_creation_transaction_has_no_creator_member() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+    use jazz_app_support::jazz::tools::PolicyExpr;
+    use jazz_app_support::jazz::tools::deployment::artifact::{self, ArtifactInput};
+
+    let fixture = artifact::load(
+        include_bytes!("fixtures/encrypted/jazz.app.json"),
+        include_bytes!("fixtures/encrypted/jazz.permissions.json"),
+    )
+    .unwrap();
+    let mut permissions = fixture.permissions().clone();
+    let projects = permissions.get_mut(&TableName::new("projects")).unwrap();
+    *projects = projects.clone().with_delete(PolicyExpr::True);
+    let files = artifact::write(ArtifactInput {
+        current: fixture.current_hash().to_string(),
+        schemas: vec![fixture.current_schema().clone()],
+        migrations: Vec::new(),
+        permissions,
+        codegen: fixture.codegen().clone(),
+    })
+    .unwrap();
+    let app = App::start_with(AppFiles::new(
+        files.app,
+        Some(files.permissions.into_bytes()),
+    ))
+    .await;
+    let alice = app.device().await.durable(DurabilityTier::GlobalServer);
+    assert_eq!(ready(&alice).await, "active");
+    let account = ObjectId::from_uuid(alice.account().unwrap().0);
+    let id = alice
+        .transaction(move |tx| async move {
+            let project = tx.insert(NewProject::new("discarded plans", account))?;
+            tx.delete::<Project>(project.id)?;
+            Ok(project.id)
+        })
+        .await
+        .unwrap();
+    let members = alice
+        .all_with(
+            bindings::e2ee_members::query().filter(bindings::e2ee_members::identifier().eq(id)),
+            ReadTier::Remote,
+        )
+        .await
+        .unwrap();
+    assert!(members.is_empty(), "{members:?}");
+
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Contract: an app written against the generated bindings manages a space's
 /// members as typed rows: alice adds bob with a typed member insert, a typed
 /// read of the members table lists the project's members, and bob, delivered
