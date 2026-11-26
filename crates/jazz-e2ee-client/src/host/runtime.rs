@@ -2325,6 +2325,84 @@ mod tests {
         runtime.stop();
     }
 
+    /// Alice's subscription asks an idle host to drive the space watch.
+    /// Observe the host callback directly, before any unrelated drive.
+    #[test]
+    fn a_space_subscription_wakes_an_idle_host() {
+        let store = Rc::new(JsStore::default());
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || count.set(count.get() + 1)));
+        let runtime = native_runtime(true, true, Some(store));
+        runtime.drive();
+        wakes.set(0);
+        runtime.use_space(true, "projects".into(), uuid::Uuid::new_v4().to_string());
+        assert_eq!(wakes.get(), 1);
+        runtime.stop();
+    }
+
+    /// Alice's connection changes request a drive of their own.
+    /// Observe the runtime callback without sync traffic to drive it.
+    #[test]
+    fn a_connection_change_wakes_an_idle_host() {
+        let store = Rc::new(JsStore::default());
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || count.set(count.get() + 1)));
+        let runtime = native_runtime(true, true, Some(store));
+        runtime.drive();
+        wakes.set(0);
+        runtime.set_online(false);
+        assert_eq!(wakes.get(), 1);
+        runtime.set_online(true);
+        assert_eq!(wakes.get(), 2);
+        runtime.stop();
+    }
+
+    /// Alice's first catalogue wakes the host's readability waiters.
+    /// Observe the bridge signal separately from account verification.
+    #[test]
+    fn a_readable_catalogue_notifies_the_host() {
+        let store = Rc::new(JsStore::default());
+        let notices = Rc::new(Cell::new(0));
+        let count = Rc::clone(&notices);
+        store.set_store_wake(Some(Box::new(move |wake| {
+            if matches!(wake, StoreWake::EncryptionState) {
+                count.set(count.get() + 1);
+            }
+        })));
+        let runtime = native_runtime(true, true, Some(store));
+        assert_eq!(runtime.state()["readable"], false);
+        runtime.drive();
+        assert_eq!(runtime.state()["readable"], true);
+        assert_eq!(notices.get(), 1);
+        runtime.drive();
+        assert_eq!(notices.get(), 1);
+        runtime.stop();
+    }
+
+    /// Alice's account status wakes host waiters once per change.
+    /// Set the status directly to isolate its bridge signal from readability.
+    #[test]
+    fn an_account_status_change_notifies_the_host() {
+        let store = Rc::new(JsStore::default());
+        let notices = Rc::new(Cell::new(0));
+        let count = Rc::clone(&notices);
+        store.set_store_wake(Some(Box::new(move |wake| {
+            if matches!(wake, StoreWake::EncryptionState) {
+                count.set(count.get() + 1);
+            }
+        })));
+        let runtime = native_runtime(true, true, Some(store));
+        runtime.set_status(AccountStatus::AwaitingApproval);
+        assert_eq!(notices.get(), 1);
+        runtime.set_status(AccountStatus::AwaitingApproval);
+        assert_eq!(notices.get(), 1);
+        runtime.set_status(AccountStatus::Active);
+        assert_eq!(notices.get(), 2);
+        runtime.stop();
+    }
+
     /// Alice's delivery call wakes an idle host so the loop can answer it.
     /// Poll the call directly because the Node wrapper drives the loop itself.
     #[test]
