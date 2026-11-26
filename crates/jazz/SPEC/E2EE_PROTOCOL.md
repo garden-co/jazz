@@ -407,17 +407,11 @@ The identity ID is the account ID for generation 0 (the first bootstrap). For
 a reset (§2.11) it is random (§0); clients find a generation's identity by
 its account, generation, device and epoch (§2.4, "Private verification").
 
-**Commitment and endorsement contexts.** For `jazz.e2ee.commitment.v1`,
+**Commitment context.** For `jazz.e2ee.commitment.v1`,
 the context's `epoch` is the canonical unsigned decimal generation in UTF-8
 (for example, `0` or `12`). A requester knows the generation before the
 request. The reset identity row ID is private, and a request can precede
 its creation. Public readers verify using the generation of the admission.
-
-For `jazz.e2ee.endorsement.v1`, the context's `epoch` is the admitting
-record's epoch ID. A device approval, including a restore, uses its challenge's
-epoch ID, also carried by the public approval. A recovery root uses its
-registration's `epochId`. Readers reconstruct the context from that record
-and the framed generation from its account generation.
 
 ### 1.3 Space tables
 
@@ -1535,7 +1529,7 @@ the 32 secret bytes, created and read with user verification required
   `C = ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
   "account", identifier: account, table: "__e2ee_commitments", row: id,
   column: "signature", epoch: decimal g, recipient: rootId}` (§1.2,
-  "Commitment and endorsement contexts"). Unlike the root's own signed
+  "Commitment context"). Unlike the root's own signed
   bytes above, the context is not framed: its encoding (`JE2C 01` and its
   nine fields) is followed directly by the two framed fields, with no
   length before it. `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs`
