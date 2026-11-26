@@ -718,6 +718,14 @@ impl E2eeClient {
         Ok(())
     }
 
+    /// Makes the next [`E2eeClient::sync_spaces`] fail before it serves
+    /// anything, as a failed read of the local store would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_next_sync_for_test(&self) {
+        self.shared.member_watch.borrow_mut().fail_next_sync = true;
+    }
+
     /// Public account histories requested since the last call.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]

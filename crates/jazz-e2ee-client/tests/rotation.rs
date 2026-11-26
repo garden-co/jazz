@@ -415,6 +415,73 @@ fn startup_reports_delivery_failure_for_an_unwatched_space() {
     runtime.stop();
 }
 
+/// Alice starts offline with a held key for an unwatched space, and the
+/// startup sweep reports it. On reconnect her sync fails before it serves
+/// anything, and she is still offline for delivery: that round's sweep
+/// reports the space again, since each round starts with nothing told.
+#[test]
+fn a_sync_that_fails_early_does_not_mute_the_next_rounds_report() {
+    let settings = EncryptionSettings::default();
+    let server = secure_authority_with(&settings, None);
+    let alice = account(0xa1);
+    let client = Rc::new(open_account(
+        Rc::new(MemoryStore::new()),
+        alice,
+        settings.clone(),
+        None,
+    ));
+    let (db, _link) = session(&client, &server, alice, &settings, 0xa1, None);
+    let project = project(&db, "plans");
+    hold_new_space(&client, &db, project);
+    let at = address(&db, project);
+    client.set_online(false);
+    let reports = observe_reports(&client);
+    let db = Rc::new(db);
+    let runtime = Encryption::new(
+        Built {
+            spaces: serde_json::json!({}),
+            client: client.clone(),
+            reports: Rc::default(),
+        },
+        Rc::new(JsStore::default()),
+        db.clone(),
+    );
+    let failures = || {
+        reports
+            .borrow()
+            .iter()
+            .filter(|report| {
+                matches!(report, Report::DeliveryFailed { space, .. }
+                if space.scope_id == at.scope_id && space.identifier == at.identifier)
+            })
+            .count()
+    };
+    let until_reported = |count: usize| {
+        let mut turns = 0;
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                runtime.take_reports();
+                if runtime.state()["stage"] == "idle" && failures() >= count {
+                    break;
+                }
+                turns += 1;
+                assert!(turns < 1_500, "no report {count}: {}", runtime.state());
+                futures::pending!();
+            }
+        });
+    };
+    until_reported(1);
+    // Back online for the runtime, so it syncs and sweeps again, but the
+    // sync fails first and delivery is still refused as offline.
+    client.fail_next_sync_for_test();
+    runtime.set_online(true);
+    client.set_online(false);
+    until_reported(2);
+    assert_eq!(failures(), 2, "{:?}", reports.borrow());
+    runtime.stop();
+}
+
 /// Alice's app has a space open whose member Bob lacks its key, and her
 /// deliveries fail. At startup the watched space's pass and the sweep over
 /// held spaces both fail for it, and she is told `delivery-failed` once.
