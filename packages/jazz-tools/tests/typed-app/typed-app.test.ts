@@ -239,20 +239,33 @@ describe("typed app prototype", () => {
     ]);
   });
 
-  it("rejects composite index columns that are neither declared nor provenance timestamps", () => {
+  it("lets an index use the author columns, for creator permissions", () => {
+    const app = testApp({
+      tables: {
+        messages: {
+          columns: { roomId: "uuid", text: "string" },
+          indexes: ["$createdBy", ["$updatedBy", "$createdAt"]],
+        },
+      },
+    });
+    expect(app.wasmSchema.messages?.indexed_columns).toEqual(["$createdBy"]);
+    expect(app.wasmSchema.messages?.composite_indexes).toEqual([["$updatedBy", "$createdAt"]]);
+  });
+
+  it("rejects composite index columns that are neither declared nor provenance columns", () => {
     const withIndex = (index: string[]) => ({
       tables: { messages: { columns: { roomId: "uuid", text: "string" }, indexes: [index] } },
     });
-    // `$createdBy` is metadata, not an indexable timestamp.
-    expect(() => testApp(withIndex(["roomId", "$createdBy"]))).toThrow(
-      /indexes\.composite\[0\]: table messages has no column `\$createdBy`/,
+    // `$deletedBy` is read from the deletion, not stored as a column.
+    expect(() => testApp(withIndex(["roomId", "$deletedBy"]))).toThrow(
+      /indexes\.composite\[0\]: table messages has no column `\$deletedBy`/,
     );
     // Not a column of this table.
     expect(() => testApp(withIndex(["roomId", "sentAt"]))).toThrow(
       /indexes\.composite\[0\]: table messages has no column `sentAt`/,
     );
     expect(() => testApp(withIndex(["$createdAt", "$createdAt"]))).toThrow(
-      /distinct declared columns or provenance timestamps/,
+      /distinct declared columns or provenance columns/,
     );
   });
 

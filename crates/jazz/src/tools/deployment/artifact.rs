@@ -16,6 +16,7 @@
 //! the nearest names.
 
 mod app_file;
+mod creator_index;
 pub mod expr;
 pub mod json;
 mod permissions_file;
@@ -267,7 +268,8 @@ impl LoadedApp {
         &self.codegen
     }
 
-    /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
+    /// What loaded but is ignored or will be slow, as `<file>: <path>:
+    /// <why>` lines: e.g. a creator read policy with no index on its author.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -369,6 +371,7 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
     .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
     let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
     let stranded = history.stranded.clone();
+    let unindexed = creator_index::warnings(history.current_schema(), &permissions);
     Ok(LoadedApp {
         history,
         bundle,
@@ -379,6 +382,11 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
             .into_iter()
             .map(|w| format!("{APP_FILE}: {w}"))
             .chain(stranded)
+            .chain(
+                unindexed
+                    .into_iter()
+                    .map(|w| format!("{PERMISSIONS_FILE}: {w}")),
+            )
             .collect(),
     })
 }
@@ -501,12 +509,16 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
     )
     .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
     let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
+    let warnings = creator_index::warnings(history.current_schema(), &permissions)
+        .into_iter()
+        .map(|w| format!("{PERMISSIONS_FILE}: {w}"))
+        .collect();
     Ok(LoadedApp {
         history,
         bundle,
         permissions,
         codegen,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 

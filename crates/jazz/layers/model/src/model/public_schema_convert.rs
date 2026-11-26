@@ -816,14 +816,19 @@ fn convert_table(
         let mut seen = BTreeSet::new();
         for column in group {
             let column_name = column.as_str();
-            // Provenance timestamps are stored on every row, so they can
-            // order an index too (e.g. a chat's messages by `$createdAt`).
+            // Provenance is stored on every row, so it can key an index
+            // too: a chat's messages by `$createdAt`, or a creator's rows by
+            // `$createdBy` (its author code) for a policy such as
+            // `$createdBy.account = session.user`.
             let declared = column_names.contains(column_name)
-                || matches!(column_name, "$createdAt" | "$updatedAt");
+                || matches!(
+                    column_name,
+                    "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy"
+                );
             if !declared || !seen.insert(column_name) {
                 return Err(err(
                     format!("$.{}.composite_indexes.{index}", name.as_str()),
-                    "composite index columns must be distinct declared columns or provenance timestamps",
+                    "composite index columns must be distinct declared columns or provenance columns ($createdAt, $updatedAt, $createdBy, $updatedBy)",
                 ));
             }
             if table.columns.column(column_name).is_some_and(|descriptor| {

@@ -167,6 +167,8 @@ enum Term {
     Large(LargeColumn),
     /// An enum column's cell ([`EnumColumn`]).
     Enum(EnumColumn),
+    /// A part of an author record ([`AuthorPart`]).
+    Author(AuthorPart),
     /// A bound value (literal, parameter, session or claim value): its
     /// placeholder and the value itself.
     Bound(String, Sql),
@@ -183,6 +185,7 @@ impl Term {
             Term::Sql(sql) | Term::Bound(sql, _) => Some(sql),
             Term::Large(column) => Some(&column.cell),
             Term::Enum(column) => Some(&column.cell),
+            Term::Author(part) => Some(&part.cell),
             Term::Missing | Term::NaN => None,
         }
     }
@@ -210,6 +213,35 @@ impl EnumColumn {
     /// order, or the cell itself where that is tag order.
     fn ordered(&self) -> Option<String> {
         self.column.rank_sql(&self.cell)
+    }
+}
+
+/// A part of an author record (`$createdBy.account`,
+/// `$updatedBy.identity.subject`, ...): the field of `_jazz_authors` the
+/// row's author code names. Read on its own it is that field, looked up
+/// per row; equal to bound values, it is the row's code among the codes
+/// whose field holds them, looked up once, so an index on the code column
+/// serves a policy such as `$createdBy.account = session.user` (#6378).
+#[derive(Clone)]
+struct AuthorPart {
+    /// The field, read for this row.
+    cell: String,
+    /// The row's author code.
+    code: String,
+    /// The `_jazz_authors` field.
+    part: &'static str,
+}
+
+impl AuthorPart {
+    /// The row's code is one whose field is among `values` (bound,
+    /// non-NULL placeholders). `+n` drops the INTEGER affinity of
+    /// `_jazz_authors.n`: compared under it, the untyped code column's
+    /// index could not serve the `IN`.
+    fn among(&self, values: &str) -> String {
+        format!(
+            "({} IN (SELECT +n FROM _jazz_authors WHERE {} IN ({values})))",
+            self.code, self.part
+        )
     }
 }
 
@@ -2835,6 +2867,16 @@ impl<'a> Ctx<'a> {
     }
 
     fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+        let src = self.resolve_src(rel, column)?;
+        Ok(match &src.table {
+            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
+            None if column.column == "id" => format!("{}.id", src.alias),
+            None => format!("{}.{}", src.alias, quote(&column.column)),
+        })
+    }
+
+    /// The source of `rel` a relation column names.
+    fn resolve_src<'r>(&self, rel: &'r Rel, column: &RelationColumnRef) -> Result<&'r Src, Error> {
         let has = |src: &Src| match &src.table {
             Some(table) => self.schema.tables[table].has_column(&column.column),
             None => column.column == "id",
@@ -2853,26 +2895,18 @@ impl<'a> Ctx<'a> {
                 "relation column {column:?} does not exist"
             )));
         }
-        Ok(match &src.table {
-            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
-            None if column.column == "id" => format!("{}.id", src.alias),
-            None => format!("{}.{}", src.alias, quote(&column.column)),
-        })
+        Ok(src)
     }
 
-    /// [`Self::resolve`] as an operand.
+    /// [`Self::resolve`] as an operand: a table's column as
+    /// [`Self::column_term`] makes it (an author part seeks by code, see
+    /// [`AuthorPart`]).
     fn resolve_term(&self, rel: &Rel, column: &RelationColumnRef) -> Result<Term, Error> {
-        let sql = self.resolve(rel, column)?;
-        let src = rel.from.iter().find(|src| {
-            src.table.as_ref().is_some_and(|table| {
-                sql.starts_with(&format!("{}.", src.alias))
-                    && self.schema.tables[table].has_column(&column.column)
-            })
-        });
-        Ok(match src.and_then(|src| src.table.as_ref()) {
-            Some(table) => self.large_term(&self.schema.tables[table], sql, &column.column),
-            None => Term::Sql(sql),
-        })
+        let src = self.resolve_src(rel, column)?;
+        match &src.table {
+            Some(table) => self.column_term(&self.schema.tables[table], &src.alias, &column.column),
+            None => Ok(Term::Sql(self.resolve(rel, column)?)),
+        }
     }
 
     fn row_id(
@@ -2966,14 +3000,11 @@ impl<'a> Ctx<'a> {
     /// The type of relation column `column` (nullability removed), when it
     /// resolves to a table's column.
     fn rel_column_type(&self, rel: &Rel, column: &RelationColumnRef) -> Option<ValueType> {
-        let sql = self.resolve(rel, column).ok()?;
-        rel.from.iter().find_map(|src| {
-            let table = &self.schema.tables[src.table.as_ref()?];
-            (sql.starts_with(&format!("{}.", src.alias)) && table.has_column(&column.column))
-                .then(|| table.column_type(&column.column))
-                .flatten()
-                .map(|ty| unwrap_nullable_type(ty).clone())
-        })
+        let src = self.resolve_src(rel, column).ok()?;
+        let table = &self.schema.tables[src.table.as_ref()?];
+        table
+            .column_type(&column.column)
+            .map(|ty| unwrap_nullable_type(ty).clone())
     }
 
     fn rel_predicate(
@@ -3588,19 +3619,13 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
         } else {
             identity.to_owned()
         };
-        let code = match stored {
-            "$deletedBy" => deletion_sql(table, alias, stored),
-            _ => stored_sql(alias, stored),
-        };
+        let code = author_code_sql(table, alias, stored);
         return Ok(format!(
             "(SELECT {fields} FROM _jazz_authors WHERE n = {code})"
         ));
     }
     if let Some((stored, part)) = crate::values::author_part(column) {
-        let code = match stored {
-            "$deletedBy" => deletion_sql(table, alias, stored),
-            _ => stored_sql(alias, stored),
-        };
+        let code = author_code_sql(table, alias, stored);
         return Ok(format!(
             "(SELECT {part} FROM _jazz_authors WHERE n = {code})"
         ));
@@ -3660,6 +3685,15 @@ fn deletion_sql(table: &Table, alias: &str, column: &str) -> String {
         "CASE WHEN ({alias}._state & {STATE_DELETED}) <> 0 THEN {} END",
         stored_sql(alias, stamp)
     )
+}
+
+/// The author code a stored author column (`$createdBy`, `$updatedBy`,
+/// `$deletedBy`) holds for the row at `alias`.
+fn author_code_sql(table: &Table, alias: &str, stored: &str) -> String {
+    match stored {
+        "$deletedBy" => deletion_sql(table, alias, stored),
+        _ => stored_sql(alias, stored),
+    }
 }
 
 /// A stored provenance column; an update stamp left NULL reads as the
@@ -3929,6 +3963,13 @@ impl Ctx<'_> {
     /// A column as an operand: a large-capable column compares by its cell.
     fn column_term(&self, table: &Table, alias: &str, column: &str) -> Result<Term, Error> {
         let sql = column_sql(table, alias, column)?;
+        if let Some((stored, part)) = crate::values::author_part(column) {
+            return Ok(Term::Author(AuthorPart {
+                cell: sql,
+                code: author_code_sql(table, alias, stored),
+                part,
+            }));
+        }
         Ok(self.large_term(table, sql, column))
     }
 
@@ -4093,6 +4134,15 @@ impl Ctx<'_> {
         }
         Ok(match (left, right) {
             (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
+            // An author part equal to a value: the codes whose field holds
+            // it, looked up once (see [`AuthorPart`]). A NULL value keeps
+            // the per-row read, which `IS` matches against a missing code.
+            (Term::Author(part), Term::Bound(p, value))
+            | (Term::Bound(p, value), Term::Author(part))
+                if matches!(op, CmpOp::Eq) && !matches!(value, Sql::Null) =>
+            {
+                part.among(&p)
+            }
             // A range in a schema whose order is not tag order compares
             // ranks.
             (Term::Enum(column), right @ Term::Bound(..))
@@ -4214,6 +4264,18 @@ impl Ctx<'_> {
                 option => option,
             })
             .collect();
+        if let Term::Author(part) = &left
+            && options
+                .iter()
+                .all(|o| matches!(o, Term::Bound(_, value) if !matches!(value, Sql::Null)))
+        {
+            let list = self.bound_list(&options);
+            let list = list.unwrap_or_else(|| {
+                let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+                list.join(", ")
+            });
+            return Ok(part.among(&list));
+        }
         if let Term::Large(column) = &left {
             // A chunked cell is in no list of inline values; a longer
             // literal is refused as `=` refuses it.
