@@ -19,14 +19,23 @@ const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
 /// later task. Only actual store and wire traffic drives the foreground.
 ///
 /// Alice ──store reply──► foreground ──recovery root──► authority
+///
+/// The test blocks on the two events that move it: a store wake and frames
+/// queued for the authority. It has no time budget, so a loaded machine only
+/// makes it slower; a quiet minute means verification stalled.
 #[test]
 fn delayed_store_replies_wake_account_verification() {
     use std::sync::mpsc;
 
+    enum Event {
+        StoreRequest,
+        Outbound,
+    }
+
     unsafe extern "C" fn wake(context: *mut c_void, _: u64, kind: u8, _: u64) {
         if kind == FOREGROUND_WAKE_IMMEDIATE {
-            let sender = unsafe { &*context.cast::<mpsc::Sender<()>>() };
-            let _ = sender.send(());
+            let sender = unsafe { &*context.cast::<mpsc::Sender<Event>>() };
+            let _ = sender.send(Event::StoreRequest);
         }
     }
 
@@ -34,7 +43,8 @@ fn delayed_store_replies_wake_account_verification() {
     let (app, schema) = encrypted_schema();
     let (author, request) = device_account_request([0x43; 32]);
     let store = delayed_store();
-    let (events, wakes) = mpsc::channel::<()>();
+    let (events, wakes) = mpsc::channel::<Event>();
+    let outbound = events.clone();
     unsafe {
         let host = jazz_native_relay_host_new();
         let lease = jazz_native_relay_host_retain(host, 1);
@@ -62,33 +72,46 @@ fn delayed_store_replies_wake_account_verification() {
             .db
             .prepare_query(&jazz::query::Query::from("__e2ee_recovery_roots"))
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut replies = 0;
-        let registered = loop {
-            if pump() {
-                relay.pump().unwrap();
+        let queued = relay.wire().unwrap().outbound_ready();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let replies = thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    block_on(queued.notified());
+                    if outbound.send(Event::Outbound).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut replies = 0;
+            loop {
+                // Carry whatever the relay queued for the authority, and its
+                // answers back, until the wire is quiet.
+                while pump() {
+                    relay.pump().unwrap();
+                }
+                if !block_on(server.db.all(&query, Default::default()))
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                match wakes.recv_timeout(Duration::from_secs(60)) {
+                    Ok(Event::StoreRequest) => replies += answer_store(&execute, &store),
+                    Ok(Event::Outbound) => {}
+                    Err(_) => panic!(
+                        "recovery registration stalled after {replies} delayed store replies"
+                    ),
+                }
             }
-            if !block_on(server.db.all(&query, Default::default()))
-                .unwrap()
-                .is_empty()
-            {
-                break true;
-            }
-            if wakes.recv_timeout(Duration::from_millis(2)).is_ok() {
-                replies += answer_store(&execute, &store);
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-        };
+            done.store(true, std::sync::atomic::Ordering::Release);
+            queued.notify_one();
+            replies
+        });
         jazz_native_relay_host_lease_free(lease);
         jazz_native_relay_host_free(host);
         drop(Box::from_raw(events));
         assert!(replies > 0, "verification never got to the private store");
-        assert!(
-            registered,
-            "recovery registration stalled after {replies} delayed store replies"
-        );
     }
 }
 
