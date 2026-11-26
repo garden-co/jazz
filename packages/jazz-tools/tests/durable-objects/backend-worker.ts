@@ -3,6 +3,7 @@
 // (`JazzBackend`) with a tiny todos API on `jazz.db`, and a `fetch` that
 // forwards everything to the backend object.
 import {
+  CoreRedirectError,
   acceptDeviceAccounts,
   createJazz,
   durableObjects,
@@ -56,6 +57,10 @@ export const JazzBackend = jazzBackend((env: Env) => {
           return Response.json((await jazz.db.all(app.todos)).map((todo) => todo.title).sort());
         }
       } catch (error) {
+        if (error instanceof CoreRedirectError) {
+          const { name, url, location, message } = error;
+          return Response.json({ name, url, location, message }, { status: 500 });
+        }
         return new Response(String((error as Error)?.stack ?? error), { status: 500 });
       }
       return new Response("Not found", { status: 404 });

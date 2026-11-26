@@ -73,13 +73,17 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     "refuses a %i redirect during app discovery",
     async (status) => {
       const target = await discoveryServer(() => Response.json({}));
-      const core = await discoveryServer(() => Response.redirect(target.url, status));
+      const core = await discoveryServer(() => Response.redirect(`${target.url}/app`, status));
       const { url } = await worker(undefined, { TEST_CORE_URL: core.url });
       const response = await fetch(`${url}/app-id`);
       expect(response.status).toBe(500);
-      expect(await response.text()).toContain(
-        "configure durableObjects() with the core's final URL",
-      );
+      expect(await response.json()).toEqual({
+        name: "CoreRedirectError",
+        url: core.url,
+        location: `${target.url}/app`,
+        message: `the Jazz core at ${core.url} redirected to ${target.url}/app; Jazz never follows a core's redirects, since they would carry the backend credential along: configure durableObjects() with the core's final URL`,
+      });
+      expect(core.requests).toEqual(["/app"]);
       expect(target.requests).toEqual([]);
     },
   );
