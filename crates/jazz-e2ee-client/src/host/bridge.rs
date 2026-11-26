@@ -67,6 +67,8 @@ impl StoreWake {
 }
 
 type StoreScheduler = Box<dyn Fn(StoreWake)>;
+/// A [`StoreScheduler`] the store can clone out of its cell before calling it.
+type SharedStoreScheduler = Rc<dyn Fn(StoreWake)>;
 
 #[derive(Default)]
 pub struct JsStore {
@@ -81,7 +83,7 @@ pub struct JsStore {
     /// Called when a request is queued, so the host polls the queue soon.
     /// Shared so a call can release the borrow first: the host may call back.
     wake: RefCell<Option<Rc<dyn Fn()>>>,
-    store_wake: RefCell<Option<Rc<dyn Fn(StoreWake)>>>,
+    store_wake: RefCell<Option<SharedStoreScheduler>>,
     background_deadline: Cell<Option<Instant>>,
     operation_deadlines: RefCell<BTreeMap<Instant, usize>>,
     announced_deadline: Cell<Option<Instant>>,
