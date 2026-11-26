@@ -309,22 +309,28 @@ pub struct Encryption {
 /// One runtime call at a time: two calls that each hold a database
 /// transaction open across awaits would lock one another out (the store is
 /// busy), so the loop and the calls from JavaScript take turns.
-#[derive(Default)]
-struct Gate(Cell<bool>);
+struct Gate {
+    held: Cell<bool>,
+    waiting: Cell<bool>,
+    wake: Rc<dyn Fn()>,
+}
 
 struct Turn<'a>(&'a Gate);
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        self.0.0.set(false);
+        self.0.held.set(false);
+        if self.0.waiting.replace(false) {
+            (self.0.wake)();
+        }
     }
 }
 
 impl Gate {
     async fn enter(&self) -> Turn<'_> {
-        std::future::poll_fn(|context| {
-            if self.0.replace(true) {
-                context.waker().wake_by_ref();
+        std::future::poll_fn(|_| {
+            if self.held.replace(true) {
+                self.waiting.set(true);
                 Poll::Pending
             } else {
                 Poll::Ready(())
@@ -510,6 +516,11 @@ impl Encryption {
         let encryption = Rc::new(Self {
             client,
             bridge_store,
+            gate: Gate {
+                held: Cell::new(false),
+                waiting: Cell::new(false),
+                wake: Rc::clone(&wake),
+            },
             wake,
             db,
             reports,
@@ -525,7 +536,6 @@ impl Encryption {
             stage: Cell::new("starting"),
             woken_batch: Cell::new(None),
             preparations: Default::default(),
-            gate: Gate::default(),
             main: RefCell::default(),
         });
         let running = Rc::clone(&encryption);
@@ -558,6 +568,7 @@ impl Encryption {
     /// Lets the loop run as far as it can without waiting.
     pub fn drive(&self) {
         self.preparations.settle();
+        let turn_was_held = self.gate.held.get();
         let mut main = self.main.borrow_mut();
         let Some(future) = main.as_mut() else {
             return;
@@ -567,6 +578,11 @@ impl Encryption {
             *main = None;
         }
         drop(main);
+        // A store or sync reply may have let the loop free its turn after
+        // the preparations were polled. Give them that turn on this drive.
+        if turn_was_held && !self.gate.held.get() {
+            self.preparations.settle();
+        }
         self.wake_if_owed();
     }
 
@@ -1226,6 +1242,7 @@ impl Encryption {
             "keysDeliver" => {
                 let (reply, answer) = futures::channel::oneshot::channel();
                 self.commands.borrow_mut().push_back(reply);
+                (self.wake)();
                 // The pass belongs to the loop; if it cannot run (its watch
                 // keeps failing) the caller gets the loop's error, not a hang.
                 match self.within(answer, DELIVER_WITHIN).await {
@@ -1579,6 +1596,17 @@ async fn main_loop(this: Rc<Encryption>) {
             .then(|| looked + Duration::from_secs(2));
         this.set_background_deadline(retry_at.into_iter().chain(probe).min());
         drop(turn);
+        // A wake from queueing work may have been consumed while this
+        // iteration was suspended after its drain point. Ask for the next
+        // iteration only if it can take work left in the queues.
+        if this.reconnected.get()
+            || !this.commands.borrow().is_empty()
+            || (this.status.get() == Some(AccountStatus::Active)
+                && spaces.is_some()
+                && !this.uses.borrow().is_empty())
+        {
+            (this.wake)();
+        }
         yield_now().await;
     }
 }
@@ -2144,7 +2172,13 @@ mod tests {
         if observed {
             jazz::db::block_on(db.set_authority()).unwrap();
         }
-        Encryption::new_native(built, bridge_store, db, Rc::new(|| {}))
+        let store = bridge_store.clone();
+        let wake = Rc::new(move || {
+            if let Some(store) = &store {
+                store.request_wake();
+            }
+        });
+        Encryption::new_native(built, bridge_store, db, wake)
     }
 
     /// A space's row answers from the local catalogue, even while the loop's
@@ -2235,6 +2269,151 @@ mod tests {
             );
         }
         drop(busy);
+        runtime.stop();
+    }
+
+    /// Alice's key preparation gets the turn as soon as the loop's store
+    /// reply arrives. Replace the loop with a single store load so the test
+    /// controls exactly which drive frees the turn.
+    ///
+    /// loop ──load──► store ──reply──► loop releases ──► Alice prepares
+    #[test]
+    fn a_store_reply_that_frees_the_turn_also_drives_a_waiting_preparation() {
+        let store = Rc::new(JsStore::default());
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || count.set(count.get() + 1)));
+        let runtime = native_runtime(true, true, Some(Rc::clone(&store)));
+        let running = Rc::clone(&runtime);
+        let loading = Rc::clone(&store);
+        *runtime.main.borrow_mut() = Some(Box::pin(async move {
+            let _turn = running.gate.enter().await;
+            assert!(loading.load("alice", "keys").await.unwrap().is_none());
+        }));
+        runtime.drive();
+        let request: Value = serde_json::from_str(&store.take_requests()[0]).unwrap();
+
+        let space = SpaceAddress {
+            scope_id: uuid::Uuid::new_v4().to_string(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let deadline = Encryption::write_deadline(Duration::ZERO);
+        let mut retry = Box::pin(runtime.retry_write(&space, deadline, false));
+        assert!(
+            retry
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(runtime.preparations.0.borrow().len(), 1);
+        wakes.set(0);
+
+        assert!(store.reply(
+            request["id"].as_str().unwrap().parse().unwrap(),
+            true,
+            "null"
+        ));
+        runtime.drive();
+        assert!(runtime.preparations.0.borrow().is_empty());
+        assert_eq!(
+            wakes.get(),
+            1,
+            "releasing the contended turn wakes the host"
+        );
+        runtime.drive();
+        assert_eq!(wakes.get(), 1, "the freed gate schedules no idle wakes");
+        runtime.stop();
+    }
+
+    /// Alice queues a space watch and a delivery after the loop has taken its
+    /// snapshot of work. Inject both at the bridge's end-of-iteration signal
+    /// to check that the loop asks for the turn that will actually serve them.
+    #[test]
+    fn space_uses_and_deliveries_queued_mid_iteration_wake_the_next_pass() {
+        use jazz::db::{DbConfig, DbIdentity};
+        use jazz::ids::{AuthorSubject, NodeUuid};
+        use jazz::schema::JazzSchema;
+
+        let (schema, _, declarations) = jazz::tools::deployment::artifact::load_client_encrypted(
+            include_bytes!("../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"),
+            jazz::tools::AppId::from_name("queued-encryption-work"),
+            "test",
+        )
+        .unwrap();
+        let built = run(build_client(
+            declarations.unwrap(),
+            uuid::Uuid::new_v4().to_string(),
+            Rc::new(crate::MemoryStore::new()),
+            None,
+        ))
+        .unwrap();
+        let db = Rc::new(
+            run(Db::open(DbConfig::new(
+                JazzSchema::new(&schema).unwrap(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap(),
+        );
+        run(db.set_authority()).unwrap();
+        let store = Rc::new(JsStore::default());
+        let wakes = Rc::new(Cell::new(0));
+        let count = Rc::clone(&wakes);
+        store.set_wake(Box::new(move || count.set(count.get() + 1)));
+        let runtime = Encryption::new(built, Rc::clone(&store), db);
+        // The local catalogue has the space-watch tables. No upstream is
+        // needed to exercise the queues once the account is marked active.
+        runtime.set_status(AccountStatus::Active);
+        runtime.drive();
+
+        let delivery = Rc::new(RefCell::new(None));
+        let queued = Rc::clone(&delivery);
+        let running = Rc::downgrade(&runtime);
+        let consumed = Rc::clone(&wakes);
+        let enqueue = Rc::new(Cell::new(false));
+        let armed = Rc::clone(&enqueue);
+        store.set_store_wake(Some(Box::new(move |wake| {
+            if matches!(wake, StoreWake::Deadline(_)) && armed.replace(false) {
+                let runtime = running.upgrade().unwrap();
+                runtime.use_space(
+                    true,
+                    "projects".to_owned(),
+                    uuid::Uuid::new_v4().to_string(),
+                );
+                let mut call = runtime.call("keysDeliver".to_owned(), Value::Null);
+                assert!(
+                    call.as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                *queued.borrow_mut() = Some(call);
+                // An early drive already consumed the queueing wakes.
+                consumed.set(0);
+            }
+        })));
+        store.set_background_deadline(Some(web_time::Instant::now() + Duration::from_secs(30)));
+        enqueue.set(true);
+        runtime.drive();
+        assert_eq!(runtime.uses.borrow().len(), 1);
+        assert_eq!(runtime.commands.borrow().len(), 1);
+        assert_eq!(wakes.get(), 1, "the queued work needs another host drive");
+
+        runtime.drive();
+        assert!(runtime.uses.borrow().is_empty());
+        let result = delivery
+            .borrow_mut()
+            .take()
+            .unwrap()
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert_eq!(
+            result,
+            Poll::Ready(Ok(json!({ "delivered": 0, "failed": 0 })))
+        );
+        runtime.drive();
+        assert_eq!(wakes.get(), 1, "the drained loop schedules no idle wakes");
         runtime.stop();
     }
 
