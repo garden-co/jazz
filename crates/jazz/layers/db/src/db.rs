@@ -12357,8 +12357,15 @@ impl Db {
             // was cancelled after its fetch leaves the next read a fresh one.
             // Even a LocalOnly read observes this cut. Later remote coverage
             // must not move a snapshot whose results have already escaped.
-            *pinned_snapshot = snapshot;
-            *pinned = true;
+            // A read only starts once its predecessors are done, so one that
+            // found the batch unpinned is the only read that can pin it, and
+            // one that found it pinned read at the pinned cut.
+            if *pinned {
+                debug_assert_eq!(*pinned_snapshot, snapshot, "a read moved a pinned cut");
+            } else {
+                *pinned_snapshot = snapshot;
+                *pinned = true;
+            }
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
