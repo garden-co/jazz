@@ -444,6 +444,63 @@ fn rotation_follow_up_reads_only_the_accounts_it_uses() {
     assert_eq!(alice.client.take_public_account_reads(), 2);
 }
 
+/// Alice rotates for 101 other members, and her first try at the rest
+/// fails because she is offline. Back online, the retry waits 2 s, as
+/// after a first failure online, and then reads only Alice's history and
+/// that of its one remaining recipient, as the rotator's own batch does:
+/// not every member's, as the pass would.
+#[test]
+fn a_rotation_retry_reads_only_the_accounts_its_batch_uses() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let alice = device(&server, account(0xa1), MemoryStore::new(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+
+    for seed in 1..=101 {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+    }
+    pump(&server, &alice.db);
+
+    let address = space_address(&alice, space);
+    assert_eq!(alice.rotate(&server, &address).unwrap(), 100);
+    let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+    alice.client.advance_settle_clock(std::time::Duration::ZERO);
+    alice.client.set_online(false);
+    // The rotation's own rows, seen once by the watch: their pass fails
+    // offline, and the rest of the rotation is not tried offline.
+    alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.finish_rotation_for_test(&alice.db, &address)
+        )
+        .is_err()
+    );
+    alice.client.set_online(true);
+    alice
+        .client
+        .advance_settle_clock(std::time::Duration::from_secs(1));
+    let early = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(early.is_empty(), "retried before its wait: {early:?}");
+    alice
+        .client
+        .advance_settle_clock(std::time::Duration::from_secs(1));
+    alice.client.take_public_account_reads();
+    let synced = alice.sync_spaces(&server, &mut watch).unwrap();
+    assert!(
+        matches!(synced.as_slice(), [(at, Ok(SpaceKeyState::Held))] if *at == address),
+        "{synced:?}"
+    );
+    // Alice for the sync's acquisition, then Alice and the final recipient
+    // for the batch: the pass would read all 102.
+    assert_eq!(alice.client.take_public_account_reads(), 1 + 2);
+    assert!(alice.sync_spaces(&server, &mut watch).unwrap().is_empty());
+}
+
 /// Mallory, a member who holds the space's key, gets the new version in
 /// the first batch of Alice's rotation and writes deliveries that do not
 /// open to the members left for the follow-up. Alice's background pass
@@ -540,6 +597,147 @@ fn a_rotators_follow_up_delivers_past_another_members_junk_delivery() {
             SpaceKeyState::Held
         );
     }
+}
+
+/// Alice rotates and restarts before her background batches run, so the
+/// list of members left is gone. Mallory, who got the new version in the
+/// first batch, writes a delivery that does not open to the member left.
+/// On startup Alice's device, the signer of the current version's successor,
+/// delivers again to every member lacking a delivery from her, whatever
+/// others sent (protocol §3.5), and the member left reads the space.
+///
+/// ```text
+/// alice ──successor + 100 deliveries (mallory first)──► authority
+/// alice restarts (the rest was never sent)
+/// mallory ──junk delivery to the 1 left over──► authority
+/// alice's startup ──1 delivery anyway──► authority
+/// the 1 ──acquire──► held
+/// ```
+#[test]
+fn a_rotator_delivers_the_rest_after_a_restart_past_a_junk_delivery() {
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let store = MemoryStore::new();
+    let alice = device(&server, account(0xa1), store.clone(), 0xa1);
+    alice.activate(&server);
+    let space = new_project(&server, &alice, "plans");
+    write_note(&server, &alice, space, SECRET).unwrap();
+    let address = space_address(&alice, space);
+    let mallory = device(&server, account(0xb0), MemoryStore::new(), 0xb0);
+    mallory.activate(&server);
+    add_member(&server, &alice, space, &mallory.id());
+    assert_eq!(deliver(&server, &alice, &[&mallory], space), 1);
+    let mut others = Vec::new();
+    for seed in 1..=u8::try_from(DELIVERY_BATCH).unwrap() {
+        let member = device(&server, account(seed), MemoryStore::new(), seed);
+        member.activate(&server);
+        server_member(&server, &alice, space, &member.id());
+        others.push(member);
+    }
+    pump(&server, &alice.db);
+
+    assert_eq!(alice.rotate(&server, &address).unwrap(), DELIVERY_BATCH);
+    drop(alice);
+    let epoch = all(&server, Query::from("__e2ee_space_successors"))
+        .unwrap()
+        .remove(0)
+        .cell("epochId")
+        .unwrap();
+    let to = |member: &Device| Value::Uuid(uuid::Uuid::parse_str(&member.id()).unwrap());
+    let delivered: Vec<Value> = all(
+        &server,
+        Query::from("__e2ee_space_deliveries").filter(eq(col("keyEpochId"), lit(epoch.clone()))),
+    )
+    .unwrap()
+    .iter()
+    .map(|row| row.cell("recipientAccountId").unwrap())
+    .collect();
+    let left: Vec<&Device> = others
+        .iter()
+        .filter(|member| !delivered.contains(&to(member)))
+        .collect();
+    assert_eq!(left.len(), 1);
+    mallory.follow_notes(&server);
+    assert_eq!(
+        mallory.acquire(&server, &address).unwrap(),
+        SpaceKeyState::Held
+    );
+    junk_delivery(&mallory, left[0], space, epoch.clone());
+    pump(&server, &mallory.db);
+    let sent_by = |who: &str| {
+        all(
+            &server,
+            Query::from("__e2ee_space_deliveries")
+                .filter(eq(col("keyEpochId"), lit(epoch.clone())))
+                .filter(eq(
+                    col("senderAccountId"),
+                    lit(Value::Uuid(uuid::Uuid::parse_str(who).unwrap())),
+                )),
+        )
+        .unwrap()
+        .len()
+    };
+    // Mallory's startup: she holds the new version but did not sign its
+    // successor, so she sends nothing more than her junk delivery.
+    let mallory_id = mallory.id();
+    let mallory_db = Rc::new(mallory.db);
+    start_runtime(&server, mallory.client, &mallory_db);
+    assert_eq!(sent_by(&mallory_id), 1);
+
+    let alice = device(&server, account(0xa1), store, 0xa2);
+    alice.activate(&server);
+    let alice_id = alice.id();
+    let before = sent_by(&alice_id);
+    let db = Rc::new(alice.db);
+    start_runtime(&server, alice.client, &db);
+    let from_alice = all(
+        &server,
+        Query::from("__e2ee_space_deliveries")
+            .filter(eq(col("keyEpochId"), lit(epoch.clone())))
+            .filter(eq(col("recipientAccountId"), lit(to(left[0]))))
+            .filter(eq(
+                col("senderAccountId"),
+                lit(Value::Uuid(uuid::Uuid::parse_str(&alice_id).unwrap())),
+            )),
+    )
+    .unwrap();
+    assert_eq!(from_alice.len(), 1, "alice delivered to the member left");
+    // Only to the member left: the first batch already has hers.
+    assert_eq!(sent_by(&alice_id), before + 1);
+    left[0].follow_notes(&server);
+    assert_eq!(
+        left[0].acquire(&server, &address).unwrap(),
+        SpaceKeyState::Held
+    );
+}
+
+/// Starts a runtime for `client` and drives it until its startup work is
+/// done, then stops it.
+fn start_runtime(server: &Db, client: E2eeClient, db: &Rc<Db>) {
+    let runtime = jazz_e2ee_client::host::runtime::Encryption::new(
+        jazz_e2ee_client::host::runtime::Built {
+            spaces: serde_json::json!({}),
+            client: Rc::new(client),
+            reports: Rc::default(),
+        },
+        Rc::new(jazz_e2ee_client::host::bridge::JsStore::default()),
+        Rc::clone(db),
+    );
+    let mut idle = 0;
+    drive(server, &[db], async {
+        loop {
+            runtime.drive();
+            let state = runtime.state();
+            assert!(state["error"].is_null(), "{state}");
+            if state["status"] == "active" && state["stage"] == "idle" {
+                idle += 1;
+                if idle > 50 {
+                    break;
+                }
+            }
+            futures::pending!();
+        }
+    });
+    runtime.stop();
 }
 
 /// Alice rotates for eight other members. Selection reads everyone's

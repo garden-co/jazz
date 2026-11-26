@@ -262,14 +262,13 @@ async fn a_project_creator_is_admitted_even_without_update_permission() {
     assert_eq!(remaining[0].account_id, alice_id);
 }
 
-/// Alice's app was written before creators became members automatically: it
-/// still inserts her own member row after creating a project. That insert is
-/// refused, naming the opt-out, and she stays a member once. The same insert
-/// in a later transaction is refused too. Admitting Bob still follows plain
-/// insert semantics.
+/// Raw inserts into `__e2ee_members` stay plain inserts: only the
+/// `add_member` helpers check for an existing row. Alice inserting her own
+/// member row after creating a project, in a write and in a transaction,
+/// adds a row each time; so does inserting Bob's row twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_explicit_creator_member_row_is_refused_not_duplicated() {
-    use bindings::{E2eeMember, NewE2eeMember, NewProject, e2ee_members};
+async fn raw_member_inserts_stay_plain_inserts() {
+    use bindings::{NewE2eeMember, NewProject, e2ee_members};
 
     let app = App::start().await;
     let alice = app.device().await;
@@ -285,37 +284,203 @@ async fn an_explicit_creator_member_row_is_refused_not_duplicated() {
         .await
         .unwrap();
     let members = e2ee_members::query().filter(e2ee_members::identifier().eq(project.id));
-    let refused = |result: Result<E2eeMember, Error>| {
-        let message = format!("{:?}", result.unwrap_err());
-        assert!(
-            message.contains("already a member") && message.contains("addCreatorAsMember"),
-            "{message}"
-        );
-    };
-    refused(
-        alice
-            .insert(NewE2eeMember::new(scope, project.id, alice_id))
-            .await,
-    );
-    let in_transaction = alice
+    alice
+        .insert(NewE2eeMember::new(scope, project.id, alice_id))
+        .await
+        .unwrap();
+    alice
         .transaction(
             move |tx| async move { tx.insert(NewE2eeMember::new(scope, project.id, alice_id)) },
         )
-        .await;
-    refused(in_transaction);
-    let own = alice.all(members.clone()).await.unwrap();
-    assert_eq!(own.len(), 1);
-    assert_eq!(own[0].account_id, alice_id);
+        .await
+        .unwrap();
+    let rows = alice.all(members.clone()).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "the automatic row and two raw ones: {rows:?}"
+    );
+    assert!(rows.iter().all(|row| row.account_id == alice_id));
 
-    alice
-        .insert(NewE2eeMember::new(scope, project.id, bob_id))
+    for _ in 0..2 {
+        alice
+            .insert(NewE2eeMember::new(scope, project.id, bob_id))
+            .await
+            .unwrap();
+    }
+    let rows = alice.all(members).await.unwrap();
+    assert_eq!(
+        rows.iter().filter(|row| row.account_id == bob_id).count(),
+        2
+    );
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// `add_member` reads, then writes, so two joined adds of the same account
+/// outside a transaction can both find no row and both write one. Whichever
+/// way they interleave, each returns a row Alice can list, Bob has one or
+/// two rows, and `remove_member` clears them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_adds_leave_rows_that_remove_member_clears() {
+    use bindings::{NewProject, Project};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let (first, second) = futures_util::join!(
+        alice.add_member::<Project>(project, bob_account),
+        alice.add_member::<Project>(project, bob_account)
+    );
+    let (first, second) = (first.unwrap(), second.unwrap());
+    let rows = bob_rows(&alice, project, bob_id).await;
+    assert!((1..=2).contains(&rows.len()), "{rows:?}");
+    assert!(rows.contains(&first) && rows.contains(&second));
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
+            .await
+            .unwrap(),
+        rows.len()
+    );
+    assert!(bob_rows(&alice, project, bob_id).await.is_empty());
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Inside one Rust transaction, `add_member` calls run in turn on the
+/// client even when joined, so the second sees the row the first staged:
+/// Bob gets exactly one row, returned to both, and `remove_member` clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_adds_in_a_transaction_share_one_row() {
+    use bindings::{NewProject, Project};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let (first, second) = alice
+        .transaction(move |tx| async move {
+            let (first, second) = futures_util::join!(
+                tx.add_member::<Project>(project, bob_account),
+                tx.add_member::<Project>(project, bob_account)
+            );
+            Ok((first?, second?))
+        })
         .await
         .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(bob_rows(&alice, project, bob_id).await, vec![first]);
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(bob_rows(&alice, project, bob_id).await.is_empty());
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Bob's membership rows in `project`, as Alice lists them.
+async fn bob_rows(
+    alice: &jazz_app_support::Jazz,
+    project: ObjectId,
+    bob_id: ObjectId,
+) -> Vec<jazz_app_support::SpaceMember> {
     alice
-        .insert(NewE2eeMember::new(scope, project.id, bob_id))
+        .list_members::<bindings::Project>(project)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.account_id == bob_id)
+        .collect()
+}
+
+/// Alice's app was written before creators became members automatically: it
+/// still adds her as a member after creating a project. Adding her again,
+/// directly or in a later transaction, returns her existing row and writes
+/// nothing, so she stays a member once. Adding herself in the creating
+/// transaction keeps that explicit row instead of the automatic one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn re_adding_the_creator_returns_the_existing_member_row() {
+    use bindings::{NewProject, Project};
+
+    let app = App::start().await;
+    let alice = app.device().await;
+    assert_eq!(ready(&alice).await, "active");
+    let alice_account = alice.account().unwrap();
+    let alice_id = ObjectId::from_uuid(alice_account.0);
+
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
         .await
         .unwrap();
-    assert_eq!(alice.all(members).await.unwrap().len(), 3);
+    let creator = alice.list_members::<Project>(project.id).await.unwrap();
+    assert_eq!(creator.len(), 1);
+    assert_eq!(
+        alice
+            .add_member::<Project>(project.id, alice_account)
+            .await
+            .unwrap(),
+        creator[0]
+    );
+    let in_transaction = alice
+        .transaction(
+            move |tx| async move { tx.add_member::<Project>(project.id, alice_account).await },
+        )
+        .await
+        .unwrap();
+    assert_eq!(in_transaction, creator[0]);
+    assert_eq!(
+        alice.list_members::<Project>(project.id).await.unwrap(),
+        creator
+    );
+
+    let (created, explicit) = alice
+        .transaction(move |tx| async move {
+            let created = tx.insert(NewProject::new("drafts", alice_id))?;
+            let explicit = tx.add_member::<Project>(created.id, alice_account).await?;
+            Ok((created.id, explicit))
+        })
+        .await
+        .unwrap();
+    assert_eq!(explicit.account_id, alice_id);
+    assert_eq!(
+        alice.list_members::<Project>(created).await.unwrap(),
+        vec![explicit]
+    );
+
+    alice.shutdown().await.unwrap();
+    app.stop().await;
 }
 
 /// Alice can count the encrypted tasks in her project through the native app's untyped client.
@@ -2015,8 +2180,11 @@ async fn check_root_refusal(delay_after_durable_write: Option<Duration>) {
     app.stop().await;
 }
 
-/// Alice creates a space, admits Bob directly and in a transaction, and
-/// removes both of Bob's memberships while retaining her own.
+/// Alice creates a space and admits Bob. Admitting him again, directly or
+/// in a transaction, returns his existing row and writes nothing; a
+/// transaction that admits him to a fresh space twice stages one row, and
+/// rolling it back leaves none. Removing Bob deletes his one membership and
+/// keeps Alice's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_space_members_follow_insert_and_transaction_semantics() {
     use bindings::{NewProject, Project, Task};
@@ -2041,6 +2209,11 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
         .await
         .unwrap()
         .id;
+    let third = alice
+        .insert(NewProject::new("spare", alice_id))
+        .await
+        .unwrap()
+        .id;
     let creator = alice.list_members::<Project>(first).await.unwrap();
     assert_eq!(creator.len(), 1);
     assert_eq!(creator[0].account_id, alice_id);
@@ -2053,6 +2226,12 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
     assert_eq!(admitted.account_id, bob_id);
     assert_eq!(admitted.identifier, first);
     assert_eq!(admitted.scope_id, creator[0].scope_id);
+    let again = alice
+        .add_member::<Project>(first, bob_account)
+        .await
+        .unwrap();
+    assert_eq!(again, admitted);
+    assert_eq!(alice.list_members::<Project>(first).await.unwrap().len(), 2);
 
     let staged = alice
         .transaction(move |tx| async move {
@@ -2061,24 +2240,31 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
         })
         .await
         .unwrap();
-    assert_ne!(staged.id, admitted.id);
+    assert_eq!(staged, admitted);
     let listed = alice.list_members::<Project>(first).await.unwrap();
-    assert_eq!(listed.len(), 3);
+    assert_eq!(listed.len(), 2);
     assert!(listed.contains(&admitted));
-    assert!(listed.contains(&staged));
+    assert!(listed.contains(&creator[0]));
 
     let open = alice.begin_transaction().await.unwrap();
     let abandoned = open
-        .add_member::<Project>(first, bob_account)
+        .add_member::<Project>(third, bob_account)
         .await
         .unwrap();
+    assert_eq!(
+        open.add_member::<Project>(third, bob_account)
+            .await
+            .unwrap(),
+        abandoned
+    );
     open.rollback().await.unwrap();
     assert!(
         !alice
-            .list_members::<Project>(first)
+            .list_members::<Project>(third)
             .await
             .unwrap()
-            .contains(&abandoned)
+            .iter()
+            .any(|row| row.account_id == bob_id)
     );
 
     assert_eq!(
@@ -2086,7 +2272,7 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
             .remove_member::<Project>(first, bob_account)
             .await
             .unwrap(),
-        2
+        1
     );
     assert_eq!(
         alice
@@ -2112,6 +2298,102 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
             .any(|row| row.account_id == bob_id)
     );
 
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// `add_member` is idempotent only over what the client has synced. Alice
+/// admits Bob while her other device is offline; that device doesn't see
+/// his row, so admitting him there writes a second one. Once it syncs, Bob
+/// has two rows, and removing him deletes both.
+///
+/// ```text
+/// Alice's replica ──disconnect──┐
+/// Alice ──admit Bob──────────────┼──► authority
+/// replica ──admit Bob (local)───┘ ──reconnect──► authority: two rows for Bob
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsynced_replica_adds_a_second_member_row() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app
+        .device_of(key.clone())
+        .await
+        .durable(DurabilityTier::GlobalServer);
+    assert_eq!(ready(&alice).await, "active");
+    let replica = app.device_of(key).await;
+    let bob = app.device().await;
+    assert_eq!(ready(&replica).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let bobs = |rows: Vec<jazz_app_support::SpaceMember>| {
+        rows.into_iter()
+            .filter(|row| row.account_id == bob_id)
+            .collect::<Vec<_>>()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while replica
+        .list_members::<Project>(project)
+        .await
+        .unwrap()
+        .is_empty()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replica never saw the project"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    replica.disconnect().await.unwrap();
+    let admitted = alice
+        .add_member::<Project>(project, bob_account)
+        .await
+        .unwrap();
+    let unsynced = replica
+        .add_member::<Project>(project, bob_account)
+        .await
+        .unwrap();
+    assert_eq!(unsynced.account_id, bob_id);
+    assert_ne!(
+        unsynced.id, admitted.id,
+        "the replica couldn't see Bob's row"
+    );
+
+    replica.reconnect().await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = bobs(alice.list_members::<Project>(project).await.unwrap());
+        if rows.len() == 2 {
+            assert!(rows.contains(&admitted) && rows.contains(&unsynced));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replica's row never reached Alice: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
+            .await
+            .unwrap(),
+        2
+    );
+
+    replica.shutdown().await.unwrap();
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
     app.stop().await;

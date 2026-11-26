@@ -1,4 +1,5 @@
 /** `jazz.app.json` tables → `.64` builders (`s.table(…)`) for `s.defineSchema({…})`. */
+import { appendsEnumVariants } from "../encryption/sealed-enum.js";
 import { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import type { AppJson, ColumnJson, ColumnObject, TableJson } from "./app-json.js";
 import { jsLiteral, propKey } from "./names.js";
@@ -122,20 +123,11 @@ const PRINTED_COLUMN_KEYS = new Set([
  * with the same nullability. Any other pin would be dropped on regeneration.
  */
 function isEnumPin(column: Record<string, unknown>): boolean {
-  type EnumType = { enum?: unknown; optional?: unknown };
-  const sealed = column.sealedType as EnumType | undefined;
-  const declared = (column.type ?? column) as EnumType | undefined;
+  const sealed = column.sealedType;
+  const declared = column.type ?? column;
   if (typeof sealed !== "object" || sealed === null) return false;
   if (typeof declared !== "object" || declared === null) return false;
-  const before = sealed.enum;
-  const after = declared.enum;
-  return (
-    Array.isArray(before) &&
-    Array.isArray(after) &&
-    (sealed.optional ?? false) === (declared.optional ?? false) &&
-    before.length < after.length &&
-    before.every((variant, index) => variant === after[index])
-  );
+  return appendsEnumVariants(sealed, declared);
 }
 
 /** Report what a table's encryption entry holds that the TS DSL can't declare yet. */

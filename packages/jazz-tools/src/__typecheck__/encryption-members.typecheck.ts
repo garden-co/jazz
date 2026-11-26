@@ -16,8 +16,13 @@ db.encryption.members.list(app.tasks, id);
 // @ts-expect-error tasks are not a space table.
 db.encryption.members.remove(app.tasks, id, accountId);
 
-db.transaction((tx) => {
-  tx.encryption.members.add(app.projects, id, accountId).accountId;
+async function awaited(): Promise<string> {
+  return (await db.encryption.members.add(app.projects, id, accountId)).accountId;
+}
+void awaited;
+
+db.transaction(async (tx) => {
+  (await tx.encryption.members.add(app.projects, id, accountId)).accountId;
   // @ts-expect-error tasks are not a space table.
-  tx.encryption.members.add(app.tasks, id, accountId);
+  await tx.encryption.members.add(app.tasks, id, accountId);
 });

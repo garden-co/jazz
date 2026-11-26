@@ -247,6 +247,7 @@ public struct Encryption: Sendable {
     }
 
     /// Admits an account to a space and returns its membership row, as an insert would.
+    /// If the account is already a member, returns that member's existing row and writes nothing.
     @discardableResult
     public func addMember(table: String, id: ID, accountId: ID, tier: WriteTier? = nil) async throws -> SpaceMember {
         try await Client.typed {

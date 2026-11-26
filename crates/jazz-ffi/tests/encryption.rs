@@ -1249,6 +1249,18 @@ async fn the_uniffi_handle_adds_lists_and_removes_space_members() {
         assert_eq!(admitted["accountId"], bob_id);
         assert_eq!(members().as_array().unwrap().len(), 2);
         assert!(members().as_array().unwrap().contains(&admitted));
+        let again = parse(
+            &alice
+                .member_add(
+                    "projects".into(),
+                    id.clone(),
+                    bob_id.clone(),
+                    Some("global".into()),
+                )
+                .unwrap(),
+        );
+        assert_eq!(again, admitted);
+        assert_eq!(members().as_array().unwrap().len(), 2);
 
         assert_eq!(
             alice

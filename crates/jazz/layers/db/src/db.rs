@@ -4249,8 +4249,6 @@ impl Db {
             "a sealed write runs under the write operation's lease"
         );
         let schema = self.operation_schema();
-        self.refuse_own_duplicate_members(e2ee_write::op_member(&op), &BTreeSet::new())
-            .await?;
         let mut companions = Vec::new();
         let written = self
             .commit_prepared(op.row(), async |inner, seq, origin| {
@@ -12638,8 +12636,6 @@ impl Db {
     async fn commit_ops(&self, mut batch: Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         crate::db::large_ops::renew_upload_leases(self.inner.without_overlay(), &batch.uploads)
             .await?;
-        let (members, deleted) = e2ee_write::batch_members(&batch);
-        self.refuse_own_duplicate_members(members, &deleted).await?;
         self.inner
             .without_overlay()
             .add_creator_members(&mut batch)

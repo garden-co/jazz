@@ -1713,9 +1713,13 @@ async fn main_loop(this: Rc<Encryption>) {
                 }
                 if start || reconnect {
                     let retained = (!start && covered).then_some(&*watch);
+                    let resume = start;
                     start = false;
                     reconnect = false;
-                    match client.deliver_keys_outside_watch(&db, retained).await {
+                    match client
+                        .deliver_keys_outside_watch(&db, retained, resume)
+                        .await
+                    {
                         Ok(results) => {
                             for (space, result) in results {
                                 if let (Err(error), Ok(address)) =
