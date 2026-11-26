@@ -44,6 +44,17 @@ To turn off creator membership for one space, pass `{ addCreatorAsMember: false 
 third argument. To turn it off for all spaces this client creates, set `addCreatorAsMember: false`
 in the client's `encryption` options.
 
+Only device clients add creators: a signed-in browser, React Native, Node or native client with
+its encryption runtime, which holds the account's keys. Backend clients and keyless clients never
+add the creator, whatever these options say, because they don't act as a device of the account.
+A backend that creates a space for a user must add that user's membership itself, in the same
+transaction or afterward.
+
+Don't also insert the creator's own membership row after creating a space, as code written
+before automatic membership did. That insert is refused with an "already a member" error,
+so the creator is never listed twice. In the space's creating transaction, an explicit creator
+row is kept and the automatic one is skipped.
+
 If you create a space with `upsert`, add the creator with
 `tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
 `db.encryption.members.add(app.projects, id, accountId)` after the upsert if you have permission
