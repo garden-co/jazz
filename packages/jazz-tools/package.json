@@ -302,10 +302,10 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "@effect/ui": ">=0.0.0",
     "@vercel/functions": ">=3.10.0",
     "@vercel/sandbox": ">=3.9.0",
     "better-auth": "~1.7.22",
-    "@effect/ui": ">=0.0.0",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
