@@ -964,7 +964,9 @@ export class Members {
    * as a member, the result is that member's existing row and nothing is
    * written, so adding an account twice leaves one row. The check reads this
    * client's local data: a client that hasn't synced an existing membership
-   * yet adds a second row for the account.
+   * yet adds a second row for the account. So can two concurrent calls for the
+   * same account (in `Promise.all`, say), as both may read before either
+   * writes. `remove` deletes every row.
    * Automatic creator membership applies to `insert`. When `upsert` creates a
    * space, add the creator explicitly with `tx.encryption.members.add` in the
    * same transaction, or call this method afterward if permissions allow it.
