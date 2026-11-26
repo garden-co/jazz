@@ -2140,6 +2140,102 @@ async fn typed_space_members_follow_insert_and_transaction_semantics() {
     app.stop().await;
 }
 
+/// `add_member` is idempotent only over what the client has synced. Alice
+/// admits Bob while her other device is offline; that device doesn't see
+/// his row, so admitting him there writes a second one. Once it syncs, Bob
+/// has two rows, and removing him deletes both.
+///
+/// ```text
+/// Alice's replica ──disconnect──┐
+/// Alice ──admit Bob──────────────┼──► authority
+/// replica ──admit Bob (local)───┘ ──reconnect──► authority: two rows for Bob
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsynced_replica_adds_a_second_member_row() {
+    use bindings::{NewProject, Project};
+    use jazz_app_support::DurabilityTier;
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app
+        .device_of(key.clone())
+        .await
+        .durable(DurabilityTier::GlobalServer);
+    assert_eq!(ready(&alice).await, "active");
+    let replica = app.device_of(key).await;
+    let bob = app.device().await;
+    assert_eq!(ready(&replica).await, "active");
+    assert_eq!(ready(&bob).await, "active");
+    let alice_id = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = bob.account().unwrap();
+    let bob_id = ObjectId::from_uuid(bob_account.0);
+    let project = alice
+        .insert(NewProject::new("plans", alice_id))
+        .await
+        .unwrap()
+        .id;
+    let bobs = |rows: Vec<jazz_app_support::SpaceMember>| {
+        rows.into_iter()
+            .filter(|row| row.account_id == bob_id)
+            .collect::<Vec<_>>()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while replica
+        .list_members::<Project>(project)
+        .await
+        .unwrap()
+        .is_empty()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replica never saw the project"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    replica.disconnect().await.unwrap();
+    let admitted = alice
+        .add_member::<Project>(project, bob_account)
+        .await
+        .unwrap();
+    let unsynced = replica
+        .add_member::<Project>(project, bob_account)
+        .await
+        .unwrap();
+    assert_eq!(unsynced.account_id, bob_id);
+    assert_ne!(
+        unsynced.id, admitted.id,
+        "the replica couldn't see Bob's row"
+    );
+
+    replica.reconnect().await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = bobs(alice.list_members::<Project>(project).await.unwrap());
+        if rows.len() == 2 {
+            assert!(rows.contains(&admitted) && rows.contains(&unsynced));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the replica's row never reached Alice: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        alice
+            .remove_member::<Project>(project, bob_account)
+            .await
+            .unwrap(),
+        2
+    );
+
+    replica.shutdown().await.unwrap();
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice's offline replica lacks Bob's membership and must wait for the
 /// authority or report a read failure. Online, an absent member yields zero
 /// after the authority accepts the transaction.

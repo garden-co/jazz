@@ -106,6 +106,10 @@ impl Jazz {
     /// existing row and writes nothing, so adding the same account twice
     /// (the space's creator included) leaves one row.
     ///
+    /// The check reads this client's local data. A client that hasn't
+    /// synced an existing membership yet (offline, or another device added
+    /// it moments ago) inserts a second row for the account.
+    ///
     /// Automatic creator membership applies to inserts. When an upsert creates
     /// a space, explicitly add the creator in the same transaction or call this
     /// method afterward if permissions allow it.

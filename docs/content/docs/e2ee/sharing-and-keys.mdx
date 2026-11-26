@@ -52,9 +52,14 @@ transaction or afterward.
 
 Adding a member is idempotent. If this client already sees the account as a member of the space,
 `members.add` returns that member's existing row and writes nothing. So code written before
-automatic membership, which still adds the creator after creating a space, leaves one row. Direct
-inserts into `app.__e2ee_members` don't check this. In the space's creating transaction, an
-explicit creator row is kept and the automatic one is skipped.
+automatic membership, which still adds the creator after creating a space, leaves one row. In the
+space's creating transaction, an explicit creator row is kept and the automatic one is skipped. In
+TypeScript, await `members.add` for the member row, or call `.wait({ tier })` on it as on an
+insert's result.
+
+The check reads this client's local data. A client that hasn't synced an existing membership yet
+(it's offline, or another device has just added it) adds a second row for the account. Removing
+the member deletes all of its rows. Direct inserts into `app.__e2ee_members` aren't checked.
 
 If you create a space with `upsert`, add the creator with
 `tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
@@ -75,11 +80,12 @@ device receives the table's identity from the server.
 
 ## Advanced: in your own transaction
 
-Use `tx.encryption.members.add` to stage a member alongside other writes.
+Use `tx.encryption.members.add` to stage a member alongside other writes. It returns a promise of
+the member row: await it inside the transaction.
 
 ```ts
-const written = await db.transaction((tx) => {
-  tx.encryption.members.add(app.projects, project.id, otherAccountId);
+const written = await db.transaction(async (tx) => {
+  await tx.encryption.members.add(app.projects, project.id, otherAccountId);
 });
 await written.wait({ tier: "global" });
 ```

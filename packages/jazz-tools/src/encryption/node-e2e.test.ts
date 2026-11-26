@@ -97,13 +97,31 @@ it("adds the creator and manages members through typed tables and transactions",
   ]);
 
   const write = members.add(app.projects, id, bob.account);
-  expect((await write.wait({ tier: "global" })).accountId).toBe(bob.account);
-  expect(await members.remove(app.projects, id, bob.account)).toBe(1);
-
-  const space = { table: "projects", id };
-  const transaction = await alice.db.transaction((tx) =>
+  const admitted = await write.wait({ tier: "global" });
+  expect(admitted.accountId).toBe(bob.account);
+  // Adding Bob again returns his existing row and writes nothing.
+  expect(await members.add(app.projects, id, bob.account)).toEqual(admitted);
+  expect(await members.add(app.projects, id, bob.account).wait({ tier: "global" })).toEqual(
+    admitted,
+  );
+  const again = await alice.db.transaction((tx) =>
     tx.encryption.members.add(app.projects, id, bob.account),
   );
+  expect(again.value).toEqual(admitted);
+  // So does adding Alice, the creator, after the space was created.
+  const [creator] = await members.list(app.projects, id);
+  expect(await members.add(app.projects, id, alice.account)).toEqual(creator);
+  expect(await members.list(app.projects, id)).toHaveLength(2);
+  expect(await members.remove(app.projects, id, bob.account)).toBe(1);
+  expect(await members.remove(app.projects, id, bob.account)).toBe(0);
+
+  const space = { table: "projects", id };
+  const transaction = await alice.db.transaction(async (tx) => {
+    const staged = await tx.encryption.members.add(app.projects, id, bob.account);
+    // The transaction sees its own staged member row.
+    expect(await tx.encryption.members.add(app.projects, id, bob.account)).toEqual(staged);
+    return staged;
+  });
   expect(transaction.value.accountId).toBe(bob.account);
   await transaction.wait({ tier: "global" });
   expect((await members.list(space)).map((row) => row.accountId).sort()).toEqual(
