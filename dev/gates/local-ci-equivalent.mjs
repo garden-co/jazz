@@ -213,6 +213,13 @@ const typescriptPartitions = Object.freeze({
       "--target",
       "wasm32-unknown-unknown",
     ]),
+    // The WASM module and Node binding this partition produced link no
+    // lattice or SHA-3 code (the SLH-DSA dependency carries SHAKE variants
+    // that no build may use).
+    command("no lattice or SHA-3 symbols", "node", [
+      "dev/gates/check-endorsement-symbols.mjs",
+      "--correctness-artifacts",
+    ]),
   ]),
 });
 

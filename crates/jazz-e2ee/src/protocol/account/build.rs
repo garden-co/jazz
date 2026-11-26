@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::random::RandomSource;
 use crate::registry::{Registry, Suite};
 
-use crate::primitives::slh_dsa::CommitmentKey;
+use crate::primitives::slh_dsa::{self, CommitmentKey};
 
 use super::super::commitment::MECHANISM as COMMITMENT_MECHANISM;
 use super::super::derive::{self, RecoveryKeys, RecoverySecret};
@@ -1120,20 +1120,54 @@ pub fn recovery_root(
     Ok(root)
 }
 
-/// The commitment of the recovery root `secret` derives at the account's
-/// current `generation` (§2.9, "Register"): the SLH-DSA-SHA2-128s public
-/// key of the root's commitment seed, signed by the root's own signing key.
-/// It is written with the root, in the root's transaction.
+/// The SLH-DSA-SHA2-128s public key of the commitment seed `secret` derives
+/// for an account at `generation` (§2.9, "Register"), with the ID of the
+/// root it commits. Key generation is slow, so a caller that may retry a
+/// registration derives this once and reuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryCommitmentKey {
+    root_id: String,
+    generation: u64,
+    public: [u8; slh_dsa::PUBLIC_KEY_BYTES],
+}
+
+impl RecoveryCommitmentKey {
+    pub fn derive(
+        secret: &RecoverySecret,
+        application: &AccountDomain,
+        generation: u64,
+    ) -> ProtocolResult<Self> {
+        let root_id = RecoveryKeys::derive(secret, application, generation)?.root_id;
+        let seed = derive::recovery_commitment_seed(secret, application, generation);
+        let (_, public) = CommitmentKey::from_seed(&seed);
+        Ok(Self {
+            root_id,
+            generation,
+            public,
+        })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// The commitment of the recovery root `secret` derives at `key`'s
+/// generation, which must be the account's current one (§2.9, "Register"):
+/// `key`, signed by the root's own signing key. It is written with the root,
+/// in the root's transaction. A key derived for another root (another
+/// secret, account or generation) is refused before anything is signed.
 pub fn recovery_commitment(
     writer: &AccountWriter<'_>,
-    generation: u64,
     secret: &RecoverySecret,
+    key: &RecoveryCommitmentKey,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<Commitment> {
     let application = writer.application()?;
-    let recovery = RecoveryKeys::derive(secret, &application, generation)?;
-    let seed = derive::recovery_commitment_seed(secret, &application, generation);
-    let (_, public) = CommitmentKey::from_seed(&seed);
+    let recovery = RecoveryKeys::derive(secret, &application, key.generation)?;
+    if recovery.root_id != key.root_id {
+        return Err(ProtocolError::Crypto(Error::InvalidInput));
+    }
     let mut record = Commitment {
         id: ids::random_v4(rng)?,
         account_id: writer.account_id.to_owned(),
@@ -1141,12 +1175,12 @@ pub fn recovery_commitment(
         subject_id: recovery.root_id,
         mechanism: COMMITMENT_MECHANISM.id.to_owned(),
         version: COMMITMENT_MECHANISM.version,
-        commitment: public.to_vec(),
+        commitment: key.public.to_vec(),
         signature: Vec::new(),
     };
     record.signature = writer.sign(
         &recovery.signing,
-        &record.signed_bytes(&application, generation)?,
+        &record.signed_bytes(&application, key.generation)?,
     )?;
     Ok(record)
 }

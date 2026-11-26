@@ -3634,6 +3634,56 @@ fn a_recovery_delivery_that_does_not_open_does_not_skip_the_registration() {
     });
 }
 
+/// Contract: a root that is already registered gets no new commitment, even
+/// when its registration has to write the root's delivery again (here the
+/// server lost it).
+///
+/// ```text
+/// alice's device ──register──► root + delivery + commitment
+/// server (stopped) ──loses the delivery──► root + commitment
+/// alice's device ──register──► a delivery, and no second commitment
+/// ```
+#[test]
+fn rewriting_a_registered_roots_delivery_commits_nothing() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let alice = account(0xa1);
+        let store = memory();
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([9; 32]);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            let first = device(&server, alice, store.clone(), 1, &settings);
+            first.status(&server, &[]);
+            drive(
+                &server,
+                &[&first.db],
+                first.client.register_recovery(&first.db, &secret),
+            )
+            .unwrap();
+            pump(&server, &first.db);
+            assert_eq!(count(&server, "__e2ee_commitments"), 1);
+            std::mem::forget(first);
+        }
+        delete_rows(&path, "__e2ee_recovery_deliveries");
+
+        let server = secure_authority_with(&settings, Some(&path));
+        let again = device(&server, alice, store, 2, &settings);
+        again.status(&server, &[]);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 0);
+        drive(
+            &server,
+            &[&again.db],
+            again.client.register_recovery(&again.db, &secret),
+        )
+        .unwrap();
+        pump(&server, &again.db);
+        assert_eq!(count(&server, "__e2ee_recovery_deliveries"), 1);
+        assert_eq!(count(&server, "__e2ee_commitments"), 1);
+    });
+}
+
 /// Contract: the device list shows active devices and the ones waiting, with
 /// which is this device, the order their requests arrived in and who approved
 /// each, so a user can tell the device they approve from others; and a

@@ -33,9 +33,9 @@ use jazz::db::Db;
 use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::build::{
-    AccountWriter, Challenge, LocalDevice, RecoveryApprovalRecords, RotationTarget, approve,
-    challenge, recovery_approve, recovery_commitment, recovery_delivery, recovery_root,
-    removal_request, respond, rotate,
+    AccountWriter, Challenge, LocalDevice, RecoveryApprovalRecords, RecoveryCommitmentKey,
+    RotationTarget, approve, challenge, recovery_approve, recovery_commitment, recovery_delivery,
+    recovery_root, removal_request, respond, rotate,
 };
 use jazz_e2ee::protocol::account::{
     AccountKey, AccountKeyEvidence, AccountReplay, AccountState, verify_private,
@@ -778,14 +778,14 @@ impl E2eeClient {
         secret: &RecoverySecret,
         at_start: bool,
     ) -> Result<(), ClientError> {
+        let domain = self.shared.domain.account(&self.shared.account_id)?;
+        // Slow to derive: kept across the transaction's retries, and derived
+        // only when a new root is written.
+        let mut commitment_key: Option<RecoveryCommitmentKey> = None;
         self.serializable(db, async |tx| {
             let read = self.read_account(db, tx).await?;
             let view = self.view(&read).await?;
-            let keys = RecoveryKeys::derive(
-                secret,
-                &self.shared.domain.account(&self.shared.account_id)?,
-                view.state.generation,
-            )?;
+            let keys = RecoveryKeys::derive(secret, &domain, view.state.generation)?;
             // Retired: it stays retired (§2.9, "Retiring a derived root"), so
             // there is nothing to register. A start with this secret goes on;
             // an explicit call is refused as a restore with it would be.
@@ -821,12 +821,17 @@ impl E2eeClient {
                 Some(existing) => existing.row.clone(),
                 None => {
                     let root = recovery_root(&writer, &view.state, &view.device, &keys)?;
+                    let key = match commitment_key.take() {
+                        Some(key) if key.generation() == view.state.generation => key,
+                        _ => RecoveryCommitmentKey::derive(secret, &domain, view.state.generation)?,
+                    };
                     let commitment = recovery_commitment(
                         &writer,
-                        view.state.generation,
                         secret,
+                        &key,
                         &mut SharedRandom(&self.shared.random),
                     )?;
+                    commitment_key = Some(key);
                     self.stage(db, tx, &root).await?;
                     self.stage(db, tx, &commitment).await?;
                     root

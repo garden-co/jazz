@@ -383,7 +383,11 @@ wherever it enters JSON. Optional columns
 
 A commitment's `subjectKind` is `device` or `recovery-root`, and
 `subjectId` is that device's or recovery root's ID. This version writes
-only `recovery-root` commitments.
+only `recovery-root` commitments. A `commitment` under a mechanism the
+reader knows has exactly that mechanism's key length (32 bytes for
+`jazz.commit.slh-dsa-sha2-128s` v1): any other length makes the record
+invalid, even when its signature verifies. One under a mechanism or version
+the reader does not know is unsupported, not invalid.
 
 `action` is `remove-device` or `retire-recovery-root`; the matching target
 column is set. `retiredRecoveryRootIds` is an ID list (§0) of recovery root
@@ -403,17 +407,11 @@ The identity ID is the account ID for generation 0 (the first bootstrap). For
 a reset (§2.11) it is random (§0); clients find a generation's identity by
 its account, generation, device and epoch (§2.4, "Private verification").
 
-**Commitment and endorsement contexts.** For `jazz.e2ee.commitment.v1`,
+**Commitment context.** For `jazz.e2ee.commitment.v1`,
 the context's `epoch` is the canonical unsigned decimal generation in UTF-8
 (for example, `0` or `12`). A requester knows the generation before the
 request. The reset identity row ID is private, and a request can precede
 its creation. Public readers verify using the generation of the admission.
-
-For `jazz.e2ee.endorsement.v1`, the context's `epoch` is the admitting
-record's epoch ID. A device approval, including a restore, uses its challenge's
-epoch ID, also carried by the public approval. A recovery root uses its
-registration's `epochId`. Readers reconstruct the context from that record
-and the framed generation from its account generation.
 
 ### 1.3 Space tables
 
@@ -1475,20 +1473,37 @@ the 32 secret bytes, created and read with user verification required
   generation 2.
 - **Register.** After bootstrap (§2.3), and whenever the recovery secret is
   first available on an active device, the SDK registers the root derived
-  for the account's current generation unless a valid root with that ID
-  exists. Two publications. Stage
-  `recovery-root`: an active device holding the account key inserts the root
-  `{id: rootId, accountId, epochId: current, signerId, keys…}` signed over
-  `frame[ctx{application: D, policy: "jazz.e2ee.recovery.v1", scope:
-  "account", identifier: account, table: "__e2ee_recovery_roots", row:
-  rootId, column: json(["root", signerId]), epoch}, env(signingMechanism,
-  signingPublicKey), env(mechanism, publicKey)]`. An existing root with the
-  same ID must match exactly. Stage `recovery-delivery`: unless a usable
-  delivery exists, insert `{rootId, epochId: current, envelope:
-  seal(root.pub, R, K)}` with `R = ctx{application: D, policy:
-  "jazz.e2ee.recovery.v1", scope: "account", identifier: account, table:
-  "__e2ee_recovery_deliveries", row: deliveryId, column: "envelope", epoch,
-  recipient: rootId}`. An unknown outcome of the first stage is not retried.
+  for the account's current generation. It reads the account and writes in
+  one serializable transaction, published once, and decides from that read:
+  - A retired root stays retired (§2.9, "Retiring a derived root"): nothing
+    is written. A device account's start goes on; an explicit registration
+    fails with `recovery-root-mismatch`.
+  - A valid root with that ID, with a delivery for the current epoch that
+    opens with the recovery key: nothing is written. A delivery row that is
+    there but does not open does not count.
+  - No valid root with that ID: stage `recovery-root`. An active device
+    holding the account key inserts the root `{id: rootId, accountId,
+    epochId: current, signerId, keys…}` signed over `frame[ctx{application:
+    D, policy: "jazz.e2ee.recovery.v1", scope: "account", identifier:
+    account, table: "__e2ee_recovery_roots", row: rootId, column:
+    json(["root", signerId]), epoch}, env(signingMechanism,
+    signingPublicKey), env(mechanism, publicKey)]`, its commitment (below)
+    and its delivery, all three in that one transaction.
+  - A valid root with that ID but no delivery for the current epoch that
+    opens (for example, the server lost it): stage `recovery-delivery`. The
+    device inserts only a new delivery, and no second commitment.
+
+  The delivery is `{rootId, epochId: current, envelope: seal(root.pub, R,
+  K)}` with `R = ctx{application: D, policy: "jazz.e2ee.recovery.v1", scope:
+  "account", identifier: account, table: "__e2ee_recovery_deliveries", row:
+  deliveryId, column: "envelope", epoch, recipient: rootId}`. The
+  transaction is all or nothing: if an insert is refused or the provider
+  fails, the registration fails and none of its rows is written. A conflict
+  (another writer changed what the transaction read) reads again and
+  decides again, up to five attempts in all; the last conflict is the error.
+  A registration whose outcome is unknown can be run again: it reads what
+  was accepted and writes only what is missing.
+
 - **Commitment.** Every root registration also commits the root to a
   post-quantum signing key, so that a later version can verify the account's
   history after a break of its classical signatures. In the
@@ -1510,16 +1525,29 @@ the 32 secret bytes, created and read with user verification required
   `slh_keygen_internal(SK.seed, SK.prf, PK.seed)` for SLH-DSA-SHA2-128s
   gives the key pair, and `commitment` is its 32-byte public key `PK.seed ‖
   PK.root`. The record is signed with the root's own signing key over
-  `frame[ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
+  `C ‖ frame[subjectKind, env(mechanism, commitment)]` with
+  `C = ctx{application: D, policy: "jazz.e2ee.commitment.v1", scope:
   "account", identifier: account, table: "__e2ee_commitments", row: id,
-  column: "signature", epoch: decimal g, recipient: rootId}, subjectKind,
-  env(mechanism, commitment)]` (§1.2, "Commitment and endorsement
-  contexts"). `c` and the private key are never stored. A root that is
+  column: "signature", epoch: decimal g, recipient: rootId}` (§1.2,
+  "Commitment context"). Unlike the root's own signed
+  bytes above, the context is not framed: its encoding (`JE2C 01` and its
+  nine fields) is followed directly by the two framed fields, with no
+  length before it. `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs`
+  builds these bytes for the generation-0 fixture below and checks that the
+  fixture's signature verifies over them, and not over
+  `frame[C, subjectKind, env(mechanism, commitment)]`. `c` and the private
+  key are never stored. A root that is
   already registered gets no new commitment; approving or restoring a
   device writes none. Only recovery roots write commitments in this
   version, and nothing reads, verifies or enforces them yet: their presence
-  or absence changes no behaviour, and a client that does not know the table
-  ignores it. Verification arrives in a later version. Fixture: `s` = bytes
+  or absence changes no behaviour. Verification arrives in a later version.
+  The table belongs to the system tables of version 1, amended before any
+  release. A client built with that amended set and no commitment support
+  works as before and ignores the table's rows. A client built with the set
+  from before the table was added is not compatible with an authority that
+  has the amended set: it does not get the authority's catalogue
+  identities, so it cannot restore a device or read encrypted rows. No client with the earlier set has been released.
+  Fixture: `s` = bytes
   `00`–`1f` and
   `Dₐ = ["0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f","prod","a11ce000-0000-5000-8000-00000000a11c"]`
   give at generation 0 root ID `bdf7dfa1-160c-8e21-bee8-aef5fd8199ea`,

@@ -1,22 +1,19 @@
-//! Wire fixtures for the three admission records, recovery commitment seeds
-//! and the commitment record a recovery root's registration writes.
+//! Wire fixtures for the commitment record, recovery commitment seeds and
+//! the commitment record a recovery root's registration writes.
 
-use jazz_e2ee::Zeroizing;
 use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::conformance::FixedRandom;
-use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::primitives::{sign::SigningKeyPair, slh_dsa::CommitmentKey};
-use jazz_e2ee::protocol::account::build::{AccountWriter, recovery_commitment};
+use jazz_e2ee::protocol::account::build::{
+    AccountWriter, RecoveryCommitmentKey, recovery_commitment,
+};
 use jazz_e2ee::protocol::{
-    commitment::{ENDORSEMENT_CONTEXT, MECHANISM, endorsement_digest, verify_endorsement},
+    commitment::MECHANISM,
     derive::{RecoveryKeys, RecoverySecret, recovery_commitment_seed},
     domain::{AccountDomain, AppDomain},
-    error::{ProtocolError, UnsupportedCapability},
-    records::{
-        KeyColumns,
-        roster::{Commitment, Endorsement, EndorsementSignature, SubjectKind},
-    },
+    error::ProtocolError,
+    records::roster::{Commitment, SubjectKind},
 };
 use jazz_e2ee::registry::Registry;
 
@@ -24,8 +21,6 @@ const APP: &str = "0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f";
 const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
 const ROW: &str = "11111111-1111-4111-8111-111111111111";
 const DEVICE: &str = "22222222-2222-4222-8222-222222222222";
-const ENDORSER: &str = "33333333-3333-4333-8333-333333333333";
-const EPOCH: &str = "44444444-4444-4444-8444-444444444444";
 const OTHER: &str = "55555555-5555-4555-8555-555555555555";
 
 fn domain(app: &str, env: &str, account: &str) -> AccountDomain {
@@ -45,29 +40,6 @@ fn commitment() -> Commitment {
         version: 1,
         commitment: vec![0x11; 32],
         signature: vec![],
-    }
-}
-
-fn header() -> Endorsement {
-    Endorsement {
-        id: ROW.into(),
-        account_id: ALICE.into(),
-        endorser_kind: SubjectKind::RecoveryRoot,
-        endorser_id: ENDORSER.into(),
-        subject_kind: SubjectKind::Device,
-        subject_id: DEVICE.into(),
-        signature_digest: vec![],
-    }
-}
-
-fn keys() -> KeyColumns {
-    KeyColumns {
-        signing_mechanism: "jazz.sodium.sign".into(),
-        signing_version: 1,
-        signing_public_key: vec![0x22; 32],
-        mechanism: "jazz.wrap.hpke-x25519".into(),
-        version: 1,
-        public_key: vec![0x33; 32],
     }
 }
 
@@ -137,16 +109,16 @@ fn recovery_root_commitment_record_vector() {
         domain: &app,
         account_id: ALICE,
     };
+    let application = domain(APP, "prod", ALICE);
     let record = |generation| {
         recovery_commitment(
             &writer,
-            generation,
             &secret,
+            &RecoveryCommitmentKey::derive(&secret, &application, generation).unwrap(),
             &mut FixedRandom(vec![0x66; 16]),
         )
         .unwrap()
     };
-    let application = domain(APP, "prod", ALICE);
     let d = format!(r#"["{APP}","prod","{ALICE}"]"#);
     for (generation, (seed, public, root, signing, signature)) in [
         (
@@ -225,6 +197,113 @@ fn recovery_root_commitment_record_vector() {
     }
 }
 
+/// Alice's registration refuses a commitment key derived for another root:
+/// from another secret, for another account or at another generation.
+/// Nothing is signed, so no record with the wrong key can be staged.
+#[test]
+fn a_commitment_key_for_another_root_is_refused() {
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let other_secret = RecoverySecret::from_bytes([0x42; 32]);
+    let app = AppDomain::new(APP, Some("prod")).unwrap();
+    let registry = Registry::builtin();
+    let writer = AccountWriter {
+        account_secret_root_id: None,
+        suite: registry.select(&MechanismConfig::default()).unwrap(),
+        registry: &registry,
+        domain: &app,
+        account_id: ALICE,
+    };
+    let commit = |key: &RecoveryCommitmentKey| {
+        recovery_commitment(&writer, &secret, key, &mut FixedRandom(vec![0x66; 16]))
+    };
+    let key = |secret, account, generation| {
+        RecoveryCommitmentKey::derive(secret, &domain(APP, "prod", account), generation).unwrap()
+    };
+    commit(&key(&secret, ALICE, 0)).unwrap();
+    commit(&key(&secret, ALICE, 1)).unwrap();
+    for wrong in [
+        key(&other_secret, ALICE, 0),
+        key(&secret, OTHER, 0),
+        RecoveryCommitmentKey::derive(&secret, &domain(APP, "dev", ALICE), 0).unwrap(),
+    ] {
+        assert_eq!(
+            commit(&wrong),
+            Err(ProtocolError::Crypto(jazz_e2ee::Error::InvalidInput))
+        );
+    }
+}
+
+/// Bob follows the specification's recipe for the generation-0 fixture
+/// commitment (E2EE_PROTOCOL.md §2.9, "Commitment"): the encoded context
+/// `ctx{…}` (`JE2C 01` and its nine length-prefixed fields), then
+/// `frame[subjectKind, env(mechanism, commitment)]`. The context itself is
+/// not framed, unlike a recovery root's signed bytes. Those bytes are the
+/// record's, and Alice's fixture signature verifies over them and not over
+/// `frame[ctx, subjectKind, env]`.
+#[test]
+fn the_specified_commitment_signed_bytes_reproduce_the_vector() {
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let application = domain(APP, "prod", ALICE);
+    let (row, root) = (
+        "66666666-6666-4666-a666-666666666666",
+        "bdf7dfa1-160c-8e21-bee8-aef5fd8199ea",
+    );
+    let key = unhex("2ae40871d9032f2c93de201fb72c8be3b5af417742ede3ea45f5bdd4ccc553d5");
+    let signature = unhex(
+        "4a45324501106a617a7a2e736f6469756d2e7369676e000000010b11e3f3411463dd689a7922b0263d9c1976b3eadffab447d431e3cd1cd51a3509b8aadb379b9c881dd545cfe5164a53f79fb831c16b5fb70abcba10efc66b04",
+    );
+    let d = format!(r#"["{APP}","prod","{ALICE}"]"#);
+    let ctx = fields(
+        b"JE2C\x01",
+        &[
+            d.as_bytes(),
+            b"jazz.e2ee.commitment.v1",
+            b"account",
+            ALICE.as_bytes(),
+            b"__e2ee_commitments",
+            row.as_bytes(),
+            b"signature",
+            b"0",
+            root.as_bytes(),
+        ],
+    );
+    let env = [
+        b"JE2E\x01\x1djazz.commit.slh-dsa-sha2-128s\0\0\0\x01".as_slice(),
+        &key,
+    ]
+    .concat();
+    let specified = [ctx.clone(), fields(b"", &[b"recovery-root", &env])].concat();
+    let record = Commitment {
+        id: row.into(),
+        account_id: ALICE.into(),
+        subject_kind: SubjectKind::RecoveryRoot,
+        subject_id: root.into(),
+        mechanism: MECHANISM.id.into(),
+        version: MECHANISM.version,
+        commitment: key.clone(),
+        signature: signature.clone(),
+    };
+    assert_eq!(record.signed_bytes(&application, 0).unwrap(), specified);
+    let signing = RecoveryKeys::derive(&secret, &application, 0)
+        .unwrap()
+        .signing
+        .public;
+    let registry = Registry::builtin();
+    assert_eq!(registry.verify(&signing, &specified, &signature), Ok(true));
+    let framed_context = fields(b"", &[&ctx, b"recovery-root", &env]);
+    assert_eq!(
+        registry.verify(&signing, &framed_context, &signature),
+        Ok(false)
+    );
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
 // Assemble the expected bytes directly, independent of the protocol encoders.
 fn fields(prefix: &[u8], parts: &[&[u8]]) -> Vec<u8> {
     let mut out = prefix.to_vec();
@@ -235,8 +314,7 @@ fn fields(prefix: &[u8], parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Bob reproduces the full signed byte strings for Alice's commitment and
-/// endorsement, and the digest of the entire signature column.
+/// Bob reproduces the full signed byte string for Alice's commitment.
 #[test]
 fn record_vectors() {
     let application = domain(APP, "prod", ALICE);
@@ -264,49 +342,6 @@ fn record_vectors() {
         ],
     );
     assert_eq!(c.signed_bytes(&application, 12).unwrap(), expected);
-
-    let sign = [
-        b"JE2E\x01\x10jazz.sodium.sign\0\0\0\x01".as_slice(),
-        &[0x22; 32],
-    ]
-    .concat();
-    let seal = [
-        b"JE2E\x01\x15jazz.wrap.hpke-x25519\0\0\0\x01".as_slice(),
-        &[0x33; 32],
-    ]
-    .concat();
-    let column = format!("endorsement:recovery-root:{ENDORSER}");
-    let expected = fields(
-        b"JE2C\x01",
-        &[
-            d.as_bytes(),
-            b"jazz.e2ee.endorsement.v1",
-            b"account",
-            ALICE.as_bytes(),
-            b"__e2ee_endorsements",
-            ROW.as_bytes(),
-            column.as_bytes(),
-            EPOCH.as_bytes(),
-            DEVICE.as_bytes(),
-            b"12",
-            b"device",
-            &cenv,
-            &sign,
-            &seal,
-        ],
-    );
-    assert_eq!(
-        header()
-            .message(&application, 12, EPOCH, &c, &keys())
-            .unwrap(),
-        expected
-    );
-    assert_eq!(ENDORSEMENT_CONTEXT.as_bytes(), b"jazz.e2ee.endorsement.v1");
-    let signature = envelope::encode(MECHANISM, &[0x77; 7856]).unwrap();
-    assert_eq!(
-        hex(&endorsement_digest(&signature)),
-        "fb03a2c89c6ab0c577c175996037172543aaae25ff3eb9710a43e104abb3d57e"
-    );
 }
 
 /// Alice's classical signature fails when Bob changes one bound field,
@@ -346,88 +381,45 @@ fn commitment_signature_binds_each_field() {
     assert!(!valid(&c, &application, 13));
 }
 
-/// Bob verifies Alice's endorsement only for the original admission and both
-/// of the admitted subject's classical keys, each under its stated mechanism.
+/// Bob refuses an SLH-DSA-SHA2-128s commitment whose key is not exactly 32
+/// bytes, as a record and as signed bytes. A key of the same lengths under a
+/// mechanism or version he doesn't know stays opaque: well formed, and
+/// unsupported only when used.
 #[test]
-fn endorsement_binds_each_field() {
-    let d = domain(APP, "prod", ALICE);
-    let h = header();
-    let c = commitment();
-    let keys = keys();
-    let (signer, public) = CommitmentKey::from_seed(&Zeroizing::new([7; 32]));
-    let m = h.message(&d, 12, EPOCH, &c, &keys).unwrap();
-    let raw = signer
-        .sign(
-            &public,
-            &m,
-            ENDORSEMENT_CONTEXT.as_bytes(),
-            &mut FixedRandom(vec![5; 16]),
-        )
-        .unwrap();
-    let signature = envelope::encode(MECHANISM, &raw).unwrap();
-    let valid = |h: &Endorsement, d: &AccountDomain, g, epoch, c: &Commitment, k: &KeyColumns| {
-        verify_endorsement(
-            MECHANISM,
-            &public,
-            &h.message(d, g, epoch, c, k).unwrap(),
-            &signature,
-        )
-        .unwrap()
+fn a_known_mechanism_needs_its_exact_key_length() {
+    let application = domain(APP, "prod", ALICE);
+    let c = Commitment {
+        signature: vec![1],
+        ..commitment()
     };
-    assert!(valid(&h, &d, 12, EPOCH, &c, &keys));
-    let mutations: &[fn(&mut Endorsement)] = &[
-        |row| row.id = OTHER.into(),
-        |row| row.account_id = OTHER.into(),
-        |row| row.endorser_kind = SubjectKind::Device,
-        |row| row.endorser_id = OTHER.into(),
-        |row| row.subject_kind = SubjectKind::RecoveryRoot,
-        |row| row.subject_id = OTHER.into(),
-    ];
-    for mutate in mutations {
-        let mut altered = h.clone();
-        mutate(&mut altered);
-        assert!(!valid(&altered, &d, 12, EPOCH, &c, &keys));
+    c.validate().unwrap();
+    let invalid = Err(ProtocolError::InvalidRecord("invalid commitment length"));
+    for len in [31, 33] {
+        let wrong = Commitment {
+            commitment: vec![0x11; len],
+            ..c.clone()
+        };
+        assert_eq!(wrong.validate(), invalid, "{len} bytes");
+        assert_eq!(
+            wrong.signed_bytes(&application, 0).map(drop),
+            invalid,
+            "{len} bytes"
+        );
+        for (mechanism, version) in [("future", 1), (MECHANISM.id, 2)] {
+            let unknown = Commitment {
+                mechanism: mechanism.into(),
+                version,
+                ..wrong.clone()
+            };
+            unknown.validate().unwrap();
+            unknown.signed_bytes(&application, 0).unwrap();
+        }
     }
-    for alternate in [
-        domain(OTHER, "prod", ALICE),
-        domain(APP, "dev", ALICE),
-        domain(APP, "prod", OTHER),
-    ] {
-        assert!(!valid(&h, &alternate, 12, EPOCH, &c, &keys));
-    }
-    assert!(!valid(&h, &d, 13, EPOCH, &c, &keys));
-    assert!(!valid(&h, &d, 12, OTHER, &c, &keys));
-    let mutations: &[fn(&mut Commitment)] = &[
-        |row| row.mechanism = "future".into(),
-        |row| row.version = 2,
-        |row| row.commitment = vec![0x12; 32],
-    ];
-    for mutate in mutations {
-        let mut altered = c.clone();
-        mutate(&mut altered);
-        assert!(!valid(&h, &d, 12, EPOCH, &altered, &keys));
-    }
-    let mutations: &[fn(&mut KeyColumns)] = &[
-        |row| row.signing_mechanism = "future".into(),
-        |row| row.signing_version = 2,
-        |row| row.signing_public_key = vec![0x23; 32],
-        |row| row.mechanism = "future".into(),
-        |row| row.version = 2,
-        |row| row.public_key = vec![0x34; 32],
-    ];
-    for mutate in mutations {
-        let mut altered = keys.clone();
-        mutate(&mut altered);
-        assert!(!valid(&h, &d, 12, EPOCH, &c, &altered));
-    }
-    assert!(!jazz_e2ee::primitives::slh_dsa::verify(&public, &m, b"other context", &raw).unwrap());
 }
 
-/// Bob can authenticate the bytes of an unknown key. Its use, or an
-/// unknown signature envelope, reports the missing capability.
+/// Bob can authenticate the bytes of an unknown key.
 #[test]
 fn row_shapes_and_mechanisms() {
-    let unknown = Mechanism::new("future", 2);
     let mut c = Commitment {
         mechanism: "future".into(),
         ..commitment()
@@ -444,38 +436,5 @@ fn row_shapes_and_mechanisms() {
     for len in [0, 65_537] {
         c.commitment = vec![0; len];
         assert!(c.validate().is_err());
-    }
-    let mut h = header();
-    assert!(h.validate().is_err());
-    h.signature_digest = vec![0; 32];
-    h.validate().unwrap();
-    let s = EndorsementSignature {
-        id: ROW.into(),
-        account_id: ALICE.into(),
-        signature: envelope::encode(unknown, &[1]).unwrap(),
-    };
-    s.validate().unwrap();
-    let unsupported = Err(ProtocolError::Unsupported(
-        UnsupportedCapability::CommitmentMechanism,
-    ));
-    assert_eq!(
-        verify_endorsement(MECHANISM, &[], b"", &s.signature),
-        unsupported
-    );
-    let short = envelope::encode(MECHANISM, &[1]).unwrap();
-    assert_eq!(verify_endorsement(unknown, &[], b"", &short), unsupported);
-    assert_eq!(
-        verify_endorsement(MECHANISM, &[0; 32], b"", &short),
-        Ok(false)
-    );
-    for bad in [vec![1], envelope::encode(MECHANISM, &[]).unwrap()] {
-        assert!(
-            EndorsementSignature {
-                signature: bad,
-                ..s.clone()
-            }
-            .validate()
-            .is_err()
-        );
     }
 }
