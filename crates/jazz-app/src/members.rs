@@ -109,8 +109,10 @@ impl Jazz {
     /// The check reads this client's local data. A client that hasn't
     /// synced an existing membership yet (offline, or another device added
     /// it moments ago) inserts a second row for the account. So can two
-    /// concurrent calls for the same account (say, in `join!`): both may
-    /// read before either writes. [`Jazz::remove_member`] removes every row.
+    /// concurrent calls for the same account outside a transaction (say, in
+    /// `join!`): both may read before either writes. Inside one transaction,
+    /// [`crate::Transaction::add_member`] calls run in turn and share one row.
+    /// [`Jazz::remove_member`] removes every row.
     ///
     /// Automatic creator membership applies to inserts. When an upsert creates
     /// a space, explicitly add the creator in the same transaction or call this
