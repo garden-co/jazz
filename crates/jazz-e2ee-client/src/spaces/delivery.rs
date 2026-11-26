@@ -224,7 +224,13 @@ impl E2eeClient {
         if written > 0 {
             self.publish(db, tx).await?;
         } else if resume {
-            self.resume_rotation(space, &chain, &read.ledger, &acquisition.keys, &deps.members)?;
+            self.resume_rotation(
+                space,
+                &chain,
+                &read.ledger,
+                &acquisition.keys,
+                &deps.members,
+            )?;
         }
         if let Some(watched) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
             *watched = deps;
@@ -308,7 +314,8 @@ impl E2eeClient {
         let mut previous = None;
         for _ in 0..MAX_BATCHES {
             let outcome = crate::account::serializable(db, ATTEMPTS, async |tx| {
-                self.deliver_step(db, tx, space, &mut previous, resume).await
+                self.deliver_step(db, tx, space, &mut previous, resume)
+                    .await
             })
             .await;
             match outcome {

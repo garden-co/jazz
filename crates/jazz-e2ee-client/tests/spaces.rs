@@ -481,10 +481,14 @@ fn a_rotation_retry_reads_only_the_accounts_its_batch_uses() {
         .is_err()
     );
     alice.client.set_online(true);
-    alice.client.advance_settle_clock(std::time::Duration::from_secs(1));
+    alice
+        .client
+        .advance_settle_clock(std::time::Duration::from_secs(1));
     let early = alice.sync_spaces(&server, &mut watch).unwrap();
     assert!(early.is_empty(), "retried before its wait: {early:?}");
-    alice.client.advance_settle_clock(std::time::Duration::from_secs(1));
+    alice
+        .client
+        .advance_settle_clock(std::time::Duration::from_secs(1));
     alice.client.take_public_account_reads();
     let synced = alice.sync_spaces(&server, &mut watch).unwrap();
     assert!(
