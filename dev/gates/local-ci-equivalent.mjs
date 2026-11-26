@@ -217,7 +217,7 @@ const typescriptPartitions = Object.freeze({
     // lattice or SHA-3 code (the SLH-DSA dependency carries SHAKE variants
     // that no build may use).
     command("no lattice or SHA-3 symbols", "node", [
-      "dev/gates/check-endorsement-symbols.mjs",
+      "dev/gates/check-no-lattice-sha3-symbols.mjs",
       "--correctness-artifacts",
     ]),
   ]),
@@ -530,6 +530,10 @@ export const ciPartitions = Object.freeze({
     command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
       "dev/gates/jazz-swift.sh",
     ]),
+    // The native libraries link no lattice or SHA-3 code: jazz-ffi's (which
+    // jazz-kotlin and the Swift package load, built above) and the React
+    // Native relay linked as an app links it.
+    command("no lattice or SHA-3 native symbols", "bash", ["dev/gates/native-crypto-symbols.sh"]),
   ]),
   // Every crate release-publish.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
