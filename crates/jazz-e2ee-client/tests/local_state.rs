@@ -703,6 +703,46 @@ fn a_wipe_during_a_keep_closes_it() {
     assert!(store.inner.scopes().is_empty());
 }
 
+/// Alice keeps her unpublished creation, then its acceptance changes the
+/// mark. The second save seals the new mark and it survives reopening.
+#[test]
+fn a_changed_held_key_mark_is_resealed() {
+    use jazz_e2ee::protocol::content::{CreationFate, HeldSpace, KeyMark};
+    use jazz_e2ee::protocol::domain::AppDomain;
+
+    let server = authority();
+    let store = Rc::new(MemoryStore::new());
+    let alice = open_client(store.clone());
+    let (db, _link, _) = online(&alice, &server, None);
+    let root = new_root(
+        &alice.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
+    let domain = AppDomain::new(
+        &app_id().as_object_id().uuid().to_string(),
+        Some(ENVIRONMENT),
+    )
+    .unwrap();
+    let mut held =
+        HeldSpace::from_creation(&Registry::builtin(), &domain, &root, "creation").unwrap();
+    let name = format!("held-{}", held.root_id());
+    block_on(alice.keep(held.clone())).unwrap();
+    let first = block_on(store.load(&scope(), &name)).unwrap().unwrap();
+    held.settle(CreationFate::Accepted, Some(&root.root.id));
+    block_on(alice.keep(held)).unwrap();
+    let second = block_on(store.load(&scope(), &name)).unwrap().unwrap();
+    assert_eq!(second.revision, first.revision + 1);
+    assert!(second.bytes != first.bytes);
+    drop(alice);
+    let reopened = open_client(store);
+    assert!(reopened.with_held(|keys| {
+        keys.space(&root.root.id)
+            .unwrap()
+            .held()
+            .eq([(0, &KeyMark::Published)])
+    }));
+}
+
 /// Alice's persisted device is valid; a failing key provider during its
 /// reopen check reaches the caller with the provider's error.
 #[test]

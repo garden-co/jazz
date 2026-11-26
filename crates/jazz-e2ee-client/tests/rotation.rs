@@ -14,6 +14,7 @@ use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 use jazz_e2ee::{OsRandom, RandomSource};
 use jazz_e2ee_client::host::bridge::JsStore;
 use jazz_e2ee_client::host::runtime::{Built, Encryption};
+use jazz_e2ee_client::testing::StoreWithSaveHook;
 use jazz_e2ee_client::{AccountStatus, ClientConfig, E2eeClient, MemoryStore, Report};
 
 struct FailingDeliveryIds(Rc<Cell<bool>>);
@@ -33,6 +34,8 @@ impl RandomSource for FailingDeliveryIds {
 /// The call returns after the first batch and Alice can immediately write
 /// under the new key. The background pass serves the remaining member in
 /// this unwatched space. A failure on the next rotation reaches her once.
+/// At depth four, the foreground and background saves share one sealing,
+/// and the writing and empty batches share one verified chain.
 ///
 /// ```text
 /// alice ──successor + first batch──► authority ──accepts──► rotate returns
@@ -46,8 +49,18 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     let server = secure_authority_with(&settings, None);
     let alice = account(0xa1);
     let fails = Rc::new(Cell::new(false));
+    let saves = Rc::new(RefCell::new(Vec::new()));
+    let store = StoreWithSaveHook::new(MemoryStore::new(), {
+        let saves = saves.clone();
+        move |_, doc, bytes, _| {
+            if doc.starts_with("held-") {
+                saves.borrow_mut().push(bytes.to_vec());
+            }
+            Box::pin(async { Ok(()) })
+        }
+    });
     let client = block_on(E2eeClient::open(ClientConfig {
-        store: Rc::new(MemoryStore::new()),
+        store: Rc::new(store),
         declarations: declarations_with(settings.clone()),
         account_id: account_id(alice),
         registry: jazz_e2ee::registry::Registry::builtin(),
@@ -91,6 +104,17 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
     pump(&server, &db);
     drive(&server, &[&db], client.reconcile(&db)).unwrap();
     client.advance_settle_clock(std::time::Duration::ZERO);
+    let address = SpaceAddress {
+        scope_id: scope.to_string(),
+        identifier: space.to_string(),
+    };
+    for _ in 0..3 {
+        assert_eq!(
+            drive(&server, &[&db], client.rotate(&db, &address)).unwrap(),
+            0
+        );
+    }
+    saves.borrow_mut().clear();
 
     let mut members = BTreeSet::new();
     let schema = secure_schema_with(&settings);
@@ -118,10 +142,6 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
         members.insert(add_member(member));
     }
     pump(&server, &db);
-    let address = SpaceAddress {
-        scope_id: scope.to_string(),
-        identifier: space.to_string(),
-    };
     let written = drive(&server, &[&db], client.rotate(&db, &address)).unwrap();
     assert_eq!(written, DELIVERY_BATCH);
 
@@ -131,8 +151,8 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
             .filter(eq(col("identifier"), lit(Value::Uuid(space)))),
     )
     .unwrap();
-    assert_eq!(successors.len(), 1);
-    let successor = &successors[0];
+    assert_eq!(successors.len(), 4);
+    let successor = successors.iter().max_by_key(|row| row.seq()).unwrap();
     let epoch = successor.cell("epochId").unwrap();
     let rotation_at = successor.seq();
     assert!(rotation_at.accepted());
@@ -164,6 +184,7 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
 
     let mut watch = block_on(client.watch_spaces(&db)).unwrap();
     let mut sync = || drive(&server, &[&db], client.sync_spaces(&db, &mut watch)).unwrap();
+    let replays_before = client.delivery_chain_replays();
     assert!(matches!(
         sync().as_slice(),
         [(served, Ok(jazz_e2ee_client::SpaceKeyState::Held))] if *served == address
@@ -188,6 +209,18 @@ fn rotation_dispatches_the_remaining_deliveries_after_the_successor_commits() {
         members.is_empty(),
         "members missing a delivery: {members:?}"
     );
+    {
+        let saved = saves.borrow();
+        assert_eq!(saved.len(), 2, "both saves must use compare-and-swap");
+        assert_eq!(
+            (
+                client.delivery_chain_replays() - replays_before,
+                saved[0] == saved[1]
+            ),
+            (1, true),
+            "expected one chain replay and reuse of the first sealing",
+        );
+    }
     let reports = Rc::new(RefCell::new(Vec::new()));
     client.on_report({
         let reports = reports.clone();

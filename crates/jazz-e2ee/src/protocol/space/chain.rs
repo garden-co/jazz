@@ -333,6 +333,17 @@ impl SpaceChain {
         self.source.through
     }
 
+    pub(super) fn at_matching_read(
+        &self,
+        ledger: &SpaceLedger,
+        accounts: &AccountDirectory<'_>,
+    ) -> ProtocolResult<Self> {
+        check_read(ledger, Some(accounts))?;
+        let mut chain = self.clone();
+        chain.source.through = ledger.through;
+        Ok(chain)
+    }
+
     /// Fails with [`ProtocolError::InconsistentEvidence`] unless `ledger`
     /// is the read this chain was replayed from (same address and cut) and
     /// passes its own check, and `accounts`, when given, was read at the

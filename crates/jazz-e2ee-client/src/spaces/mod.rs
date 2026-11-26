@@ -23,7 +23,7 @@ use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
 use jazz_e2ee::protocol::error::UnsupportedCapability;
 use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::SpaceWriter;
-use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
+use jazz_e2ee::protocol::space::members::{CurrentVersion, DeliveryChain, ReplayedSpaceChain};
 use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
 
@@ -98,11 +98,10 @@ pub(crate) struct SpaceRead {
     skipped_deliveries: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SpaceReadPurpose<'a> {
+pub(super) enum SpaceReadPurpose<'a, 'registry> {
     Acquire,
     WriteCheck,
-    Deliver,
+    Deliver(&'a mut Option<DeliveryChain<'registry>>),
     Rotate,
     RecoverRotation,
     RotationBatch(&'a [String]),
@@ -212,12 +211,12 @@ impl E2eeClient {
 
     /// Read the chain evidence first, then select deliveries by authenticated
     /// epoch at the same serializable cut.
-    pub(crate) async fn read_space_of(
-        &self,
+    pub(crate) async fn read_space_of<'registry>(
+        &'registry self,
         db: &Db,
         tx: OpenTransactionId,
         address: &SpaceAddress,
-        purpose: SpaceReadPurpose<'_>,
+        mut purpose: SpaceReadPurpose<'_, 'registry>,
     ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
         let own = self.shared.account_id.clone();
@@ -246,7 +245,8 @@ impl E2eeClient {
                 | SpaceReadPurpose::RecoverRotation
                 | SpaceReadPurpose::RotationBatch(_)
         );
-        let all_members = rotating || purpose == SpaceReadPurpose::Deliver;
+        let delivering = matches!(purpose, SpaceReadPurpose::Deliver(_));
+        let all_members = rotating || delivering;
         if !all_members {
             members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
         }
@@ -297,7 +297,25 @@ impl E2eeClient {
             ledger.through,
         )?;
         self.space_floors(&accounts, &directory).await?;
-        let chain = ReplayedSpaceChain::replay(&ledger, &directory)?;
+        let chain = if let SpaceReadPurpose::Deliver(previous) = &mut purpose {
+            let reused = match previous.as_ref() {
+                Some(previous) => previous.reuse(&ledger, &directory)?,
+                None => None,
+            };
+            match reused {
+                Some(chain) => Some(chain),
+                None => {
+                    #[cfg(any(test, feature = "testing"))]
+                    {
+                        self.shared.member_watch.borrow_mut().delivery_chain_replays += 1;
+                    }
+                    **previous = DeliveryChain::replay(&ledger, &directory, &self.shared.registry)?;
+                    previous.as_ref().map(DeliveryChain::verified)
+                }
+            }
+        } else {
+            ReplayedSpaceChain::replay(&ledger, &directory)?
+        };
         let acquire_read = |chain: &ReplayedSpaceChain, ledger: &SpaceLedger| {
             let own = self.account.borrow();
             let own = own.as_ref().ok_or(ClientError::NoAccount)?;
@@ -319,7 +337,7 @@ impl E2eeClient {
                 if !batch {
                     epochs.insert(current.clone());
                 }
-                if purpose == SpaceReadPurpose::RecoverRotation {
+                if matches!(purpose, SpaceReadPurpose::RecoverRotation) {
                     let acquired = acquire_read(chain, &ledger)?;
                     let first = acquired
                         .keys
@@ -360,7 +378,7 @@ impl E2eeClient {
             };
             if let Some(chain) = &chain {
                 epochs.insert(chain.last().epoch_id.clone());
-                if purpose != SpaceReadPurpose::WriteCheck {
+                if !matches!(purpose, SpaceReadPurpose::WriteCheck) {
                     epochs.extend(
                         chain
                             .skipped()
@@ -369,10 +387,10 @@ impl E2eeClient {
                     );
                 }
                 ledger.deliveries = epoch_deliveries(&epochs, true).await?;
-                if purpose != SpaceReadPurpose::WriteCheck {
+                if !matches!(purpose, SpaceReadPurpose::WriteCheck) {
                     let acquired = acquire_read(chain, &ledger)?;
                     let held: BTreeSet<_> = acquired.keys.epoch_ids().collect();
-                    if purpose == SpaceReadPurpose::Deliver {
+                    if delivering {
                         // Only held versions can be delivered or mark a rotation.
                         epochs.retain(|id| held.contains(id.as_str()));
                         ledger.deliveries = epoch_deliveries(&epochs, false).await?;
