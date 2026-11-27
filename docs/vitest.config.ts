@@ -19,8 +19,6 @@ export default defineConfig({
       "lib/app-file-blocks.test.ts",
       "lib/llm-text.test.ts",
       "lib/quickstart-links.test.ts",
-      "lib/private-store.test.ts",
-      "lib/rotation-retries.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
