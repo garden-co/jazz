@@ -909,7 +909,9 @@ this build does not know is dropped when reading, so a version read without
 it may be another version than the one sent. A replica therefore takes a
 version only if the id it computes for it is the id sent (`INV-LENS-1`);
 otherwise the version carries keys this build ignores and is skipped the
-same way. A skipped version is never admitted. The wire is unchanged.
+same way. So does a version whose known value was corrupted but still decodes
+(a changed weight, a flipped flag): its id no longer matches, so it is skipped
+and reported, not taken. A skipped version is never admitted. The wire is unchanged.
 
 A relay serves only the versions it can read: it skips the others as any
 replica does and does not pass them on. A relay must therefore be at least
