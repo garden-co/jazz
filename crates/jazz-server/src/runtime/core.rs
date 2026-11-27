@@ -459,7 +459,7 @@ impl ServerCore {
     /// the same transaction as the change. A key already holding the same
     /// value is left as it is; a key holding a different value fails the
     /// whole change, which then leaves nothing behind
-    /// ([`jazz::db::Db::apply_catalogue_keeping`]).
+    /// ([`jazz::db::Db::apply_catalogue_checked`]).
     pub fn apply_catalogue_keeping(
         &mut self,
         expected: &crate::portable::catalogue::CatalogueIndex,
