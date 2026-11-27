@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 2.0.0-beta.5
+
+### Patch Changes
+
+- 292c963: Opening a store no longer scans every history table to find where its commit seq resumes. The seq lives in one `_jazz_meta` row (`commit_seq.v1`), kept current by SQLite triggers in the same transaction as every write that takes a seq. Older cores writing to the same store keep it current too. An existing store is scanned as before until its first write records the row. From then on, an open reads only the row. A large store on network storage (a Vercel Sandbox Drive) opens without reading its whole history.
+- 906b7f0: `vercel()` no longer stops a core's session while the core is still opening its store. A large store can take tens of seconds to open, and Vercel's router answers "not listening" all that time, which the store used to read as a router glitch after 12 s, so every waiter stopped each new session before it could listen. A session is now recycled only when a check inside the Sandbox finds its core listening while the router still can't reach it, and at most once per session across all function instances. A wake that runs out of time while the core opens says so. The core's launcher logs every stop signal with how long after its launch it arrived.
+  - jazz-wasm@2.0.0-beta.5
+  - jazz-rn@2.0.0-beta.5
+
 ## 2.0.0-beta.4
 
 ### Patch Changes
