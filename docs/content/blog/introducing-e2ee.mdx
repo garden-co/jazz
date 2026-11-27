@@ -9,7 +9,7 @@ This blog post introduces end-to-end encryption for Jazz 2.0. We're happy to ans
 
 # Classic Jazz, and why we stopped doing E2EE by default
 
-One of the distinguishing features of Classic Jazz was that end-to-end encryption was built into the protocol. The approach was simple: any client could load any data by ID, but only authorised clients would be able to decrypt the content. To determine whether writes were legitimate, we checked each write against a chain of signed hashes. In case we couldn't validate the write was authorised, it was ignored.
+One of the distinguishing features of classic Jazz was that end-to-end encryption was built into the protocol. The approach was simple: any client could load any data by ID, but only authorised clients would be able to decrypt the content. To determine whether writes were legitimate, we checked each write against a chain of signed hashes. In case we couldn't validate the write was authorised, it was ignored.
 
 We used fast crypto and hashing algorithms, and for a lot of apps, performance was good. But towards the end of 2025, we began to run into challenges. As users put more and more data into Jazz, we discovered an uncomfortable implication of our design. Some of the core features we’d built on top of the protocol, such as groups and history, were causing slowness in apps with either deeply nested group structures or deep history.
 
@@ -23,7 +23,7 @@ Today, we’re launching E2EE in Jazz 2.0.
 
 # Overview of E2EE in Jazz 2.0
 
-End-to-end encryption in Jazz 2.0 has been built from the ground up to be resilient and performant. We’ve drawn on what we learned from Classic Jazz, while taking advantage of the new ways Jazz 2.0 works to keep performance as fast as possible.
+End-to-end encryption in Jazz 2.0 has been built from the ground up to be resilient and performant. We’ve drawn on what we learned from classic Jazz, while taking advantage of the new ways Jazz 2.0 works to keep performance as fast as possible.
 
 The guiding principles:
 
@@ -41,7 +41,7 @@ A device unseals its account key, the account unseals each space key, and the sp
 
 Jazz determines who can decrypt an encrypted row based on the membership of the `space`. This doesn't stop you from writing more complex permission rules (e.g. only the creator can read a `task` if its `status` is `draft`), but bear in mind that the `space` alone is the cryptographic boundary. If you need more control over who can decrypt a piece of data, you can create more spaces. Jazz warns you when a table’s read rule is narrower than its space, so you can decide whether you are comfortable relying on permissions, or whether you would rather move this data into its own space.
 
-When someone leaves or is removed, the space switches to a new key (known as _rotation_) and encrypts all new content with it, so they can’t read anything written after the switch.
+When someone leaves or is removed, the space switches to a new key (known as _rotation_), either straight away if you call `rotate`, or before the next write by someone who manages the space. Content written after the switch is encrypted with the new key, so they can’t read it.
 
 ## Per-column opt-in
 
@@ -53,7 +53,7 @@ Plain columns keep everything Jazz 2.0 can do with them: indexes, ordering, rang
 
 For Jazz 2.0, we built E2EE with performance in mind from the start. In our benchmarks, with warm clients, where the keys are already loaded in memory, encryption adds about 3µs per encrypted value read, and less than 10µs per write.
 
-The key lesson from Classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is opening a space, because that means unsealing the newest key the device was given, and opening older space keys. This is a small up-front cost the first time a space is accessed, which grows with the number of key rotations, not with how much data the space holds.
+The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is opening a space, because that means unsealing the newest key the device was given, and opening older space keys. This is a small up-front cost the first time a space is accessed, which grows with the number of key rotations, not with how much data the space holds.
 
 Adding E2EE costs under 10ms at app start-up natively (up to around 60ms in the browser for a returning device). The first time a device loads each space, it also fetches and verifies the space's keys, which takes less than 100ms natively for typical spaces, and less than 50ms for small spaces.
 
@@ -68,7 +68,7 @@ Every building block we use for E2EE in Jazz is standard and widely reviewed, ta
 - Ed25519 for signatures
 - BLAKE2 and SHA-2 for hashing
 
-The protocol that puts them together (how keys are created, delivered, rotated and recovered) is our own. It’s written down in full in the Jazz repository, next to the code, so anyone can review it.
+The protocol that puts them together (how keys are created, delivered, rotated and recovered) is our own. It’s [written down in full](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_PROTOCOL.md) in the Jazz repository, next to the code, so anyone can review it.
 
 ## Swappable algorithms
 
@@ -76,7 +76,7 @@ We've built a core which allows you to swap out cryptography without painful mig
 
 That's important today for use cases that require specific algorithms, or for applications where you want to adopt newer cryptography early. For example, key sealing is shaped after HPKE, so a post-quantum hybrid such as X-Wing can be swapped in. Once a new algorithm is available in your build, new content uses it straight away, and keys are sealed with it from the space’s next key rotation. Old content remains readable, so you can have clients that hold the key re-encrypt it as they go.
 
-For now, adding alternative crypto implementations requires a custom build, but the interfaces are designed to make this easy, and there's an example of how you could do this to get you (or your agent) going.
+For now, adding alternative crypto implementations requires a custom build, but the interfaces are designed to make this easy, and there's [an example of how you could do this](https://github.com/garden-co/jazz/blob/main/crates/jazz-e2ee/examples/custom_mechanism.rs) to get you (or your agent) going.
 
 _Note: as a last minute addition, we also added 'commitments' before releasing. These use hash-based certificates to allow a device to prove that a new, post-quantum key is owned by the same device. This holds as long as SHA does._
 
@@ -95,6 +95,8 @@ Encryption is opt-in per column, so you can start with one sensitive field.
 Here’s a table with one encrypted column, `title`:
 
 ```ts
+import { schema as s } from "jazz-tools";
+
 export const schema = s.defineSchema({
   projects: s.table({
     name: s.string(),
@@ -151,7 +153,7 @@ A member’s copy of the space key is sealed to their account, so any device the
 
 ## Can my backend read encrypted columns?
 
-Your backend can always read plain columns. Encrypted columns are client-only: your backend has no account and no keys. Its reads come back without encrypted columns, and it refuses writes to them. If your server needs to compute on some data, that data has to stay plain.
+Your backend can always read plain columns. Encrypted columns are client-only: your main backend has no account and no keys. Its reads come back without encrypted columns, and it refuses writes to them. If your server needs to compute on some data, that data has to stay plain.
 
 ## Is it ready for production?
 
