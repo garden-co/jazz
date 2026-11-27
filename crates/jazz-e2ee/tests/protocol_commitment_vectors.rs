@@ -438,3 +438,167 @@ fn row_shapes_and_mechanisms() {
         assert!(c.validate().is_err());
     }
 }
+
+/// Alice's root has several commitment rows, as the table policy allows
+/// (§1.4, R11a): malformed ones, forged ones, ones signed by the root for
+/// other coordinates and a second valid one. Bob counts only the root's own
+/// transaction: the valid row at the root's accepted position with the
+/// smallest ID (§2.9, "Which commitment counts"). No row before or after it
+/// ever counts, so a root written without its commitment stays uncommitted,
+/// and an invalid row never blocks a valid one.
+#[test]
+fn only_the_roots_own_commitment_counts() {
+    use jazz_e2ee::protocol::position::{Accepted, Position};
+    use jazz_e2ee::protocol::records::roster::{CommittedRoot, Counted, counting_commitment};
+
+    let secret = RecoverySecret::from_bytes(std::array::from_fn(|i| i as u8));
+    let app = AppDomain::new(APP, Some("prod")).unwrap();
+    let registry = Registry::builtin();
+    let writer = AccountWriter {
+        account_secret_root_id: None,
+        suite: registry.select(&MechanismConfig::default()).unwrap(),
+        registry: &registry,
+        domain: &app,
+        account_id: ALICE,
+    };
+    let application = domain(APP, "prod", ALICE);
+    let keys = RecoveryKeys::derive(&secret, &application, 0).unwrap();
+    let key = RecoveryCommitmentKey::derive(&secret, &application, 0).unwrap();
+    let valid = |id_byte: u8| {
+        recovery_commitment(&writer, &secret, &key, &mut FixedRandom(vec![id_byte; 16])).unwrap()
+    };
+    // Re-signs a row with the root's own key, so only its content decides.
+    let signed = |mut row: Commitment| {
+        let bytes = row.signed_bytes(&application, 0).unwrap();
+        row.signature = registry
+            .signer(keys.signing.public.mechanism.as_mechanism())
+            .unwrap()
+            .sign(&keys.signing, &bytes)
+            .unwrap();
+        row
+    };
+    let root = CommittedRoot {
+        account_id: ALICE,
+        root_id: &keys.root_id,
+        generation: 0,
+        position: Position(10),
+        signing: &keys.signing.public,
+    };
+    let first = valid(0x66);
+    let second = valid(0x22);
+    let wrong_key = {
+        let mut row = valid(0x33);
+        row.commitment = vec![0x44; 32];
+        row
+    };
+    // The record refuses to build signed bytes for it, so it can't be re-signed.
+    let short_key = Commitment {
+        commitment: vec![0x44; 31],
+        ..valid(0x34)
+    };
+    let device_kind = signed(Commitment {
+        subject_kind: SubjectKind::Device,
+        subject_id: DEVICE.into(),
+        ..valid(0x35)
+    });
+    let other_root = Commitment {
+        subject_id: OTHER.into(),
+        ..valid(0x36)
+    };
+    let not_a_signature = Commitment {
+        signature: vec![0x01],
+        ..valid(0x37)
+    };
+    let future = signed(Commitment {
+        mechanism: "jazz.commit.future".into(),
+        version: 1,
+        commitment: vec![0x55; 64],
+        ..valid(0x11)
+    });
+    let at = |position, row: &Commitment| Accepted::new(Position(position), row.clone());
+    let count_for = |root: &CommittedRoot<'_>, rows: &[Accepted<Commitment>]| {
+        counting_commitment(&registry, &application, root, rows)
+            .unwrap()
+            .map(|counted| match counted {
+                Counted::Known(row) => ("known", row.id.clone()),
+                Counted::Unsupported(row) => ("unsupported", row.id.clone()),
+            })
+    };
+    let count = |rows: &[Accepted<Commitment>]| count_for(&root, rows);
+    let known = |row: &Commitment| Some(("known", row.id.clone()));
+
+    // Invalid rows in the root's transaction never count, and never block
+    // a valid one there, in any read order.
+    let invalid = [
+        &wrong_key,
+        &short_key,
+        &device_kind,
+        &other_root,
+        &not_a_signature,
+    ];
+    for row in invalid {
+        assert_eq!(count(&[at(10, row)]), None, "{row:?}");
+    }
+    let mut rows: Vec<_> = invalid.iter().map(|row| at(10, row)).collect();
+    rows.push(at(10, &first));
+    assert_eq!(count(&rows), known(&first));
+    rows.reverse();
+    assert_eq!(count(&rows), known(&first));
+    // In the root's transaction, the smallest ID counts ("22…" before "66…").
+    assert_eq!(count(&[at(10, &first), at(10, &second)]), known(&second));
+    // Only the root's own transaction counts. A valid row before it or
+    // after it never does: a root written without its commitment stays
+    // uncommitted, whoever can sign for it later.
+    assert_eq!(count(&[at(9, &second)]), None);
+    assert_eq!(count(&[at(11, &second)]), None);
+    assert_eq!(count(&[at(11, &second), at(12, &first)]), None);
+    assert_eq!(count(&[at(10, &first), at(11, &second)]), known(&first));
+    // A counting row of an unknown mechanism is unsupported: Bob does not
+    // fall through to another row of a mechanism he knows.
+    assert_eq!(
+        count(&[at(10, &first), at(10, &future)]),
+        Some(("unsupported", future.id.clone()))
+    );
+
+    // Rows the root itself signed, for other coordinates. The signature
+    // covers them, so only the record checks refuse them. A root with a
+    // random ID lets a device subject carry the same ID.
+    const RANDOM_ROOT: &str = "77777777-7777-4777-8777-777777777777";
+    let random_root = CommittedRoot {
+        root_id: RANDOM_ROOT,
+        ..root
+    };
+    let for_random_root = |id_byte| {
+        signed(Commitment {
+            subject_id: RANDOM_ROOT.into(),
+            ..valid(id_byte)
+        })
+    };
+    let own = for_random_root(0x40);
+    assert_eq!(count_for(&random_root, &[at(10, &own)]), known(&own));
+    for (what, row) in [
+        (
+            "a device with the root's ID",
+            signed(Commitment {
+                subject_kind: SubjectKind::Device,
+                ..for_random_root(0x41)
+            }),
+        ),
+        (
+            "another account",
+            signed(Commitment {
+                account_id: OTHER.into(),
+                ..for_random_root(0x42)
+            }),
+        ),
+        (
+            "another root",
+            signed(Commitment {
+                subject_id: "88888888-8888-4888-8888-888888888888".into(),
+                ..for_random_root(0x43)
+            }),
+        ),
+    ] {
+        assert_eq!(count_for(&random_root, &[at(10, &row)]), None, "{what}");
+    }
+}

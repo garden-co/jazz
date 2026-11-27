@@ -27,6 +27,7 @@ export async function bundleWorker(entry: string): Promise<string> {
       "jazz-tools/durable-object": join(src, "durable-object/index.ts"),
       // The workerd entry, as the package's `workerd` condition picks it.
       "jazz-tools/backend": join(src, "backend/workerd.ts"),
+      "jazz-tools/cloudflare": join(src, "cloudflare/index.ts"),
     },
     logLevel: "warning",
   });

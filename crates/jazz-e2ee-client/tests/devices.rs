@@ -1991,6 +1991,10 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
             announced.get()
         );
         assert!(runtime.take_reports().is_empty());
+        // The first re-check: the watch must see the challenge before it.
+        let recheck = bridge
+            .next_deadline_after(web_time::Instant::now())
+            .expect("a healthy watch arms its re-check");
 
         let both = [&first.db, db.as_ref()];
         drive(
@@ -2019,6 +2023,63 @@ fn approval_watch_recovery(fault: ApprovalWatchFault) {
                 futures::pending!();
             }
         });
+        assert!(
+            web_time::Instant::now() < recheck,
+            "the watch, not the re-check, must report the challenge"
+        );
+        runtime.stop();
+    });
+}
+
+/// Alice's second device waits for approval, offline, with the rest of a
+/// rotation whose retry time passed while it was offline (nothing serves
+/// it until reconnect). That past time must not hide the approval watch's
+/// re-check: the host still gets a deadline for it.
+#[test]
+fn a_stale_rotation_retry_does_not_hide_the_approval_recheck() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let second = device(&server, alice, memory(), 2, &settings);
+        let db = Rc::new(second.db);
+        let client = Rc::new(second.client);
+        client.set_online(false);
+        client
+            .stale_rotation_retry_for_test(&jazz::e2ee::SpaceAddress {
+                scope_id: uuid::Uuid::new_v4().to_string(),
+                identifier: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap();
+        let bridge = Rc::new(JsStore::default());
+        let runtime = Encryption::new(
+            Built {
+                spaces: serde_json::json!({}),
+                client,
+                reports: Rc::default(),
+            },
+            bridge.clone(),
+            db.clone(),
+        );
+        drive(&server, &[&db], async {
+            loop {
+                runtime.drive();
+                let state = runtime.state();
+                assert!(state["error"].is_null(), "{state}");
+                if state["status"] == "awaiting-approval" && state["stage"] == "idle" {
+                    break;
+                }
+                futures::pending!();
+            }
+        });
+        let now = web_time::Instant::now();
+        let deadline = bridge.next_deadline_after(now);
+        assert!(
+            deadline.is_some_and(|at| at <= now + std::time::Duration::from_secs(2)),
+            "the approval re-check must stay armed: {deadline:?}"
+        );
         runtime.stop();
     });
 }

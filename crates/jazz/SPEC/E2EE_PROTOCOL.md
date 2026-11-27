@@ -607,7 +607,10 @@ Account and device tables (fixed policies):
 - R11a. `__e2ee_commitments`: insert only with `accountId = session account`
   and `subjectId` a device request or a recovery root of the same account (a
   root inserted in the same transaction counts); readable like the other
-  public tables (R10).
+  public tables (R10). The policy does not check the rest of the row, nor
+  that a subject has only one, nor that a root's commitment is in the root's
+  transaction: which row counts is the reader's rule (§2.9, "Which
+  commitment counts"), and only a row in the root's own transaction can.
 
 The founder, kind and `allowAccountReset` conditions of R5 and R6 are
 account-registry and configuration checks beside the policies, as Jazz's
@@ -1539,7 +1542,7 @@ the 32 secret bytes, created and read with user verification required
   key are never stored. A root that is
   already registered gets no new commitment; approving or restoring a
   device writes none. Only recovery roots write commitments in this
-  version, and nothing reads, verifies or enforces them yet: their presence
+  version, and no replay reads, verifies or enforces them yet: their presence
   or absence changes no behaviour. Verification arrives in a later version.
   The table belongs to the system tables of version 1, amended before any
   release. A client built with that amended set and no commitment support
@@ -1558,6 +1561,35 @@ the 32 secret bytes, created and read with user verification required
   `c = 24e9d79801d9d24478c1884ac45222da7851a6be14eb7401bd75ea6456b8430c`
   and commitment
   `334b6b549eb6afc4e68f0d33e45989ef4be77c7bef100ae98595f5632485f10a`.
+- **Which commitment counts.** The table policy (§1.4, R11a) checks only
+  the account and the subject, so a root can have several commitment rows,
+  some of them malformed. A reader decides alone. A commitment row is
+  **valid for** a valid root iff its `accountId` is the root's account, its
+  `subjectKind` is `recovery-root` and its `subjectId` the root's ID, the
+  record is well formed (IDs of their forms, a known mechanism's key at its
+  exact length, any other mechanism's key of 1 to 65,536 bytes,
+  a non-empty signature), and its signature verifies under the root's own
+  signing key over the signed bytes above, at the root's generation. The
+  root's **counting commitment** is the row valid for it with the smallest
+  ID among the rows at the root's own accepted position: the commitment
+  written in the root's transaction. A root with no valid row there is
+  **uncommitted**, and stays so: no row accepted before or after the root
+  ever counts, so whoever can forge the root's classical signature later can
+  neither swap its commitment out nor give an uncommitted root one. Every
+  registration writes the root and its commitment in one transaction, and
+  re-registering an existing root writes none, so a root of this version is
+  uncommitted only if the server lost or withholds its commitment. Invalid rows are
+  ignored. If the counting row's mechanism or version is one the reader does
+  not know, the root's commitment is unsupported for that reader: it does not
+  fall through to another row of a mechanism it knows. If the root's signing
+  mechanism is unsupported or the provider fails, the reader cannot decide,
+  rather than treating the row as invalid. The rule relies on accepted
+  positions: a reader with no earlier state cannot tell a server that
+  rewrites them, as for every other ordering rule here (§0). `counting_commitment` in
+  `crates/jazz-e2ee/src/protocol/records/roster.rs` is this rule, and
+  `only_the_roots_own_commitment_counts` in
+  `crates/jazz-e2ee/tests/protocol_commitment_vectors.rs` pins it; no
+  replay calls it yet.
 - **Validity.** A root is valid iff it is strictly after the account root, its
   `epochId` was the account epoch at its position, its signer was active then
   with a supported signing mechanism, and its signature verifies. In an app
@@ -2160,11 +2192,18 @@ rotator is the only member) commit in one transaction. Right after the
 rotation is accepted, the rotator's runtime delivers
 `K'` to every remaining member in delivery transactions of up to 100
 deliveries, whether or not a delivery to it already exists (another
-member's delivery may not open); members it does not reach (without a sealing key, or the
-rotator went offline) receive `K'` later from any holder: an unfinished
-rotation needs no tracking, since any holder of the new version (the
-first-batch recipients, or the rotator on its next start) completes it
-through the pass (§3.4), the first holder to commit winning. Read-set
+member's delivery may not open). This per-sender delivery is guaranteed
+only within the rotator's session: the runtime keeps the remaining members
+in memory, retries a failed batch after a wait and stores nothing. Members
+it does not reach (without a sealing key, the rotator went offline or
+restarted, or its retries ran out) receive `K'` from any holder through the
+pass (§3.4), the first holder to commit winning. When the rotator's device
+starts again, its pass over a held space whose current version's successor
+that device signed also delivers `K'`, in the same batches, to every other
+member that lacks a delivery of it from the rotator's account, whatever
+others sent; it derives them from the ledger. So an unfinished rotation
+needs no stored tracking: no state beyond the held keys survives a
+restart. Read-set
 validation refuses a second successor of the same predecessor, and a
 rotation whose members changed meanwhile; the loser re-reads.
 

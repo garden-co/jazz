@@ -847,6 +847,16 @@ impl E2eeClient {
         space: &SpaceAddress,
     ) -> Result<Acquired, ClientError> {
         self.ensure_open()?;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            let mut watch = self.shared.member_watch.borrow_mut();
+            if watch.fail_acquisitions > 0 {
+                watch.fail_acquisitions -= 1;
+                return Err(
+                    crate::StoreError::Failed("acquisition failed for the test".into()).into(),
+                );
+            }
+        }
         // A creation of this device that is neither accepted nor refused
         // yet has rows no ledger read can show: its own key serves.
         if self.settle_creations(db, space, None).await? {

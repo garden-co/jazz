@@ -77,19 +77,13 @@ pub(crate) async fn deploy_body(
     // a runtime opens (`Owner::open`): a deployment that brings one to a
     // runtime without it is refused before anything is applied.
     if let Some(runtime) = state.runtime()
-        && deployment.prepared.schemas().iter().any(|schema| {
-            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
-                .unwrap_or(false)
-        })
+        && deployment.encrypts()
         && !runtime
             .has_account_registry()
             .await
             .map_err(DeployError::internal)?
     {
-        return Err(DeployError::invalid(
-            "this app encrypts columns, which needs the account registry of an app's store; \
-             the server's runtime has none",
-        ));
+        return Err(DeployError::invalid(portable::REGISTRY_REQUIRED));
     }
     let kept_values = if kept.is_some() {
         deployment.kept_values()
@@ -233,37 +227,48 @@ impl DeployHooks {
 
 /// Publish `source` (a schema carrying its permissions as table policies)
 /// as a permissions bundle, as `createJazz` does on boot: no permissions
-/// become current. Its hex bundle id.
+/// become current. An app that declares encryption sends its declarations
+/// (`encryption`), as its deployment does (see [`deploy_body`]): the server
+/// derives the system tables' policies into the bundle and keeps the
+/// version's declarations. Its hex bundle id.
 #[cfg(any(test, feature = "embedded-server"))]
 pub(crate) async fn publish_source_bundle(
     state: Arc<ServerState>,
     source: &Schema,
+    encryption: Option<jazz::tools::deployment::artifact::DeclaredEncryption>,
 ) -> Result<String, String> {
     let mut structural = source.clone();
     for table in structural.values_mut() {
         table.policies = TablePolicies::default();
     }
     let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+    // Jazz derives its system tables' policies, and a deployment's
+    // permissions may not name them: the app's own tables only, as its
+    // permissions file has them. A system table that carries policies of
+    // its own is still sent, and refused.
     let permissions = source
         .iter()
+        .filter(|(name, table)| {
+            !jazz::tools::deployment::artifact::system_tables::is_system_table(name.as_str())
+                || table.policies != TablePolicies::default()
+        })
         .map(|(name, table)| (*name, table.policies.clone()))
         .collect();
-    let response = deploy_body(
-        state,
-        DeployRequest {
-            target_schema_hash: hash.clone(),
-            schemas: vec![DeploySchema {
-                hash,
-                schema: structural,
-            }],
-            migrations: Vec::new(),
-            permissions,
-            allow_dropping_history: false,
-        }
-        .into(),
-    )
-    .await
-    .map_err(|error| error.body.to_string())?;
+    let mut body: DeployBody = DeployRequest {
+        target_schema_hash: hash.clone(),
+        schemas: vec![DeploySchema {
+            hash,
+            schema: structural,
+        }],
+        migrations: Vec::new(),
+        permissions,
+        allow_dropping_history: false,
+    }
+    .into();
+    body.encryption = encryption;
+    let response = deploy_body(state, body)
+        .await
+        .map_err(|error| error.body.to_string())?;
     Ok(response.bundle)
 }
 

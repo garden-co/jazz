@@ -127,12 +127,10 @@ impl Parser {
     }
 
     fn starts_with(&self, text: &str) -> bool {
-        let mut position = self.index;
-        for expected in text.chars() {
+        for (position, expected) in (self.index..).zip(text.chars()) {
             if self.chars.get(position) != Some(&expected) {
                 return false;
             }
-            position += 1;
         }
         true
     }

@@ -19,14 +19,36 @@ const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
 /// later task. Only actual store and wire traffic drives the foreground.
 ///
 /// Alice ──store reply──► foreground ──recovery root──► authority
+///
+/// The test blocks on the two events that move it: a store wake and frames
+/// queued for the authority. It has no time budget, so a loaded machine only
+/// makes it slower; a quiet minute means verification stalled.
 #[test]
 fn delayed_store_replies_wake_account_verification() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+
+    enum Event {
+        StoreRequest,
+        Outbound,
+    }
+
+    struct Release<'a> {
+        done: &'a AtomicBool,
+        queued: &'a tokio::sync::Notify,
+    }
+
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::Release);
+            self.queued.notify_one();
+        }
+    }
 
     unsafe extern "C" fn wake(context: *mut c_void, _: u64, kind: u8, _: u64) {
         if kind == FOREGROUND_WAKE_IMMEDIATE {
-            let sender = unsafe { &*context.cast::<mpsc::Sender<()>>() };
-            let _ = sender.send(());
+            let sender = unsafe { &*context.cast::<mpsc::Sender<Event>>() };
+            let _ = sender.send(Event::StoreRequest);
         }
     }
 
@@ -34,7 +56,8 @@ fn delayed_store_replies_wake_account_verification() {
     let (app, schema) = encrypted_schema();
     let (author, request) = device_account_request([0x43; 32]);
     let store = delayed_store();
-    let (events, wakes) = mpsc::channel::<()>();
+    let (events, wakes) = mpsc::channel::<Event>();
+    let outbound = events.clone();
     unsafe {
         let host = jazz_native_relay_host_new();
         let lease = jazz_native_relay_host_retain(host, 1);
@@ -62,33 +85,50 @@ fn delayed_store_replies_wake_account_verification() {
             .db
             .prepare_query(&jazz::query::Query::from("__e2ee_recovery_roots"))
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut replies = 0;
-        let registered = loop {
-            if pump() {
-                relay.pump().unwrap();
+        let queued = relay.wire().unwrap().outbound_ready();
+        let done = AtomicBool::new(false);
+        let replies = thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Acquire) {
+                    block_on(queued.notified());
+                    if outbound.send(Event::Outbound).is_err() {
+                        break;
+                    }
+                }
+            });
+            // Release the helper on every exit, a panic included: the scope
+            // joins it before the panic can leave the test.
+            let _release = Release {
+                done: &done,
+                queued: &queued,
+            };
+            let mut replies = 0;
+            loop {
+                // Carry whatever the relay queued for the authority, and its
+                // answers back, until the wire is quiet.
+                while pump() {
+                    relay.pump().unwrap();
+                }
+                if !block_on(server.db.all(&query, Default::default()))
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                match wakes.recv_timeout(Duration::from_secs(60)) {
+                    Ok(Event::StoreRequest) => replies += answer_store(&execute, &store),
+                    Ok(Event::Outbound) => {}
+                    Err(_) => panic!(
+                        "recovery registration stalled after {replies} delayed store replies"
+                    ),
+                }
             }
-            if !block_on(server.db.all(&query, Default::default()))
-                .unwrap()
-                .is_empty()
-            {
-                break true;
-            }
-            if wakes.recv_timeout(Duration::from_millis(2)).is_ok() {
-                replies += answer_store(&execute, &store);
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-        };
+            replies
+        });
         jazz_native_relay_host_lease_free(lease);
         jazz_native_relay_host_free(host);
         drop(Box::from_raw(events));
         assert!(replies > 0, "verification never got to the private store");
-        assert!(
-            registered,
-            "recovery registration stalled after {replies} delayed store replies"
-        );
     }
 }
 
@@ -730,6 +770,13 @@ fn a_space_row_waits_for_the_catalogue_without_an_authority() {
                 if reason.contains("has not received its authority's catalogue")),
             "the creator's member row needs the catalogue: {refused:?}"
         );
+        for table in ["projects", jazz::schema::MEMBERS_TABLE] {
+            assert_eq!(
+                local_rows(&execute, &store, table),
+                0,
+                "the refused insert wrote nothing to {table}"
+            );
+        }
         assert_eq!(execute(Request::Close), Response::Closed { closed: true });
         jazz_native_relay_host_lease_free(lease);
         jazz_native_relay_host_free(host);
@@ -917,6 +964,25 @@ fn device_insert(
     }) {
         Response::Inserted { .. } => run(Request::CommitTransaction { transaction }),
         refused => refused,
+    }
+}
+
+/// How many rows of `table` the device's own store holds.
+fn local_rows(execute: &impl Fn(Request) -> Response, store: &Handler, table: &str) -> usize {
+    let all = Request::All {
+        query: postcard::to_allocvec(&jazz::query::Query::from(table)).unwrap(),
+        options_json: "{}".into(),
+        transaction: None,
+    };
+    match settle(execute, execute(all), || {
+        answer_store(execute, store);
+    }) {
+        Response::Rows { rows } => jazz::binding_codec::decode_rows(&rows)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.rows.len())
+            .sum(),
+        other => panic!("the device could not read {table}: {other:?}"),
     }
 }
 

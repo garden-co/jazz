@@ -6,7 +6,7 @@ FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda1
 
 ARG NODE_VERSION=24.13.0
 ARG PNPM_VERSION=10.14.0
-ARG RUST_VERSION=1.93.1
+ARG RUST_VERSION=1.100.0
 ARG SCCACHE_VERSION=0.15.0
 ARG CARGO_NEXTEST_VERSION=0.9.143
 ARG WASM_PACK_VERSION=0.13.1
@@ -23,9 +23,9 @@ ARG WASM_BINDGEN_SHA256=97f527f7c7956f69a88a4bdb5176142ebc4e255c2dbe3805ec4f3734
 ENV DEBIAN_FRONTEND=noninteractive \
     BUNDLE_ROOT=/opt/jazz-ci/toolchains/v1 \
     RUSTUP_HOME=/opt/jazz-ci/toolchains/v1/rustup \
-    RUSTUP_TOOLCHAIN=1.93.1-x86_64-unknown-linux-gnu \
+    RUSTUP_TOOLCHAIN=1.100.0-x86_64-unknown-linux-gnu \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PATH=/opt/jazz-ci/toolchains/v1/bin:/opt/jazz-ci/toolchains/v1/node/bin:/opt/jazz-ci/toolchains/v1/rustup/toolchains/1.93.1-x86_64-unknown-linux-gnu/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/opt/jazz-ci/toolchains/v1/bin:/opt/jazz-ci/toolchains/v1/node/bin:/opt/jazz-ci/toolchains/v1/rustup/toolchains/1.100.0-x86_64-unknown-linux-gnu/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # clang compiles SQLite's C sources for wasm32. No Rust dependency uses
 # bindgen, so libclang is not installed.

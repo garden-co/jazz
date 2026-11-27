@@ -88,9 +88,31 @@ fn members_in(scope_id: ObjectId, id: ObjectId) -> Query<SpaceMember> {
         .filter(Column::<SpaceMember, ObjectId>::new("identifier").eq(id))
 }
 
+/// The account's membership rows in the space.
+pub(crate) fn member_rows(
+    scope_id: ObjectId,
+    id: ObjectId,
+    account: AccountId,
+) -> Query<SpaceMember> {
+    members_in(scope_id, id).filter(
+        Column::<SpaceMember, ObjectId>::new("accountId").eq(ObjectId::from_uuid(account.0)),
+    )
+}
+
 impl Jazz {
     /// Admits an account to the space row `id` of `T`. Returns its membership
-    /// row with the same durability as [`Jazz::insert`].
+    /// row with the same durability as [`Jazz::insert`]. If the account is
+    /// already a member, as this client sees the space, returns that member's
+    /// existing row and writes nothing, so adding the same account twice
+    /// (the space's creator included) leaves one row.
+    ///
+    /// The check reads this client's local data. A client that hasn't
+    /// synced an existing membership yet (offline, or another device added
+    /// it moments ago) inserts a second row for the account. So can two
+    /// concurrent calls for the same account outside a transaction (say, in
+    /// `join!`): both may read before either writes. Inside one transaction,
+    /// [`crate::Transaction::add_member`] calls run in turn and share one row.
+    /// [`Jazz::remove_member`] removes every row.
     ///
     /// Automatic creator membership applies to inserts. When an upsert creates
     /// a space, explicitly add the creator in the same transaction or call this
@@ -123,8 +145,12 @@ impl Jazz {
         account: AccountId,
     ) -> Result<SpaceMember> {
         require_space(self.info.declarations.as_deref(), table)?;
+        let scope_id = self.table_identity(table).await?;
+        if let Some(existing) = self.one(member_rows(scope_id, id, account)).await? {
+            return Ok(existing);
+        }
         self.insert(NewSpaceMember {
-            scope_id: self.table_identity(table).await?,
+            scope_id,
             identifier: id,
             account,
         })
@@ -151,9 +177,7 @@ impl Jazz {
     ) -> Result<usize> {
         require_space(self.info.declarations.as_deref(), table)?;
         let scope_id = self.table_identity(table).await?;
-        let query = members_in(scope_id, id).filter(
-            Column::<SpaceMember, ObjectId>::new("accountId").eq(ObjectId::from_uuid(account.0)),
-        );
+        let query = member_rows(scope_id, id, account);
         let jazz = self.durable(DurabilityTier::GlobalServer);
         for attempt in 1.. {
             let query = query.clone();

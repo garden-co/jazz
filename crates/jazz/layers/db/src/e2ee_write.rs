@@ -19,59 +19,10 @@ use crate::records::Value;
 use crate::tools::OpenTransactionId;
 use crate::values::Schema;
 use crate::values::{CachedRow, Sql};
+#[cfg(feature = "e2ee-client")]
+use jazz_protocol::protocol::PermissionAdviceAction;
 
 impl Db {
-    /// Refuse an explicit insert of the writer's own membership of a space
-    /// (an `__e2ee_members` row naming the writing account) when this store
-    /// already holds it, or when the same write adds it twice. A signed-in
-    /// client adds a space's creator as a member itself when it inserts the
-    /// space ([`Store::creator_member`]), so an app that still inserts the
-    /// creator's row afterwards would otherwise hold two. Memberships of
-    /// other accounts follow plain insert semantics. `inserts` are each
-    /// insert's membership and writer; `deleted` are the rows the same
-    /// write deletes, which no longer count.
-    pub(super) async fn refuse_own_duplicate_members(
-        &self,
-        inserts: impl IntoIterator<Item = ([Option<uuid::Uuid>; 3], WriteIdentity)>,
-        deleted: &BTreeSet<RowUuid>,
-    ) -> Result<(), Error> {
-        use crate::query::{col, eq, lit};
-        let mut seen = BTreeSet::new();
-        for (address, identity) in inserts {
-            let [Some(scope), Some(space), Some(account)] = address else {
-                continue;
-            };
-            if self.inner.writer_account(identity).map(|own| own.0) != Some(account) {
-                continue;
-            }
-            let refused = || {
-                rejected(format!(
-                    "account {account} is already a member of space {space}: a signed-in \
-                     client adds a space's creator as a member when it inserts the space. \
-                     Don't add the creator again, or insert the space with \
-                     addCreatorAsMember: false"
-                ))
-            };
-            if !seen.insert(address) {
-                return Err(refused());
-            }
-            let query = crate::query::Query::from(jazz_model::schema::MEMBERS_TABLE)
-                .filter(eq(col("scopeId"), lit(Value::Uuid(scope))))
-                .filter(eq(col("identifier"), lit(Value::Uuid(space))))
-                .filter(eq(col("accountId"), lit(Value::Uuid(account))));
-            let prepared = self.prepare_query(&query)?;
-            let rows = self
-                .inner
-                .without_overlay()
-                .run(&prepared, None, &super::ReadSpec::default())
-                .await?;
-            if rows.iter().any(|row| !deleted.contains(&row.id)) {
-                return Err(refused());
-            }
-        }
-        Ok(())
-    }
-
     /// Counts retained staging state that a row read cannot observe.
     #[cfg(all(feature = "e2ee-client", any(test, feature = "testing")))]
     #[doc(hidden)]
@@ -249,20 +200,6 @@ impl From<StreamingMutationKind> for WriteKind {
 }
 
 impl Store {
-    /// The account a write authored as `identity` is written by: none for
-    /// an attributed write or a writer without an account.
-    pub(super) fn writer_account(
-        &self,
-        identity: WriteIdentity,
-    ) -> Option<jazz_types::account_registry::AccountId> {
-        let author = match identity {
-            WriteIdentity::Database => self.stamp_author(),
-            WriteIdentity::Session(author) => author,
-            WriteIdentity::Attribution(_) => return None,
-        };
-        author.account_id()
-    }
-
     pub(super) async fn creator_member(
         &self,
         schema: &Schema,
@@ -283,7 +220,12 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(account) = self.writer_account(options.identity) else {
+        let author = match options.identity {
+            WriteIdentity::Database => self.stamp_author(),
+            WriteIdentity::Session(author) => author,
+            WriteIdentity::Attribution(_) => return Ok(None),
+        };
+        let Some(account) = author.account_id() else {
             return Ok(None);
         };
         let row = options.row_id.expect("authored inserts have a row id");
@@ -794,41 +736,6 @@ impl Store {
     }
 }
 
-/// The memberships `batch` inserts explicitly, and the rows it deletes.
-pub(super) fn batch_members(
-    batch: &Batch,
-) -> (
-    Vec<([Option<uuid::Uuid>; 3], WriteIdentity)>,
-    BTreeSet<RowUuid>,
-) {
-    let members = jazz_model::schema::MEMBERS_TABLE;
-    let mut inserts = Vec::new();
-    let mut deleted = BTreeSet::new();
-    for write in &batch.ops {
-        match &write.op {
-            StagedOp::Insert(_, cells, options) if write.layout.source.name == members => {
-                let address = member_address(cells, |name| write.layout.source.stored_name(name));
-                inserts.push((address, options.identity));
-            }
-            StagedOp::Delete(_, row, _) => {
-                deleted.insert(*row);
-            }
-            _ => {}
-        }
-    }
-    (inserts, deleted)
-}
-
-/// The membership an explicit insert of `op` adds, by the caller's names.
-pub(super) fn op_member(op: &StagedOp) -> Option<([Option<uuid::Uuid>; 3], WriteIdentity)> {
-    match op {
-        StagedOp::Insert(table, cells, options) if table == jazz_model::schema::MEMBERS_TABLE => {
-            Some((member_address(cells, |name| name), options.identity))
-        }
-        _ => None,
-    }
-}
-
 fn member_address<'a>(
     cells: &BTreeMap<String, Value>,
     column: impl Fn(&'static str) -> &'a str,
@@ -837,4 +744,65 @@ fn member_address<'a>(
         Some(Value::Uuid(id)) => Some(*id),
         _ => None,
     })
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Db {
+    /// `action` as the authority will see the write it previews: an insert's
+    /// or update's cells sealed by the encryption hooks, as the write itself
+    /// seals them, so the dry run judges the cells the write would carry and
+    /// no encrypted column's plaintext leaves this device. Reads, deletes and
+    /// any action of a database without hooks pass through as they are.
+    ///
+    /// `None` when the advice cannot be judged from the one action: the
+    /// hooks refuse to seal it (no held key, a pending space, a keyless
+    /// backend writing an encrypted column), or sealing it would also stage
+    /// internal rows (a space's first root), which the write commits with it
+    /// and a single-action dry run leaves out.
+    pub(crate) async fn sealed_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> Option<PermissionAdviceAction> {
+        use super::UpdateOptions;
+        let Some(hooks) = self.inner.e2ee_hooks().cloned() else {
+            return Some(action);
+        };
+        let mut op = match action {
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    // The authority draws its own id for the candidate.
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..InsertOptions::default()
+                },
+            ),
+            PermissionAdviceAction::Update { table, row, patch } => {
+                StagedOp::Update(table, row, patch, UpdateOptions::default())
+            }
+            other => return Some(other),
+        };
+        let companions = {
+            let _operation = self.write_operation().await;
+            let schema = self.operation_schema();
+            self.inner
+                .without_overlay()
+                .seal_op(&schema, &mut op, None)
+                .await
+                .ok()?
+        };
+        if !companions.is_empty() {
+            hooks.companions_dropped(&companion_names(&companions));
+            return None;
+        }
+        match op {
+            StagedOp::Insert(table, cells, _) => {
+                Some(PermissionAdviceAction::Insert { table, cells })
+            }
+            StagedOp::Update(table, row, patch, _) => {
+                Some(PermissionAdviceAction::Update { table, row, patch })
+            }
+            _ => unreachable!("only inserts and updates are sealed"),
+        }
+    }
 }

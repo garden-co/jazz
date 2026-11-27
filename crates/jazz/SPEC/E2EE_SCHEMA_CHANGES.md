@@ -144,15 +144,14 @@ app encrypts data it already stores. References: the
   kept ones for a version is refused before anything is live, however many
   instances share the store. The transaction belongs to one call and ends
   with it (a Durable Object core holds none open between calls).
-- **Known limits: hosts that keep no declarations.**
-  - A host whose deploy path takes no declarations (the Durable Object host)
-    refuses every schema that has Jazz's system tables, with "has Jazz's
-    system tables but declares no encryption", so an encrypted app cannot
-    deploy there.
-  - A server running without a store (a runtime only) has no account
-    registry, which an encrypted app needs, so it refuses every deploy that
-    brings Jazz's system tables, with "this app encrypts columns, which needs
-    the account registry of an app's store", before anything is applied.
+- **Known limit: a host that keeps no declarations.** The native server and
+  the Durable Object host take the whole deploy body, keep the declarations
+  in the same form in their store's `e2ee_declarations` host table, and read
+  them back for every later deploy. One host keeps none: a server running
+  without a store (a runtime only) has no account registry, which an
+  encrypted app needs, so it refuses every deploy that brings Jazz's system
+  tables, with "this app encrypts columns, which needs the account registry
+  of an app's store", before anything is applied.
 
 ## 3. The deploy's rules on encrypted columns
 

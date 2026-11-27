@@ -403,6 +403,10 @@ export async function prepareAccountManager(options: {
   // an adoption: retaining it must not take its account off the tombstone.
   const startupSecret = stored.selected === null ? undefined : stored.roots[stored.selected];
   let restoringStartup = startupSecret !== undefined;
+  // The device account whose sign-out began (`signOutRequested`) and hasn't
+  // finished: the record already says signed out, so this is how the
+  // sign-out, once it finishes, finds the root `clearOnSignOut` forgets.
+  let signingOutRoot: string | undefined;
   const save = () => {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
@@ -457,7 +461,24 @@ export async function prepareAccountManager(options: {
     restoredLocalFirstSecret: startupSecret,
     restoredBackendUser: stored.backendUser,
     selectionDurability: {
+      signOutRequested(account) {
+        const root = stored.selected === null ? undefined : stored.roots[stored.selected];
+        const ownRoot = root !== undefined && rootAccount(root) === account.id;
+        if (!ownRoot && stored.backendUser?.account !== account.id) return;
+        // Signed out as of now, across reloads, even if the client can't
+        // close yet (writes that can't upload): a reload opens no one, and
+        // the account's key and writes stay on this device for its next
+        // sign-in. The session goes on in this tab until the sign-out
+        // finishes or is retried.
+        if (ownRoot) signingOutRoot = root;
+        stored.selected = null;
+        delete stored.backendUser;
+        stored.signedOut = true;
+        return save().catch((error) => manager.reportPersistenceError(error));
+      },
       selectionChanged(next) {
+        const signingOut = signingOutRoot;
+        signingOutRoot = undefined;
         // Creating/restoring a local handle already queued its root and selection.
         if (next?.identity.issuer === "urn:jazz:local-first") {
           keepNextSignedOutKey.delete(manager);
@@ -471,7 +492,7 @@ export async function prepareAccountManager(options: {
           // `clearOnSignOut` forgets the device account's key with it, so
           // nothing on this device reopens it (its local data is wiped too).
           const signedOutRoot =
-            stored.selected === null ? undefined : stored.roots[stored.selected];
+            stored.selected === null ? signingOut : stored.roots[stored.selected];
           const account = signedOutRoot === undefined ? undefined : rootAccount(signedOutRoot);
           // Unless another tab still has the account's store open: the last
           // tab out decides (`keepDeviceKeyOnSignOut`).
@@ -480,7 +501,8 @@ export async function prepareAccountManager(options: {
           if (!remembers && !keep && account !== undefined) {
             unforgetting.delete(account);
             forgetting.add(account);
-            stored.roots.splice(stored.selected!, 1);
+            const index = stored.roots.indexOf(signedOutRoot!);
+            if (index >= 0) stored.roots.splice(index, 1);
             if (stored.recentDevice === account) delete stored.recentDevice;
           }
           stored.selected = null;

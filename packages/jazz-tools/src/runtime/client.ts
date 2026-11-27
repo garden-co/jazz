@@ -1073,8 +1073,8 @@ async function waitForWritten(
   return handle.wait({ tier, timeoutMs: Math.max(0, deadline - Date.now()) });
 }
 
-/** Validate JavaScript callers before passing a wait tier to the runtime. */
-function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+/** @internal Validate JavaScript callers before passing a wait tier to the runtime. */
+export function resolveWriteWaitTier(tier: unknown): DurabilityTier {
   if (tier === "local" || tier === "global") return tier;
   const message =
     tier === "edge"

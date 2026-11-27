@@ -685,6 +685,12 @@ pub(crate) struct MemberWatch {
     /// Spaces told `delivery-failed` in the current round: one sync and the
     /// startup or reconnect sweep that follows it.
     pub delivery_failures_told: BTreeSet<SpaceAddress>,
+    /// Tests: the next sync fails before it serves anything.
+    #[cfg(any(test, feature = "testing"))]
+    pub fail_next_sync: bool,
+    /// Tests: how many of the next full acquisitions fail.
+    #[cfg(any(test, feature = "testing"))]
+    pub fail_acquisitions: u32,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 

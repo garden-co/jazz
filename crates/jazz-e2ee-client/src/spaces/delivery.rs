@@ -43,9 +43,11 @@ const MAX_BATCHES: usize = 100;
 pub(crate) const ROTATION_ATTEMPTS: u32 = 6;
 
 /// The wait before the rest of a rotation is tried again after `failures`
-/// failed attempts in a row: 2 s, doubling, at most 60 s.
+/// failed attempts in a row: 2 s, doubling to 32 s at the fifth; the sixth
+/// gives up (see [`ROTATION_ATTEMPTS`]). An attempt that failed offline is
+/// not counted, and waits as long as a first failure.
 pub(crate) fn retry_delay(failures: u32) -> std::time::Duration {
-    std::time::Duration::from_secs((1u64 << failures.min(6)).min(60))
+    std::time::Duration::from_secs(1u64 << failures.clamp(1, ROTATION_ATTEMPTS - 1))
 }
 
 /// Which rotation to make.
@@ -66,6 +68,7 @@ impl E2eeClient {
         tx: OpenTransactionId,
         space: &SpaceAddress,
         previous: &mut Option<DeliveryChain<'a>>,
+        resume: bool,
     ) -> Result<usize, ClientError> {
         let mut read = self
             .read_space_of(db, tx, space, SpaceReadPurpose::Deliver(previous))
@@ -220,6 +223,14 @@ impl E2eeClient {
         }
         if written > 0 {
             self.publish(db, tx).await?;
+        } else if resume {
+            self.resume_rotation(
+                space,
+                &chain,
+                &read.ledger,
+                &acquisition.keys,
+                &deps.members,
+            )?;
         }
         if let Some(watched) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
             *watched = deps;
@@ -227,11 +238,73 @@ impl E2eeClient {
         Ok(written)
     }
 
+    /// The rest of this device's last rotation of `space`, found again after
+    /// a restart from what the pass read, with nothing stored (protocol
+    /// §3.5): when this device signed the successor of the current version
+    /// and holds it, every other member without a delivery of it from this
+    /// account is left for [`E2eeClient::finish_rotation`], whatever other
+    /// members sent. Called once the pass has nothing more to write, so
+    /// the members it served are not counted. A rest already pending in
+    /// this session is kept.
+    fn resume_rotation(
+        &self,
+        space: &SpaceAddress,
+        chain: &jazz_e2ee::protocol::space::SpaceChain,
+        ledger: &jazz_e2ee::protocol::space::SpaceLedger,
+        keys: &jazz_e2ee::protocol::space::SpaceKeys,
+        members: &BTreeSet<String>,
+    ) -> Result<(), ClientError> {
+        let current = &chain.current()?.epoch_id;
+        let device = self.shared.device()?.id.clone();
+        let rotator = ledger
+            .successors
+            .iter()
+            .any(|row| row.row.epoch_id == *current && row.row.author_device_id == device);
+        if !rotator || keys.version(current).is_none() {
+            return Ok(());
+        }
+        let own = &self.shared.account_id;
+        let served: BTreeSet<&String> = ledger
+            .deliveries
+            .iter()
+            .filter(|row| row.row.key_epoch_id == *current && row.row.sender_account_id == *own)
+            .map(|row| &row.row.recipient_account_id)
+            .collect();
+        let accounts: Vec<String> = members
+            .iter()
+            .filter(|account| *account != own && !served.contains(account))
+            .cloned()
+            .collect();
+        if !accounts.is_empty() {
+            self.shared
+                .member_watch
+                .borrow_mut()
+                .pending_deliveries
+                .entry(space.clone())
+                .or_insert(PendingRotation {
+                    accounts,
+                    ..Default::default()
+                });
+        }
+        Ok(())
+    }
+
     /// The pass over `space`.
     pub(crate) async fn deliver_pass(
         &self,
         db: &Db,
         space: &SpaceAddress,
+    ) -> Result<usize, ClientError> {
+        self.deliver_pass_with(db, space, false).await
+    }
+
+    /// The pass over `space`; with `resume`, it also finds the rest of this
+    /// device's last rotation of it (see [`E2eeClient::resume_rotation`]).
+    async fn deliver_pass_with(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        resume: bool,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
         if !self.shared.keys.borrow().online {
@@ -241,7 +314,8 @@ impl E2eeClient {
         let mut previous = None;
         for _ in 0..MAX_BATCHES {
             let outcome = crate::account::serializable(db, ATTEMPTS, async |tx| {
-                self.deliver_step(db, tx, space, &mut previous).await
+                self.deliver_step(db, tx, space, &mut previous, resume)
+                    .await
             })
             .await;
             match outcome {
@@ -261,15 +335,18 @@ impl E2eeClient {
         &self,
         db: &Db,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
-        self.deliver_keys_outside_watch(db, None).await
+        self.deliver_keys_outside_watch(db, None, false).await
     }
 
     /// Retained watches catch up on reconnect. Read the authority for held
-    /// spaces without a watch-driven pass, including failed passes.
+    /// spaces without a watch-driven pass, including failed passes. At
+    /// startup (`resume`), a space whose current version this device made
+    /// also gets the rest of that rotation, in batches (protocol §3.5).
     pub(crate) async fn deliver_keys_outside_watch(
         &self,
         db: &Db,
         watch: Option<&SpaceWatch>,
+        resume: bool,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
         let held: BTreeSet<SpaceAddress> = self.held_addresses().into_iter().collect();
         let mut results = Vec::new();
@@ -277,7 +354,21 @@ impl E2eeClient {
             if watch.is_some_and(|watch| watch.covers_delivery(&space)) {
                 continue;
             }
-            let mut outcome = self.deliver_pass(db, &space).await;
+            let mut outcome = self.deliver_pass_with(db, &space, resume).await;
+            if resume
+                && let Ok(written) = outcome
+                && self
+                    .shared
+                    .member_watch
+                    .borrow()
+                    .pending_deliveries
+                    .contains_key(&space)
+            {
+                outcome = self
+                    .finish_rotation(db, &space)
+                    .await
+                    .map(|rest| written + rest);
+            }
             if outcome.is_ok()
                 && self.holds_refused_key(&space)
                 && let Err(error) = self.repair_auto(db, &space).await
@@ -492,18 +583,35 @@ impl E2eeClient {
                     return Ok(written);
                 }
                 Err(error) => {
-                    if self.shared.keys.borrow().online {
-                        pending.failures += 1;
-                    }
-                    if pending.failures >= ROTATION_ATTEMPTS {
-                        watch.pending_deliveries.remove(space);
-                    } else {
-                        pending.retry_at = Some(self.shared.now() + retry_delay(pending.failures));
-                    }
                     drop(watch);
+                    self.rotation_attempt_failed(space);
                     return Err(self.forget_account_on(error));
                 }
             }
+        }
+    }
+
+    /// Counts a failed attempt at the rest of this device's rotation of
+    /// `space`, wherever it failed: in a batch, or before it, in the
+    /// acquisition that must succeed first. Online it is one more failure
+    /// in a row; the next attempt waits [`retry_delay`], and the
+    /// [`ROTATION_ATTEMPTS`]th failure leaves the rest to the pass of any
+    /// holder (protocol §3.4). Offline it is not counted, and waits as long
+    /// as a first failure. Nothing pending: nothing to count.
+    pub(crate) fn rotation_attempt_failed(&self, space: &SpaceAddress) {
+        let online = self.shared.keys.borrow().online;
+        let now = self.shared.now();
+        let mut watch = self.shared.member_watch.borrow_mut();
+        let Some(pending) = watch.pending_deliveries.get_mut(space) else {
+            return;
+        };
+        if online {
+            pending.failures += 1;
+        }
+        if pending.failures >= ROTATION_ATTEMPTS {
+            watch.pending_deliveries.remove(space);
+        } else {
+            pending.retry_at = Some(now + retry_delay(pending.failures));
         }
     }
 
@@ -526,14 +634,19 @@ impl E2eeClient {
         }]);
     }
 
-    /// When the next rest of a rotation is due again after a failure.
+    /// When the next rest of a rotation is due again after a failure. Only
+    /// a retry time still ahead counts: one that passed while offline waits
+    /// for the reconnect, and as the runtime's earliest deadline the host
+    /// would drop it as past, and with it every later timer.
     pub(crate) fn next_rotation_retry(&self) -> Option<web_time::Instant> {
+        let now = self.shared.now();
         self.shared
             .member_watch
             .borrow()
             .pending_deliveries
             .values()
             .filter_map(|pending| pending.retry_at)
+            .filter(|at| *at > now)
             .min()
     }
 
@@ -699,5 +812,26 @@ impl E2eeClient {
             self.publish(db, tx).await?;
         }
         Ok(Some(written))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rest of a rotation is tried again 2 s after its first failure,
+    /// then 4, 8, 16 and 32 s, and left to the pass of any holder at the
+    /// sixth failure in a row. An attempt that failed offline waits as long
+    /// as a first failure. `docs/lib/rotation-retries.test.ts` pins the
+    /// guide's sentence to these numbers, outside this crate, so its tests
+    /// build from the published package.
+    #[test]
+    fn rotation_retries_wait_2_to_32_seconds_then_give_up() {
+        let waits: Vec<u64> = (1..ROTATION_ATTEMPTS)
+            .map(|failures| retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(waits, [2, 4, 8, 16, 32]);
+        assert_eq!(ROTATION_ATTEMPTS, 6);
+        assert_eq!(retry_delay(0), retry_delay(1));
     }
 }

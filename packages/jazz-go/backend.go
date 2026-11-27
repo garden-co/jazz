@@ -3,6 +3,7 @@ package jazz
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -73,15 +74,15 @@ func (db *DB) ForUser(ctx context.Context, userID string, claims map[string]any)
 	}
 	done := make(chan opened, 1)
 	go func() {
-		db.mu.RLock()
-		defer db.mu.RUnlock()
-		if db.handle == 0 {
-			done <- opened{err: &Error{Kind: KindClosed, Message: "closed"}}
+		parent, release, err := db.acquire(nil)
+		if err != nil {
+			done <- opened{err: err}
 			return
 		}
+		defer release()
 		var cerr uintptr
-		h := ffi.forUser(db.handle, cstr(userID), cstr(string(claimsJSON)), &cerr)
-		err := takeError(cerr)
+		h := ffi.forUser(parent, cstr(userID), cstr(string(claimsJSON)), &cerr)
+		err = takeError(cerr)
 		if err == nil && h == 0 {
 			err = &Error{Kind: KindRefused, Message: "for user failed"}
 		}
@@ -108,10 +109,10 @@ func (db *DB) ForUser(ctx context.Context, userID string, claims map[string]any)
 const DefaultShutdownTimeout = 10 * time.Second
 
 // Shutdown closes db after its queued writes reach the server, waiting
-// until ctx's deadline (DefaultShutdownTimeout without one). It closes in
-// every case; with memory storage, writes still pending then are lost and
-// it returns ErrUnsynced (Error.Pending counts them). Close closes at
-// once.
+// until ctx's deadline (DefaultShutdownTimeout without one), then closes
+// as Close does: calls still waiting for the server end with ErrClosed. It
+// closes in every case; with memory storage, writes still pending then are
+// lost and it returns ErrUnsynced (Error.Pending counts them).
 func (db *DB) Shutdown(ctx context.Context) error {
 	timeout := DefaultShutdownTimeout
 	if deadline, ok := ctx.Deadline(); ok {
@@ -120,28 +121,10 @@ func (db *DB) Shutdown(ctx context.Context) error {
 	if ctx.Err() != nil {
 		timeout = 0
 	}
-	if ffi.closeWithin == nil {
-		// An older libjazz_ffi: drain with waitForSync, then close.
-		c, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		err := db.call(c, "waitForSync", map[string]any{}, nil)
-		db.Close()
-		if c.Err() != nil {
-			// Timed out: some writes may not have reached the server (this
-			// libjazz_ffi can't count them).
-			return &Error{Kind: KindUnsynced, Message: "closed before every write reached the server"}
-		}
-		return err
-	}
-	db.endStreams()
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.handle == 0 {
-		return nil
-	}
-	var cerr uintptr
-	ffi.closeWithin(db.handle, uint64(timeout.Milliseconds()), &cerr)
-	db.handle = 0
-	releaseCallbacks(db.provider, db.store)
-	return takeError(cerr)
+	ms := uint64(timeout.Milliseconds())
+	return db.closeAndFree(timeout,
+		func(h uintptr) error {
+			return callClose(ffi.call, h, fmt.Sprintf(`{"timeoutMs":%d}`, ms))
+		},
+		ffi.close)
 }

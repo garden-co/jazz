@@ -1829,7 +1829,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   readonly encryption = {
     members: {
-      add: (...args: AddMemberArgs): MemberRow => {
+      /**
+       * Stage an account's admission to the space with the transaction's other
+       * writes. If the transaction already sees the account as a member (its
+       * own staged writes included), resolves to that member's existing row
+       * and stages nothing. Two concurrent calls for the same account (in
+       * `Promise.all`, say) can both stage a row.
+       */
+      add: async (...args: AddMemberArgs): Promise<MemberRow> => {
         const [table, row] = memberInsert(
           this.encryptionSchema,
           (schema, spaceTable) => {
@@ -1845,6 +1852,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           },
           args,
         );
+        const existing = await this.one(table.where(row));
+        if (existing) return existing;
         return this.insert<MemberRow, MemberAddress>(table, row);
       },
     },

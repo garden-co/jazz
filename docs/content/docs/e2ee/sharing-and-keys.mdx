@@ -45,13 +45,26 @@ Jazz adds the creator only in these cases:
 - Automatic membership is on. To turn it off, pass `{ addCreatorAsMember: false }` as the third
   argument of `db.insert`, or set it in the client's `encryption` options.
 
-Adding the creator a second time fails with an "already a member" error.
+`members.add` checks before it writes. If this client already sees the account as a member, it
+returns the existing member row and writes nothing. Await it for the member row, or call
+`.wait({ tier })` on it as on an insert.
 
-To add a member together with other writes, use `tx.encryption.members.add`:
+The check reads this client's local data, so an account can end up with two rows:
+
+- The client hasn't synced the existing membership yet, because it's offline or another device
+  has just added it.
+- Two adds of the same account run at the same time, such as two calls in `Promise.all`, inside
+  a transaction or not, or two `add_member` calls joined with `join!` in Rust.
+
+Inside one Rust transaction, adds run one after another, so the account gets one row.
+`members.remove` deletes all of an account's rows.
+
+To add a member together with other writes, use `tx.encryption.members.add`. It returns a promise
+of the member row. Await it inside the transaction:
 
 ```ts
-const written = await db.transaction((tx) => {
-  tx.encryption.members.add(app.projects, project.id, otherAccountId);
+const written = await db.transaction(async (tx) => {
+  await tx.encryption.members.add(app.projects, project.id, otherAccountId);
 });
 await written.wait({ tier: "global" });
 ```
@@ -59,7 +72,8 @@ await written.wait({ tier: "global" });
 Members are rows of the `__e2ee_members` table. To query or write it yourself,
 `db.encryption.members.where(space)` returns a filter for a space's member rows and
 `db.encryption.members.row(space, accountId)` returns the values to insert. Here `space` is
-`{ table: "projects", id: project.id }`.
+`{ table: "projects", id: project.id }`. Rows you insert yourself aren't checked against existing
+members.
 
 On a device that has never synced, these calls can fail with `not-observed`. Try again after the
 first sync.
@@ -87,11 +101,18 @@ a member who can update the space row. To change the key immediately, call
 `db.encryption.keys.rotate(space)`. If you remove several members, rotate once at the end.
 
 `rotate` returns the number of members who got the new key in the same transaction, up to 100.
-Jazz delivers it to the rest in the background. It can fail with these codes:
+It can fail with these codes:
 
 - `rotation-needs-key`: this device doesn't hold the current key yet. Try again once it does.
 - `not-a-member`: this account isn't a member of the space.
 - `no-account`: this device is waiting for approval.
+
+Jazz delivers the new key to the rest of the members in the background. If a delivery fails, it
+tries again after 2 seconds, then 4, 8, 16 and 32, and gives up after 6 failed attempts in a row.
+Failures while offline aren't counted, and wait 2 seconds like a first failure. After it gives up,
+any device that holds the new key delivers it to the members left out, the next time it delivers
+keys. If the app stops before the deliveries finish, the device that rotated delivers again the
+next time it starts.
 
 A removed member keeps everything they could already read. They get no rows and no keys from
 then on.

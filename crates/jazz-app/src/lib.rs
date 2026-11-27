@@ -68,6 +68,7 @@ mod backend;
 mod backend_client;
 mod branch;
 mod config;
+mod control;
 mod edit;
 mod encryption;
 #[cfg(feature = "unstable-endpoint")]
@@ -83,6 +84,7 @@ mod members;
 mod query;
 mod read;
 mod relation;
+mod remembered;
 mod session;
 mod subscription;
 mod table;
@@ -97,6 +99,7 @@ pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason}
 pub use backend_client::{BackendClientKind, CLOSE_TIMEOUT};
 pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
+pub use control::{CallControl, Interruption};
 pub use edit::{Edits, TextColumn};
 pub use encryption::Encryption;
 #[cfg(feature = "e2ee-client")]
@@ -138,6 +141,8 @@ pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, Value
 pub use table::{Fields, Implementations, Insert, NoUpdate, Table, Updatable, Update};
 pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
+#[doc(hidden)]
+pub use writes::note_committed;
 
 pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, TransactionId};

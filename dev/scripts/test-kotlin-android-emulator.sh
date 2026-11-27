@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Kotlin Android emulator smoke test: dev/kotlin-android-smoke, a minified
-# app of the built jazz-kotlin-android AAR, installed on an x86-64 emulator,
+# app of the built jazz-kotlin-android AAR (jazz-kotlin's Android target), installed on an x86-64 emulator,
 # opens, writes, reads and syncs against a Jazz server and
 # jazz-app-test-relay on this machine (adb reverse), offline after a process
 # kill, and again once the server is back, then checks one app per store
@@ -129,13 +129,13 @@ else
   [ -n "$version" ] || fail "no version in packages/jazz-tools/package.json"
   # The POM and module as publishing writes them, without its signing.
   KOTLIN_ANDROID_ABIS=x86_64 \
-    KOTLIN_ANDROID_TASKS="generatePomFileForMavenPublication generateMetadataFileForMavenPublication" \
+    KOTLIN_ANDROID_TASKS="generatePomFileForAndroidReleasePublication generateMetadataFileForAndroidReleasePublication" \
     bash dev/scripts/test-kotlin-android.sh
-  built=packages/jazz-kotlin-android/build
+  built=packages/jazz-kotlin/build
   mkdir -p "$published/$artifact/$version"
-  cp "$built/outputs/aar/$artifact-release.aar" "$published/$artifact/$version/$artifact-$version.aar"
-  cp "$built/publications/maven/pom-default.xml" "$published/$artifact/$version/$artifact-$version.pom"
-  cp "$built/publications/maven/module.json" "$published/$artifact/$version/$artifact-$version.module"
+  cp "$built/outputs/aar/jazz-kotlin-release.aar" "$published/$artifact/$version/$artifact-$version.aar"
+  cp "$built/publications/androidRelease/pom-default.xml" "$published/$artifact/$version/$artifact-$version.pom"
+  cp "$built/publications/androidRelease/module.json" "$published/$artifact/$version/$artifact-$version.module"
 fi
 echo "testing $artifact $version: $(sha256sum "$published/$artifact/$version/$artifact-$version.aar")"
 mark "AAR ready"

@@ -74,6 +74,24 @@ export function checkManifest(pkg, version) {
         throw new Error(`${pkg.name}'s ${field}.${dep} is ${range}`);
 }
 
+/**
+ * The main jazz-napi package carries no binary: npm installs the matching
+ * @garden-co/jazz-napi-<platform> one. A bundled binary ships every
+ * platform's to every install (past Vercel's 250 MB limit in 2.0.0-beta.3).
+ */
+export function checkNoBundledBinaries(tarball) {
+  const bundled = execFileSync("tar", ["-tzf", tarball], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
+    .split("\n")
+    .filter((name) => name.endsWith(".node"));
+  if (bundled.length)
+    throw new Error(
+      `${tarball} bundles native binaries (${bundled.join(", ")}); they belong only in the @garden-co/jazz-napi-<platform> packages`,
+    );
+}
+
 function run(cmd, args) {
   return new Promise((resolvePromise) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -185,6 +203,7 @@ async function main() {
     const manifest = readPackage(tarball);
     checkManifest(manifest, version);
     if (manifest.name.startsWith("jazz-rn")) verifyRnPackSize(statSync(tarball).size);
+    if (manifest.name === "jazz-napi") checkNoBundledBinaries(tarball);
     const deps = Object.keys({
       ...manifest.dependencies,
       ...manifest.optionalDependencies,

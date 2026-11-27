@@ -112,6 +112,8 @@ impl From<&Error> for SessionError {
             Error::Panicked(_) => "panicked",
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
+            Error::Interrupted { .. } => "interrupted",
+            Error::StillQueued { .. } => "stillQueued",
             Error::BundleMismatch { .. } => "bundleMismatch",
             Error::WriteRejected { .. } => "writeRejected",
             Error::Jazz(_) => "jazz",
@@ -315,6 +317,16 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct JazzSession {
     inner: Arc<Inner>,
+    /// What else ends this view's operations' waits: its control
+    /// ([`JazzSession::controlled`]) and the dropped call it runs for.
+    call: CallEnds,
+}
+
+/// The per-call signals an operation stops waiting at, beside `closing`.
+#[derive(Clone, Default)]
+struct CallEnds {
+    control: Option<crate::CallControl>,
+    ends: Vec<watch::Receiver<bool>>,
 }
 
 impl std::fmt::Debug for JazzSession {
@@ -370,6 +382,7 @@ impl JazzSession {
                 state,
                 current: Mutex::new(Current::default()),
             }),
+            call: CallEnds::default(),
         };
         let start = match initial {
             Initial::Backend if has_bearer => Some(Op::Follow),
@@ -485,8 +498,7 @@ impl JazzSession {
     /// usable: sign in again, or [`JazzSession::refresh`]. Each account's
     /// local store stays, and so does a device account's key.
     pub async fn sign_out(&self) -> Result<()> {
-        let this = self.clone();
-        self.on_runtime(async move {
+        self.operation(|this| async move {
             let _one = this.take_turn().await?;
             this.replace(None, None, SessionStatus::SignedOut).await;
             Ok(())
@@ -558,14 +570,98 @@ impl JazzSession {
         }
     }
 
-    /// `wait`'s output, or [`Error::Stopped`] once the session closes.
+    /// `wait`'s output, or [`Error::Stopped`] once the session closes;
+    /// on a controlled view, [`Error::Interrupted`] once its control ends
+    /// (what the operation sent may still apply). An operation whose caller
+    /// dropped it stops waiting too.
     async fn unless_closing<T>(&self, wait: impl std::future::Future<Output = T>) -> Result<T> {
         let mut closing = self.inner.closing.subscribe();
+        let mut ends: Vec<_> = self.call.ends.clone();
+        ends.extend(self.call.control.as_ref().map(crate::CallControl::signal));
+        let call_ended = async {
+            let ends = ends.into_iter().map(|mut ends| {
+                Box::pin(async move {
+                    if ends.wait_for(|ended| *ended).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                })
+            });
+            let ends: Vec<_> = ends.collect();
+            if ends.is_empty() {
+                std::future::pending::<()>().await;
+            }
+            futures_util::future::select_all(ends).await;
+        };
+        let timeout = self.call.control.clone().map(crate::CallControl::time_out);
+        let timed_out = async {
+            match timeout {
+                Some(timeout) => timeout.await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             () = async { let _ = closing.wait_for(|closing| *closing).await; } => Err(Error::Stopped),
             output = wait => Ok(output),
+            () = call_ended => Err(self.interrupted()),
+            () = timed_out => Err(self.interrupted()),
         }
+    }
+
+    /// Why this view's operation was cut short by its call.
+    fn interrupted(&self) -> Error {
+        match self
+            .call
+            .control
+            .as_ref()
+            .and_then(crate::CallControl::interruption)
+        {
+            Some(reason) => Error::Interrupted { reason },
+            // Dropped: nobody hears it.
+            None => Error::Stopped,
+        }
+    }
+
+    /// This session, with its operations (refresh, sign-in, link, sign-out,
+    /// retry) cut short by `control`: they stop waiting on the app and the
+    /// network once it is cancelled or timed out, and fail with
+    /// [`Error::Interrupted`]; what they sent may still apply, and the
+    /// snapshot reports the failure (retry repeats it). One made once the
+    /// control has ended does nothing. See [`crate::CallControl`].
+    pub fn controlled(&self, control: crate::CallControl) -> JazzSession {
+        JazzSession {
+            inner: self.inner.clone(),
+            call: CallEnds {
+                control: Some(control),
+                ends: self.call.ends.clone(),
+            },
+        }
+    }
+
+    /// Runs `operation` (on a clone of this view that also stops waiting
+    /// once this call is dropped) on the session's runtime: refused before
+    /// it starts once the view's control has ended.
+    async fn operation<T: Send + 'static, F>(
+        &self,
+        operation: impl FnOnce(JazzSession) -> F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
+        if let Some(reason) = self
+            .call
+            .control
+            .as_ref()
+            .and_then(crate::CallControl::interruption)
+        {
+            return Err(Error::Interrupted { reason });
+        }
+        let (mut dropped, call_ends) = crate::control::EndOnDrop::new();
+        let mut this = self.clone();
+        this.call.ends.push(call_ends);
+        let answer = self.on_runtime(operation(this)).await;
+        dropped.disarm();
+        answer
     }
 
     /// This operation's turn, unless the session closes first.
@@ -590,8 +686,7 @@ impl JazzSession {
     /// Runs `op` on the session's runtime, one operation at a time,
     /// recording its failure in the snapshot.
     async fn run(&self, op: Op) -> Result<()> {
-        let this = self.clone();
-        self.on_runtime(async move {
+        self.operation(|this| async move {
             let _one = this.take_turn().await?;
             let result = this.perform(op.clone()).await;
             if result.is_err() && *this.inner.closing.borrow() {
@@ -693,10 +788,28 @@ impl JazzSession {
             .unless_closing(bearer.token(TokenReason::Refresh))
             .await??;
         let who = match &token {
-            Some(token) => {
-                self.unless_closing(crate::backend::backend_user(&endpoint, app, token))
-                    .await??
-            }
+            Some(token) => match self
+                .unless_closing(crate::backend::backend_user(&endpoint, app, token))
+                .await?
+            {
+                Ok(who) => who,
+                // The backend can't be reached. A client already open goes
+                // on; otherwise the bearer's user opens offline, if they
+                // signed in on this device before (the open says if not).
+                Err(crate::backend::Unanswered::Unreachable(error)) => {
+                    if self.lock().jazz.is_some() {
+                        self.set(|snapshot| snapshot.status = SessionStatus::Ready);
+                        return Ok(());
+                    }
+                    if guest {
+                        return Err(Error::Server(error));
+                    }
+                    self.transition();
+                    let config = self.user_config().user(Auth::Bearer(bearer));
+                    return self.switch_to(config, None).await;
+                }
+                Err(crate::backend::Unanswered::Failed(error)) => return Err(error),
+            },
             None => None,
         };
         let (Some(token), Some(who)) = (token, who) else {
@@ -928,7 +1041,10 @@ impl JazzSession {
             let Some(inner) = inner.upgrade() else {
                 return;
             };
-            let this = Self { inner };
+            let this = Self {
+                inner,
+                call: CallEnds::default(),
+            };
             let _one = this.inner.one_at_a_time.lock().await;
             if this.ensure_open().is_err() || this.inner.state.borrow().client_epoch != epoch {
                 return;

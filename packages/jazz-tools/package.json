@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-beta.1",
+  "version": "2.0.0-beta.4",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,8 @@
     "./dist/worker/**",
     "**/*.css",
     "./dist/backend/node-native.js",
-    "./dist/backend/workerd.js"
+    "./dist/backend/workerd.js",
+    "./dist/cloudflare/index.js"
   ],
   "main": "dist/index.js",
   "browser": {
@@ -57,6 +58,10 @@
     "./durable-object": {
       "types": "./dist/durable-object/index.d.ts",
       "workerd": "./dist/durable-object/index.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/cloudflare/index.d.ts",
+      "workerd": "./dist/cloudflare/index.js"
     },
     "./better-auth-adapter": {
       "types": "./dist/better-auth-adapter/index.d.ts",
@@ -180,7 +185,7 @@
     "tag": "latest"
   },
   "scripts": {
-    "build": "pnpm build:runtime && pnpm build:test && pnpm typecheck:react-native && pnpm build:svelte && pnpm build:solid",
+    "build": "pnpm build:runtime && pnpm build:svelte && pnpm run \"/^(build:test|build:solid|typecheck:react-native)$/\"",
     "build:react-native": "tsc --project tsconfig.json",
     "build:runtime": "node scripts/clean-dist.mjs && node scripts/ensure-native-inputs.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",

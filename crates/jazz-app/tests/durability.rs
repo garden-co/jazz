@@ -382,6 +382,413 @@ async fn an_interrupted_wait_leaves_its_refusal_to_mutation_errors() {
     server.shutdown().await;
 }
 
+/// Polls `call` once, then drops it, as `tokio::time::timeout` drops a
+/// call it gave up on: the call has begun, and its caller is gone.
+fn abandon<F: std::future::Future>(call: F) {
+    use futures::FutureExt as _;
+    assert!(call.now_or_never().is_none(), "the call finished at once");
+}
+
+/// The refusal of a durable write whose caller stopped waiting: it reaches
+/// both `mutation_errors()` and the next `wait_for_sync()`, as a plain
+/// write's refusal does.
+async fn assert_refusal_kept(
+    jazz: &Jazz,
+    errors: &mut jazz_app_support::MutationErrors,
+    what: &str,
+) {
+    let error = next_error(errors).await;
+    assert!(error.denied, "{what}: {error:?}");
+    match jazz.wait_for_sync().await {
+        Err(jazz_app_support::Error::WriteRejected { code, .. }) => {
+            assert_eq!(code, "permission_denied", "{what}");
+        }
+        other => panic!("{what}: wait_for_sync reported {other:?}"),
+    }
+}
+
+/// A durable write its caller stopped waiting for loses no bookkeeping:
+/// the write may still apply, and its refusal is still reported, on every
+/// path that waits for a write's verdict. One that its caller heard is
+/// reported to it alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_durable_write_keeps_its_refusal() {
+    use futures::StreamExt;
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let someone_else = ObjectId::new();
+    let durable = jazz.durable(DurabilityTier::GlobalServer);
+    let to_update = durable.insert(NewNote::new(me, "to update")).await.unwrap();
+    let to_restore = durable
+        .insert(NewNote::new(me, "to restore"))
+        .await
+        .unwrap();
+    durable
+        .delete::<bindings::Note>(to_restore.id)
+        .await
+        .unwrap();
+    let mut errors = jazz.mutation_errors().await.unwrap();
+
+    abandon(durable.insert(NewNote::new(someone_else, "insert")));
+    assert_refusal_kept(&jazz, &mut errors, "insert").await;
+
+    abandon(durable.upsert(ObjectId::new(), NewNote::new(someone_else, "upsert")));
+    assert_refusal_kept(&jazz, &mut errors, "upsert").await;
+
+    abandon(durable.update(
+        to_update.id,
+        bindings::NoteUpdate {
+            owner: Some(someone_else),
+            body: None,
+        },
+    ));
+    assert_refusal_kept(&jazz, &mut errors, "update").await;
+
+    abandon(durable.restore_with(to_restore.id, NewNote::new(someone_else, "restore")));
+    assert_refusal_kept(&jazz, &mut errors, "restore").await;
+
+    abandon(durable.transaction(move |tx| async move {
+        tx.insert(NewNote::new(someone_else, "transaction"))?;
+        Ok(())
+    }));
+    assert_refusal_kept(&jazz, &mut errors, "transaction").await;
+
+    let open = durable.begin_transaction().await.unwrap();
+    open.insert(NewNote::new(someone_else, "open transaction"))
+        .await
+        .unwrap();
+    abandon(open.commit());
+    assert_refusal_kept(&jazz, &mut errors, "OpenTransaction::commit").await;
+
+    // Each was reported once.
+    jazz.wait_for_sync().await.unwrap();
+    // Heard: the caller's alone, neither a mutation error nor reported
+    // again.
+    assert_permission_denied(
+        durable
+            .insert(NewNote::new(someone_else, "heard"))
+            .await
+            .map(drop),
+    );
+    jazz.wait_for_sync().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), errors.next())
+            .await
+            .is_err(),
+        "a heard refusal is no mutation error"
+    );
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// Until it stops: every call fails with `Stopped`.
+async fn until_stopped(jazz: &Jazz) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            jazz.all_with(notes::query(), jazz_app_support::ReadTier::LocalOnly)
+                .await,
+            Err(jazz_app_support::Error::Stopped)
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the client stops");
+}
+
+/// A close its caller stopped waiting for still closes: the client stops
+/// and lets go of its store, so another app may delete it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_close_still_closes() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let data = tempfile::TempDir::new().unwrap();
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    connected(&jazz).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "kept")).await.unwrap();
+
+    abandon(jazz.close(Duration::from_secs(10)));
+    until_stopped(&jazz).await;
+    // Its store is free: only the app reopened on it holds it.
+    let reopened = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    reopened.delete_client_storage().await.unwrap();
+    server.shutdown().await;
+}
+
+/// So does a shutdown, and a delete of the client storage, which deletes
+/// the store once the client stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_shutdown_or_delete_completes() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let data = tempfile::TempDir::new().unwrap();
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    abandon(jazz.shutdown());
+    until_stopped(&jazz).await;
+
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "deleted")).await.unwrap();
+    assert!(data.path().join("jazz.sqlite").exists());
+    abandon(jazz.delete_client_storage());
+    until_stopped(&jazz).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while data.path().join("jazz.sqlite").exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the store is deleted");
+    server.shutdown().await;
+}
+
+/// A controlled call whose control ended before it started does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_cancelled_before_it_starts_does_nothing() {
+    use jazz_app_support::{CallControl, Error, Interruption};
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let control = CallControl::new(None);
+    control.cancel();
+    let written = jazz
+        .controlled(control)
+        .insert(NewNote::new(me, "never"))
+        .await;
+    assert!(
+        matches!(
+            written,
+            Err(Error::Interrupted {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "{written:?}"
+    );
+    let local = jazz
+        .all_with(notes::query(), jazz_app_support::ReadTier::LocalOnly)
+        .await
+        .unwrap();
+    assert!(local.is_empty(), "{local:?}");
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// Cancelling ends a controlled call's wait on the server at once:
+/// `Interrupted` when it wrote nothing, `StillQueued` when it committed a
+/// write, whose refusal still reaches `mutation_errors()` and the next
+/// `wait_for_sync()`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_ends_a_controlled_wait_at_once() {
+    use jazz_app_support::{CallControl, Error, Interruption};
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    let mut errors = jazz.mutation_errors().await.unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let someone_else = ObjectId::new();
+    jazz.disconnect().await.unwrap();
+
+    /// Runs `call` on a controlled handle, cancels it once it waits, and
+    /// returns what it failed with, within 100 ms of the cancel.
+    async fn cancelled<T: std::fmt::Debug + Send + 'static>(
+        jazz: &Jazz,
+        call: impl FnOnce(Jazz) -> futures::future::BoxFuture<'static, jazz_app_support::Result<T>>,
+    ) -> jazz_app_support::Result<T> {
+        let control = CallControl::new(None);
+        let running = tokio::spawn(call(jazz.controlled(control.clone())));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!running.is_finished(), "nothing to wait for");
+        let cancelled = std::time::Instant::now();
+        control.cancel();
+        let ended = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the call ends")
+            .unwrap();
+        assert!(
+            cancelled.elapsed() < Duration::from_millis(100),
+            "took {:?}",
+            cancelled.elapsed()
+        );
+        ended
+    }
+    let durable = |jazz: Jazz| jazz.durable(DurabilityTier::GlobalServer);
+
+    jazz.insert(NewNote::new(me, "unsent")).await.unwrap();
+    let synced = cancelled(&jazz, |jazz| {
+        Box::pin(async move { jazz.wait_for_sync().await })
+    })
+    .await;
+    assert!(
+        matches!(
+            synced,
+            Err(Error::Interrupted {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "wait_for_sync: {synced:?}"
+    );
+    let read = cancelled(&jazz, |jazz| {
+        Box::pin(async move {
+            jazz.all_with(notes::query(), jazz_app_support::ReadTier::Remote)
+                .await
+        })
+    })
+    .await;
+    assert!(
+        matches!(
+            read,
+            Err(Error::Interrupted {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "remote read: {read:?}"
+    );
+    let inserted = cancelled(&jazz, move |jazz| {
+        Box::pin(async move {
+            durable(jazz)
+                .insert(NewNote::new(someone_else, "refused later"))
+                .await
+                .map(drop)
+        })
+    })
+    .await;
+    assert!(
+        matches!(
+            inserted,
+            Err(Error::StillQueued {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "global insert: {inserted:?}"
+    );
+    let committed = cancelled(&jazz, move |jazz| {
+        Box::pin(async move {
+            let open = durable(jazz).begin_transaction().await?;
+            open.insert(NewNote::new(me, "committed")).await?;
+            open.commit().await
+        })
+    })
+    .await;
+    assert!(
+        matches!(
+            committed,
+            Err(Error::StillQueued {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "global commit: {committed:?}"
+    );
+
+    // The refused write's refusal, once the server sees it.
+    jazz.reconnect().await.unwrap();
+    assert!(next_error(&mut errors).await.denied);
+    assert_permission_denied(jazz.wait_for_sync().await);
+    jazz.wait_for_sync().await.unwrap();
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// A control's timeout ends its call's wait on time while the server
+/// can't be reached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_controlled_call_times_out_on_time() {
+    use jazz_app_support::{CallControl, Error, Interruption};
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    jazz.disconnect().await.unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let started = std::time::Instant::now();
+    let written = jazz
+        .controlled(CallControl::new(Some(Duration::from_millis(300))))
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewNote::new(me, "timed out"))
+        .await;
+    let took = started.elapsed();
+    assert!(
+        matches!(
+            written,
+            Err(Error::StillQueued {
+                reason: Interruption::Timeout
+            })
+        ),
+        "{written:?}"
+    );
+    assert!(
+        took >= Duration::from_millis(300) && took < Duration::from_millis(400),
+        "took {took:?}"
+    );
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// Dropping a call ends its job's waits on the client's thread, not only
+/// the caller's wait for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_a_call_ends_its_job() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    let (ended, job_ended) = tokio::sync::oneshot::channel();
+    abandon(jazz.with_client(move |client| async move {
+        client.waits_ended().await;
+        let _ = ended.send(());
+        Ok(())
+    }));
+    tokio::time::timeout(Duration::from_secs(2), job_ended)
+        .await
+        .expect("the job's waits end")
+        .unwrap();
+    // The client runs on.
+    jazz.wait_for_sync().await.unwrap();
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 /// `shutdown` ends the waits on the server at once, rather than draining
 /// them for 30 seconds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

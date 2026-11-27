@@ -266,6 +266,13 @@ impl NativeRelayWire {
         Ok(Self::lock(&self.outbound).frames.drain(..).collect())
     }
 
+    /// Signalled when frames for the server are queued: a test carrying the
+    /// wire itself waits on it instead of polling.
+    #[cfg(test)]
+    pub(crate) fn outbound_ready(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.outbound_ready)
+    }
+
     /// Queued (inbound, outbound) frames.
     pub fn queue_depths(&self) -> (usize, usize) {
         (

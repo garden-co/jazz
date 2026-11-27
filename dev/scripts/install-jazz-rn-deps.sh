@@ -8,7 +8,7 @@ export PATH="$CARGO_HOME/bin:$PATH"
 JAZZ_SKIP_RN_DEPS="${JAZZ_SKIP_RN_DEPS:-0}"
 JAZZ_RN_PLATFORM="${JAZZ_RN_PLATFORM:-all}"
 JAZZ_RN_ANDROID_TARGETS="${JAZZ_RN_ANDROID_TARGETS:-aarch64-linux-android armv7-linux-androideabi x86_64-linux-android}"
-RUST_TOOLCHAIN="${JAZZ_RUST_TOOLCHAIN:-1.93.1}"
+RUST_TOOLCHAIN="${JAZZ_RUST_TOOLCHAIN:-1.100.0}"
 
 is_truthy() {
   case "$1" in

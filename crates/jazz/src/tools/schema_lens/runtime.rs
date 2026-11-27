@@ -28,8 +28,8 @@ pub fn compile_lens(
         })
         .collect::<BTreeMap<_, _>>();
     let mut table_lenses = source
-        .iter()
-        .filter_map(|(source_name, _)| {
+        .keys()
+        .filter_map(|source_name| {
             let source_name = source_name.as_str();
             let target_name = renamed_tables
                 .get(source_name)

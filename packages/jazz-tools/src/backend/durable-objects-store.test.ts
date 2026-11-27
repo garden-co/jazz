@@ -47,4 +47,18 @@ describe("durableObjects()", () => {
       /JAZZ_CORE_SECRET, a random string of at least 32 characters/,
     );
   });
+
+  it("still requires a secret with a url", () => {
+    // @ts-expect-error a url without a secret doesn't type-check
+    expect(() => durableObjects({ url: "https://w.example.workers.dev" })).toThrow(
+      /JAZZ_CORE_SECRET, a random string of at least 32 characters/,
+    );
+  });
+
+  it("takes a binding without a secret: the object hands out its own", () => {
+    const binding = { fetch: async () => new Response() };
+    const store = durableObjects({ binding });
+    expect(store.binding).toBe(binding);
+    expect("secret" in store).toBe(false);
+  });
 });

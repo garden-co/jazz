@@ -101,12 +101,14 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-react-native",
     "test-go",
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin",
     "test-kotlin-android",
     "test-kotlin-android-emulator",
     "warm-native-builds",
@@ -196,6 +198,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -288,7 +291,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   );
   assert.equal(
     warm.if,
-    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'",
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true' && needs.main-coverage.outputs.head == 'true'",
   );
   assert.deepEqual(warm.needs, ["main-coverage"]);
   assert.deepEqual(warm.permissions, { contents: "read", "id-token": "write", packages: "read" });
@@ -399,7 +402,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     contents: "read",
     statuses: "read",
   });
-  assert.equal(mainCoverage.steps.length, 2);
+  assert.equal(mainCoverage.steps.length, 3);
   assert.equal(
     mainCoverage.steps[0].uses,
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
@@ -407,6 +410,10 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(mainCoverage.steps[0].with["persist-credentials"], false);
   assert.match(mainCoverage.steps[1].run, /dev\/ci\/main-push-coverage\.sh /);
   assert.match(mainCoverage.steps[1].run, /echo "covered=true" >> "\$\{GITHUB_OUTPUT\}"/);
+  // Only the push still at main's head warms, so a landed group's
+  // per-PR pushes do not race each other for one native cache key.
+  assert.match(mainCoverage.steps[2].run, /repos\/\$\{REPO\}\/git\/ref\/heads\/main/);
+  assert.match(mainCoverage.steps[2].run, /echo "head=true" >> "\$\{GITHUB_OUTPUT\}"/);
 
   // Only dispatched runs may write a commit status, and only test-rust's own.
   assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
@@ -434,14 +441,30 @@ const assertEntryCacheTrustBoundary = (source) => {
     "steps",
     "timeout-minutes",
   ]);
-  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  // full-suite reads the suite results directly (test-rust's own success per
+  // event), so the merge group's tail skips one job hop.
+  assert.match(fullSuiteStatus.if, /^always\(\) && \(\n/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\.result == 'success' && needs\.trusted\.result == 'skipped' \|\|\n/,
+  );
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'push' && needs\.trusted\.result == 'success' \|\|\n/,
+  );
   assert.match(
     fullSuiteStatus.if,
     /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
   );
   assert.doesNotMatch(fullSuiteStatus.if, /head_ref/);
-  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
-  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  // An untrusted suite result counts for dispatches only: a pull request's
+  // untrusted (fast-scope) run must never post full-suite.
+  assert.equal([...fullSuiteStatus.if.matchAll(/needs\.untrusted/g)].length, 1);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\./,
+  );
+  assert.deepEqual(fullSuiteStatus.needs, ["untrusted", "trusted"]);
   assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
   assert.equal(fullSuiteStatus.steps.length, 2);
   assert.equal(
@@ -659,7 +682,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     ["cargo-nextest@0.9.143", "cargo-nextest", "0.9.143", true],
     // cargo-zigbuild is needed only for hosted Linux package cross-builds;
     // the provisioned bundle intentionally does not include Zig.
-    ["cargo-zigbuild@0.20.1", "cargo-zigbuild", "0.20.1", false],
+    ["cargo-zigbuild@0.24.1", "cargo-zigbuild", "0.24.1", false],
     ["wasm-pack@0.13.1", "wasm-pack", "0.13.1", true],
   ]) {
     if (provisioned)
@@ -695,7 +718,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
   assert.doesNotMatch(installRustToolScript, /rm -rf/);
   assert.match(installRustToolScript, /echo "\$\{install_root\}\/bin" >> "\$\{GITHUB_PATH/);
   assert.match(setupBuildAction, /tool: sccache@0\.15\.0/);
-  assert.match(packageBuild, /tool: cargo-zigbuild@0\.20\.1/);
+  assert.match(packageBuild, /tool: cargo-zigbuild@0\.24\.1/);
   assert.throws(
     () => assert.match(installRustToolScript.replace(" --locked", ""), / --locked/),
     /--locked/,
@@ -757,13 +780,13 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   assert.match(setupBuildAction, /steps\.provisioned-tools\.outputs\.active != 'true'/);
   assert.match(installRustTool, /steps\.provisioned-tool\.outputs\.active != 'true'/);
   assert.match(toolBundleValidator, /BUNDLE_ROOT = "\/opt\/jazz-ci\/toolchains\/v1"/);
-  for (const value of ["1.93.1", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
+  for (const value of ["1.100.0", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
     assert.match(toolBundleValidator, new RegExp(value.replaceAll(".", "\\.")));
   }
   assert.match(setupBuildAction, /sccache --show-stats/);
   assert.match(
     setupBuildAction,
-    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
+    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.100\.0-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
   );
   assert.match(setupBuildAction, /Jobs are clients only/);
   assert.match(
@@ -965,6 +988,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -1671,7 +1695,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /public export surface is incomplete/);
   assert.match(runner, /producer receipt is checked before either suite starts/);
   assert.match(runner, /correctness-artifact-producer\.mjs/);
-  assert.match(runner, /--concurrency=3/);
+  assert.match(runner, /--concurrency-limit=3\b/);
   assert.match(
     runner,
     /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser/,
@@ -1887,7 +1911,7 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
     // The real runner and verifier resolve from cwd, so this is a controlled
     // checkout rather than a mutation of the developer's generated dist. Lint
     // CI deliberately has no Jazz Tools build before it runs this contract.
-    for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
+    for (const source of ["run-ts-tests.sh", "with-test-env.sh", "verify-jazz-tools-exports.mjs"])
       write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
     write("dev/artifacts/correctness-artifact-producer.mjs", "process.exit(0);\n");
     write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
@@ -2195,6 +2219,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-rust-workspace",
     "test-storage-compat",
     "test-durable-object-limits",
+    "test-wasm-durable-object",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
@@ -2233,6 +2258,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-rust-workspace",
       "test-storage-compat",
       "test-ts",
+      "test-wasm-durable-object",
       "warm-native-builds",
     ],
     "a new suite job must declare which scope runs it",

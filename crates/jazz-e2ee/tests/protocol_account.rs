@@ -2342,6 +2342,57 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
     );
 }
 
+/// The possession check compares the proof's nonce commitment against the
+/// request's in constant time over every byte: a request whose commitment
+/// differs from the opened one in its first or last byte, or is truncated,
+/// extended or empty, refuses phone's otherwise valid proof, and only the
+/// exact commitment accepts it.
+#[test]
+fn possession_check_needs_the_exact_nonce_commitment() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(34);
+    let laptop = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let state = ledger.state(&env);
+    let writer = env.writer();
+    let request = phone.request();
+    let challenge = build::challenge(&writer, &state, &laptop, &request, &mut rng).unwrap();
+    let proof =
+        build::respond(&writer, &state, &mut phone, &challenge.challenge, &mut rng).unwrap();
+    let verify = |request: &jazz_e2ee::protocol::records::account::DeviceRequest| {
+        build::verify_possession(
+            &writer,
+            &challenge.challenge,
+            &proof,
+            request,
+            &challenge.secret,
+        )
+    };
+    verify(&request).unwrap();
+
+    let commitment = request.nonce_commitment.clone();
+    assert_eq!(commitment.len(), 32);
+    let mut first = commitment.clone();
+    first[0] ^= 1;
+    let mut last = commitment.clone();
+    last[31] ^= 0x80;
+    let truncated = commitment[..31].to_vec();
+    let mut extended = commitment.clone();
+    extended.push(0);
+    for bad in [first, last, truncated, extended, Vec::new()] {
+        let mut altered = request.clone();
+        altered.nonce_commitment = bad;
+        assert_eq!(
+            verify(&altered).unwrap_err(),
+            refused(RefusalCode::InvalidPossessionProof)
+        );
+    }
+}
+
 /// Private verification requires the challenge to be signed by the
 /// approval's signer over the requester's keys and nonce commitment, and the
 /// proof's nonce to open that commitment.

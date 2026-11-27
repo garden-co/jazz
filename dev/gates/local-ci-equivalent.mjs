@@ -43,6 +43,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-durable-object-limits",
+  "wasm-durable-object": "test-wasm-durable-object",
   // One test-ts matrix job per TypeScript shard (see typescriptPartitions).
   "typescript-tools-node-1": "test-ts",
   "typescript-tools-node-2": "test-ts",
@@ -217,7 +218,7 @@ const typescriptPartitions = Object.freeze({
     // lattice or SHA-3 code (the SLH-DSA dependency carries SHAKE variants
     // that no build may use).
     command("no lattice or SHA-3 symbols", "node", [
-      "dev/gates/check-endorsement-symbols.mjs",
+      "dev/gates/check-no-lattice-sha3-symbols.mjs",
       "--correctness-artifacts",
     ]),
   ]),
@@ -378,6 +379,14 @@ export const ciPartitions = Object.freeze({
       "-lc",
       "unset RUSTC_WRAPPER; exec dev/ci/wasm-pack-test.sh --node crates/jazz-wasm",
     ]),
+    // The SLH-DSA key-generation vectors on wasm32 under Node, as the
+    // browser and Durable Object builds run them. wasm-pack would build every
+    // jazz-e2ee test target, and the libsodium cross-checks don't build for
+    // wasm32, so cargo runs just these targets under wasm-bindgen's runner.
+    command("jazz-e2ee SLH-DSA vectors on wasm32", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec dev/ci/wasm-cargo-test.sh -p jazz-e2ee --lib --test slh_dsa",
+    ]),
     // Run jazz-core's integration tests without the client encryption hooks,
     // which the workspace run above unifies on through its binding crates.
     command("jazz-core integration tests without e2ee-client", "node", [
@@ -396,9 +405,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       "jazz-core/testing",
     ]),
-    // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
-    // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
-    command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
+    // jazz-ffi's C ABI test and UniFFI generation (dev/gates/jazz-ffi.sh) run
+    // in the jazz-ffi-bindings partition, whose jazz-ffi-compile-bindings.sh
+    // starts with it: running it here as well only lengthened this job.
     // Runs after the workspace tests with the same feature selection, so its
     // `cargo nextest list` reuses the test binaries that were just built.
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
@@ -511,6 +520,18 @@ export const ciPartitions = Object.freeze({
       "jazz-core/durable-object-limits",
     ]),
   ]),
+  // jazz-wasm's own Durable Object suite in workerd, through Miniflare (the
+  // host, its smoke test and R2 large values; crates/jazz-wasm/tests/
+  // durable-objects). It needs dev builds with the test-only
+  // `durable-object-tests` feature (a panic route, held limits), so it can't
+  // reuse the -O1 host tools-other builds; its two builds share one compile.
+  "wasm-durable-object": Object.freeze([
+    command("jazz-wasm Durable Object suite", "pnpm", [
+      "--filter",
+      "jazz-wasm",
+      "test:durable-objects",
+    ]),
+  ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
   // run against the library (needs a JDK and swiftc: the runner image); then
   // the Jazz Swift package, the StagePlan Swift example and the docs Swift
@@ -522,6 +543,10 @@ export const ciPartitions = Object.freeze({
     command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
       "dev/gates/jazz-swift.sh",
     ]),
+    // The native libraries link no lattice or SHA-3 code: jazz-ffi's (which
+    // jazz-kotlin and the Swift package load, built above) and the React
+    // Native relay linked as an app links it.
+    command("no lattice or SHA-3 native symbols", "bash", ["dev/gates/native-crypto-symbols.sh"]),
   ]),
   // Every crate release-publish.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.

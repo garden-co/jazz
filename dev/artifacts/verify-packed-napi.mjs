@@ -17,6 +17,14 @@ export function verifyPackedNapi(tarball) {
     if (!files.has(`package/${name}`)) throw new Error(`packed jazz-napi is missing ${name}`);
     return execFileSync("tar", ["-xOf", tarball, `package/${name}`], { encoding: "utf8" });
   };
+  // npm installs the matching @garden-co/jazz-napi-<platform> package; a
+  // binary in the main package ships every platform's to every install (and
+  // past Vercel's 250 MB function limit, jazz-napi 2.0.0-beta.3).
+  const bundled = [...files].filter((name) => name.endsWith(".node"));
+  if (bundled.length)
+    throw new Error(
+      `packed jazz-napi must not contain native binaries (they live in the @garden-co/jazz-napi-<platform> packages): ${bundled.join(", ")}`,
+    );
   const manifest = JSON.parse(read("package.json"));
   const entry = manifest.exports?.["."];
   if (

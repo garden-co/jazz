@@ -2804,6 +2804,10 @@ pub(crate) struct Client {
     answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
+    /// Preflights waiting to be sealed before they are sent, by id: their
+    /// waiter seals them (`Db::permission_advice`).
+    #[cfg(feature = "e2ee-client")]
+    parked_advice: HashMap<u64, ParkedAdvice>,
     /// Nodes pushed for each unsettled commit.
     pushed: HashMap<u64, Vec<jazz_types::large_values::ContentHash>>,
     /// Chunks arrived this tick: results waiting for them run again.
@@ -3897,20 +3901,76 @@ pub(crate) enum Support {
 }
 
 /// One equality of a composite [`Support::Array`]: the child's `inner`
-/// column holds `value`.
+/// column holds `from`.
 #[derive(Debug)]
 pub(crate) struct Also {
     inner: String,
-    value: AlsoValue,
+    from: AlsoFrom,
 }
 
-/// What an [`Also`] child's column equals.
+/// Where the value an [`Also`] part follows comes from.
 #[derive(Debug)]
-enum AlsoValue {
-    /// The parent's cell in this stored column.
+pub(crate) enum AlsoFrom {
+    /// The parent's `outer` cell.
     Outer(String),
+    /// The reading session's value at this path (see [`session_value`]):
+    /// the same for every parent the walk follows.
+    Session(Vec<String>),
     /// A fixed value: a table identity a policy compares the column with.
     Fixed(Sql),
+}
+
+/// The value of `session.<path>` an [`AlsoFrom::Session`] part follows, as
+/// a written row's cell would carry it, for a walk on `identity`'s behalf.
+/// `None` (leave the part out, which only widens the support) for a walk
+/// without a policy subject, which reads every row, or a session without
+/// that value.
+fn session_value(path: &[String], identity: Option<AuthorSubject>) -> Option<Sql> {
+    let identity = identity?;
+    let value = crate::compile::Session::for_author(identity, Default::default()).resolve(path)?;
+    crate::values::to_sql(&value).ok().flatten()
+}
+
+/// Whether support can follow `consulted.inner = session.<path>` by value:
+/// the account (`session.user`) meeting a `uuid` column, or the login
+/// (`session.identity.subject` or `.issuer`) a text one. Claims are left
+/// out: the policy compares a claim converted to its column's type, which
+/// the walk does not repeat, so they only widen the support.
+fn followable_by_session(consulted: &crate::values::Table, inner: &str, path: &[String]) -> bool {
+    use crate::records::ValueType;
+    let wanted = match path {
+        [user] if user == "user" => ValueType::Uuid,
+        [identity, part] if identity == "identity" && (part == "subject" || part == "issuer") => {
+            ValueType::String
+        }
+        _ => return false,
+    };
+    column_storage(consulted, inner) == Some((wanted, false))
+}
+
+/// A column's type, nullability aside (`id` is a `uuid`), and whether it
+/// is an enum column; `None` for an array, a real, or a column outside the
+/// stored application columns.
+fn column_storage(
+    table: &crate::values::Table,
+    column: &str,
+) -> Option<(crate::records::ValueType, bool)> {
+    use crate::records::ValueType;
+    if column == "id" {
+        return Some((ValueType::Uuid, false));
+    }
+    if crate::compile::is_array(table, column) {
+        return None;
+    }
+    let column = table.columns.iter().find(|c| c.name == column)?;
+    let mut ty = &column.ty;
+    while let ValueType::Nullable(inner) = ty {
+        ty = inner;
+    }
+    if matches!(ty, ValueType::F64) {
+        return None;
+    }
+    Some((ty.clone(), column.tags.is_some()))
 }
 
 /// Whether support can follow `consulted.inner = table.outer` by value:
@@ -3928,29 +3988,10 @@ fn followable_by_value(
     inner: &str,
 ) -> bool {
     use crate::records::ValueType;
-    /// A column's type, nullability aside (`id` is a `uuid`), and whether
-    /// it is an enum column; `None` for an array, a real, or a column
-    /// outside the stored application columns.
-    fn storage(table: &crate::values::Table, column: &str) -> Option<(ValueType, bool)> {
-        if column == "id" {
-            return Some((ValueType::Uuid, false));
-        }
-        if crate::compile::is_array(table, column) {
-            return None;
-        }
-        let column = table.columns.iter().find(|c| c.name == column)?;
-        let mut ty = &column.ty;
-        while let ValueType::Nullable(inner) = ty {
-            ty = inner;
-        }
-        if matches!(ty, ValueType::F64) {
-            return None;
-        }
-        Some((ty.clone(), column.tags.is_some()))
-    }
-    let (Some((outer_ty, outer_enum)), Some((inner_ty, inner_enum))) =
-        (storage(table, outer), storage(consulted, inner))
-    else {
+    let (Some((outer_ty, outer_enum)), Some((inner_ty, inner_enum))) = (
+        column_storage(table, outer),
+        column_storage(consulted, inner),
+    ) else {
         return false;
     };
     if !outer_enum && !inner_enum {
@@ -4346,12 +4387,33 @@ pub struct SubscriberId {
     generation: u64,
 }
 
+/// A preflight parked for sealing: where it goes, what, and for whom.
+#[cfg(feature = "e2ee-client")]
+type ParkedAdvice = (
+    Option<Weak<UpstreamPort>>,
+    Box<PermissionAdviceAction>,
+    Acting,
+);
+
 pub(super) enum SessionControl {
     Observe(SubscriberId, RegistrationObserver, bool),
     Restored(SubscriberId),
     Disconnect(SubscriberId),
     Detach(u64),
+    /// Send a permission preflight; `action` `None` answers `Unknown`
+    /// unsent. A `parked` one (sealed since) is sent only if it is still
+    /// asked for.
     RequestAdvice {
+        id: u64,
+        port: Option<Weak<UpstreamPort>>,
+        action: Option<Box<PermissionAdviceAction>>,
+        acting: Acting,
+        parked: bool,
+    },
+    /// Keep a preflight to seal before it is sent (see
+    /// `Db::request_permission_advice`).
+    #[cfg(feature = "e2ee-client")]
+    ParkAdvice {
         id: u64,
         port: Option<Weak<UpstreamPort>>,
         action: Box<PermissionAdviceAction>,
@@ -4391,11 +4453,17 @@ impl SessionControl {
                 port,
                 action,
                 acting,
+                parked,
             } => {
                 if let Some(mut client) = inner.client_mut() {
-                    if port
-                        .as_ref()
-                        .is_some_and(|port| Weak::ptr_eq(port, &Rc::downgrade(&client.port)))
+                    if parked && !client.advice.contains_key(&id) {
+                        // Cancelled while it was sealed.
+                        return;
+                    }
+                    if let Some(action) = action
+                        && port
+                            .as_ref()
+                            .is_some_and(|port| Weak::ptr_eq(port, &Rc::downgrade(&client.port)))
                         && client.port.connected()
                         && may_wait(client.hint.get())
                     {
@@ -4415,7 +4483,23 @@ impl SessionControl {
                     }
                 }
             }
+            #[cfg(feature = "e2ee-client")]
+            Self::ParkAdvice {
+                id,
+                port,
+                action,
+                acting,
+            } => {
+                if let Some(mut client) = inner.client_mut() {
+                    client.advice.insert(id, None);
+                    client.parked_advice.insert(id, (port, action, acting));
+                }
+            }
             Self::CancelAdvice(id) => {
+                #[cfg(feature = "e2ee-client")]
+                if let Some(mut client) = inner.client_mut() {
+                    client.parked_advice.remove(&id);
+                }
                 if let Some(mut client) = inner.client_mut()
                     && client.advice.remove(&id).is_some()
                 {
@@ -4845,21 +4929,28 @@ impl Store {
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
         /// The `(inner, outer)` columns each outer-row equality among an
-        /// `EXISTS` condition's conjuncts correlates, in order.
-        fn correlation<'p>(condition: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p str)>) {
+        /// `EXISTS` condition's conjuncts correlates, in order, and the
+        /// `(inner, path)` of each equality with the session.
+        fn correlation<'p>(
+            condition: &'p PolicyExpr,
+            out: &mut Vec<(&'p str, &'p str)>,
+            session: &mut Vec<(&'p str, &'p [String])>,
+        ) {
             match condition {
                 PolicyExpr::Cmp {
                     column,
                     op: CmpOp::Eq,
                     value: PolicyValue::SessionRef(path),
-                } => {
-                    if let [outer_row, outer] = path.as_slice()
-                        && outer_row == "__jazz_outer_row"
-                    {
-                        out.push((column, outer));
+                } => match path.as_slice() {
+                    [outer_row, outer] if outer_row == "__jazz_outer_row" => {
+                        out.push((column, outer))
                     }
-                }
-                PolicyExpr::And(parts) => parts.iter().for_each(|part| correlation(part, out)),
+                    [outer_row, ..] if outer_row == "__jazz_outer_row" => {}
+                    path => session.push((column, path)),
+                },
+                PolicyExpr::And(parts) => parts
+                    .iter()
+                    .for_each(|part| correlation(part, out, session)),
                 _ => {}
             }
         }
@@ -4899,23 +4990,30 @@ impl Store {
             clauses(policy, &mut exists);
         }
         for (consulted, condition) in exists {
-            let mut equalities = Vec::new();
-            correlation(condition, &mut equalities);
+            let (mut equalities, mut session) = (Vec::new(), Vec::new());
+            correlation(condition, &mut equalities, &mut session);
             // The first outer-row equality leads, as it always has.
             let Some((&(inner, outer), further)) = equalities.split_first() else {
                 continue;
             };
+            // Jazz's E2EE members table stays wide: a device that delivers a
+            // space's keys watches every member row of the space, as it
+            // learns of a removal (and so of the rotation the removal needs)
+            // from the removed member's row.
+            let narrow_by_session = consulted != jazz_model::schema::MEMBERS_TABLE;
             let consulted = active_schema.table(consulted)?;
             // Every further equality narrows the children to one composite
-            // key, each followed by value as the lead is. One that cannot
-            // be (a different type, an array, a real, a provenance column)
-            // is left out, which only widens the support: the session's
-            // policies filter what it finds. A lead that cannot be keeps
-            // its single key.
+            // key, each followed by value as the lead is: with the parent's
+            // cell, or with the reading session's value, so a membership
+            // check follows the reader's own member row rather than every
+            // member's. One that cannot be (a different type, an array, a
+            // real, a provenance column, a claim) is left out, which only
+            // widens the support: the session's policies filter what it
+            // finds. A lead that cannot be keeps its single key.
             let part = |inner: &str, outer: &str| {
                 followable_by_value(table, outer, consulted, inner).then(|| Also {
                     inner: consulted.stored_name(inner).to_owned(),
-                    value: AlsoValue::Outer(table.stored_name(outer).to_owned()),
+                    from: AlsoFrom::Outer(table.stored_name(outer).to_owned()),
                 })
             };
             let mut composite = Vec::new();
@@ -4937,10 +5035,20 @@ impl Store {
                     {
                         composite.push(Also {
                             inner: consulted.stored_name(inner).to_owned(),
-                            value: AlsoValue::Fixed(value),
+                            from: AlsoFrom::Fixed(value),
                         });
                     }
                 }
+                composite.extend(
+                    session
+                        .iter()
+                        .filter(|_| narrow_by_session)
+                        .filter(|&&(inner, path)| followable_by_session(consulted, inner, path))
+                        .map(|&(inner, path)| Also {
+                            inner: consulted.stored_name(inner).to_owned(),
+                            from: AlsoFrom::Session(path.to_vec()),
+                        }),
+                );
                 if !composite.is_empty() {
                     composite.insert(0, lead);
                 }
@@ -5260,19 +5368,22 @@ impl Store {
                 } if !composite.is_empty() => {
                     // One composite key: the children equal to the row on
                     // every equality at once, each by the parent's cell as
-                    // its image carries it. A policy `=` is the null-safe
-                    // `IS`, so a part whose parent cell is NULL (or a
-                    // chunked value, which an image's cell does not show)
-                    // is left out: that only widens the support, and a
-                    // written child with a NULL there still matches the
-                    // key of the parts left. So no composite key holds a
-                    // NULL, as no written row's does ([`composite_keys`]).
+                    // its image carries it, or by the reading session's
+                    // value. A policy `=` is the null-safe `IS`, so a part
+                    // whose value is NULL or missing (a chunked cell, which
+                    // an image does not show, or a session without that
+                    // value, or a walk without a policy subject) is left
+                    // out: that only widens the support, and a written
+                    // child with a NULL there still matches the key of the
+                    // parts left. So no composite key holds a NULL, as no
+                    // written row's does ([`composite_keys`]).
                     let parts: Vec<(String, Sql)> = composite
                         .iter()
                         .filter_map(|also| {
-                            let value = match &also.value {
-                                AlsoValue::Outer(outer) => image_cell(image, outer),
-                                AlsoValue::Fixed(value) => Some(value.clone()),
+                            let value = match &also.from {
+                                AlsoFrom::Outer(outer) => image_cell(image, outer),
+                                AlsoFrom::Session(path) => session_value(path, follow.identity),
+                                AlsoFrom::Fixed(value) => Some(value.clone()),
                             };
                             match value {
                                 Some(Sql::Null) | None => None,
@@ -5283,7 +5394,7 @@ impl Store {
                     // A key needs a part from the row: fixed parts alone
                     // would follow every space of a table.
                     let from_row = composite.iter().any(|also| {
-                        matches!(&also.value, AlsoValue::Outer(outer)
+                        matches!(&also.from, AlsoFrom::Outer(outer)
                             if !matches!(image_cell(image, outer), Some(Sql::Null) | None))
                     });
                     if !from_row {
@@ -7439,25 +7550,29 @@ impl Store {
         let mut size = 0;
         let mut absent = Vec::new();
         for op in ops {
-            let (row, cells) = match &op.write {
+            // An upsert's created cells (the defaults it fills in when it
+            // creates the row, chunked as written values are) need their
+            // nodes too: the authority may create the row from them.
+            let none = BTreeMap::new();
+            let (row, cells, created) = match &op.write {
+                WireWrite::Upsert {
+                    row,
+                    cells,
+                    created,
+                    ..
+                } => (RowUuid::from_bytes(*row), cells, created),
                 WireWrite::Insert { row, cells, .. }
                 | WireWrite::Update { row, cells, .. }
-                | WireWrite::Upsert { row, cells, .. }
                 | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
-                } => (RowUuid::from_bytes(*row), cells),
+                } => (RowUuid::from_bytes(*row), cells, &none),
                 _ => continue,
             };
             let mut values = Vec::new();
-            for value in cells.values() {
+            for value in cells.values().chain(created.values()) {
                 large(value, &mut values);
-            }
-            if let WireWrite::Upsert { created, .. } = &op.write {
-                for value in created.values() {
-                    large(value, &mut values);
-                }
             }
             if values.is_empty() {
                 continue;
@@ -9435,6 +9550,8 @@ impl Client {
             visibility_moved: false,
             answers: HashMap::new(),
             advice: HashMap::new(),
+            #[cfg(feature = "e2ee-client")]
+            parked_advice: HashMap::new(),
             pushed: HashMap::new(),
             arrived: false,
             relayed_fetches: Vec::new(),
@@ -10732,6 +10849,17 @@ impl Db {
         fate
     }
 
+    /// A rejection of this local transaction was reported (a caller of
+    /// [`Db::observe_transaction`] heard it): a later [`Db::wait_for_sync`]
+    /// doesn't report it again.
+    /// Synchronous, so its caller decides it with nothing in between: the
+    /// set is in memory, outside the store's write operations.
+    pub fn mark_rejection_reported(&self, tx: u64) {
+        if let Some(mut client) = self.inner.client_mut() {
+            client.unreported_rejections.remove(&tx);
+        }
+    }
+
     /// Like [`Db::wait_for_transaction`], but a rejection it sees stays
     /// unreported: a later [`Db::wait_for_sync`] reports it. For
     /// waits that only watch a write (a host routing its mutation errors).
@@ -10910,6 +11038,15 @@ impl Db {
         self.inner.composite_scans.get()
     }
 
+    /// The tables this store scanned for its newest commit seq since it
+    /// opened, in order: those its `_jazz_meta` row did not cover yet
+    /// (see `commit_seq`). Empty once every table is covered.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn seq_scans_for_test(&self) -> Vec<String> {
+        self.inner.seq_scans.borrow().clone()
+    }
+
     /// One-shot read records, answer slots, and queued one-shot requests.
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_once_state_for_test(&self) -> (usize, usize, usize) {
@@ -11082,7 +11219,11 @@ impl Db {
     /// backend acts for, with its claims); wait with
     /// [`Db::permission_advice`]. Without a connected upstream the answer
     /// is `Unknown`: a replica's own policy evidence may be incomplete, so
-    /// it never decides locally.
+    /// it never decides locally. On a database with encryption hooks, an
+    /// insert or update goes up with its cells sealed, as the write would
+    /// carry them: it is sealed, then sent, once its answer is awaited
+    /// ([`Db::permission_advice`]), and one that cannot be sealed on its own
+    /// is `Unknown`, unsent.
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
@@ -11101,11 +11242,30 @@ impl Db {
             None => Acting::Own,
         };
         let port = self.inner.upstream.borrow().as_ref().map(Rc::downgrade);
+        // An insert or update on a database with encryption hooks goes up
+        // sealed, and sealing waits for the store: it is parked here and
+        // sealed by the wait for its answer (`permission_advice`).
+        #[cfg(feature = "e2ee-client")]
+        if self.inner.e2ee_hooks().is_some()
+            && matches!(
+                action,
+                PermissionAdviceAction::Insert { .. } | PermissionAdviceAction::Update { .. }
+            )
+        {
+            self.inner.session_control(SessionControl::ParkAdvice {
+                id,
+                port,
+                action: Box::new(action),
+                acting,
+            });
+            return id;
+        }
         self.inner.session_control(SessionControl::RequestAdvice {
             id,
             port,
-            action: Box::new(action),
+            action: Some(Box::new(action)),
             acting,
+            parked: false,
         });
         id
     }
@@ -11113,6 +11273,8 @@ impl Db {
     /// The answer to a [`Db::request_permission_advice`]; `Unknown` if the
     /// link fails or the request was cancelled first.
     pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
+        #[cfg(feature = "e2ee-client")]
+        self.send_parked_advice(id).await;
         self.poll_operation(|| {
             let inner = self.inner.without_overlay();
             let Some(mut client) = inner.client_mut() else {
@@ -11133,6 +11295,31 @@ impl Db {
             }
         })
         .await
+    }
+
+    /// Seal and send the request `id` parked for sealing
+    /// ([`Db::request_permission_advice`]), if it still is: `Unknown`,
+    /// unsent, when it can't be sealed on its own ([`Db::sealed_advice`]).
+    #[cfg(feature = "e2ee-client")]
+    async fn send_parked_advice(&self, id: u64) {
+        let parked = {
+            let _operation = self.write_operation().await;
+            self.inner
+                .without_overlay()
+                .client_mut()
+                .and_then(|mut client| client.parked_advice.remove(&id))
+        };
+        let Some((port, action, acting)) = parked else {
+            return;
+        };
+        let action = self.sealed_advice(*action).await.map(Box::new);
+        self.inner.session_control(SessionControl::RequestAdvice {
+            id,
+            port,
+            action,
+            acting,
+            parked: true,
+        });
     }
 
     /// Resolve an outstanding request as `Unknown`: its waiter is removed,
@@ -11229,6 +11416,8 @@ impl Db {
             return Ok(());
         }
         // Everything one tick applies commits together.
+        // Not covered here (`Store::cover_commit_seq`): a replica ticks
+        // when it only reads, and must leave its file as it was.
         let conn = self.inner.without_overlay().conn.clone();
         conn.db_scope("sync_tick", async || self.client_apply().await)
             .await?;
@@ -17334,6 +17523,11 @@ impl Db {
         // The unit lands in one scope: its writes, its fate and settlement,
         // its hold's release, the relay's upload record and the bases it
         // was built on. Any failure undoes all of it.
+        self.inner
+            .without_overlay()
+            .cover_commit_seq()
+            .await
+            .map_err(|e| (e, Vec::new()))?;
         let mut merged = HashSet::new();
         let landed_unit = conn
             .db_scope_then("upload", async || {

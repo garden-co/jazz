@@ -97,9 +97,11 @@ test("NAPI packing stages one sealed release generation and excludes historical 
 
     assert.ok(files.has("native-loader.cjs"));
     assert.ok(files.has("native-artifact-fingerprint.cjs"));
+    // The main package ships no binary, not even the staged host one: npm
+    // installs only the platform package that matches (Vercel's 250 MB limit).
     assert.deepEqual(
-      [...files].filter((file) => /^jazz-napi\.[^.]+\.node$/.test(file)),
-      [`jazz-napi.${target}.node`],
+      [...files].filter((file) => file.endsWith(".node")),
+      [],
     );
     assert.deepEqual(
       [...files].filter((file) => /^jazz-napi\.[^.]+\.manifest\.json$/.test(file)),
@@ -109,11 +111,10 @@ test("NAPI packing stages one sealed release generation and excludes historical 
       [...files].every((file) => !file.startsWith(".native-artifacts/")),
       `packed historical native generation: ${[...files].find((file) => file.startsWith(".native-artifacts/"))}`,
     );
-    // A platform package contains exactly one selected native binary plus its
-    // small JS/declaration surface.  This catches a future broad files glob even
-    // if it happens to omit a particular historic directory in a fixture.
+    // Only the small JS/declaration surface. This catches a future broad
+    // files glob even if it happens to omit a particular historic directory.
     assert.ok(
-      receipt.unpackedSize < 110_000_000,
+      receipt.unpackedSize < 5_000_000,
       `unexpected unpacked size: ${receipt.unpackedSize}`,
     );
   } finally {

@@ -18,8 +18,14 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case notSupported(String)
     /// A serializable transaction lost to another write: retrying may succeed.
     case conflict(String)
-    /// The calling task was cancelled.
+    /// The calling task was cancelled. A wait on the server it ended
+    /// changed nothing; a write it ended before the write was saved
+    /// locally wasn't made.
     case cancelled
+    /// The calling task was cancelled after the write was saved locally:
+    /// it stays queued and may still reach the server. Don't retry it; a
+    /// later refusal reaches `mutationErrors`.
+    case stillQueued(String)
     /// A `JazzSession`'s client kept past a change of user (or a sign-out):
     /// get the current one with `session.client()`.
     case replaced(String)
@@ -36,6 +42,7 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .notSupported(let message): return "not supported yet: \(message)"
         case .conflict(let message): return "conflict: \(message)"
         case .cancelled: return "cancelled"
+        case .stillQueued(let message): return "still queued: \(message)"
         case .replaced(let message): return "replaced: \(message)"
         case .noUser(let message): return "no user: \(message)"
         }
@@ -73,6 +80,9 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .NoUser(_, let message): return JazzError.noUser(message)
         // A trusted backend client's: a Swift app never opens one.
         case .BundleMismatch(_, _, let message): return JazzError.refused(message)
+        // A call its task's cancellation cut short (`Client.controlled`).
+        case .Interrupted(_, let queued, let message):
+            return queued ? JazzError.stillQueued(message) : JazzError.cancelled
         }
     }
 }
@@ -233,7 +243,7 @@ public final class Client: Sendable {
     /// The signed-in user's account id (`session.user` in permissions).
     public func account() async throws -> Jazz.ID {
         try await Self.typed {
-            guard let account = try await Self.run({ try self.handle.account() }) else {
+            guard let account = try await self.controlled( { handle in try handle.account() }) else {
                 throw JazzError.refused("no one is signed in")
             }
             return account
@@ -244,8 +254,8 @@ public final class Client: Sendable {
     public func all<R>(_ query: Query<R>, tier: ReadTier? = nil) async throws -> [R] {
         try await Self.typed {
             let json = try query.json()
-            let rows = try await Self.run {
-                if let tier { try self.handle.allAt(queryJson: json, tier: tier.rawValue) } else { try self.handle.all(queryJson: json) }
+            let rows = try await self.controlled { handle in
+                if let tier { try handle.allAt(queryJson: json, tier: tier.rawValue) } else { try handle.all(queryJson: json) }
             }
             return try Coding.decode([R].self, rows, userInfo)
         }
@@ -258,7 +268,7 @@ public final class Client: Sendable {
     {
         try await Self.typed {
             let json = try selection.json()
-            let rows = try await Self.run { try self.handle.all(queryJson: json) }
+            let rows = try await self.controlled { handle in try handle.all(queryJson: json) }
             return try Coding.decode([T].self, rows, userInfo)
         }
     }
@@ -268,8 +278,8 @@ public final class Client: Sendable {
         try await Self.typed {
             let json = try query.json()
             guard
-                let row = try await Self.run({
-                    if let tier { try self.handle.oneAt(queryJson: json, tier: tier.rawValue) } else { try self.handle.one(queryJson: json) }
+                let row = try await self.controlled( { handle in
+                    if let tier { try handle.oneAt(queryJson: json, tier: tier.rawValue) } else { try handle.one(queryJson: json) }
                 })
             else {
                 return nil
@@ -283,11 +293,11 @@ public final class Client: Sendable {
     public func insert<I: Insert>(_ row: I, tier: WriteTier? = nil) async throws -> I.Row {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
-            let inserted = try await Self.run {
+            let inserted = try await self.controlled { handle in
                 if let tier {
-                    try self.handle.insertAt(table: I.Row.table, rowJson: json, tier: tier.rawValue)
+                    try handle.insertAt(table: I.Row.table, rowJson: json, tier: tier.rawValue)
                 } else {
-                    try self.handle.insert(table: I.Row.table, rowJson: json)
+                    try handle.insert(table: I.Row.table, rowJson: json)
                 }
             }
             return try Coding.decode(I.Row.self, inserted, userInfo)
@@ -300,11 +310,11 @@ public final class Client: Sendable {
     {
         try await Self.typed {
             let json = try Coding.json(patch, userInfo)
-            try await Self.run {
+            try await self.controlled { handle in
                 if let tier {
-                    try self.handle.updateAt(table: P.Row.table, id: id, patchJson: json, tier: tier.rawValue)
+                    try handle.updateAt(table: P.Row.table, id: id, patchJson: json, tier: tier.rawValue)
                 } else {
-                    try self.handle.update(table: P.Row.table, id: id, patchJson: json)
+                    try handle.update(table: P.Row.table, id: id, patchJson: json)
                 }
             }
         }
@@ -321,11 +331,11 @@ public final class Client: Sendable {
         async throws
     {
         try await Self.typed {
-            try await Self.run {
+            try await self.controlled { handle in
                 if let tier {
-                    try self.handle.deleteAt(table: R.table, id: id, tier: tier.rawValue)
+                    try handle.deleteAt(table: R.table, id: id, tier: tier.rawValue)
                 } else {
-                    try self.handle.delete(table: R.table, id: id)
+                    try handle.delete(table: R.table, id: id)
                 }
             }
         }
@@ -338,7 +348,7 @@ public final class Client: Sendable {
     /// Returns once every write made so far has reached `tier`.
     public func waitForSync(_ tier: WriteTier = .global) async throws {
         try await Self.typed {
-            try await Self.run { try self.handle.waitForSync(tier: tier.rawValue) }
+            try await self.controlled { handle in try handle.waitForSync(tier: tier.rawValue) }
         }
     }
 
@@ -353,7 +363,7 @@ public final class Client: Sendable {
         commit tier: WriteTier? = nil, isolation: isolated (any Actor)? = #isolation,
         _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        try await run(transaction: { try self.handle.beginMergeable() }, commit: tier, body)
+        try await run(transaction: { try $0.beginMergeable() }, commit: tier, body)
     }
 
     /// Runs `body` in a serializable transaction (TS's
@@ -365,19 +375,25 @@ public final class Client: Sendable {
         commit tier: WriteTier? = nil, isolation: isolated (any Actor)? = #isolation,
         _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        try await run(transaction: { try self.handle.begin() }, commit: tier, body)
+        try await run(transaction: { try $0.begin() }, commit: tier, body)
     }
 
     /// Runs on the caller's actor (`isolation`), so `body` may be a closure
-    /// of main-actor code, as in a SwiftUI view.
+    /// of main-actor code, as in a SwiftUI view. A task cancelled before
+    /// the commit rolls back; once the commit has begun, it stands (a
+    /// cancelled wait for its tier throws `stillQueued`).
     func run<T: Sendable>(
-        transaction begin: @escaping @Sendable () throws -> JazzFFI.Transaction,
+        transaction begin: @escaping @Sendable (JazzHandle) throws -> JazzFFI.Transaction,
         commit tier: WriteTier?, isolation: isolated (any Actor)? = #isolation,
         _ body: (Transaction) async throws -> T
     ) async throws -> T {
+        if _Concurrency.Task.isCancelled { throw JazzError.cancelled }
+        // One control for the transaction: its commit obeys it.
+        let control = CallControl(timeoutMs: nil)
+        let view = handle.controlled(control: control)
         // Not `typed`: its closure would leave the caller's actor.
         let ffi: JazzFFI.Transaction
-        do { ffi = try await Self.run(begin) } catch { throw JazzError.wrap(error) }
+        do { ffi = try await Self.run { try begin(view) } } catch { throw JazzError.wrap(error) }
         let tx = Transaction(ffi, implementations: implementations)
         let result: T
         do {
@@ -386,8 +402,16 @@ public final class Client: Sendable {
             try? await Self.run { try ffi.rollback() }
             throw error
         }
+        if _Concurrency.Task.isCancelled {
+            try? await Self.run { try ffi.rollback() }
+            throw JazzError.cancelled
+        }
         do {
-            try await Self.run { try ffi.commit(tier: tier?.rawValue) }
+            try await withTaskCancellationHandler {
+                try await Self.run { try ffi.commit(tier: tier?.rawValue) }
+            } onCancel: {
+                control.cancel()
+            }
         } catch {
             throw JazzError.wrap(error)
         }
@@ -481,6 +505,22 @@ public final class Client: Sendable {
             return try await body()
         } catch {
             throw JazzError.wrap(error)
+        }
+    }
+
+    /// Runs a blocking jazz-ffi call through a view of the handle that the
+    /// calling task's cancellation ends (TS's and Kotlin's cancellable
+    /// waits): a wait on the server stops at once, throwing `cancelled`,
+    /// or `stillQueued` for a write already saved locally. A task cancelled
+    /// before the call starts nothing.
+    func controlled<T: Sendable>(_ call: @escaping @Sendable (JazzHandle) throws -> T) async throws -> T {
+        if _Concurrency.Task.isCancelled { throw JazzError.cancelled }
+        let control = CallControl(timeoutMs: nil)
+        let view = handle.controlled(control: control)
+        return try await withTaskCancellationHandler {
+            try await Self.run { try call(view) }
+        } onCancel: {
+            control.cancel()
         }
     }
 

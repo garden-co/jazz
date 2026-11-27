@@ -216,6 +216,9 @@ export const jazz = createJazz({
 });
 ```
 
+Set `url` to the core's final URL: your backend never follows a redirect from the core (it would
+carry the backend's credential along), so a core that answers with one fails to open.
+
 Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
 the core's address or secret. Your backend sends its schema, migrations and permissions to the core
 on start, and tells the core who each user is; the core does no auth of its own and trusts only the

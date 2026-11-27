@@ -18,11 +18,11 @@
     ],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore", "JazzBackend"] }],
-  // Attachments and avatars over 64 KiB go to R2, not the core's SQLite:
-  // `wrangler r2 bucket create band-chat-jazz-blobs` before the first deploy.
-  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "band-chat-jazz-blobs" }],
+  // Attachments and avatars over 64 KiB go to R2, not the core's SQLite.
+  // Wrangler creates the bucket on the first deploy.
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS" }],
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
-  // APP_ORIGIN: set to the deployed URL. Secrets: `wrangler secret put
-  // BETTER_AUTH_SECRET` and `wrangler secret put JAZZ_CORE_SECRET`.
+  // APP_ORIGIN: set to the deployed URL. Secret: `wrangler secret put
+  // BETTER_AUTH_SECRET`.
   "vars": { "APP_ORIGIN": "http://localhost:8787" },
 }

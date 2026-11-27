@@ -12,8 +12,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import { DOWNLOAD_CORE, newerVersion, startScript } from "./vercel-store.js";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
+import {
+  CORE_LAUNCHER,
+  DOWNLOAD_CORE,
+  claimRecycleScript,
+  coreStateScript,
+  newerVersion,
+  releaseRecycleScript,
+  startScript,
+} from "./vercel-store.js";
 import { VERSION_ORDER } from "./fixtures/version-order.js";
 
 // The start script's own version order, run in bash: it decides which core
@@ -363,5 +371,134 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(results.filter((result) => result === "running")).toHaveLength(1);
     expect(results.filter((result) => result === 0)).toHaveLength(2);
     expect(read("servers.log")!.split("\n")).toHaveLength(1);
+  });
+
+  /** Wait until `check` holds (within a few seconds). */
+  async function until(check: () => boolean) {
+    const deadline = Date.now() + 5_000;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error("timed out");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  it("tells a core that opens its store from one that listens, a start under way, and nothing", async () => {
+    const port = await new Promise<number>((resolve) => {
+      const probe = createNetServer().listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as AddressInfo;
+        probe.close(() => resolve(port));
+      });
+    });
+    const state = () =>
+      spawnSync("bash", ["-c", coreStateScript(root, port), "jazz-core-state"], {
+        encoding: "utf8",
+      }).stdout.trim();
+    expect(state()).toBe("down");
+
+    // A start holds the lock while it downloads the core (or stops another
+    // version's): nothing runs yet, but nothing else needs to start.
+    const holder = spawn(
+      "bash",
+      ["-c", `exec 9>${JSON.stringify(join(root, "tmp/jazz.lock"))}; flock 9; sleep 30`],
+      { stdio: "ignore", detached: true },
+    );
+    children.push(holder);
+    await until(() => state() === "starting");
+    process.kill(-holder.pid!, "SIGKILL");
+    await until(() => state() === "down");
+
+    // The core's process runs, its port not open yet: it opens its store.
+    installFake("1.0.0");
+    expect(await start("1.0.0")).toBe("running");
+    expect(state()).toMatch(/^opening \d+$/);
+    const listening = createNetServer().listen(port, "127.0.0.1");
+    await new Promise((resolve) => listening.once("listening", resolve));
+    try {
+      expect(state()).toMatch(/^listening \d+$/);
+    } finally {
+      listening.close();
+    }
+
+    // A pid file naming another process (a resumed snapshot) is no core.
+    spawnSync("kill", ["-9", read("tmp/jazz.pid")!]);
+    await until(() => state() === "down");
+  });
+
+  it("lets exactly one waiter claim each session's recycle", async () => {
+    const claim = (session: string) =>
+      new Promise<number>((resolve) =>
+        spawn("bash", ["-c", claimRecycleScript(root), "jazz-claim-recycle", session]).on(
+          "exit",
+          (code) => resolve(code ?? -1),
+        ),
+      );
+    const first = await Promise.all([1, 2, 3, 4, 5].map(() => claim("1000")));
+    expect(first.filter((code) => code === 0)).toHaveLength(1);
+    expect(await claim("1000")).toBe(1);
+    // The next session is claimed afresh, and the earlier claim dropped.
+    expect(await claim("2000")).toBe(0);
+    expect(await claim("2000")).toBe(1);
+    expect(existsSync(join(root, "tmp/jazz-recycled-1000"))).toBe(false);
+    // A claim given back after a failed stop can be claimed again.
+    spawnSync("bash", ["-c", releaseRecycleScript(root), "jazz-release-recycle", "2000"]);
+    expect(await claim("2000")).toBe(0);
+  });
+});
+
+// The launcher the start script execs, in this machine's Node, with a
+// stand-in for the core addon whose store takes a moment to open.
+describe("vercel() core launcher", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "jazz-launcher-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  /** Run the launcher with an addon whose `serveCore` is `body`; resolves when it exits. */
+  function launch(body: string) {
+    const addon = join(dir, "addon.cjs");
+    writeFileSync(addon, `exports.serveCore = () => {\n${body}\n};\n`);
+    const child = spawn(process.execPath, ["-e", CORE_LAUNCHER, addon, "app", "{}"], {
+      env: { ...process.env, MARK: join(dir, "opening") },
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const exited = new Promise<{ code: number | null; signal: string | null; stderr: string }>(
+      (resolve) => child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+    );
+    return { child, exited };
+  }
+
+  // Like `jazz_server::run_until`: a stop asked for while the store opens
+  // takes effect once it has opened.
+  const opensIn = (ms: number) => `
+    let stop = false, open = false, done;
+    const closed = new Promise((resolve) => (done = resolve));
+    require("node:fs").writeFileSync(process.env.MARK, "");
+    setTimeout(() => { open = true; if (stop) { console.error("stopped once open"); done(); } }, ${ms});
+    return { stop() { stop = true; if (open) done(); }, closed: () => closed };`;
+
+  it("logs a stop that arrives while the core opens its store", async () => {
+    const { child, exited } = launch(opensIn(1_000));
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(join(dir, "opening")) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    child.kill("SIGTERM");
+    const { code, stderr } = await exited;
+    expect(stderr).toMatch(
+      /^\d{4}-\d\d-\d\dT\S+ jazz: SIGTERM \d+ s after the core launched; asking it to stop \(a core still opening its store stops once it has opened\)$/m,
+    );
+    expect(stderr).toContain("stopped once open");
+    expect(code).toBe(0);
+  });
+
+  it("catches a stop that arrives before the core has even started opening", async () => {
+    // The signal lands while `serveCore` runs: the handlers are already in place.
+    const { exited } = launch(`process.kill(process.pid, "SIGTERM");${opensIn(200)}`);
+    const { code, signal, stderr } = await exited;
+    expect({ code, signal }).toEqual({ code: 0, signal: null });
+    expect(stderr).toMatch(/jazz: SIGTERM \d+ s after the core launched/);
+    expect(stderr).toContain("stopped once open");
   });
 });

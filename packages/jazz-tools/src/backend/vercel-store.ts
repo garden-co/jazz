@@ -155,10 +155,21 @@ export interface SandboxHandle {
     timeout: number;
     extendTimeout(ms: number): Promise<void>;
   };
-  runCommand(params: { cmd: string; args: string[]; detached?: boolean }): Promise<unknown>;
+  /** A detached command resolves once it started; any other once it finished. */
+  runCommand(params: {
+    cmd: string;
+    args: string[];
+    detached?: boolean;
+  }): Promise<SandboxCommandResult | void>;
   writeFiles(files: { path: string; content: Buffer }[]): Promise<void>;
   readFileToBuffer(file: { path: string }): Promise<Buffer | null>;
   stop(): Promise<void>;
+}
+
+/** What a command run in the Sandbox (`@vercel/sandbox`'s `CommandFinished`) reports. */
+export interface SandboxCommandResult {
+  readonly exitCode: number | null;
+  stdout(): Promise<string>;
 }
 
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
@@ -211,7 +222,11 @@ const WAKE_DEADLINE_MS = 60_000;
 // only if it can be extended.
 const MIN_LEFT_MS = 30_000;
 // Vercel's router can answer SANDBOX_NOT_LISTENING for minutes while the
-// server listens; a fresh session routes, so recycle after this long.
+// server listens; a fresh session routes, so a session is recycled once its
+// core has listened inside the Sandbox for this long while the router said
+// it doesn't. A core still opening its store answers the same from outside,
+// for as long as the open takes (tens of seconds for a large store), so the
+// router's answer alone never recycles a session (#6366).
 const NOT_LISTENING_RECYCLE_MS = 12_000;
 // How long a wake is trusted before the next request checks again.
 const ENSURE_FRESH_MS = 10_000;
@@ -220,6 +235,8 @@ const ENSURE_FRESH_MS = 10_000;
  * listening, or is stopping): the request never reached the core.
  */
 const ROUTER_ERROR_HEADER = "x-vercel-error";
+/** A wake's log names this step when it found the core still opening its store. */
+const OPENING_STEP = "waited for its core to open its store";
 const KEEPALIVE_MS = 30_000;
 // A session that answers `/health` while connections to its core keep
 // ending without opening (none opening in between), for this long and this
@@ -231,6 +248,12 @@ const UNREACHED_RECYCLE_COUNT = 2;
 // After a start that can't succeed, requests fail fast for this long
 // instead of each waking the Sandbox into the same failure.
 const START_FAILURE_HOLD_MS = 30_000;
+
+/** What the core in a Sandbox is doing, from `coreStateScript` (`unknown`: the check failed). */
+type CoreState =
+  | { kind: "listening" | "opening"; upSeconds: number }
+  | { kind: "starting" | "down" }
+  | { kind: "unknown"; why: string };
 
 /** A core start that gave up (the start script said why); retrying won't help. */
 class CoreStartError extends Error {}
@@ -356,22 +379,107 @@ export const DOWNLOAD_CORE =
   " process.stdout.write(Buffer.from(await r.arrayBuffer()));" +
   " }).catch((e) => fail('transient', e.message + (e.cause ? ': ' + (e.cause.code || e.cause.message) : '')));";
 
+/** `s` as one single-quoted shell word. */
+const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+
 /** The addon's file in its npm tarball. */
 const CORE_ADDON = "package/jazz-napi.linux-x64-gnu.node";
 
 /**
  * Runs the core in the Sandbox's Node: `node -e` with the addon, the app id
  * and the core's options, in that order. Node owns the process's signals: a
- * SIGTERM asks the core to drain, and the process exits once it has. The addon's path stays in the
- * process's command line, which is how a later start recognises it.
+ * SIGTERM asks the core to drain, and the process exits once it has. The
+ * handlers are in place before the core starts opening its store, and each
+ * signal is logged with how long after the launch it came, so a stop while
+ * the core still opens (it drains once open) shows in /data/server.log. The
+ * addon's path stays in the process's command line, which is how a later
+ * start recognises it.
  *
  * @internal
  */
 export const CORE_LAUNCHER =
   "const [addon, appId, options] = process.argv.slice(1);" +
-  " const core = require(addon).serveCore({ ...JSON.parse(options), appId });" +
-  " for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => core.stop());" +
+  " let core; let stopping = false;" +
+  " for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {" +
+  " console.error(new Date().toISOString() + ' jazz: ' + signal + ' ' + Math.round(process.uptime()) + ' s after the core launched; asking it to stop (a core still opening its store stops once it has opened)');" +
+  " stopping = true; core?.stop(); });" +
+  " core = require(addon).serveCore({ ...JSON.parse(options), appId });" +
+  " if (stopping) core.stop();" +
   " core.closed().then(() => process.exit(0), (error) => { console.error(error); process.exit(1); });";
+
+/**
+ * What the core in a Sandbox is doing, as seen from inside it: one line,
+ *
+ * - `listening <s>`: its process runs (the pid file names a process running
+ *   one of our cores, as the start script checks) and its port accepts
+ *   connections on localhost, `<s>` seconds after it launched;
+ * - `opening <s>`: its process runs but doesn't listen yet (it is opening
+ *   its store);
+ * - `starting`: no core runs, but a start holds the start lock (it is
+ *   downloading the core, or stopping another version's);
+ * - `down`: nothing runs or starts.
+ *
+ * @internal
+ */
+export function coreStateScript(
+  /** @internal Prefix for /data and /tmp, for tests. */
+  root = "",
+  port = VERCEL_CORE_PORT,
+): string {
+  return `set -uo pipefail
+data=${shellQuote(`${root}/data`)}
+run=${shellQuote(`${root}/tmp`)}
+pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
+cmdline=$(tr '\\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)
+if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* ]]; then
+  launched=$(cat "$run/jazz.launched" 2>/dev/null || true)
+  age=$(( $(date +%s) - \${launched:-$(date +%s)} ))
+  if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port}' 2>/dev/null; then
+    echo "listening $age"
+  else
+    echo "opening $age"
+  fi
+elif ! flock -n "$run/jazz.lock" true 2>/dev/null; then
+  echo starting
+else
+  echo down
+fi
+`;
+}
+
+/**
+ * Claims the recycle of the session started at `$1` (its start in
+ * milliseconds): exits 0 for the first caller only, across every waiter and
+ * function instance, since all of them reach the same Sandbox. Claims of
+ * earlier sessions (a resumed snapshot keeps /tmp) are dropped.
+ *
+ * @internal
+ */
+export function claimRecycleScript(
+  /** @internal Prefix for /tmp, for tests. */
+  root = "",
+): string {
+  return `set -u
+run=${shellQuote(`${root}/tmp`)}
+find "$run" -maxdepth 1 -name 'jazz-recycled-*' ! -name "jazz-recycled-$1" -exec rmdir {} + 2>/dev/null
+mkdir "$run/jazz-recycled-$1" 2>/dev/null
+`;
+}
+
+/**
+ * Gives back the claim on the recycle of the session started at `$1`, after
+ * a stop that failed, so another waiter can try.
+ *
+ * @internal
+ */
+export function releaseRecycleScript(
+  /** @internal Prefix for /tmp, for tests. */
+  root = "",
+): string {
+  return `set -u
+rmdir ${shellQuote(`${root}/tmp`)}/"jazz-recycled-$1" 2>/dev/null || true
+`;
+}
 
 /**
  * Start the core: install the core addon for `version` on the Drive,
@@ -388,7 +496,6 @@ export function startScript(
   /** @internal Prefix for /data and /tmp, for tests. */
   root = "",
 ): string {
-  const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store for each server start.
@@ -397,8 +504,8 @@ set -euo pipefail
 # an error file that names one of its own starts (never a stale one).
 start_id=$(basename "$0" .sh)
 rm -f "$0"
-data=${q(`${root}/data`)}
-run=${q(`${root}/tmp`)}
+data=${shellQuote(`${root}/data`)}
+run=${shellQuote(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
@@ -408,8 +515,8 @@ flock 9
 newer() {
   [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1//-/\\~}" "\${2//-/\\~}" | sort -V | tail -1)" = "\${1//-/\\~}" ]
 }
-version=${q(version)}
-trust=${q(trustLine)}
+version=${shellQuote(version)}
+trust=${shellQuote(trustLine)}
 # A start that gives up says why in this version's error file, which the
 # function reads and reports instead of waiting for a server that won't
 # come: "<start id> permanent: …" when retrying can't help (the function then stops
@@ -441,9 +548,9 @@ addon=$data/bin/jazz-napi-$version.node
 # Fetch before stopping anything, so a failed download leaves the old core up.
 if [ ! -s "$addon" ]; then
   mkdir -p "$data/bin"
-  url=${q(tarballUrl)}
+  url=${shellQuote(tarballUrl)}
   rm -f "$run/download.kind"
-  if ! node -e ${q(DOWNLOAD_CORE)} "$url" "$run/download.kind" 2>"$run/download.err" \\
+  if ! node -e ${shellQuote(DOWNLOAD_CORE)} "$url" "$run/download.kind" 2>"$run/download.err" \\
     | tar xz -O ${CORE_ADDON} 2>>"$run/download.err" > "$addon.tmp"; then
     rm -f "$addon.tmp"
     # No kind: the download arrived but isn't the core's tarball.
@@ -475,9 +582,11 @@ printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data
 find "$data/bin" -name 'jazz-napi-*' ! -name "jazz-napi-$version.node" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
+# When the core launched, for coreStateScript: a large store takes a while to open.
+date +%s > "$run/jazz.launched"
 exec 9>&-
-# The core admits only the deploying function's own workload.${blobsSetup(blobs, q)}
-exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
+# The core admits only the deploying function's own workload.${blobsSetup(blobs)}
+exec node -e ${shellQuote(CORE_LAUNCHER)} "$addon" "$app_id" ${shellQuote(
     JSON.stringify(coreOptions(`${root}/data/store`, trust, blobs)),
   )}
 `;
@@ -488,7 +597,7 @@ exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
  * Marketplace's role with the function's OIDC token, which every request
  * carries. With `vercelBlob()` that token is the Blob credential itself.
  */
-function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
+function blobsSetup(blobs: VercelS3 | VercelBlob | undefined): string {
   if (!blobs) {
     return "\n# Large values stay in its SQLite file (they can move to Vercel Blob or S3 later).";
   }
@@ -497,7 +606,7 @@ function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => 
   }
   return `
 # Large values go to S3, under the role this project's functions assume.
-export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
+export S3_BUCKET_NAME=${shellQuote(blobs.bucket)} AWS_REGION=${shellQuote(blobs.region)} AWS_ROLE_ARN=${shellQuote(blobs.roleArn)}`;
 }
 
 /**
@@ -990,9 +1099,21 @@ async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
     return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
-    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error, {
+      requireEsm: SANDBOX_REQUIRE_ESM_HINT,
+    });
   }
 }
+
+/**
+ * @vercel/sandbox 4.1.0 to 5.0.0 depend on @vercel/drives 1.0.0, whose
+ * CommonJS build require()s the ES-only @workflow/serde. A function Vercel
+ * bundles (Next.js) never runs that require(); a plain `api/` function, which
+ * Vercel only traces, does, and fails on Vercel's runtime.
+ */
+const SANDBOX_REQUIRE_ESM_HINT =
+  "@vercel/sandbox 4.1.0 to 5.0.0 do this through @vercel/drives in a function Vercel doesn't bundle " +
+  "(a plain Node function in api/; Next.js bundles it): install @vercel/sandbox@4.0.0.";
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
@@ -1189,14 +1310,80 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   /**
    * Stop the session `sbx` belongs to, so the next wake starts a fresh one.
    * Other instances may be watching the same session; only the session this
-   * one saw fail is stopped, never a newer one.
+   * one saw fail is stopped, never a newer one. Says how it went: `gone`
+   * when that session no longer runs (stopped, or replaced by a newer one),
+   * and the error when Vercel refused to stop it.
    */
-  const stopSession = async (sbx: SandboxHandle) => {
+  const stopSession = async (
+    sbx: SandboxHandle,
+  ): Promise<{ stopped: true } | { gone: true } | { failed: unknown }> => {
     const watched = sbx.currentSession().startedAt.getTime();
     const now = await getRunning();
-    if (now && now.currentSession().startedAt.getTime() === watched) {
-      await now.stop().catch(() => {});
+    if (!now || now.currentSession().startedAt.getTime() !== watched) return { gone: true };
+    try {
+      await now.stop();
+      return { stopped: true };
+    } catch (error) {
+      return { failed: error };
     }
+  };
+
+  /** What the core in `sbx` is doing, as seen from inside the Sandbox (see `coreStateScript`). */
+  const coreState = async (sbx: SandboxHandle): Promise<CoreState> => {
+    let said: string;
+    try {
+      const done = await sbx.runCommand({
+        cmd: "bash",
+        args: ["-c", coreStateScript(), "jazz-core-state"],
+      });
+      said = done ? (await done.stdout()).trim() : "";
+    } catch (error) {
+      return { kind: "unknown", why: String(error) };
+    }
+    const match = /^(listening|opening) (\d+)$/.exec(said);
+    if (match) return { kind: match[1] as "listening" | "opening", upSeconds: Number(match[2]) };
+    if (said === "starting" || said === "down") return { kind: said };
+    return { kind: "unknown", why: `the core's state check said ${JSON.stringify(said)}` };
+  };
+
+  /**
+   * Stop the session `sbx` belongs to because Vercel's router doesn't reach
+   * the core in it, so the next wake starts a fresh one. Only a session
+   * whose core listens inside the Sandbox is stopped: one still opening its
+   * store looks the same from outside, and stopping it throws its open away.
+   * Each session is stopped for this at most once, by whichever waiter of
+   * any instance claims it first. Returns whether this call stopped it.
+   */
+  const recycle = async (sbx: SandboxHandle, why: string): Promise<boolean> => {
+    const state = await coreState(sbx);
+    if (state.kind !== "listening") return false;
+    const session = sbx.currentSession().startedAt.getTime();
+    const claim = await sbx
+      .runCommand({
+        cmd: "bash",
+        args: ["-c", claimRecycleScript(), "jazz-claim-recycle", String(session)],
+      })
+      .catch(() => undefined);
+    if (claim?.exitCode !== 0) return false;
+    console.warn(
+      `jazz: vercel(): stopping core ${name}'s session, whose core listens, so the next wake starts a fresh one: ${why}`,
+    );
+    const stop = await stopSession(sbx);
+    if ("failed" in stop) {
+      // Left claimed, the session could never be recycled again: every
+      // later waiter would wait out its deadline. Give the claim back.
+      await sbx
+        .runCommand({
+          cmd: "bash",
+          args: ["-c", releaseRecycleScript(), "jazz-release-recycle", String(session)],
+        })
+        .catch(() => undefined);
+      console.warn(
+        `jazz: vercel(): could not stop core ${name}'s session (${String(stop.failed)}); released its recycle for the next waiter`,
+      );
+      return false;
+    }
+    return true;
   };
 
   /** Resume (or create) the Sandbox and wait until the server answers. */
@@ -1206,8 +1393,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     const healthFails: Record<string, number> = {};
     let recycled = false;
     let restarted = false;
+    /** What the core was doing when this wake last looked inside its Sandbox. */
+    let lastState: CoreState | undefined;
     /** The last transient start failure, for the error if the wake times out. */
     let lastTransient: string | undefined;
+    /** What this wake had to do, for its log line. */
+    const steps = new Set<string>();
+    /** Done: say how long it took, once per wake, if the core wasn't simply answering. */
+    const woke = (sbx: SandboxHandle, base: string) => {
+      if (steps.size > 0) {
+        console.info(
+          `jazz: vercel(): core ${name} woke in ${since(t0)} ms (${[...steps].join(", ")})`,
+        );
+      }
+      return { sbx, base };
+    };
     let sbx = await getRunning();
     for (;;) {
       while (!sbx) {
@@ -1216,6 +1416,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           // Before resuming, which starts its server: a core elsewhere is
           // never woken.
           if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
+          steps.add(existing ? "resumed" : "created");
           sbx = existing
             ? await sdk.Sandbox.get({
                 name,
@@ -1250,49 +1451,69 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       await refuseForeignPin(sbx);
       let base = sbx.domain(VERCEL_CORE_PORT);
       let ok = await healthy(base, 300, healthFails);
-      if (!ok) await startServer(sbx);
-      const healthT0 = performance.now();
+      if (!ok) {
+        steps.add("started its server");
+        await startServer(sbx);
+      }
+      /** Since when this session's core has listened while the router said it doesn't. */
+      let unroutedSince: number | undefined;
       while (!ok && sbx && performance.now() < deadline) {
-        ok = await healthy(base, 5_000, healthFails);
-        const failure = ok ? undefined : await startError(sbx);
+        const fails: Record<string, number> = {};
+        ok = await healthy(base, 5_000, fails);
+        for (const [why, n] of Object.entries(fails))
+          healthFails[why] = (healthFails[why] ?? 0) + n;
+        if (ok) break;
+        const failure = await startError(sbx);
         if (failure?.permanent) await giveUp(sbx, failure.why);
         if (failure) lastTransient = failure.why;
-        const notListening = Object.keys(healthFails).some((k) =>
-          k.includes("SANDBOX_NOT_LISTENING"),
-        );
-        if (
-          !ok &&
-          notListening &&
-          !recycled &&
-          performance.now() - healthT0 > NOT_LISTENING_RECYCLE_MS
-        ) {
-          recycled = true;
-          await stopSession(sbx);
-          sbx = null;
-          break;
-        }
-        if (!ok) {
-          sbx = await getRunning();
-          if (sbx) {
-            base = sbx.domain(VERCEL_CORE_PORT);
-            await startServer(sbx);
+        // Only the Sandbox itself tells a core that is still opening its
+        // store from one the router doesn't reach: both answer "not
+        // listening" from outside.
+        const state = await coreState(sbx);
+        lastState = state;
+        const refused = Object.keys(fails).some((k) => k.includes("SANDBOX_NOT_LISTENING"));
+        if (state.kind === "listening" && refused) {
+          unroutedSince ??= performance.now();
+          if (!recycled && performance.now() - unroutedSince >= NOT_LISTENING_RECYCLE_MS) {
+            const why = `Vercel's router answered SANDBOX_NOT_LISTENING for ${since(unroutedSince)} ms while it listened`;
+            if (await recycle(sbx, why)) {
+              recycled = true;
+              steps.add("recycled a session the router didn't reach");
+              sbx = null;
+              break;
+            }
           }
+        } else {
+          unroutedSince = undefined;
+        }
+        if (state.kind === "opening" && !steps.has(OPENING_STEP)) {
+          steps.add(OPENING_STEP);
+          console.info(
+            `jazz: vercel(): core ${name} is opening its store (its process launched ${state.upSeconds} s ago); waiting for it to listen`,
+          );
+        }
+        sbx = await getRunning();
+        if (sbx) {
+          base = sbx.domain(VERCEL_CORE_PORT);
+          // A core that runs, or a start under way, needs no other start.
+          if (state.kind === "down" || state.kind === "unknown") await startServer(sbx);
         }
       }
       if (ok && sbx) {
         // An instance of a newer deployment restarts an older server once;
         // an older instance uses whatever newer server it finds.
         const running = await runningVersion(sbx);
-        if (!running || !newerVersion(version, running)) return { sbx, base };
+        if (!running || !newerVersion(version, running)) return woke(sbx, base);
         if (restarted) {
           throw new Error(`vercel(): core ${name} still runs ${running}, not ${version}`);
         }
         restarted = true;
+        steps.add(`restarted ${running} on ${version}`);
         await startServer(sbx);
         while (performance.now() < deadline) {
           const now = await runningVersion(sbx);
           if (now && !newerVersion(version, now) && (await healthy(base, 1_000, healthFails))) {
-            return { sbx, base };
+            return woke(sbx, base);
           }
           // The older core stays up for the deployments still using it.
           const failure = await startError(sbx);
@@ -1311,6 +1532,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         }
       }
       if (performance.now() > deadline) {
+        if (lastState?.kind === "opening") {
+          throw new Error(
+            `vercel(): core ${name} is still opening its store: its process launched ${lastState.upSeconds} s ago and doesn't listen yet; ` +
+              `gave up waiting after ${since(t0)} ms, and the core keeps opening (log: /data/server.log)`,
+          );
+        }
         throw new Error(
           `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})` +
             (lastTransient ? `; its last start failed: ${lastTransient}` : ""),
@@ -1375,9 +1602,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           return live;
         }
         if (live && unreachable()) {
-          // Its `/health` would pass again: start a fresh session instead.
+          // Its `/health` would pass again: start a fresh session instead,
+          // unless another waiter already did, or its core doesn't listen
+          // (then the wake below waits for it).
+          const why = `${unreached!.count} connections in ${Date.now() - unreached!.since} ms ended without reaching the core, which answers /health`;
           unreached = undefined;
-          await stopSession(live.sbx);
+          await recycle(live.sbx, why);
         }
         const before = live?.sbx.currentSession().startedAt.getTime();
         const { sbx, base } = await wake();

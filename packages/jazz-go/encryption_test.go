@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // memoryStore is a private store in memory, as a host's would be over a file.
@@ -243,10 +245,12 @@ func TestCancelledEncryptedOpenReleasesCallbacksAfterClose(t *testing.T) {
 		ffi.openEncrypted, ffi.close = originalOpen, originalClose
 	})
 	var provider, store uint64
+	entered := make(chan struct{})
 	allowOpen := make(chan struct{})
 	closed := make(chan struct{})
 	ffi.openEncrypted = func(_ *byte, _, tokenCtx, _, storeCtx uintptr, _ *uintptr) uintptr {
 		provider, store = uint64(tokenCtx), uint64(storeCtx)
+		close(entered)
 		<-allowOpen
 		return 1
 	}
@@ -261,58 +265,69 @@ func TestCancelledEncryptedOpenReleasesCallbacksAfterClose(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// The open is cancelled while the native open runs; Open waits for it
+	// and closes what it gives before answering.
+	go func() {
+		<-entered
+		cancel()
+		time.Sleep(10 * time.Millisecond)
+		close(allowOpen)
+	}()
 	db, err := open(ctx, Config{
 		Auth:       Token(func(context.Context, TokenReason) (string, error) { return "", nil }),
 		Encryption: &EncryptionConfig{Store: newMemoryStore()},
 	})
-	close(allowOpen)
 	if db != nil || !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled open returned db %v, err %v", db, err)
 	}
 	select {
 	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("native close did not run")
+	default:
+		t.Fatal("native close had not run when Open returned")
 	}
-	defer providers.Delete(provider)
-	defer stores.Delete(store)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		_, hasProvider := providers.Load(provider)
-		_, hasStore := stores.Load(store)
-		if !hasProvider && !hasStore {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	_, hasProvider := providers.Load(provider)
+	_, hasStore := stores.Load(store)
+	if hasProvider || hasStore {
+		t.Error("cancelled open retained its callback registrations")
 	}
-	t.Error("cancelled open retained its callback registrations")
 }
 
 func TestEncryptedShutdownReleasesCallbacksAfterDraining(t *testing.T) {
-	originalCloseWithin := ffi.closeWithin
-	t.Cleanup(func() { ffi.closeWithin = originalCloseWithin })
+	originalCall, originalClose := ffi.call, ffi.close
+	t.Cleanup(func() { ffi.call, ffi.close = originalCall, originalClose })
 	db := &DB{handle: 1, provider: nextProvider.Add(1), store: nextStore.Add(1)}
 	providers.Store(db.provider, TokenProvider(func(context.Context, TokenReason) (string, error) { return "", nil }))
 	stores.Store(db.store, newMemoryStore())
 	defer providers.Delete(db.provider)
 	defer stores.Delete(db.store)
 
-	ffi.closeWithin = func(handle uintptr, timeoutMs uint64, _ *uintptr) int32 {
-		if handle != 1 || timeoutMs != uint64(DefaultShutdownTimeout.Milliseconds()) {
-			t.Errorf("draining close received handle %d, timeout %d ms", handle, timeoutMs)
-		}
+	registered := func(stage string) {
 		if _, ok := providers.Load(db.provider); !ok {
-			t.Error("token provider was released before native close returned")
+			t.Errorf("token provider was released before native %s returned", stage)
 		}
 		if _, ok := stores.Load(db.store); !ok {
-			t.Error("private store was released before native close returned")
+			t.Errorf("private store was released before native %s returned", stage)
 		}
+	}
+	ffi.call = func(handle uintptr, method, args *byte, _ *uintptr) uintptr {
+		want := fmt.Sprintf(`{"timeoutMs":%d}`, DefaultShutdownTimeout.Milliseconds())
+		if m, a := goString(uintptr(unsafe.Pointer(method))), goString(uintptr(unsafe.Pointer(args))); handle != 1 || m != "close" || a != want {
+			t.Errorf("draining close received handle %d, %s %s", handle, m, a)
+		}
+		registered("close")
 		return 0
+	}
+	freed := false
+	ffi.close = func(handle uintptr) {
+		registered("free")
+		freed = handle == 1
 	}
 
 	if err := db.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if !freed {
+		t.Error("shutdown did not free the handle")
 	}
 	if _, ok := providers.Load(db.provider); ok {
 		t.Error("shutdown retained its token provider")

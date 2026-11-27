@@ -34,9 +34,9 @@ has the full list and the reasons.
 - Permissions decide who gets keys. Anyone who can update a space row can add any account as a
   member, and so can your backend. Members' devices then send that account the keys.
 - The backend can't read or compute on encrypted columns. Do that on a client.
-- A Cloudflare Worker backend can serve an encrypted app only through a native Jazz core, with
-  `remote()`. A Durable Object core can't host an encrypted schema, and a Worker can't run a
-  client that holds keys.
+- A Cloudflare Worker backend can serve an encrypted app with a Durable Object core
+  (`durableObjects()`) or a native Jazz core (`remote()`). The Worker holds no keys and can't run
+  a client that holds keys.
 
 ## Members and keys
 
