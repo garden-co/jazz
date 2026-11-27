@@ -17,8 +17,7 @@
     "incremental": true,
     "paths": {
       "@/*": ["./*"],
-      "fumadocs-mdx:collections/*": ["./.source/*"],
-      "jazz-tools/backend": ["./lib/private-store-sample-backend.ts"]
+      "fumadocs-mdx:collections/*": ["./.source/*"]
     },
     "plugins": [
       {
