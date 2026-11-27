@@ -32,12 +32,26 @@ async function files(dir: string): Promise<string[]> {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
-/** Which of `secrets` occur in `bytes`, as UTF-8 or as hex. */
+/**
+ * `secret`'s base64 (and base64url) as it reads inside a longer encoding, at
+ * each of the three byte alignments: without the characters its neighbours
+ * share.
+ */
+function base64Forms(secret: string): string[] {
+  return [0, 1, 2].flatMap((offset) => {
+    const encoded = Buffer.concat([Buffer.alloc(offset), Buffer.from(secret)])
+      .toString("base64")
+      .slice(Math.ceil((offset * 4) / 3), -4);
+    return [encoded, encoded.replaceAll("+", "-").replaceAll("/", "_")];
+  });
+}
+
+/** Which of `secrets` occur in `bytes`, as UTF-8, hex or base64. */
 function leaked(bytes: Buffer, secrets: string[]): string[] {
-  return secrets.filter(
-    (secret) =>
-      bytes.includes(Buffer.from(secret)) ||
-      bytes.includes(Buffer.from(Buffer.from(secret).toString("hex"))),
+  return secrets.filter((secret) =>
+    [Buffer.from(secret).toString("hex"), secret, ...base64Forms(secret)].some((form) =>
+      bytes.includes(Buffer.from(form)),
+    ),
   );
 }
 
@@ -144,7 +158,9 @@ describe.skipIf(!hostBuilt && !process.env.CI)("an encrypted app on a Durable Ob
     });
 
     // Alice removes Bob and rotates. Bob is still sent her next write (tasks
-    // are readable to all here), but holds no key for it.
+    // are readable to all here), but holds no key for it. Opening task reads
+    // to everyone means this test doesn't exercise the membership read rule
+    // (`allowedTo.read(project)`): only the rotated key keeps Bob out.
     expect(await alice.db.encryption.members.remove(space, bob.account)).toBe(1);
     await alice.db.encryption.keys.rotate(space);
     const afterId = crypto.randomUUID();
@@ -154,7 +170,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("an encrypted app on a Durable Ob
     await expect
       .poll(async () => (await alice.db.all(app.tasks.where({ id: afterId }))).map((r) => r.title))
       .toEqual([afterRemoval]);
-    let seen: Array<{ id: string }> = [];
+    let seen: Array<{ id: string; title: string }> = [];
     await expect
       .poll(
         async () => {
@@ -166,23 +182,38 @@ describe.skipIf(!hostBuilt && !process.env.CI)("an encrypted app on a Durable Ob
       .toContain(afterId);
     expect(seen.map((row) => row.id)).not.toContain(afterId);
     expect(unreadableRows(seen)).toEqual([
-      expect.objectContaining({ table: "tasks", id: afterId, column: "title" }),
+      expect.objectContaining({
+        table: "tasks",
+        id: afterId,
+        column: "title",
+        code: "key-unavailable",
+      }),
     ]);
+    // He still opens the titles written before the rotation.
+    expect(titles(seen)).toEqual({ [smallId]: small, [largeId]: large });
 
-    // The large title's ciphertext reached the bucket. Nothing there, nor in
-    // either object's SQLite, holds a title in the clear.
+    // The large title's ciphertext reached the bucket. Nothing there (bodies,
+    // keys, custom and HTTP metadata), nor in either object's SQLite, holds a
+    // title in the clear.
     const secrets = [small, `large title ${tag}`, afterRemoval];
     // Miniflare types its R2 binding with the Workers types, which these
     // Node tests don't load: the two calls used here.
     const bucket = (await core.miniflare.getR2Bucket("JAZZ_BLOBS")) as unknown as {
       list(): Promise<{ objects: Array<{ key: string }> }>;
-      get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
+      get(key: string): Promise<{
+        arrayBuffer(): Promise<ArrayBuffer>;
+        customMetadata?: Record<string, string>;
+        httpMetadata?: Record<string, unknown>;
+      } | null>;
     };
     const blobs = async () => (await bucket.list()).objects;
     await expect.poll(async () => (await blobs()).length, { timeout: 30_000 }).toBeGreaterThan(0);
     for (const { key } of await blobs()) {
-      const body = Buffer.from(await (await bucket.get(key))!.arrayBuffer());
+      const object = (await bucket.get(key))!;
+      const body = Buffer.from(await object.arrayBuffer());
       expect(leaked(body, secrets), `R2 ${key}`).toEqual([]);
+      const metadata = JSON.stringify([key, object.customMetadata, object.httpMetadata]);
+      expect(leaked(Buffer.from(metadata), secrets), `R2 ${key} metadata`).toEqual([]);
     }
     await alice.session.close();
     await bob.session.close();
