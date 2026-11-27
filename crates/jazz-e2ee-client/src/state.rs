@@ -797,6 +797,9 @@ pub(crate) struct Shared {
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
     pub(crate) outbox: RefCell<VecDeque<Report>>,
+    /// The missing keys (table, space, version) the outbox holds a report
+    /// of: one report each, however many rows or evictions name it.
+    pub(crate) queued_missing: RefCell<BTreeSet<(String, SpaceAddress, String)>>,
     /// Test observation: every report a hook made since the test last
     /// took them, before delivery and de-duplication.
     #[cfg(any(test, feature = "testing"))]
@@ -862,6 +865,7 @@ impl Shared {
             .into(),
             random: RefCell::new(random),
             outbox: Default::default(),
+            queued_missing: Default::default(),
             #[cfg(any(test, feature = "testing"))]
             taken: Default::default(),
             published: Default::default(),
@@ -1018,8 +1022,25 @@ impl Shared {
     pub(crate) fn report(&self, report: Report) {
         #[cfg(any(test, feature = "testing"))]
         push_bounded(&mut self.taken.borrow_mut(), report.clone(), MAX_REPORTS);
+        let mut queued = self.queued_missing.borrow_mut();
+        if let Report::MissingKey {
+            table,
+            space,
+            epoch_id,
+        } = &report
+            && !queued.insert((table.clone(), unchecked_address(space), epoch_id.clone()))
+        {
+            return;
+        }
         let mut outbox = self.outbox.borrow_mut();
-        push_bounded(&mut outbox, report, MAX_REPORTS);
+        if let Some(Report::MissingKey {
+            table,
+            space,
+            epoch_id,
+        }) = push_bounded(&mut outbox, report, MAX_REPORTS)
+        {
+            queued.remove(&(table, unchecked_address(&space), epoch_id));
+        }
     }
 
     /// Notes that `column` of the row opened under a refused creation's key
@@ -1066,6 +1087,7 @@ impl Shared {
     /// listeners, each distinct report once, and `extra` too.
     pub(crate) fn flush(&self, extra: Vec<Report>) {
         let mut outbox = std::mem::take(&mut *self.outbox.borrow_mut());
+        self.queued_missing.borrow_mut().clear();
         outbox.extend(extra);
         let mut deliver = Vec::new();
         let listeners = {
@@ -1122,6 +1144,7 @@ impl Shared {
     pub(crate) fn reset_reports(&self) {
         let withdrawn = self.published.borrow_mut().reset();
         *self.outbox.borrow_mut() = withdrawn.into();
+        self.queued_missing.borrow_mut().clear();
     }
 
     /// Withdraws the reports of `space` with one of `codes`.

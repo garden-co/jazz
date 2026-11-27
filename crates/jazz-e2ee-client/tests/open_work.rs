@@ -1906,3 +1906,59 @@ fn every_wake_republishes_the_next_deadline() {
         session.close();
     });
 }
+
+/// Contract: a missing key's report is queued once however many rows of it
+/// a full queue evicts: with 20,000 rows of the second key, the first key's
+/// report is not pushed out, and both keys are reported.
+///
+/// ```text
+/// bob ──Y: 1 row, X: 20,000 rows queued (Y and 10,000 X rows evicted)
+///     ──settle X ──► listeners hear Y and X
+/// ```
+#[test]
+fn many_evictions_of_one_key_do_not_push_out_another_keys_report() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, _spaces) = bob_holding(&server, dir.path(), 1);
+        let holder = alice.open_quiet(&server);
+        let keyless = holder.space_of(&server, &[alice.id(), bob.id()]);
+        holder.close();
+        let session = bob.open_quiet(&server);
+        let heard = observe_reports(&session.client);
+        let x = session.address(keyless);
+        let y = SpaceAddress {
+            scope_id: x.scope_id.clone(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let epoch = uuid::Uuid::new_v4().to_string();
+        session
+            .client
+            .queue_missing_for_test("notes", &y, &epoch, 1);
+        session.client.queue_missing_for_test(
+            "notes",
+            &x,
+            &epoch,
+            2 * jazz_e2ee_client::MAX_REPORTS,
+        );
+        let _ = drive(
+            &server,
+            &[&session.db],
+            session.client.settle_reads(&session.db),
+        );
+        let missing: BTreeSet<_> = heard
+            .borrow()
+            .iter()
+            .filter_map(|report| match report {
+                jazz_e2ee_client::Report::MissingKey { space, .. } => Some(space.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            missing.contains(&y),
+            "the first key's report was pushed out"
+        );
+        assert!(missing.contains(&x));
+        session.close();
+    });
+}
