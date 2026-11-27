@@ -51,13 +51,13 @@ Plain columns keep everything Jazz 2.0 can do with them: indexes, ordering, rang
 
 ## Performance by design
 
-For Jazz 2.0, we built E2EE with performance in mind from the start. In our benchmarks, with warm clients, where the keys are already loaded in memory, encryption adds about 3µs per encrypted value read, and about 10µs per write.
+For Jazz 2.0, we built E2EE with performance in mind from the start. The figures below come from our own local runs of a native client, comparing an encrypted app with the same app in plaintext, for a space with 10 members.
 
 The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is opening a space, because that means unsealing the newest key the device was given, and opening older space keys. This is a small up-front cost the first time a space is accessed, which grows with the number of key rotations, not with how much data the space holds.
 
-Adding E2EE costs a few milliseconds at app start-up natively for typical accounts (up to around 60ms in the browser for a returning device). The first time a device loads each space, it also fetches and verifies the space's keys. That takes less than 100ms natively for typical spaces, and a few hundred milliseconds the first time a browser opens a space.
+A device that opens the app again pays about 13ms more at start-up than it would without encryption. The first time a new device opens the app, it also fetches and verifies the keys it needs, which adds about 65–70ms. Creating a new account adds a one-off registration of about 130ms. Ten key rotations barely change any of these numbers. (Browser figures will follow.)
 
-After that, reading encrypted data costs a few microseconds per value more than plaintext, so even a 200-row result is less than a millisecond slower than a comparable plaintext query.
+After that, reading encrypted data costs about half a millisecond more per query than plaintext, whether the query returns one row or 200, and a write costs about 0.2ms more.
 
 ## No homegrown cryptography
 
@@ -78,7 +78,7 @@ That's important today for use cases that require specific algorithms, or for ap
 
 For now, adding alternative crypto implementations requires a custom build, but the interfaces are designed to make this easy, and there's [an example of how you could do this](https://github.com/garden-co/jazz/blob/main/crates/jazz-e2ee/examples/custom_mechanism.rs) to get you (or your agent) going.
 
-_Note: as a last minute addition, we also added 'commitments' before releasing. Each device and recovery root commits to a post-quantum signing key (SLH-DSA, a hash-based signature scheme standardised as FIPS 205), so a future version can still verify an account's history if classical signatures are ever broken. This holds as long as SHA-2 does._
+_Note: as a last minute addition, we also added 'commitments' before releasing. Each recovery root commits to a post-quantum signing key (SLH-DSA, a hash-based signature scheme standardised as FIPS 205), so a future version can still verify an account's history if classical signatures are ever broken. This holds as long as SHA-2 does._
 
 ## Limitations
 
