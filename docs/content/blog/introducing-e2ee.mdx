@@ -51,11 +51,11 @@ Plain columns keep everything Jazz 2.0 can do with them: indexes, ordering, rang
 
 ## Performance by design
 
-For Jazz 2.0, we built E2EE with performance in mind from the start. The figures below come from our own local runs of a native client and of Chromium, comparing an encrypted app with the same app in plaintext, for a space with 10 members.
+For Jazz 2.0, we built E2EE with performance in mind from the start. The figures below come from our own local runs of a native client, comparing an encrypted app with the same app in plaintext, for a space with 10 members.
 
-The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is opening a space, because that means unsealing the newest key the device was given, and opening older space keys. This is a small up-front cost the first time a new device opens a space: about 65–70ms in a native client, and about 280ms in the browser, where most of it goes to recovering the account. It grows with the number of key rotations, not with how much data the space holds.
+The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is setting up keys. This is a small up-front cost, paid once per device: the first time an account opens the app on a new device, getting its keys ready adds about 90ms. Opening a space for the first time means unsealing the newest key the device was given, and opening older space keys. That work grows with the number of key rotations, not with how much data the space holds, and it overlaps start-up, so it adds only a few milliseconds.
 
-After that, the cost is small. A device that opens the app again pays about 13ms more at start-up in a native client. Reading encrypted data costs about half a millisecond more per query than plaintext, whether the query returns one row or 200 (under 3ms in the browser), and a write costs about 0.2ms more.
+After that, the cost is small. A device that opens the app again pays about 12–14ms more at start-up. Reading encrypted data costs under a millisecond more per query than plaintext, whether the query returns one row or 200, and a write costs about 0.2ms more.
 
 ## No homegrown cryptography
 
