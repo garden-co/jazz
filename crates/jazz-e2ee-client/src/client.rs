@@ -734,6 +734,15 @@ impl E2eeClient {
             .collect()
     }
 
+    /// Makes the background pass's step of `space` wait forever (`None`:
+    /// none), as one held up by a slow server would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hold_background_step_of_for_test(&self, space: Option<&jazz::e2ee::SpaceAddress>) {
+        self.shared.member_watch.borrow_mut().hold_background_space =
+            space.map(crate::state::unchecked_address);
+    }
+
     /// Makes the next `count` listings of the background pass's spaces
     /// fail, as a failed read of the local store would.
     #[doc(hidden)]

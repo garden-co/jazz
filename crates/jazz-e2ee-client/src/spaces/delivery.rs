@@ -498,7 +498,15 @@ impl E2eeClient {
             .work
             .push(("background", space.clone()));
         #[cfg(any(test, feature = "testing"))]
-        if self.shared.member_watch.borrow().hold_background {
+        if self.shared.member_watch.borrow().hold_background
+            || self
+                .shared
+                .member_watch
+                .borrow()
+                .hold_background_space
+                .as_ref()
+                == Some(space)
+        {
             std::future::pending::<()>().await;
         }
         let mut held = step.held;

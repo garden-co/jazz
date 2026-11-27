@@ -408,7 +408,7 @@ impl Opened {
             block_on(self.db.tick()).unwrap();
             block_on(server.tick()).unwrap();
         }
-        panic!("not done: {work:?}");
+        panic!("not done: {work:?} {}", self.runtime.state());
     }
 
     /// Starts pulling the rows of `table` into this device's store, as an
@@ -1439,6 +1439,235 @@ fn a_slow_background_step_does_not_hold_back_calls_or_reads() {
             work.iter()
                 .any(|entry| *entry == ("acquire", rotated.clone()))
         });
+        session.close();
+    });
+}
+
+impl Opened {
+    /// Runs the runtime and the sync for `turns` turns.
+    fn turn(&self, server: &Db, turns: usize) -> Vec<(&'static str, SpaceAddress)> {
+        let mut work = Vec::new();
+        for _ in 0..turns {
+            self.runtime.drive();
+            work.extend(self.work());
+            block_on(self.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        work
+    }
+
+    /// Calls `deviceId` and waits for its answer, driving the runtime.
+    fn device_id(&self, server: &Db) -> Vec<(&'static str, SpaceAddress)> {
+        let mut work = Vec::new();
+        let mut call = self
+            .runtime
+            .call("deviceId".to_owned(), serde_json::json!({}));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..200 {
+            if let std::task::Poll::Ready(answer) = call.as_mut().poll(&mut cx) {
+                answer.unwrap();
+                return work;
+            }
+            work.extend(self.turn(server, 1));
+        }
+        panic!("deviceId was not answered");
+    }
+}
+
+/// Contract: a background retry that comes due while another space's step
+/// is stalled pre-empts it, and the runtime keeps a deadline for both: the
+/// retry runs, and the stalled space completes once its server answers.
+///
+/// ```text
+/// bob ──step S1 ✗ (retry in 2 s) ──► step S2 stalls
+///     ──2 s later: S1 again (S2 put back) ──► S2 answers ──► carol served
+/// ```
+#[test]
+fn a_due_retry_pre_empts_a_stalled_step() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        let (retried, stalled) = (session.address(spaces[0]), session.address(spaces[1]));
+        let told = Rc::new(std::cell::RefCell::new(Vec::new()));
+        session.bridge.set_store_wake(Some(Box::new({
+            let told = told.clone();
+            move |wake| {
+                if let StoreWake::Deadline(delay) = wake {
+                    told.borrow_mut().push(delay);
+                }
+            }
+        })));
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.fail_acquisitions_for_test(1);
+        session
+            .client
+            .hold_background_step_of_for_test(Some(&stalled));
+        let acquisitions = |work: &[(&'static str, SpaceAddress)]| {
+            work.iter()
+                .filter(|entry| **entry == ("acquire", retried.clone()))
+                .count()
+        };
+        let mut work = session.drive_until(&server, |work| {
+            acquisitions(work) == 1
+                && work
+                    .iter()
+                    .any(|entry| *entry == ("background", stalled.clone()))
+        });
+        work.extend(session.turn(&server, 200));
+        assert_eq!(acquisitions(&work), 1);
+        let last = told.borrow().last().copied().flatten();
+        assert!(
+            last.is_some_and(|delay| delay <= std::time::Duration::from_secs(3)),
+            "the host was told {last:?}, not the retry"
+        );
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
+        session.drive_until(&server, |work| acquisitions(work) == 1);
+        session.client.hold_background_step_of_for_test(None);
+        session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        session.close();
+    });
+}
+
+/// Contract: a step stopped again and again goes behind the others: with a
+/// slow first space and repeated local calls, the other spaces still
+/// complete.
+///
+/// ```text
+/// bob ──step S1 stalls ──► deviceId ×6 ──► S2, S3 run ──► carol served
+/// ```
+#[test]
+fn repeated_calls_do_not_starve_the_other_spaces() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        let session = bob.open_quiet(&server);
+        let slow = session.address(spaces[0]);
+        session.client.hold_background_step_of_for_test(Some(&slow));
+        let mut work = session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("background", slow.clone()))
+        });
+        for _ in 0..6 {
+            work.extend(session.device_id(&server));
+            work.extend(session.turn(&server, 50));
+        }
+        // The slow space was stopped by the calls and ran again, behind the
+        // others, which completed.
+        let runs = work
+            .iter()
+            .filter(|entry| **entry == ("background", slow.clone()))
+            .count();
+        assert!(runs >= 2, "{work:?}");
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 1);
+        session.close();
+    });
+}
+
+/// The `delivery-failed` reports of `space` a listener heard.
+fn delivery_failures(
+    heard: &std::cell::RefCell<Vec<jazz_e2ee_client::Report>>,
+    space: &SpaceAddress,
+) -> Vec<String> {
+    heard
+        .borrow()
+        .iter()
+        .filter_map(|report| match report {
+            jazz_e2ee_client::Report::DeliveryFailed {
+                space: failed,
+                reason,
+            } if failed == space => Some(reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Contract: a step that runs past its bound has failed: it is told
+/// `delivery-failed` once (its reason a timeout), however often it times
+/// out again.
+///
+/// ```text
+/// bob ──step S1 stalls ──► 61 s: timed out (told) ──► retry stalls ──► 61 s: timed out
+/// ```
+#[test]
+fn a_step_past_its_bound_is_told_failed_once() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let session = bob.open_quiet(&server);
+        let heard = observe_reports(&session.client);
+        let slow = session.address(spaces[0]);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.hold_background_step_of_for_test(Some(&slow));
+        let steps = |work: &[(&'static str, SpaceAddress)]| {
+            work.iter()
+                .filter(|entry| **entry == ("background", slow.clone()))
+                .count()
+        };
+        for _ in 0..2 {
+            session.drive_until(&server, |work| steps(work) == 1);
+            session.turn(&server, 50);
+            session
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            session.turn(&server, 50);
+            // Past the retry's wait.
+            session
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(3));
+        }
+        let reasons = delivery_failures(&heard, &slow);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("60 s"), "{reasons:?}");
+        session.close();
+    });
+}
+
+/// Contract: a step's bound counts from its first run: being stopped and
+/// put back does not renew it.
+///
+/// ```text
+/// bob ──step S1 stalls ──► (20 s, deviceId) ×4 ──► timed out at 80 s
+/// ```
+#[test]
+fn stopping_a_step_does_not_renew_its_bound() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let session = bob.open_quiet(&server);
+        let heard = observe_reports(&session.client);
+        let slow = session.address(spaces[0]);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.hold_background_step_of_for_test(Some(&slow));
+        session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("background", slow.clone()))
+        });
+        for _ in 0..4 {
+            session
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(20));
+            let _ = session.device_id(&server);
+            session.turn(&server, 50);
+        }
+        let reasons = delivery_failures(&heard, &slow);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
         session.close();
     });
 }

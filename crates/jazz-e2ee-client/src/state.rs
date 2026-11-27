@@ -719,6 +719,9 @@ pub(crate) struct MemberWatch {
     /// Tests: the background pass's steps wait forever.
     #[cfg(any(test, feature = "testing"))]
     pub hold_background: bool,
+    /// Tests: the background pass's step of this space waits forever.
+    #[cfg(any(test, feature = "testing"))]
+    pub hold_background_space: Option<SpaceAddress>,
     /// Tests: how many of the next full acquisitions fail.
     #[cfg(any(test, feature = "testing"))]
     pub fail_acquisitions: u32,
@@ -955,9 +958,11 @@ impl Shared {
 /// entry of a space that is not backed off: a backed-off space's entries
 /// are the rows its reads are unresolved for (re-queued ahead of newer
 /// ones), so they go last. When every entry is backed off, `missing` itself
-/// is dropped, never silently: the report a row left out for want of a key
-/// gets is returned for it (a later read queues it again). That covers an
-/// entry the settle loop re-queues, which no read reports again.
+/// is dropped. A dropped entry is never dropped silently: it will not be
+/// fetched, and a read reports a missing key only once its fetch settles,
+/// so the report a row left out for want of a key gets is returned for it
+/// (a later read queues it again). That covers an entry the settle loop
+/// re-queues, which no read reports again.
 #[must_use]
 fn enqueue_missing(
     queue: &mut VecDeque<Missing>,
@@ -974,7 +979,13 @@ fn enqueue_missing(
             .position(|entry| !backoff.contains_key(&entry.space))
         {
             Some(oldest) => {
-                queue.remove(oldest);
+                let evicted = queue.remove(oldest).expect("a queued entry");
+                queue.push_back(missing);
+                return Some(Report::MissingKey {
+                    table: evicted.table,
+                    space: db_address(&evicted.space),
+                    epoch_id: evicted.epoch_id,
+                });
             }
             None => {
                 return Some(Report::MissingKey {
@@ -1329,13 +1340,37 @@ mod missing_queue_tests {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for (space, n) in [("held", 1), ("other", 2), ("other", 3), ("other", 4)] {
-            assert_eq!(
-                enqueue_missing(&mut queue, &backoff, entry(space, n), 3),
-                None
-            );
+            // The fourth evicts the second, which is reported (see
+            // `an_evicted_entry_is_reported`).
+            let _ = enqueue_missing(&mut queue, &backoff, entry(space, n), 3);
         }
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 3, 4]);
+    }
+
+    /// An entry a full queue evicts is never dropped silently: it will not
+    /// be fetched, and its read reports a missing key only once a fetch
+    /// settles, so the report it would get is returned for it. A unit test:
+    /// filling the queue through reads takes 10,000 rows.
+    #[test]
+    fn an_evicted_entry_is_reported() {
+        let backoff = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        for n in 1..=3 {
+            assert_eq!(
+                enqueue_missing(&mut queue, &backoff, entry("first", n), 3),
+                None
+            );
+        }
+        let evicted = entry("first", 1);
+        assert_eq!(
+            enqueue_missing(&mut queue, &backoff, entry("second", 4), 3),
+            Some(Report::MissingKey {
+                table: evicted.table.clone(),
+                space: db_address(&evicted.space),
+                epoch_id: evicted.epoch_id,
+            })
+        );
     }
 
     /// When every queued entry is backed off, the newcomer is dropped.
