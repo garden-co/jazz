@@ -63,7 +63,7 @@ fn loosening_an_encrypted_json_schema_requires_a_new_column() {
     let loose = PlainType::new(ColumnType::Json { schema: None }, false);
     let error = encryption_transition(&restricted, &restricted, &loose).unwrap_err();
     assert!(
-        error.contains("docs/e2ee/encrypting-existing-data"),
+        error.contains("docs/e2ee/limits#queries-and-schema"),
         "{error}"
     );
 }
@@ -348,7 +348,7 @@ fn unknown_encryption_keys_are_refused_in_the_app_file() {
                 && error.contains(&format!("unknown key `{key}`"))
                 && error.contains("this object takes")
                 && error.contains(if on_column { "`type`" } else { "`scope`" })
-                && !error.contains("docs/e2ee/encrypting-existing-data"),
+                && !error.contains("docs/e2ee/limits#queries-and-schema"),
             "{error}"
         );
     }
@@ -414,7 +414,7 @@ fn nested_encrypted_type_objects_refuse_unknown_fields() {
                     error.contains(&format!("tables.tasks.encryption.columns.notes.{path}"))
                         && error.contains(&format!("unknown key `{key}`"))
                         && error.contains("this object takes")
-                        && !error.contains("docs/e2ee/encrypting-existing-data"),
+                        && !error.contains("docs/e2ee/limits#queries-and-schema"),
                     "{error}"
                 );
             }

@@ -3594,7 +3594,7 @@ fn a_retyped_encrypted_column_names_both_types_as_the_file_writes_them() {
         "messages.text: the encrypted column's type changes from \"string\", which its cells \
          were sealed under, to \"int\"; only append-only enum widening can pin the old type \
          with sealedType; to encrypt existing data, copy it into a new encrypted table \
-         (docs/e2ee/encrypting-existing-data)"
+         (docs/e2ee/limits#queries-and-schema)"
     );
     let retyped = refusal(
         &column(ColumnType::Text, true),
