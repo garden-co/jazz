@@ -1491,7 +1491,10 @@ describe("encryption on Node, end to end", () => {
     const jazz = await createJazz({
       app: plain,
       permissions: plainPermissions as never,
-      store: sqlite({ path: `${await mkdtemp(`${tmpdir()}/e2ee-plain-`)}/core.sqlite` }),
+      store: sqlite({
+        path: `${await mkdtemp(`${tmpdir()}/e2ee-plain-`)}/core.sqlite`,
+        blobs: "sqlite",
+      }),
       authenticate: acceptDeviceAccounts,
     }).ready();
     cleanups.push(() => jazz.close());

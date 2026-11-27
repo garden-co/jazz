@@ -62,7 +62,7 @@ async function serve(version: Files, dir: string, port = 0) {
   const jazz = await createJazz({
     app: version.app,
     permissions: version.permissions,
-    store: sqlite({ path: `${dir}/core.sqlite` }),
+    store: sqlite({ path: `${dir}/core.sqlite`, blobs: "sqlite" }),
     authenticate: acceptDeviceAccounts,
   }).ready();
   const server: Server = createServer((req, res) =>
