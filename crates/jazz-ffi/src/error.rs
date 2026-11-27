@@ -428,7 +428,7 @@ mod tests {
             }),
             11
         );
-        // Interrupted shipped in 2.0.0-beta.4 at 12; Encryption follows it.
+        // Interrupted shipped in 2.0.0-beta.2 at 12; Encryption follows it.
         assert_eq!(
             index(JazzError::Interrupted {
                 interruption: reason(),

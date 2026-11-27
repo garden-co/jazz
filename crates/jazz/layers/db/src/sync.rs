@@ -4387,6 +4387,23 @@ pub struct SubscriberId {
     generation: u64,
 }
 
+/// A parked preflight its wait took to seal and send
+/// (`Db::send_parked_advice`): dropped unsent, with the wait, it cancels the
+/// request, so nothing of it is kept or sent.
+#[cfg(feature = "e2ee-client")]
+struct UnsentAdvice<'a> {
+    inner: &'a Store,
+    id: u64,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Drop for UnsentAdvice<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .session_control(SessionControl::CancelAdvice(self.id));
+    }
+}
+
 /// A preflight parked for sealing: where it goes, what, and for whom.
 #[cfg(feature = "e2ee-client")]
 type ParkedAdvice = (
@@ -11312,6 +11329,24 @@ impl Db {
         let Some((port, action, acting)) = parked else {
             return;
         };
+        // Taken from the parked ones, the request is this wait's alone until
+        // it is sent: a wait dropped before then cancels it.
+        let unsent = UnsentAdvice {
+            inner: &self.inner,
+            id,
+        };
+        #[cfg(any(test, feature = "testing"))]
+        if self.inner.pausing_advice_seal.replace(false) {
+            let mut yielded = false;
+            poll_fn(|cx| {
+                if std::mem::replace(&mut yielded, true) {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+        }
         let action = self.sealed_advice(*action).await.map(Box::new);
         self.inner.session_control(SessionControl::RequestAdvice {
             id,
@@ -11320,12 +11355,21 @@ impl Db {
             acting,
             parked: true,
         });
+        std::mem::forget(unsent);
     }
 
     /// Resolve an outstanding request as `Unknown`: its waiter is removed,
     /// a request not yet sent is never sent, and a late answer is ignored.
     pub fn cancel_permission_advice_request(&self, id: u64) {
         self.inner.session_control(SessionControl::CancelAdvice(id));
+    }
+
+    /// How many permission advice requests this client still keeps: parked,
+    /// waiting for their answer, or answered and not yet taken.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn advice_requests_kept_for_test(&self) -> usize {
+        self.inner.client().map_or(0, |client| client.advice.len())
     }
 
     /// Dry-run `action` as `identity` (`None`: a trusted link) and roll it
