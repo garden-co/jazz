@@ -466,6 +466,46 @@ class StagePlanTest {
     }
 
     @Test
+    fun cancelling_or_timing_out_ends_a_wait_on_the_server(): Unit = runBlocking {
+        open("user-waits").use { jazz ->
+            val show = showNamed(jazz, "Waits")
+            val tasks = Tasks.where(Tasks.showId eq show.id)
+            jazz.disconnect()
+            fun task(title: String) = jazzapp.NewTask(showId = show.id, title = title, status = TaskStatus.Todo, rank = 1.0)
+            suspend fun timesOut(what: String, call: suspend () -> Unit) {
+                val started = System.nanoTime()
+                val thrown = runCatching { kotlinx.coroutines.withTimeout(300) { call() } }.exceptionOrNull()
+                kotlin.test.assertIs<kotlinx.coroutines.TimeoutCancellationException>(thrown, what)
+                val ms = (System.nanoTime() - started) / 1_000_000
+                kotlin.test.assertTrue(ms < 3_000, "$what: returned after $ms ms")
+            }
+            // A write the server hasn't seen, for the waits to wait on.
+            jazz.insert(Tasks, task("Pending"))
+            timesOut("a sync wait") { jazz.waitForSync(tools.jazz.WriteTier.Global) }
+            timesOut("a remote read") { jazz.all(tasks, tools.jazz.ReadTier.Remote) }
+
+            // Cancelling, not only a timeout, ends the wait.
+            val waiting = launch(kotlinx.coroutines.Dispatchers.Default) { jazz.waitForSync(tools.jazz.WriteTier.Global) }
+            kotlinx.coroutines.delay(200)
+            val started = System.nanoTime()
+            waiting.cancel()
+            kotlinx.coroutines.withTimeout(3_000) { waiting.join() }
+            kotlin.test.assertTrue((System.nanoTime() - started) / 1_000_000 < 3_000)
+
+            // A global write committed locally stays queued: it says so, and reaches the server later.
+            val queued = runCatching {
+                kotlinx.coroutines.withTimeout(300) { jazz.insert(Tasks, task("Queued"), tools.jazz.WriteTier.Global) }
+            }.exceptionOrNull()
+            kotlin.test.assertIs<tools.jazz.JazzException.StillQueued>(queued)
+
+            // The app is fine afterwards.
+            jazz.reconnect()
+            jazz.waitForSync(tools.jazz.WriteTier.Global)
+            assertEquals(setOf("Pending", "Queued"), jazz.all(tasks, tools.jazz.ReadTier.Remote).map { it.title }.toSet())
+        }
+    }
+
+    @Test
     fun plain_transactions_merge_and_serializable_ones_conflict(): Unit = runBlocking {
         open("user-9").use { jazz ->
             val show = showNamed(jazz, "Concurrent")

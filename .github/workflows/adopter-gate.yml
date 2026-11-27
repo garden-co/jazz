@@ -268,7 +268,9 @@ jobs:
   t4:
     needs: inputs
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 15
+    # 15 min of checks plus a preview's teardown: up to 10 min for the removed deployment to stop answering, up to 10
+    # for the core to stay gone (it can be resumed for minutes after), about 1 for each wait's end and the Drive.
+    timeout-minutes: 36
     # Serialized only in production (the long-lived core). A preview has its own core (ci-<run id>; t4.sh FAILs a CI
     # preview without T4_TEARDOWN=1, which would share cli-previews) and a skip touches nothing, so those runs go side
     # by side: a test dispatch never queues a real RC's t4. (Environment vars such as T4_TEARDOWN are empty here:
@@ -345,7 +347,8 @@ jobs:
     needs: [inputs, checks, t9-swift, t4]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    # Up to 45 min for the artifacts run to finish (its manifest comes last; RC 45312279311's was queued), then the verdict.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: dev/adopter-gate }
@@ -371,14 +374,18 @@ jobs:
             EXPECT: "${{ needs.inputs.outputs.expect_sha }}",
           }
         run: |
-          mkdir -p results/provenance; out=results/provenance/provenance.txt; m="$RUNNER_TEMP/release-manifest"; end=$(( $(date +%s) + 240 ))
-          until timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null; do
-            if [ "$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json status --jq .status)" = completed ] || [ "$(date +%s)" -ge $end ]; then
-              timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null && break
-              echo "FAIL provenance: run $RUN has no release-manifest (finished without one, or not within 4 min)" > "$out"; exit 0
-            fi
-            sleep 15
+          mkdir -p results/provenance; out=results/provenance/provenance.txt; m="$RUNNER_TEMP/release-manifest"
+          # Wait for the artifacts run to finish (up to 45 min, polled every 30 s): its manifest is uploaded last, and
+          # a queued run can finish long after this gate (RC 45312279311). Then it must have succeeded, and have one.
+          end=$(( $(date +%s) + 45 * 60 ))
+          until [ "$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json status --jq .status 2>/dev/null)" = completed ]; do
+            [ "$(date +%s)" -ge $end ] && { echo "FAIL provenance: artifacts run $RUN hasn't finished after 45 min, so its release-manifest can't be checked" > "$out"; cat "$out"; exit 0; }
+            sleep 30
           done
+          conclusion=$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
+          [ "$conclusion" = success ] || { echo "FAIL provenance: artifacts run $RUN ended $conclusion" > "$out"; cat "$out"; exit 0; }
+          for i in 1 2 3; do timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null && break; rm -rf "$m"; sleep $((i * 10)); done
+          [ -f "$m/manifest.json" ] || { echo "FAIL provenance: artifacts run $RUN succeeded without a downloadable release-manifest" > "$out"; cat "$out"; exit 0; }
           sha=$(node -p 'require(process.argv[1]).sha' "$m/manifest.json")
           if [ -n "$EXPECT" ] && [ "$sha" = "$EXPECT" ]; then echo "PASS provenance: run $RUN's release manifest names $EXPECT" > "$out"
           else echo "FAIL provenance: run $RUN's release manifest is for $sha, not '${EXPECT}'" > "$out"; fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fails unless each given Kotlin sources jar holds sources only: no native
 # library, no bigger than sources can be, and with the bindings uniffi-bindgen
-# generated. `-PnativeLibs` once made the JVM one 54 MB (jazz#6020).
+# generated (at the root, or under a Kotlin Multiplatform source set: jvmMain/, androidMain/). `-PnativeLibs` once made the JVM one 54 MB (jazz#6020).
 #
 # usage: dev/scripts/check-kotlin-sources-jar.sh <sources jar>...
 set -euo pipefail
@@ -21,7 +21,7 @@ for jar in "$@"; do
     echo "$jar is $bytes bytes: too big to be sources only (limit $max_bytes)" >&2
     exit 1
   fi
-  grep -qx 'uniffi/jazz_ffi/jazz_ffi.kt' <<<"$entries" || {
+  grep -Eqx '([A-Za-z]+Main/)?uniffi/jazz_ffi/jazz_ffi.kt' <<<"$entries" || {
     echo "$jar lacks the generated bindings, uniffi/jazz_ffi/jazz_ffi.kt" >&2
     exit 1
   }

@@ -1615,7 +1615,7 @@ fn convert_policy_with_native_select_inherits(
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     match expr {
-        PolicyExpr::Inherits { max_depth: _, .. }
+        PolicyExpr::Inherits { .. }
         | PolicyExpr::InheritsReferencing { .. }
         | PolicyExpr::InheritsFrom { .. }
         | PolicyExpr::Exists { .. }

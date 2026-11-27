@@ -226,29 +226,6 @@
       ],
       "outputs": ["android/**", "ios/**", "lib/**", "src/**"]
     },
-    "test": {
-      "dependsOn": ["^build"],
-      "cache": false,
-      "passThroughEnv": [
-        "TMPDIR",
-        "RUSTC",
-        "RUSTC_WRAPPER",
-        "SCCACHE_*",
-        "CI",
-        "JAZZ_TEST_SEALED_TOOLS_DIST",
-        "JAZZ_CORRECTNESS_ARTIFACT_RUN",
-        "JAZZ_RN_TEST_BRIDGE",
-        "JAZZ_CORRECTNESS_WASM_PACKAGE",
-        "JAZZ_CORRECTNESS_NAPI_BINDING",
-        "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
-        "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
-        "JAZZ_CORRECTNESS_CONSUMER_TOKEN"
-      ]
-    },
-    "rn-device-acceptance#test": {
-      "dependsOn": [],
-      "cache": false
-    },
     "rn-device-acceptance#build": {
       "dependsOn": [],
       "cache": false

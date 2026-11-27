@@ -50,6 +50,17 @@ pub enum JazzError {
         served: String,
         reason: String,
     },
+    /// Contract 2, only for a call made with a `CallControl`: it was cut
+    /// short, by `interruption` (`"cancelled"` or `"timeout"`). `queued`
+    /// when it committed a write locally, which may still apply: its
+    /// refusal, if one comes, reaches mutation errors and the next
+    /// waitForSync. Not queued, it did nothing the host must account for.
+    #[error("{reason}")]
+    Interrupted {
+        interruption: String,
+        queued: bool,
+        reason: String,
+    },
     /// Contract 2: encryption refused the operation (`code` names the
     /// refusal), or hit an I/O failure (`io`). Last, so the variants before
     /// it keep their indexes.
@@ -100,6 +111,7 @@ impl JazzError {
             Self::Replaced { .. } => "replaced",
             Self::NoUser { .. } => "noUser",
             Self::BundleMismatch { .. } => "bundleMismatch",
+            Self::Interrupted { .. } => "interrupted",
         }
     }
 }
@@ -147,6 +159,11 @@ pub(crate) enum JazzErrorKind {
         status: String,
         reason: String,
     },
+    Interrupted {
+        interruption: String,
+        queued: bool,
+        reason: String,
+    },
 }
 
 impl From<JazzErrorKind> for JazzError {
@@ -163,6 +180,15 @@ impl From<JazzErrorKind> for JazzError {
             JazzErrorKind::Unsynced { pending, reason } => Self::Unsynced { pending, reason },
             JazzErrorKind::Replaced(reason) => Self::Replaced { reason },
             JazzErrorKind::NoUser { status, reason } => Self::NoUser { status, reason },
+            JazzErrorKind::Interrupted {
+                interruption,
+                queued,
+                reason,
+            } => Self::Interrupted {
+                interruption,
+                queued,
+                reason,
+            },
             JazzErrorKind::BundleMismatch {
                 own,
                 served,
@@ -246,6 +272,16 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
             E::App(_) | E::Config(_) | E::Decode { .. } | E::Refused(_) => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
+            E::Interrupted { reason } => Self::Interrupted {
+                interruption: reason.as_str().to_owned(),
+                queued: false,
+                reason: message,
+            },
+            E::StillQueued { reason } => Self::Interrupted {
+                interruption: reason.as_str().to_owned(),
+                queued: true,
+                reason: message,
+            },
             // Another open app holds the store (deleteClientStorage): a
             // refusal, not a failure to retry.
             E::StoreHeld(_) => Self::Refused(message),
@@ -392,13 +428,22 @@ mod tests {
             }),
             11
         );
+        // Interrupted shipped in 2.0.0-beta.4 at 12; Encryption follows it.
+        assert_eq!(
+            index(JazzError::Interrupted {
+                interruption: reason(),
+                queued: false,
+                reason: reason()
+            }),
+            12
+        );
         assert_eq!(
             index(JazzError::Encryption {
                 code: reason(),
                 reason: reason(),
                 io: false
             }),
-            12
+            13
         );
     }
 

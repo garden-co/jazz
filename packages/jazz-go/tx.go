@@ -2,6 +2,7 @@ package jazz
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -44,8 +45,10 @@ func Mergeable() TxOption { return func(o *txOptions) { o.serializable = false }
 func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = tier } }
 
 // Tx runs fn in a transaction. It commits when fn returns nil, and rolls
-// back when fn returns an error (which Tx returns) or panics (Tx rolls
-// back and panics again).
+// back when fn returns an error (which Tx returns), panics (Tx rolls
+// back and panics again) or doesn't return (runtime.Goexit, t.Fatal).
+// When ctx ends before the commit, Tx rolls back and returns ctx.Err(),
+// also while it begins.
 //
 // A Tx is mergeable, as TS's db.transaction: its writes merge with
 // concurrent ones by Jazz's normal rules, and its commit never fails with
@@ -64,21 +67,42 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 		Tx string `json:"tx"`
 	}
 	begin := map[string]any{"serializable": o.serializable}
-	if err := db.call(ctx, "txBegin", begin, &begun); err != nil {
+	// A begin that ctx's end returned from is rolled back once it answers.
+	rollBack := func(text string, err error) {
+		var late struct {
+			Tx string `json:"tx"`
+		}
+		if err == nil && json.Unmarshal([]byte(text), &late) == nil && late.Tx != "" {
+			_ = db.call(context.Background(), "txRollback", map[string]any{"tx": late.Tx}, nil)
+		}
+	}
+	if err := db.callOr(ctx, "txBegin", begin, &begun, rollBack); err != nil {
 		return err
 	}
 	if begun.Tx == "" {
 		return &Error{Kind: KindNotSupported, Message: "transactions are not supported by this jazz-ffi"}
 	}
 	tx := &Tx{db: db, id: begun.Tx, tier: o.tier}
+	// rollback ends the transaction, at once if ctx has ended (the
+	// rollback then finishes behind).
+	rollback := func() error {
+		if ctx.Err() != nil {
+			go tx.end(context.Background(), "txRollback")
+			return nil
+		}
+		return tx.end(context.WithoutCancel(ctx), "txRollback")
+	}
+	// A panic, or runtime.Goexit (t.Fatal), in fn rolls back too.
+	returned := false
 	defer func() {
-		if p := recover(); p != nil {
+		if !returned {
 			tx.end(context.WithoutCancel(ctx), "txRollback")
-			panic(p)
 		}
 	}()
-	if err := fn(tx); err != nil {
-		if rbErr := tx.end(context.WithoutCancel(ctx), "txRollback"); rbErr != nil {
+	err = fn(tx)
+	returned = true
+	if err != nil {
+		if rbErr := rollback(); rbErr != nil {
 			return fmt.Errorf("%w (and rolling back: %v)", err, rbErr)
 		}
 		return err
@@ -86,7 +110,7 @@ func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (
 	// A ctx cancelled while fn ran would stop the commit before it reached
 	// Jazz and leave the transaction open: roll it back instead.
 	if err := ctx.Err(); err != nil {
-		tx.end(context.WithoutCancel(ctx), "txRollback")
+		rollback()
 		return err
 	}
 	// The commit is sent even if ctx is cancelled from here on, so the

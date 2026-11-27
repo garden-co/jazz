@@ -41,13 +41,12 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
-test("Turbo preserves the private admission capability for nested concurrent consumers", () => {
+test("Jazz Tools builds exclude the private test admission capability", () => {
   const turbo = JSON.parse(read("turbo.json"));
   const privateCapability = [
     "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
     "JAZZ_CORRECTNESS_CONSUMER_TOKEN",
   ];
-  assert.deepEqual(turbo.tasks.test.passThroughEnv.slice(-2), privateCapability);
   for (const name of privateCapability) {
     assert.equal(
       turbo.tasks["jazz-tools#build"].passThroughEnv.includes(name),

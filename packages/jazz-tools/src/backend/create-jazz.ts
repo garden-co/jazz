@@ -12,8 +12,10 @@ import { declaresEncryption, keylessBackend } from "../encryption/node-host.js";
 import { backendNative, inProcessCore } from "./backend-native.js";
 import {
   BINDING_ORIGIN,
+  bindingCredential,
   bindingTransport,
   networkTransport,
+  refuseRedirect,
   type CoreBinding,
   type CoreTransport,
   type CoreWebSocket,
@@ -164,8 +166,11 @@ export type JazzStore =
       readonly url: string;
       /** The core's Durable Object binding, in this Worker. */
       readonly binding?: CoreBinding;
-      /** The Worker's `JAZZ_CORE_SECRET`. */
-      readonly secret: string;
+      /**
+       * The Worker's `JAZZ_CORE_SECRET`. Absent for a binding without one:
+       * the object hands its own to this backend over RPC.
+       */
+      readonly secret?: string;
     }
   | {
       readonly kind: "vercel";
@@ -292,6 +297,12 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * that stays the same across deployments. The object keeps its own app id,
  * which this backend asks it for when the store opens.
  *
+ * With `binding` (the core in this Worker, e.g. `env.JAZZ`), `secret` is
+ * optional: without one the object hands this backend its own secret over
+ * RPC, which only code holding the binding can call. It is
+ * `JAZZ_CORE_SECRET` if the Worker sets one, else a secret the object made
+ * on its first start and keeps in its SQLite.
+ *
  * Large values' bytes go where the core's Worker puts them, so there is no
  * `blobs` option here: bind an R2 bucket to that Worker as `JAZZ_BLOBS`
  * (recommended), or they stay in the object's SQLite.
@@ -307,7 +318,7 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
 export function durableObjects(
   options: { lifecycle?: DurableObjectLifecycle } & (
     | { url: string; secret: string; appId?: never }
-    | { binding: CoreBinding; secret: string; appId?: never }
+    | { binding: CoreBinding; secret?: string; appId?: never }
   ),
 ): Extract<JazzStore, { kind: "durableObjects" }> {
   if (typeof options === "object" && options !== null && "appId" in options) {
@@ -331,12 +342,12 @@ export function durableObjects(
         "durableObjects(): binding must be the Worker's JazzCore Durable Object binding, e.g. env.JAZZ",
       );
     }
-    checkCoreSecret(secret);
+    if (secret !== undefined) checkCoreSecret(secret);
     return {
       kind: "durableObjects",
       url: BINDING_ORIGIN,
       binding,
-      secret,
+      ...(secret !== undefined && { secret }),
       ...(lifecycle && { lifecycle }),
     };
   }
@@ -388,14 +399,17 @@ function checkCoreSecret(secret: unknown): void {
  */
 async function durableObjectCore(store: Extract<JazzStore, { kind: "durableObjects" }>) {
   const transport = store.binding ? bindingTransport(store.binding) : networkTransport();
+  // A binding without a secret: the object's own, which only a binding reaches.
+  const secret = store.secret ?? (await bindingCredential(store.binding!));
   let response: Response;
   let body: { appId?: unknown } | undefined;
   try {
     response = await transport.fetch(`${store.url}/app`, {
-      headers: { [CREDENTIAL_HEADER]: store.secret },
+      headers: { [CREDENTIAL_HEADER]: secret },
       redirect: "manual",
       signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
     });
+    await refuseRedirect(store.url, `${store.url}/app`, response, "durableObjects()");
     body = (await response.json().catch(() => undefined)) as typeof body;
   } catch (error) {
     if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
@@ -418,7 +432,7 @@ async function durableObjectCore(store: Extract<JazzStore, { kind: "durableObjec
     );
   }
   return {
-    ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
+    ...remote({ url: store.url, appId: body.appId, secret }),
     transport,
     lifecycle: store.lifecycle,
   };
@@ -1589,7 +1603,8 @@ function openRemoteCore(
     adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
     backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
     async handle(method, path, headers, body, access = "session") {
-      const response = await transport.fetch(`${target.url}${path}`, {
+      const requestUrl = `${target.url}${path}`;
+      const response = await transport.fetch(requestUrl, {
         method,
         // The request carries this backend's credential: never to another
         // URL. ("manual", not "error", which workerd doesn't implement.)
@@ -1599,10 +1614,7 @@ function openRemoteCore(
         ),
         ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
       });
-      if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
-        await response.body?.cancel();
-        throw new TypeError(`the Jazz core at ${target.url} answered with a redirect`);
-      }
+      await refuseRedirect(target.url, requestUrl, response);
       const replyHeaders: string[][] = [];
       response.headers.forEach((value, name) => {
         // fetch already decoded the body.

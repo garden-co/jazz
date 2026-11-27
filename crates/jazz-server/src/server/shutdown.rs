@@ -178,7 +178,7 @@ impl ShutdownController {
 
         self.inner
             .active_websockets
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
                 (active < max_websockets).then_some(active + 1)
             })
             .map_err(|_| WebSocketEntryRefused::AtCapacity)?;

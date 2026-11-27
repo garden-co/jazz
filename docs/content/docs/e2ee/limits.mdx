@@ -10,9 +10,10 @@ languageTabs: backend
   or combine an aggregate with a filter on an encrypted column. `count()` includes every matching
   row the server returns, even if this device is still waiting for a key to open its encrypted cells.
   While keys are pending, `count()` can exceed `all().length` for the same filter.
-- **Cloudflare Workers can serve encrypted apps.** Connect the Worker backend to a native Jazz core
-  with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
-  deploying an encrypted schema to a Durable Object core are unsupported.
+- **Cloudflare Workers can serve encrypted apps.** The Worker backend reaches its core through
+  `durableObjects()` (a Durable Object core, which keeps your encryption declarations as a native
+  core does) or `remote()` (a native Jazz core). Either way the Worker holds no keys. Running a
+  key-holding client on the Worker is unsupported.
 - **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
 - **Appending variants to an encrypted enum needs a new schema version.** Add a schema change that
   creates a new version, such as adding an index, then run `jazz-tools migrations create`. It keeps

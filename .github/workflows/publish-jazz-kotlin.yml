@@ -30,8 +30,6 @@ on:
       - dev/scripts/kotlin-android-sdk.sh
       - packages/jazz-kotlin/build.gradle.kts
       - packages/jazz-kotlin/settings.gradle.kts
-      - packages/jazz-kotlin-android/build.gradle.kts
-      - packages/jazz-kotlin-android/settings.gradle.kts
   workflow_dispatch:
     inputs:
       mode:

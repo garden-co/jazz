@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
-          rust-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          rust-targets: ${{ matrix.target }}
           setup-node: "false"
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
@@ -93,7 +93,7 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
-          tool: cargo-zigbuild@0.20.1
+          tool: cargo-zigbuild@0.24.1
 
       - name: Build server binary
         run: cargo zigbuild -p jazz-tools --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}
@@ -817,17 +817,47 @@ jobs:
           restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall1
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+      - if: steps.stall1.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall2
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+      - if: steps.stall2.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall3
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+      - if: steps.stall3.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           name: jazz-wasm-backend-pkg
           path: crates/jazz-wasm/backend/pkg
@@ -847,12 +877,33 @@ jobs:
       - name: Smoke-test the release jazz-wasm Durable Object entry
         run: pnpm --filter jazz-wasm test:durable-object-release
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: jazz-napi-loader
+          path: crates/jazz-napi
+      - if: steps.stall4.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           name: jazz-napi-loader
           path: crates/jazz-napi
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          pattern: jazz-napi-binding-*
+          path: crates/jazz-napi/artifacts
+          merge-multiple: true
+      - if: steps.stall5.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
@@ -1286,23 +1337,73 @@ jobs:
             echo "JAZZ_NATIVE_RELAY_SOURCE_REVISION=$(git rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall6
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           name: pkg-jazz-tools
           path: packages/jazz-tools
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - if: steps.stall6.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall7
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           name: pkg-jazz-wasm
           path: crates/jazz-wasm
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - if: steps.stall7.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall8
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           name: pkg-jazz-napi
           path: crates/jazz-napi
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - if: steps.stall8.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall9
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           name: pkg-jazz-rn
           path: crates/jazz-rn
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - if: steps.stall9.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: stall10
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+      - if: steps.stall10.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 5
         with:
           name: pkg-create-jazz
           path: packages/create-jazz

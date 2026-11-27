@@ -263,8 +263,8 @@ extension Client {
         _ type: R.Type, id: Jazz.ID, column: String, from base: String, to text: String
     ) async throws {
         try await Self.typed {
-            try await Self.run {
-                try self.handle.editText(table: R.table, id: id, column: column, editedFrom: base, text: text)
+            try await self.controlled { handle in
+                try handle.editText(table: R.table, id: id, column: column, editedFrom: base, text: text)
             }
         }
     }
@@ -284,8 +284,8 @@ extension Client {
     func edit(_ table: String, id: Jazz.ID, patchJSON: String?, edits: [Edit]) async throws {
         try await Self.typed {
             let editsJSON = try Coding.json(JSONValue.array(edits.map { $0.json() }))
-            try await Self.run {
-                try self.handle.edit(table: table, id: id, patchJson: patchJSON, editsJson: editsJSON)
+            try await self.controlled { handle in
+                try handle.edit(table: table, id: id, patchJson: patchJSON, editsJson: editsJSON)
             }
         }
     }
@@ -312,7 +312,7 @@ extension Client {
     // typed-throws overloads calling a same-named generic helper.
     func textHandle<R: Updatable>(_ row: R, column name: String) async throws -> JazzText<R> {
         let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
-        guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
+        guard let found = try await self.controlled( { handle in try handle.one(queryJson: json) }) else {
             throw JazzError.refused("no row \(row.id) in \(R.table)")
         }
         let object = try Coding.decode([String: JSONValue].self, found)

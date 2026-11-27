@@ -73,9 +73,11 @@ pub struct Jazz {
     /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
     /// returns once a write is committed locally.
     pub(crate) durability: Option<DurabilityTier>,
-    /// Ends this handle's calls' waits on the server once true
+    /// Ends this handle's calls' waits on the server once any reads true
     /// ([`Jazz::ending_waits_with`]).
-    pub(crate) waits_end: Option<watch::Receiver<bool>>,
+    pub(crate) waits_end: Vec<watch::Receiver<bool>>,
+    /// Cuts this handle's calls short ([`Jazz::controlled`]).
+    pub(crate) control: Option<crate::CallControl>,
 }
 
 #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
@@ -314,7 +316,8 @@ impl Jazz {
             scope: None,
             for_user: false,
             durability: None,
-            waits_end: None,
+            waits_end: Vec::new(),
+            control: None,
         })
     }
 
@@ -343,6 +346,7 @@ impl Jazz {
             for_user: true,
             durability: self.durability,
             waits_end: self.waits_end.clone(),
+            control: self.control.clone(),
         }
     }
 
@@ -368,39 +372,76 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
+        let control = self.control.clone();
+        if let Some(reason) = control.as_ref().and_then(crate::CallControl::interruption) {
+            // Cut short before it started: it does nothing.
+            return Err(Error::Interrupted { reason });
+        }
         let (reply, answer) = oneshot::channel();
         let scope = self.scope.clone();
-        let waits_end = self.waits_end.clone();
+        // Dropping this call (as `tokio::time::timeout` drops it) ends its
+        // waits on the server on the client's thread: the job ends, what it
+        // wrote may still apply, and a refusal of it is still reported.
+        let (mut dropped, call_ends) = crate::control::EndOnDrop::new();
+        let mut waits_end = self.waits_end.clone();
+        waits_end.push(call_ends);
+        waits_end.extend(control.as_ref().map(crate::CallControl::signal));
+        let timer = control.clone();
         let job: Job = Box::new(move |client| {
             let client = match scope {
                 Some(session) => client.for_session((*session).clone()),
                 None => client,
             };
-            let client = match waits_end {
-                Some(ends) => client.ending_waits_with(ends),
-                None => client,
-            };
+            let client = waits_end
+                .into_iter()
+                .fold(client, |client, ends| client.ending_waits_with(ends));
             Box::pin(async move {
+                // The control's deadline, kept on this thread.
+                let timer = timer.map(|control| tokio::task::spawn_local(control.time_out()));
                 // A panic in the job is its caller's error, not the end of
                 // the client: the other jobs and the client run on.
                 // Calling `job` happens inside the guard too: a closure
                 // that panics before returning its future is caught.
-                let result = std::panic::AssertUnwindSafe(async move { job(client).await })
-                    .catch_unwind()
+                let refusals = crate::writes::Heard::default();
+                let result = refusals
+                    .collect(
+                        std::panic::AssertUnwindSafe(async move { job(client).await })
+                            .catch_unwind(),
+                    )
                     .await
                     .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
-                let _ = reply.send(result);
+                if let Some(timer) = timer {
+                    timer.abort();
+                }
+                // A caller that stopped waiting didn't hear what its
+                // durable waits reported (`Heard`).
+                let committed = refusals.committed();
+                refusals.replied(reply.send((result, committed)).is_ok());
             })
         });
         self.commands
             .send(Command::Run(job))
             .map_err(|_| self.stopped())?;
-        match answer.await.map_err(|_| self.stopped())? {
+        let (answer, committed) = answer.await.map_err(|_| self.stopped())?;
+        dropped.disarm();
+        let interrupted = control.as_ref().and_then(crate::CallControl::interruption);
+        match (answer, interrupted) {
+            // A wait on the server, ended by the call's control.
+            (
+                Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)),
+                Some(reason),
+            ) => {
+                if committed {
+                    Err(Error::StillQueued { reason })
+                } else {
+                    Err(Error::Interrupted { reason })
+                }
+            }
             // A wait on the server, ended as the client (or handle) closes.
-            Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)) => {
+            (Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)), _) => {
                 Err(self.stopped())
             }
-            answer => answer,
+            (answer, _) => answer,
         }
     }
 
@@ -454,8 +495,19 @@ impl Jazz {
     /// lives on. Not public API.
     #[doc(hidden)]
     pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
-        self.waits_end = Some(ends);
+        self.waits_end.push(ends);
         self
+    }
+
+    /// This handle, with its calls cut short by `control`: cancelled, or
+    /// at its deadline. A view on the same app (its clones share the
+    /// control); a binding makes one per suspending call. See
+    /// [`crate::CallControl`].
+    pub fn controlled(&self, control: crate::CallControl) -> Jazz {
+        Jazz {
+            control: Some(control),
+            ..self.clone()
+        }
     }
 
     /// Whether an end user's client still runs: it didn't sign out, and
@@ -518,8 +570,13 @@ impl Jazz {
     /// Inserts a row. Returns it as stored, once committed locally (or, on
     /// a [`Jazz::durable`] handle, once it reached that tier).
     ///
-    /// Like every write, it is sent to the client's thread when called:
-    /// dropping the returned future doesn't undo or cancel it.
+    /// Like every write, it is sent to the client's thread when called.
+    /// Dropping the returned future (as `tokio::time::timeout` does) ends
+    /// its wait for a tier on that thread, but doesn't undo the write: once
+    /// committed locally it may still apply, and a refusal of it is
+    /// reported to [`Jazz::mutation_errors`] and the next
+    /// [`Jazz::wait_for_sync`]. To learn that a call was cut short, make it
+    /// through [`Jazz::controlled`] instead.
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
@@ -603,8 +660,8 @@ impl Jazz {
     /// writes are flushed and the store closed.
     ///
     /// The 30 seconds are not a hard limit: work that doesn't yield isn't
-    /// interrupted, and shutdown also waits for the store to close and for
-    /// a host name lookup in progress. It doesn't wait for the token
+    /// interrupted, and shutdown also waits for the store to close. It
+    /// doesn't wait for a host name lookup in progress, nor for the token
     /// provider's own threads or tasks.
     ///
     /// On a handle acting for a user ([`Jazz::for_user`], or
@@ -966,7 +1023,9 @@ fn run(
     // gone is the store closed, for `delete_client_storage` to remove (a
     // file it unlinks while SQLite still maps it is a SIGBUS).
     drop(local);
-    drop(runtime);
+    // Without waiting for its blocking tasks: a host name lookup has no
+    // timeout, and none of them holds the store.
+    runtime.shutdown_background();
     drop(store);
     let (result, stopped) = match stopped {
         End::Stopped(result, replies) => (result, replies),
@@ -1293,19 +1352,31 @@ async fn connect_user(
                 .token(TokenReason::Connect)
                 .await?
                 .ok_or(Error::SignedOut)?;
-            let signed_in = backend::sign_in(endpoint, app, &token)
-                .await?
-                .ok_or(Error::SignedOut)?;
-            let mut session = Session::new(&signed_in.identity.issuer, &signed_in.identity.subject)
-                .with_claims(signed_in.claims.clone());
-            session.account_id = Some(signed_in.account);
-            context.account_id = Some(signed_in.account);
-            context.backend_session = Some(session);
-            place.hold(&mut context, Owner::Account(signed_in.account))?;
-            let encryption = plan.device(signed_in.account, None).await?;
-            let client =
-                JazzClient::connect_with(context, Some(connector), Some(token.clone()), encryption)
-                    .await?;
+            let signed_in = match backend::try_sign_in(endpoint, app, &token).await? {
+                backend::SignIn::SignedIn(signed_in) => signed_in,
+                backend::SignIn::NoOne => return Err(Error::SignedOut),
+                backend::SignIn::Refused(error) | backend::SignIn::Failing(error) => {
+                    return Err(error);
+                }
+                backend::SignIn::Unreachable(error) => {
+                    return open_offline(
+                        context, connector, provider, token, endpoint, plan, place, error,
+                    )
+                    .await;
+                }
+            };
+            // Remembered for opening offline later: a store that can't keep
+            // it still opens now.
+            if let Some(root) = &place.root {
+                let _ = crate::remembered::record(
+                    root,
+                    &token,
+                    signed_in.account,
+                    &signed_in.identity.issuer,
+                    &signed_in.identity.subject,
+                    &signed_in.claims,
+                );
+            }
             let user = User {
                 account: signed_in.account,
                 issuer: signed_in.identity.issuer,
@@ -1313,9 +1384,110 @@ async fn connect_user(
                 claims: signed_in.claims,
                 kind: UserKind::Backend,
             };
-            Ok((client, user, Credential::Bearer { provider, token }))
+            let client =
+                connect_bearer(context, connector, &user, &token, plan, place, false).await?;
+            Ok((
+                client,
+                user,
+                Credential::Bearer {
+                    provider,
+                    token,
+                    unverified: None,
+                },
+            ))
         }
     }
+}
+
+/// Opens the bearer's user's store, connecting with `token`; `held`: with
+/// nothing reaching the server until the session releases it.
+async fn connect_bearer(
+    mut context: AppContext,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    user: &User,
+    token: &str,
+    plan: &crate::encryption::Plan,
+    place: &mut Place<'_>,
+    held: bool,
+) -> Result<JazzClient> {
+    let mut session = Session::new(&user.issuer, &user.subject).with_claims(user.claims.clone());
+    session.account_id = Some(user.account);
+    context.account_id = Some(user.account);
+    context.backend_session = Some(session);
+    place.hold(&mut context, Owner::Account(user.account))?;
+    // The device's keys are in its private store here, so an app that
+    // declares encryption opens offline too.
+    let encryption = plan.device(user.account, None).await?;
+    let token = token.to_owned();
+    Ok(if held {
+        JazzClient::connect_with_held(context, connector, token, encryption).await?
+    } else {
+        JazzClient::connect_with(context, Some(connector), Some(token), encryption).await?
+    })
+}
+
+/// The bearer's user, opened with no network: their store as the account
+/// the bearer's `iss`/`sub` last signed in as on this device. The bearer is
+/// not verified, so it only opens a store already here (anyone with the
+/// files can read it). The client reaches the server only once the session
+/// signs the bearer in again as that account; until then nothing uploads,
+/// and writes queue.
+#[allow(clippy::too_many_arguments)]
+async fn open_offline(
+    context: AppContext,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    provider: crate::auth::Bearer,
+    token: String,
+    endpoint: &str,
+    plan: &crate::encryption::Plan,
+    place: &mut Place<'_>,
+    unreachable: String,
+) -> Result<(JazzClient, User, Credential)> {
+    let cannot = |why: &str| {
+        Error::Server(format!(
+            "signing in: {unreachable}; opening offline needs an earlier sign-in with this \
+             bearer's user on this device ({why})"
+        ))
+    };
+    let Some(root) = place.root.clone() else {
+        return Err(cannot("the store is in memory"));
+    };
+    if crate::remembered::token_identity(&token).is_none() {
+        return Err(cannot("the bearer is not a JWT"));
+    }
+    let Some(remembered) = crate::remembered::lookup(&root, &token) else {
+        return Err(cannot("no sign-in remembered"));
+    };
+    if !root
+        .join(remembered.account.0.to_string())
+        .join("jazz.sqlite")
+        .exists()
+    {
+        return Err(cannot("their store is gone"));
+    }
+    let user = User {
+        account: remembered.account,
+        issuer: remembered.issuer,
+        subject: remembered.subject,
+        claims: remembered.claims,
+        kind: UserKind::Backend,
+    };
+    let app = context.app_id;
+    let client = connect_bearer(context, connector, &user, &token, plan, place, true).await?;
+    let unverified = crate::session::Unverified {
+        endpoint: endpoint.to_owned(),
+        app,
+        root,
+    };
+    Ok((
+        client,
+        user,
+        Credential::Bearer {
+            provider,
+            token,
+            unverified: Some(unverified),
+        },
+    ))
 }
 
 #[allow(dead_code)]

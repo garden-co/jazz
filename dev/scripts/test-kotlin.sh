@@ -13,6 +13,9 @@ docs_example=examples/docs/todo-client-kotlin
 # checks they're current.
 
 source dev/scripts/kotlin-toolchain.sh
+# The JVM target only: a runner's ANDROID_HOME would otherwise configure
+# jazz-kotlin's Android target (dev/scripts/test-kotlin-android.sh's) here too.
+export ORG_GRADLE_PROJECT_jazzAndroid=skip
 
 cargo build -p jazz-ffi -p jazz-tools --bin jazz-tools
 # The e2e tests' backend, a test harness (Kotlin is a client): a

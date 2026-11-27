@@ -1391,11 +1391,11 @@ mod core_host {
         /// moved them is refused without it.
         pub fn open(
             storage: ObjectStorage,
-            secret: String,
+            secret: Option<String>,
             schema: Option<String>,
             blobs: Option<bool>,
         ) -> Result<DurableObjectCore, JsValue> {
-            if secret.len() < 32 {
+            if secret.as_ref().is_some_and(|secret| secret.len() < 32) {
                 return Err(js("the core secret must be at least 32 characters"));
             }
             #[cfg(feature = "durable-object-tests")]
@@ -1411,6 +1411,10 @@ mod core_host {
             )))
             .map_err(js)?;
             let app_id = stored_app_id(&durable_object_storage(storage.clone())).map_err(js)?;
+            let secret = match secret {
+                Some(secret) => secret,
+                None => stored_core_secret(&durable_object_storage(storage.clone())).map_err(js)?,
+            };
             let mut this = Self {
                 storage,
                 app_id,
@@ -2437,8 +2441,51 @@ mod core_host {
         Ok(id)
     }
 
+    /// The core secret the object makes on its first open without a
+    /// configured one (`JAZZ_CORE_SECRET`), kept in its own SQL. Only code
+    /// holding the object's binding can read it (`coreCredential`, an RPC
+    /// method), so a backend in the same Worker needs no secret of its own.
+    fn stored_core_secret(storage: &jazz::storage::Storage) -> Result<String, String> {
+        use jazz::storage::OptionalExtension;
+        jazz::db::block_on(
+            storage.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _jazz_host_secret (secret TEXT NOT NULL)",
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let stored = storage
+            .prepare_cached("SELECT secret FROM _jazz_host_secret LIMIT 1")
+            .and_then(|mut statement| {
+                jazz::db::block_on(statement.query_row([], |row| row.get::<_, String>(0)))
+                    .optional()
+            })
+            .map_err(|error| error.to_string())?;
+        if let Some(secret) = stored {
+            return Ok(secret);
+        }
+        // Two v4 UUIDs: 244 random bits, 64 hex characters.
+        let secret = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        jazz::db::block_on(storage.execute(
+            "INSERT INTO _jazz_host_secret (secret) VALUES (?1)",
+            [&secret],
+        ))
+        .map_err(|error| error.to_string())?;
+        Ok(secret)
+    }
+
     #[wasm_bindgen]
     impl DurableObjectCore {
+        /// The secret that admits the app's backend: `JAZZ_CORE_SECRET`, or
+        /// the one the object made (see `stored_core_secret`).
+        #[wasm_bindgen(js_name = coreSecret)]
+        pub fn core_secret(&self) -> String {
+            self.secret.clone()
+        }
+
         /// The app id this object serves (see `stored_app_id`).
         #[wasm_bindgen(js_name = appId)]
         pub fn app_id(&self) -> String {

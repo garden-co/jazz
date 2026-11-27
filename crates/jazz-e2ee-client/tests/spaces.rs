@@ -3166,6 +3166,36 @@ fn observed_removal(server: &Db) -> (Device, uuid::Uuid) {
     (alice, space)
 }
 
+/// Regression for main's session-narrowed sync support (jazz#6356): a
+/// replica keeps every member row of a space it delivers keys for, not
+/// only its reader's own, so alice sees bob's removal by another device and
+/// marks the space for rotation. Narrowed to her own member row, she would
+/// never hear of it, and bob would keep reading new writes.
+///
+/// ```text
+/// alice ──delivers to──► bob
+/// another device ──removes bob──► server ──bob's row deleted──► alice
+/// alice: needs_rotation ✓
+/// ```
+#[test]
+fn a_member_removed_elsewhere_marks_the_space_for_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        let at = space_address(&alice, space);
+        assert!(!alice.client.needs_rotation(&at).unwrap());
+        block_on(server.delete(MEMBERS, member_row(&server, &bob.id()), Default::default()))
+            .unwrap();
+        pump(&server, &alice.db);
+        deliver(&server, &alice, &[], space);
+        assert!(
+            alice.client.needs_rotation(&at).unwrap(),
+            "alice learned of bob's removal and marks the space for rotation"
+        );
+    });
+}
+
 /// Read the ciphertext header at the authority to distinguish the old key
 /// from the successor even though Alice can decrypt both.
 fn note_epoch(server: &Db, note: &jazz::db::WriteHandle) -> Value {

@@ -1,6 +1,6 @@
 {
   "name": "jazz-napi",
-  "version": "2.0.0-beta.1",
+  "version": "2.0.0-beta.4",
   "description": "Native Node.js bindings for Jazz runtime",
   "license": "MIT",
   "repository": {
@@ -16,7 +16,6 @@
     "native-binding.cjs",
     "native-loader.cjs",
     "native-artifact-fingerprint.cjs",
-    "jazz-napi.*.node",
     "jazz-napi.*.manifest.json"
   ],
   "main": "index.cjs",
