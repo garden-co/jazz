@@ -842,7 +842,7 @@ test("an encrypting app's system tables take a session's own writes over its soc
         }),
       );
       socket.send(fixture.testThinHello());
-      assert.deepEqual(await socket.next(), { hello: true });
+      assert.deepEqual(await socket.next(), { hello: true, heartbeat: false });
       socket.send(fixture.testThinSchema(1n, schema));
       assert.deepEqual(await socket.next(), { id: 1, ok: true });
       return socket;
