@@ -652,8 +652,9 @@ pub trait CoreHost {
     /// A new handle on the host's store (a Durable Object's SQL).
     fn store(&self) -> Result<jazz::host::StoreFile, String>;
     /// Open the host's core for `app` on its first schema `genesis`,
-    /// initializing the store and committing `change` and `kept` in one
-    /// transaction (`ServerCore::open_deployment`): no core exists unless
+    /// initializing the store and committing `change`, `kept` and the
+    /// account registry's tables in one transaction, the registry installed
+    /// on the core (`ServerCore::open_deployment`): no core exists unless
     /// that transaction commits.
     fn open_deployment(
         &self,
@@ -663,7 +664,8 @@ pub trait CoreHost {
         kept: KeptValues,
     ) -> Result<crate::runtime::ServerCore, CatalogueApplyError>;
     /// Create the account registry's tables if they are missing, and
-    /// install the registry the account tables' checks read on `core`.
+    /// install the registry the account tables' checks read on `core`, for
+    /// a core opened on a store that already holds a deployment.
     fn install_registry(&self, core: &mut crate::runtime::ServerCore) -> Result<(), String>;
 }
 
@@ -682,10 +684,12 @@ pub fn install_registry(
 /// catalogue and apply its rows, admissions and first-time declarations in
 /// one transaction ([`apply_to_core`]). Without a core yet, the core is
 /// opened on the deployment's first schema with the store's
-/// initialization, the deployment and its first-time declarations
-/// committed together, so a deployment the catalogue or the declaration
-/// checks refuse leaves the store as it was; the account registry is then
-/// installed before the core serves anyone.
+/// initialization, the deployment, its first-time declarations and the
+/// account registry's tables committed together
+/// ([`CoreHost::open_deployment`]), so a deployment the catalogue, the
+/// declaration checks or the registry refuse leaves the store as it was
+/// and no core, and its retry starts afresh; the core serves no one
+/// without the registry.
 pub fn deploy(
     core: &mut Option<crate::runtime::ServerCore>,
     host: &dyn CoreHost,
@@ -711,8 +715,12 @@ pub fn deploy(
         } else {
             CatalogueChange::default()
         };
-        let mut opened = host.open_deployment(deployment.genesis()?, app, change, kept_values)?;
-        install_registry(host, &mut opened).map_err(DeployError::internal)?;
+        let opened = host.open_deployment(deployment.genesis()?, app, change, kept_values)?;
+        // The registry was installed with the transaction that committed,
+        // so this guard holds: nothing fallible runs after the commit.
+        opened
+            .require_account_registry()
+            .map_err(DeployError::internal)?;
         *core = Some(opened);
         return Ok(deployment.staged.response);
     };

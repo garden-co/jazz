@@ -1049,6 +1049,19 @@ impl Owner {
 
 type InitialCatalogue = (CatalogueChange, crate::portable::deployment::KeptValues);
 
+/// Make the account registry's tables in `db`'s store, inside the scope the
+/// caller has open (`HostTables::host_sql` nests a savepoint in it).
+async fn open_registry_tables(db: &Db) -> Result<(), jazz::db::Error> {
+    use jazz::host::HostTables;
+    db.host_sql(&mut async |conn: &jazz::storage::Storage| {
+        crate::portable::accounts::open(conn)
+            .await
+            .map_err(|error| format!("open the account registry: {error}"))
+            .map_err(crate::portable::accounts::storage_error)
+    })
+    .await
+}
+
 #[cfg(feature = "native")]
 fn schema_encrypts<'a>(mut table_names: impl Iterator<Item = &'a str>) -> bool {
     table_names.any(|name| name == jazz::tools::deployment::artifact::system_tables::MEMBERS)
@@ -1088,16 +1101,21 @@ impl Owner {
             }
             _ => None,
         };
-        let mut owner =
-            Self::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
-                match &chunk_store {
-                    Some(choice) if choice.network => config
-                        .with_chunk_store(Arc::clone(&choice.store))
-                        .with_host_chunk_io(),
-                    Some(choice) => config.with_chunk_store(Arc::clone(&choice.store)),
-                    None => config,
-                }
-            })?;
+        let mut owner = Self::open_on(
+            schema,
+            file,
+            any_stored_catalogue,
+            app,
+            initial,
+            false,
+            |config| match &chunk_store {
+                Some(choice) if choice.network => config
+                    .with_chunk_store(Arc::clone(&choice.store))
+                    .with_host_chunk_io(),
+                Some(choice) => config.with_chunk_store(Arc::clone(&choice.store)),
+                None => config,
+            },
+        )?;
         owner.chunk_io = chunk_io;
         // The checks beside the E2EE account tables' policies read the
         // account registry the store keeps beside the rows.
@@ -1123,13 +1141,17 @@ impl Owner {
     /// again. `schema` is current instead when the store has no revision
     /// yet, or (unless `any_stored_catalogue`) none whose catalogue admits
     /// `schema`. `configure` adds the host's chunk store, if any, to the
-    /// store's configuration.
+    /// store's configuration. With `registry_tables`, the account
+    /// registry's tables are made in `initial`'s transaction, for a host
+    /// whose registry lives in this store: the deployment and the registry
+    /// commit together or not at all.
     fn open_on(
         schema: JazzSchema,
         file: StoreFile,
         any_stored_catalogue: bool,
         app: Option<String>,
         initial: Option<InitialCatalogue>,
+        registry_tables: bool,
         configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<Self, CatalogueApplyError> {
         let rows =
@@ -1164,7 +1186,13 @@ impl Owner {
                 file,
                 change,
                 &kept,
-                async |db| crate::portable::deployment::check_stored_columns(db, &kept).await,
+                async |db| {
+                    crate::portable::deployment::check_stored_columns(db, &kept).await?;
+                    if registry_tables {
+                        open_registry_tables(db).await?;
+                    }
+                    Ok(())
+                },
             )),
             None => block_on(Db::open_file(config, file)),
         }
