@@ -51,13 +51,13 @@ Plain columns keep everything Jazz 2.0 can do with them: indexes, ordering, rang
 
 ## Performance by design
 
-For Jazz 2.0, we built E2EE with performance in mind from the start. In our benchmarks, with warm clients, where the keys are already loaded in memory, encryption adds about 3µs per encrypted value read, and less than 10µs per write.
+For Jazz 2.0, we built E2EE with performance in mind from the start. In our benchmarks, with warm clients, where the keys are already loaded in memory, encryption adds about 3µs per encrypted value read, and about 10µs per write.
 
 The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is opening a space, because that means unsealing the newest key the device was given, and opening older space keys. This is a small up-front cost the first time a space is accessed, which grows with the number of key rotations, not with how much data the space holds.
 
-Adding E2EE costs under 10ms at app start-up natively (up to around 60ms in the browser for a returning device). The first time a device loads each space, it also fetches and verifies the space's keys, which takes less than 100ms natively for typical spaces, and less than 50ms for small spaces.
+Adding E2EE costs a few milliseconds at app start-up natively for typical accounts (up to around 60ms in the browser for a returning device). The first time a device loads each space, it also fetches and verifies the space's keys. That takes less than 100ms natively for typical spaces, and a few hundred milliseconds the first time a browser opens a space.
 
-After that, reading encrypted data costs a few microseconds per value more than plaintext, so even a 200-row result is only one or two milliseconds slower than a comparable plaintext query.
+After that, reading encrypted data costs a few microseconds per value more than plaintext, so even a 200-row result is less than a millisecond slower than a comparable plaintext query.
 
 ## No homegrown cryptography
 
