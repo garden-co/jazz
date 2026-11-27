@@ -3,7 +3,12 @@ title: Rivet
 description: Run your app's Jazz core in a Rivet actor.
 ---
 
-In order to run Jazz on Rivet, you run the Jazz core and the Jazz backend as separate processes. The core is a standalone, pure-Rust application provided by the `jazz-rivet` crate. All of Jazz's data lives inside a Rivet actor's embedded SQLite database (except for large values, that can be stored in blob storage directly). The Jazz backend authenticates users and publishes the app and permissions to the actor. Clients connect to the backend's usual `/jazz` endpoint.
+In order to run Jazz on Rivet, you run the Jazz core and the Jazz backend as separate processes. The core is a standalone Rust application provided by the `jazz-rivet` crate. All of Jazz's data lives inside a Rivet actor's embedded SQLite database (except for large values, that can be stored in blob storage). The Jazz backend authenticates users and publishes the app and permissions to the actor. Clients connect to the backend's usual `/jazz` endpoint.
+
+<Callout type="warn" title="Experimental">
+  Jazz on Rivet is experimental. The `rivet()` store and the `jazz-rivet` runner may change in any
+  release, without a deprecation period. Try it, and tell us what breaks.
+</Callout>
 
 ## Running Jazz locally
 
