@@ -58,11 +58,6 @@ import {
   branchViewFromWriteContext,
   decodeSubscriptionDelta,
   effectiveUpdatedAtMs,
-  encodeCellsForPatch,
-  encodeCellsForRow,
-  encodeCellsForStreamingPatch,
-  encodeCellsForStreamingRow,
-  encodeQueryJson,
   openTransactionIdFromOptions,
   parseUuid,
   queryHasArraySubqueries,
@@ -90,16 +85,33 @@ import {
 import {
   FEATURE_THIN_RESULTS,
   decodeThinResponse,
-  encodeThinRequest,
+  encodeAdmittedThinRequest,
   MAX_THIN_MESSAGE_BYTES,
   ThinAssembler,
   thinWireFrames,
   isThinResponse,
   type ThinBody,
   type ThinOp,
+  type ThinRequest,
 } from "./wire.js";
+import {
+  EncryptedGuard,
+  type AdmittedStream,
+  type BeginStreamDescription,
+  type ThinRefusalReason,
+  type ThinRequestDescription,
+} from "./encrypted-guard.js";
+import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
+
+/** @internal What a refusal of an operation on an encrypted column becomes. */
+export type ThinRefusalReview = (
+  refusal: EncryptionNeedsLocalFirstError,
+  inTransaction: boolean,
+) => EncryptionNeedsLocalFirstError;
 
 export interface ThinRuntimeOptions {
+  /** @internal A signed-in client's new spaces add their creator by default. */
+  addCreatorAsMember?: boolean;
   /** WebSocket implementation; the global one by default. */
   WebSocket?: WebSocketConstructor;
   /** Delays between reconnect attempts, in ms; the last one repeats. */
@@ -196,7 +208,7 @@ const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000];
 export const THIN_WRITE_RESEND_WINDOW_MS = 10 * 60_000;
 
 type OneShot = {
-  op: ThinOp;
+  op: ThinRequest;
   resolve(body: ThinBody): void;
   reject(error: Error): void;
   sent: boolean;
@@ -227,9 +239,8 @@ const RESENDABLE_WRITES = new Set<ThinOp["type"]>([
 type LiveQuery = {
   /** The runtime query as the client gave it, for {@link ThinRuntime.liveQueryJsons}. */
   queryJson: string;
-  query: Uint8Array;
-  /** Read options, as the native bindings take them. */
-  options: object;
+  /** Its subscribe request, as the guard admitted it. */
+  subscribe: ThinRequest;
   outputColumns: SubscriptionOutputColumns;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   /** The request id it was last opened under, while open on the server. */
@@ -250,6 +261,9 @@ type OpenTransaction = {
   lost: boolean;
   /** The rows its staged writes touched. */
   rows: WrittenRow[];
+  /** An operation in it touched an encrypted column and was refused: it
+   * can only roll back, and its commit fails with this. */
+  refused?: EncryptionNeedsLocalFirstError;
 };
 
 type Write = {
@@ -343,14 +357,31 @@ export class ThinRuntime implements Runtime {
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
   private authRestoredCallback?: () => void;
+  /** Every request passes it before it is encoded (see `admit`). */
+  private readonly guard: EncryptedGuard;
+  private readonly addCreatorAsMember: boolean;
+  private refusalReason: () => ThinRefusalReason = () => "no-loader";
+  private refusalReview?: ThinRefusalReview;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
+    this.guard = new EncryptedGuard(schema, () => this.refusalReason());
+    this.addCreatorAsMember = options.addCreatorAsMember === true;
     this.schemaBytes = encodeSchema(schema);
     this.WebSocketImpl = options.WebSocket;
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
     this.outageReportMs = options.outageReportMs ?? OUTAGE_REPORT_MS;
     this.author = options.author;
+  }
+
+  /**
+   * @internal How a refusal of an operation on an encrypted column advises
+   * the app: by who opened this runtime's `Db`, and what `review` makes of
+   * it, given whether the operation was in a transaction.
+   */
+  adviseRefusals(reason: () => ThinRefusalReason, review?: ThinRefusalReview): void {
+    this.refusalReason = reason;
+    this.refusalReview = review;
   }
 
   // ---- connection -------------------------------------------------------
@@ -499,8 +530,9 @@ export class ThinRuntime implements Runtime {
 
   private bindSchema(carrier: WebSocketCarrier): void {
     const id = this.nextRequestId++;
+    const request = this.admit({ type: "schema", schema: this.schemaBytes });
     this.oneShots.set(id, {
-      op: { type: "schema", schema: this.schemaBytes },
+      op: request,
       sent: true,
       resolve: (body) => {
         if (this.carrier !== carrier) return;
@@ -529,14 +561,10 @@ export class ThinRuntime implements Runtime {
       // A connection that ends before the answer is retried as a whole.
       reject: () => undefined,
     });
-    this.sendFrame(
-      carrier,
-      encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }),
-      (bytes) => {
-        this.oneShots.delete(id);
-        this.fatal(tooLarge("schema", bytes));
-      },
-    );
+    this.sendFrame(carrier, encodeAdmittedThinRequest(id, request), (bytes) => {
+      this.oneShots.delete(id);
+      this.fatal(tooLarge("schema", bytes));
+    });
   }
 
   /** Send `frame`, in parts when it is over a wire frame; `tooLarge`
@@ -744,13 +772,37 @@ export class ThinRuntime implements Runtime {
 
   // ---- requests ---------------------------------------------------------
 
-  private request(op: ThinOp, id = this.nextRequestId++): Promise<ThinBody> {
+  /**
+   * Classify `request` and encode it: the only way to make a request this
+   * runtime sends. One that touches an encrypted column throws here,
+   * before anything is encoded, queued or recorded, and an open
+   * transaction it belongs to can then only roll back.
+   */
+  private admit(request: BeginStreamDescription): { request: ThinRequest; stream: AdmittedStream };
+  private admit(request: ThinRequestDescription): ThinRequest;
+  private admit(request: ThinRequestDescription | BeginStreamDescription) {
+    try {
+      return request.type === "beginStream" ? this.guard.admit(request) : this.guard.admit(request);
+    } catch (error) {
+      if (error instanceof EncryptionNeedsLocalFirstError) {
+        const id = (request as { transaction?: unknown }).transaction;
+        const transaction =
+          typeof id === "string" ? this.transactions.get(id as OpenTransactionId) : undefined;
+        const refusal = this.refusalReview?.(error, typeof id === "string") ?? error;
+        if (transaction) transaction.refused ??= refusal;
+        throw refusal;
+      }
+      throw error;
+    }
+  }
+
+  private request(op: ThinRequest, id = this.nextRequestId++): Promise<ThinBody> {
     return this.requestWith(op, id).answer;
   }
 
   /** {@link request}, with the request's own record. */
   private requestWith(
-    op: ThinOp,
+    op: ThinRequest,
     id = this.nextRequestId++,
   ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
     if (this.closed)
@@ -782,11 +834,15 @@ export class ThinRuntime implements Runtime {
       oneShot.reject(resendWindowEnded());
       return;
     }
-    const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
-      // Refused here: the server would refuse it.
-      this.oneShots.delete(id);
-      oneShot.reject(tooLarge(oneShot.op.type, bytes));
-    });
+    const sent = this.sendFrame(
+      this.carrier,
+      encodeAdmittedThinRequest(id, oneShot.op),
+      (bytes) => {
+        // Refused here: the server would refuse it.
+        this.oneShots.delete(id);
+        oneShot.reject(tooLarge(oneShot.op.type, bytes));
+      },
+    );
     if (sent) {
       oneShot.sent = true;
       oneShot.firstSentAt ??= Date.now();
@@ -904,12 +960,14 @@ export class ThinRuntime implements Runtime {
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const transaction = openTransactionIdFromOptions(optionsJson);
     if (transaction) this.openTransaction(transaction, "Query setup");
-    const body = await this.request({
-      type: "query",
-      query: encodeQueryJson(coreQueryJson, this.schema),
-      options: readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson) as object,
-      transaction,
-    });
+    const body = await this.request(
+      this.admit({
+        type: "query",
+        queryJson: coreQueryJson,
+        options: readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson) as object,
+        transaction,
+      }),
+    );
     if (body.type !== "rows") throw new Error(`unexpected answer to a query: ${body.type}`);
     const projected = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
     return queryHasArraySubqueries(coreQueryJson) || body.relation
@@ -926,11 +984,15 @@ export class ThinRuntime implements Runtime {
     this.refuseOtherSession(sessionJson, "Subscription");
     assertSupportedReadOptions(tier, optionsJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
+    const subscribe = this.admit({
+      type: "subscribe",
+      queryJson,
+      options: readOptions(tier, queryIncludesDeleted(queryJson), optionsJson) as object,
+    });
     const handle = this.nextHandle++;
     this.liveQueries.set(handle, {
       queryJson,
-      query: encodeQueryJson(queryJson, this.schema),
-      options: readOptions(tier, queryIncludesDeleted(queryJson), optionsJson) as object,
+      subscribe,
       outputColumns: subscriptionOutputColumns(queryJson, this.schema),
       delivered: false,
       resetNext: false,
@@ -964,11 +1026,9 @@ export class ThinRuntime implements Runtime {
     live.callback = undefined;
     if (live.requestId === undefined) return;
     this.liveByRequest.delete(live.requestId);
+    const unsubscribe = this.admit({ type: "unsubscribe", subscription: live.requestId });
     if (this.bound) {
-      void this.request({
-        type: "unsubscribe",
-        subscription: live.requestId,
-      }).catch(() => {
+      void this.request(unsubscribe).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
     } else if (this.carrier) {
@@ -976,11 +1036,7 @@ export class ThinRuntime implements Runtime {
       // behind it. Nobody waits for the answer (its id is unknown here),
       // and a connection that ends first took the live query with it.
       const id = this.nextRequestId++;
-      this.sendFrame(
-        this.carrier,
-        encodeThinRequest(id, { type: "unsubscribe", subscription: live.requestId }),
-        () => undefined,
-      );
+      this.sendFrame(this.carrier, encodeAdmittedThinRequest(id, unsubscribe), () => undefined);
     }
   }
 
@@ -990,19 +1046,15 @@ export class ThinRuntime implements Runtime {
     if (handle === undefined) return;
     live.requestId = id;
     this.liveByRequest.set(id, handle);
-    this.sendFrame(
-      this.carrier,
-      encodeThinRequest(id, { type: "subscribe", query: live.query, options: live.options }),
-      (bytes) => {
-        this.liveByRequest.delete(id);
-        live.requestId = undefined;
-        this.receiveLive(handle, id, {
-          type: "error",
-          code: "TooLarge",
-          message: tooLarge("subscribe", bytes).message,
-        });
-      },
-    );
+    this.sendFrame(this.carrier, encodeAdmittedThinRequest(id, live.subscribe), (bytes) => {
+      this.liveByRequest.delete(id);
+      live.requestId = undefined;
+      this.receiveLive(handle, id, {
+        type: "error",
+        code: "TooLarge",
+        message: tooLarge("subscribe", bytes).message,
+      });
+    });
   }
 
   private receiveLive(handle: number, requestId: number, body: ThinBody): void {
@@ -1046,11 +1098,11 @@ export class ThinRuntime implements Runtime {
     const context = this.writeTarget(writeContext, "Insert");
     const definition = this.definition(table);
     const id = objectId ?? formatUuid(uuidv7());
-    const cells = encodeCellsForRow(definition, values, table);
     const receipt = this.mutate(context, {
       type: "insert",
       table,
-      cells,
+      values,
+      creatorMembership: this.addCreatorAsMember && !skipsCreatorMembership(writeContext),
       options: {
         rowId: parseUuid(id),
         branch: context.branchView?.head,
@@ -1068,11 +1120,12 @@ export class ThinRuntime implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const context = this.writeTarget(writeContext, "Update");
+    this.definition(table);
     return this.mutate(context, {
       type: "update",
       table,
       row: parseUuid(objectId),
-      patch: encodeCellsForPatch(this.definition(table), values),
+      values,
       options: viewOptions(context),
     });
   }
@@ -1084,11 +1137,12 @@ export class ThinRuntime implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const context = this.writeTarget(writeContext, "Upsert");
+    this.definition(table);
     return this.mutate(context, {
       type: "upsert",
       table,
       row: parseUuid(objectId),
-      cells: encodeCellsForPatch(this.definition(table), values),
+      values,
       options: viewOptions(context),
     });
   }
@@ -1116,7 +1170,7 @@ export class ThinRuntime implements Runtime {
       type: "restore",
       table,
       row: parseUuid(objectId),
-      cells: encodeCellsForRow(definition, values, table),
+      values,
       options: {
         branch: context.branchView?.head,
         updatedAtMs: context.updatedAtMs,
@@ -1140,12 +1194,13 @@ export class ThinRuntime implements Runtime {
         "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
       );
     }
+    this.definition(table);
     return this.mutate(context, {
       type: "updateLargeValues",
       table,
       row: parseUuid(objectId),
-      patch: encodeCellsForPatch(this.definition(table), values),
-      mutations: descriptors,
+      values,
+      descriptors,
       updatedAtMs: context.updatedAtMs,
     });
   }
@@ -1204,23 +1259,20 @@ export class ThinRuntime implements Runtime {
       );
     }
     const row = objectId ? parseUuid(objectId) : uuidv7();
-    const stream = this.nextRequestId++;
-    const begun = this.request(
-      {
-        type: "beginStream",
-        table,
-        row,
-        cells:
-          mutation === "insert"
-            ? encodeCellsForStreamingRow(definition, values, column, table)
-            : encodeCellsForStreamingPatch(definition, values, column),
-        column,
-        mutation,
-        options: viewOptions(context),
-        transaction: context.transaction ?? undefined,
-      },
-      stream,
-    );
+    const id = this.nextRequestId++;
+    const { request: begin, stream } = this.admit({
+      type: "beginStream",
+      stream: id,
+      table,
+      row,
+      values,
+      column,
+      mutation,
+      creatorMembership: this.addCreatorAsMember && !skipsCreatorMembership(writeContext),
+      options: viewOptions(context),
+      transaction: context.transaction ?? undefined,
+    });
+    const begun = this.request(begin, id);
     // Chunks go one window at a time: each waits for the server to apply
     // the one before, which bounds what a slow server buffers.
     // Set when the runtime, not the app's source, failed the stream.
@@ -1228,11 +1280,13 @@ export class ThinRuntime implements Runtime {
     const push = async (bytes: Uint8Array) => {
       const windowBytes = 64 * 1024;
       for (let offset = 0; offset < bytes.byteLength; offset += windowBytes) {
-        await this.request({
-          type: "streamChunk",
-          stream,
-          chunk: bytes.subarray(offset, offset + windowBytes),
-        }).catch((error: unknown) => {
+        await this.request(
+          this.admit({
+            type: "streamChunk",
+            stream,
+            chunk: bytes.subarray(offset, offset + windowBytes),
+          }),
+        ).catch((error: unknown) => {
           runtimeFailed = true;
           throw error;
         });
@@ -1268,7 +1322,7 @@ export class ThinRuntime implements Runtime {
       }
       if (pendingHighSurrogate) await push(encoder.encode(pendingHighSurrogate));
     } catch (error) {
-      void this.request({ type: "abortStream", stream }).catch(() => undefined);
+      void this.request(this.admit({ type: "abortStream", stream })).catch(() => undefined);
       // The drain after the upgrade lets a stream finish; only the app
       // shutting the client down (a sign-out, an account switch, a close)
       // ends one. Say so, and that the value was not written: the stream
@@ -1287,7 +1341,7 @@ export class ThinRuntime implements Runtime {
       // The value is staged in the transaction; its commit reports a
       // refusal of the row write.
       transaction.rows.push(...written);
-      const staged = this.request({ type: "finishStream", stream });
+      const staged = this.request(this.admit({ type: "finishStream", stream }));
       transaction.requests.push(staged);
       transaction.staged = true;
       await staged;
@@ -1300,11 +1354,21 @@ export class ThinRuntime implements Runtime {
     return {
       id: formatUuid(row),
       kind: "committed",
-      txId: this.write({ type: "finishStream", stream }, written),
+      txId: this.write(this.admit({ type: "finishStream", stream }), written),
     };
   }
 
   // ---- transactions -----------------------------------------------------
+
+  /** @internal Adding a member needs the space table's catalogue identity. */
+  memberAddRefusal(table: string): EncryptionNeedsLocalFirstError {
+    const refusal = new EncryptionNeedsLocalFirstError({
+      reason: this.refusalReason(),
+      operation: "members.add",
+      table,
+    });
+    return this.refusalReview?.(refusal, true) ?? refusal;
+  }
 
   beginTransaction(
     kind: TransactionKind,
@@ -1312,16 +1376,23 @@ export class ThinRuntime implements Runtime {
     sessionJson?: string | null,
   ): OpenTransactionId {
     this.refuseOtherSession(sessionJson, "Begin transaction");
-    if (this.closed) throw new Error("Begin transaction failed: the thin runtime is closed");
+    if (this.closed)
+      throw new Error("Begin transaction failed: the thin runtime is closed", {
+        cause: new RuntimeClosedError("the thin runtime is closed"),
+      });
+    // Its Db handed over: a transaction admitted behind writes made before
+    // that begins on the successor instead, after them.
+    if (this.handedOver)
+      throw new Error("Begin transaction failed: the Db handed over to its local-first successor", {
+        cause: new RuntimeClosedError("the thin runtime handed over"),
+      });
     if (this.transactions.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     // The server binds the transaction to this connection's session.
-    const { answer: begun, oneShot: begin } = this.requestWith({
-      type: "begin",
-      transaction: id,
-      kind,
-    });
+    const { answer: begun, oneShot: begin } = this.requestWith(
+      this.admit({ type: "begin", transaction: id, kind }),
+    );
     begun.catch(() => undefined);
     this.transactions.set(id, {
       kind,
@@ -1336,7 +1407,12 @@ export class ThinRuntime implements Runtime {
 
   hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
     const transaction = this.transactions.get(id);
-    return transaction ? transaction.staged : undefined;
+    // A refused operation leaves something to fail the commit with.
+    return transaction ? transaction.staged || transaction.refused !== undefined : undefined;
+  }
+
+  transactionRefusal(id: OpenTransactionId): EncryptionNeedsLocalFirstError | undefined {
+    return this.transactions.get(id)?.refused;
   }
 
   commitTransaction(id: OpenTransactionId): Promise<TxId> {
@@ -1345,6 +1421,15 @@ export class ThinRuntime implements Runtime {
       throw new Error(
         `Commit transaction failed: Write error: open transaction ${id} has already been completed or was never opened`,
       );
+    }
+    // An operation in it touched an encrypted column and was refused, even
+    // if the app caught that: nothing of it may commit.
+    if (transaction.refused) {
+      this.transactions.delete(id);
+      if (!transaction.lost) {
+        void this.request(this.admit({ type: "rollback", transaction: id })).catch(() => undefined);
+      }
+      return Promise.reject(transaction.refused);
     }
     if (!transaction.staged && transaction.kind === "mergeable") {
       throw new Error(
@@ -1356,9 +1441,9 @@ export class ThinRuntime implements Runtime {
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     const committed = Promise.all(transaction.requests).then(
-      () => this.write({ type: "commit", transaction: id }, transaction.rows),
+      () => this.write(this.admit({ type: "commit", transaction: id }), transaction.rows),
       (error: unknown) => {
-        void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
+        void this.request(this.admit({ type: "rollback", transaction: id })).catch(() => undefined);
         throw error;
       },
     );
@@ -1388,12 +1473,12 @@ export class ThinRuntime implements Runtime {
     this.transactions.delete(id);
     // The server already abandoned a lost transaction.
     if (transaction.lost) return true;
-    await this.request({ type: "rollback", transaction: id });
+    await this.request(this.admit({ type: "rollback", transaction: id }));
     return true;
   }
 
   async captureSnapshot(): Promise<SnapshotRef> {
-    const body = await this.request({ type: "captureSnapshot" });
+    const body = await this.request(this.admit({ type: "captureSnapshot" }));
     if (body.type !== "snapshot") {
       throw new Error(`unexpected answer to a snapshot capture: ${body.type}`);
     }
@@ -1414,14 +1499,15 @@ export class ThinRuntime implements Runtime {
   /** A write, staged in its transaction or committed on its own. */
   private mutate(
     context: WriteTarget,
-    op: Extract<ThinOp, { transaction?: string }>,
+    description: Extract<ThinRequestDescription, { table: string }>,
   ): MutationResult {
     const id = context.transaction;
+    const transaction = id ? this.openTransaction(id, context.operation) : undefined;
+    const op = this.admit(id ? { ...description, transaction: id } : description);
     const row = writtenRow(context, op);
-    if (!id) return { kind: "committed", txId: this.write(op, row ? [row] : []) };
-    const transaction = this.openTransaction(id, context.operation);
+    if (!id || !transaction) return { kind: "committed", txId: this.write(op, row ? [row] : []) };
     if (row) transaction.rows.push(row);
-    const staged = this.request({ ...op, transaction: id } as ThinOp);
+    const staged = this.request(op);
     staged.catch(() => undefined);
     transaction.requests.push(staged);
     transaction.staged = true;
@@ -1651,7 +1737,7 @@ export class ThinRuntime implements Runtime {
     return Promise.race([pending, refused]).finally(() => stop.abort());
   }
 
-  private write(op: ThinOp, rows: readonly WrittenRow[] = []): TxId {
+  private write(op: ThinRequest, rows: readonly WrittenRow[] = []): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
     const write: Write = {
       observed: false,
@@ -1667,12 +1753,9 @@ export class ThinRuntime implements Runtime {
     // made in, which is the order they reach the server, resent or not.
     const resendable = RESENDABLE_WRITES.has(op.type) && "options" in op;
     const sent = resendable
-      ? {
-          ...op,
-          options: { ...op.options, writeKey: { node: this.writerNode, seq: this.nextWriteSeq++ } },
-        }
+      ? this.guard.keyed(op, { node: this.writerNode, seq: this.nextWriteSeq++ })
       : op;
-    const { answer, oneShot } = this.requestWith(sent as ThinOp);
+    const { answer, oneShot } = this.requestWith(sent);
     if (oneShot) {
       oneShot.write = true;
       oneShot.resendable = resendable;
@@ -1776,15 +1859,19 @@ type WriteTarget = {
   updatedAtMs?: number;
 };
 
+function skipsCreatorMembership(writeContext?: string | null): boolean {
+  return (
+    !!writeContext &&
+    (JSON.parse(writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember === false
+  );
+}
+
 /**
  * The main-branch row `op` writes, if any, to hand off. Not a delete: a read
  * of a deleted row brings nothing back.
  */
-function writtenRow(
-  context: WriteTarget,
-  op: Extract<ThinOp, { transaction?: string }>,
-): WrittenRow | undefined {
-  if (context.branchView || op.type === "delete") return undefined;
+function writtenRow(context: WriteTarget, op: ThinOp): WrittenRow | undefined {
+  if (context.branchView || op.type === "delete" || !("table" in op)) return undefined;
   if (op.type === "insert") {
     const rowId = (op.options as { rowId?: Uint8Array }).rowId;
     return rowId ? { table: op.table, id: formatUuid(rowId) } : undefined;

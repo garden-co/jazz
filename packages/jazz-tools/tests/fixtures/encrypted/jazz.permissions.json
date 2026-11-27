@@ -1,0 +1,38 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "projects": {
+      "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+      "insert": "$createdBy.account = session.user",
+      "update": "ownerId = session.user"
+    },
+    "tasks": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
+    "records": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
+    "files": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
+    "captionedFiles": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
+    "notes": {
+      "read": "true",
+      "insert": "true"
+    },
+    "comments": {
+      "read": "true",
+      "insert": "allowedTo.read(task)"
+    },
+    "replies": {
+      "read": "true",
+      "insert": "allowedTo.read(note)"
+    }
+  }
+}

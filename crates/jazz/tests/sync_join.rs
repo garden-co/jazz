@@ -96,7 +96,7 @@ fn pump(dbs: &[&Db]) {
 #[test]
 fn a_connection_opens_with_one_join_answered_by_one_welcome_ahead_of_rows() {
     let server = open(1, false);
-    jazz::db::block_on(server.set_authority());
+    jazz::db::block_on(server.set_authority()).unwrap();
     block_on(server.insert(
         "docs",
         BTreeMap::from([("body".to_owned(), Value::String("hi".to_owned()))]),
@@ -130,7 +130,7 @@ fn a_connection_opens_with_one_join_answered_by_one_welcome_ahead_of_rows() {
 #[test]
 fn an_unadmitted_client_is_welcomed_unadmitted_and_told_once_it_is_admitted() {
     let server = open(1, false);
-    jazz::db::block_on(server.set_authority());
+    jazz::db::block_on(server.set_authority()).unwrap();
     let client = open(2, true);
     let (_, down) = connect(&client, &server);
     pump(&[&client, &server, &client]);
@@ -160,7 +160,7 @@ fn an_unadmitted_client_is_welcomed_unadmitted_and_told_once_it_is_admitted() {
 #[test]
 fn a_reconnect_joins_again_and_is_welcomed_again() {
     let server = open(1, false);
-    jazz::db::block_on(server.set_authority());
+    jazz::db::block_on(server.set_authority()).unwrap();
     let client = open(2, false);
     let (first_up, first_down) = connect(&client, &server);
     pump(&[&client, &server, &client]);
@@ -176,7 +176,7 @@ fn a_reconnect_joins_again_and_is_welcomed_again() {
 #[test]
 fn a_tab_joins_its_worker_as_the_worker_joins_the_server() {
     let server = open(1, false);
-    jazz::db::block_on(server.set_authority());
+    jazz::db::block_on(server.set_authority()).unwrap();
     let worker = open(2, false);
     let (worker_up, worker_down) = connect(&worker, &server);
     pump(&[&worker, &server, &worker]);

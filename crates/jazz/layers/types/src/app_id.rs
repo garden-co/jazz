@@ -29,6 +29,11 @@ impl AppId {
         Ok(Self(ObjectId::from_uuid(uuid)))
     }
 
+    /// Accept a UUID or derive the deterministic identifier for a named app.
+    pub fn from_text(text: &str) -> Self {
+        Self::from_string(text).unwrap_or_else(|_| Self::from_name(text))
+    }
+
     /// Create an AppId from an existing ObjectId.
     pub fn from_object_id(id: ObjectId) -> Self {
         Self(id)

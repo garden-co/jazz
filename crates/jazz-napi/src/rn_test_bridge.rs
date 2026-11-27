@@ -474,6 +474,22 @@ pub fn foreground_response_corpus() -> Result<String> {
             issuer: "fixture-issuer".into(),
             user_id: "fixture-user".into(),
         },
+        ForegroundDbCommandResponse::ReportedRows {
+            rows: vec![9, 8],
+            unreadable_json: r#"[{"table":"notes","id":"λ","column":null,"code":"key-pending"}]"#
+                .into(),
+        },
+        ForegroundDbCommandResponse::SubscriptionEvents {
+            events: vec![ForegroundSubscriptionEvent::UnreadableDelta {
+                reset: true,
+                settled: false,
+                tier: "Local".into(),
+                delta: vec![7],
+                unreadable_json:
+                    r#"[{"table":"notes","id":"λ","column":"body","code":"key-unavailable"}]"#
+                        .into(),
+            }],
+        },
     ];
     let bytes = responses
         .iter()

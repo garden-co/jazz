@@ -414,6 +414,13 @@ fi
  * function instance, since all of them reach the same Sandbox. Claims of
  * earlier sessions (a resumed snapshot keeps /tmp) are dropped.
  *
+ * The claim is a file bash creates under `noclobber` (`set -C`), which opens
+ * it with O_CREAT|O_EXCL: exactly one creator wins, whatever coreutils the
+ * image ships. `mkdir` isn't such a claim everywhere: uutils' mkdir (the
+ * default coreutils since Ubuntu 25.10) exits 0 when it loses the race to a
+ * concurrent mkdir of the same path. Claims of releases that used a
+ * directory (still empty) are dropped by `find -delete` just the same.
+ *
  * @internal
  */
 export function claimRecycleScript(
@@ -422,8 +429,9 @@ export function claimRecycleScript(
 ): string {
   return `set -u
 run=${shellQuote(`${root}/tmp`)}
-find "$run" -maxdepth 1 -name 'jazz-recycled-*' ! -name "jazz-recycled-$1" -exec rmdir {} + 2>/dev/null
-mkdir "$run/jazz-recycled-$1" 2>/dev/null
+find "$run" -maxdepth 1 -name 'jazz-recycled-*' ! -name "jazz-recycled-$1" -delete 2>/dev/null
+set -C
+{ : > "$run/jazz-recycled-$1"; } 2>/dev/null
 `;
 }
 
@@ -438,7 +446,7 @@ export function releaseRecycleScript(
   root = "",
 ): string {
   return `set -u
-rmdir ${shellQuote(`${root}/tmp`)}/"jazz-recycled-$1" 2>/dev/null || true
+rm -f ${shellQuote(`${root}/tmp`)}/"jazz-recycled-$1" 2>/dev/null || true
 `;
 }
 

@@ -100,8 +100,12 @@ describe("createJazz, opened on first use", () => {
   }, 60_000);
 
   it("knows how to treat every Db method before the store opens", () => {
+    // Methods only: reading a getter such as `encryption` off the bare
+    // prototype would run it without an instance.
     const names = Object.getOwnPropertyNames(Db.prototype).filter(
-      (name) => name !== "constructor" && typeof Reflect.get(Db.prototype, name) === "function",
+      (name) =>
+        name !== "constructor" &&
+        typeof Object.getOwnPropertyDescriptor(Db.prototype, name)?.value === "function",
     );
     const kinds = Object.fromEntries(names.map((name) => [name, earlyDbMethodKind(name)]));
     // A new async Db method belongs in WAITS (early-db.ts), a new write in WRITES.

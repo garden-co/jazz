@@ -1,4 +1,15 @@
+import { createOpenTransactionId, StreamingPublicationTimeoutError } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
+import { EncryptionError, type Encryption, type EncryptionNative } from "../../encryption/index.js";
+import {
+  servePrivateStore,
+  type PrivateStore,
+  type StoreTarget,
+} from "../../encryption/private-store.js";
+import { pendingSpace, retryAfterKey } from "../../encryption/key-retry.js";
+import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
+import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
+import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -150,7 +161,8 @@ export { encodeSchema } from "./schema-codec.js";
 const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
-const SERVER_PUMP_DEBOUNCE_MS = 16;
+/** The longest an idle pending read sleeps between polls when no work wakes it. */
+const PENDING_READ_MAX_IDLE_MS = 50;
 const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   none: "none",
   connecting: "attempting",
@@ -158,6 +170,7 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   unavailable: "failed",
 };
 const NATIVE_LINK_POLL_MS = 250;
+const ENCRYPTION_SHUTDOWN_TIMEOUT_MS = 1_000;
 
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
@@ -201,6 +214,66 @@ type NativeDbConstructor = {
     appId: string,
     claimedAuthor: string,
   ): NativeDb;
+  openMemoryAsBackendKeyless?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
+  ): NativeDb;
+  openMemoryKeyless?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
+    proof: NativeSelfSignedClientProof | null,
+  ): NativeDb;
+  openPersistentAsBackendKeyless?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
+  ): NativeDb;
+  openMemoryEncrypted?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+  openPersistentEncrypted?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+};
+
+/**
+ * The end-to-end encryption runtime a Node host built for the app (over the
+ * private store the app supplied) and the app's side of it.
+ */
+export type NativeEncryptionOptions = {
+  /** The native `EncryptionRuntime`, built and ready. */
+  runtime: StoreTarget;
+  store: PrivateStore;
+  /** Builds the device's public handle. The keyless broker has no handle. */
+  createHandle: EncryptionHandleFactory;
+};
+
+type EncryptionHandleFactory = (
+  native: EncryptionNative,
+  stateChanges: ReturnType<typeof servePrivateStore>["onStateChange"],
+) => Encryption;
+
+/** What a database that has the runtime installed adds to the native calls. */
+type NativeEncryptionDb = EncryptionNative & {
+  encryptionUseSpace(table: string, id: string, open: boolean): void;
+  encryptionSpaces(): string;
+  encryptionSetOnline(online: boolean): void;
 };
 
 type NativeWriteOptions = {
@@ -209,7 +282,12 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
+type PendingNativeRead = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  /** A one-shot read's rows left out as undecryptable, as JSON (see {@link UnreadableRow}). */
+  unreadable?(): string | null;
+};
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -236,6 +314,7 @@ function isPendingNativePermissionAdvice(value: unknown): value is PendingNative
 type NativeInsertOptions = NativeWriteOptions & {
   rowId?: Uint8Array;
   branch?: unknown;
+  addCreatorAsMember?: boolean;
 };
 
 type NativeUpdateOptions = NativeWriteOptions & {
@@ -251,6 +330,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  tableIdentity?(table: string): string;
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   /** A thin session's transaction request, as its backend's client serves it. */
   serveThinTransaction?(request: Uint8Array): NativeReadResult;
@@ -392,6 +472,7 @@ type NativeDb = {
     head?: unknown,
     base?: unknown,
     transaction?: OpenTransactionId,
+    addCreatorAsMember?: boolean,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -429,6 +510,12 @@ type NativeDb = {
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
   ): void;
+  /**
+   * napi: every immediate tick the core has asked for so far, coalesced
+   * requests included. Its scheduler callback runs on a later turn, so the
+   * host compares this count around a call to know which requests it made.
+   */
+  tickRequests?(): number;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   /**
    * A durable browser store's writes to its backing storage started failing
@@ -750,6 +837,8 @@ type SubscriptionState = {
   tier: string;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
+  /** The spaces this subscription uses (an app on encrypted tables). */
+  spaces?: SubscriptionSpaceUse;
 };
 
 export type SubscriptionOutputColumns = {
@@ -943,6 +1032,20 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly pendingNativeReadCancels = new Set<() => void>();
+  /** Pending native reads parked until the core can have made progress. */
+  private readonly pendingReadWakes = new Set<() => void>();
+  /** The native core asked for a tick that hasn't run yet: the tick after
+   * it may have answered a pending read. */
+  private nativeWorkSinceTick = false;
+  /** A pending read is being polled: the ticks it asks for are its own. */
+  private pollingRead = false;
+  /** With a binding that counts its tick requests (`NativeDb.tickRequests`,
+   * napi), the count the last scheduler callback accounted for... */
+  private tickRequestsSeen = 0;
+  /** ...and how many requests since then pending reads' polls made. napi
+   * delivers a poll's request on a later turn, after `pollingRead` is reset:
+   * the callback that covers it is news only for the requests beyond these. */
+  private readTickRequests = 0;
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1057,7 +1160,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
-  private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
+  private readonly peerTransportWorkListeners = new Set<
+    (requiresDistinctPass?: boolean, passCompleted?: boolean) => void
+  >();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
@@ -1095,6 +1200,24 @@ export class NativeRuntimeAdapter implements Runtime {
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
   private nextSubscriptionId = 1;
+  /** The installed encryption runtime's side, on the runtime that owns the database. */
+  private encryptionState?: {
+    native: NativeEncryptionDb;
+    createHandle: EncryptionHandleFactory;
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">;
+    uses: SpaceUse;
+    handle?: Encryption;
+    online?: boolean;
+  };
+  /**
+   * The server link of the shared worker this tab follows, as the worker's
+   * link fates relay it, and the worker connection that relayed it. A tab
+   * behind a worker has no link of its own: without this its encryption
+   * would take the tab's own `local-only` status for the server's.
+   */
+  private workerLink: { from: object; link: LinkStatus } | null = null;
+  /** The worker connection made last: the one this tab follows now. */
+  private latestWorker: object | null = null;
 
   static fromDb(
     db: NativeDb,
@@ -1115,6 +1238,98 @@ export class NativeRuntimeAdapter implements Runtime {
       slowQueryLog: opts?.slowQueryLog,
       subscriptionBacklogRows: opts?.subscriptionBacklogRows,
     });
+  }
+
+  private serveEncryption(options: NativeEncryptionOptions): void {
+    const native = this.db as unknown as NativeEncryptionDb;
+    const serving = servePrivateStore(options.runtime, options.store);
+    try {
+      this.bindEncryption(native, serving, options.createHandle);
+      // Verify the account in the background; the app may await `ready()` too.
+      this.encryptionHandle()?.start();
+    } catch (error) {
+      serving.stop();
+      throw error;
+    }
+  }
+
+  /** The authority's catalogue identity for this table. */
+  tableIdentity(table: string): string {
+    if (!this.db.tableIdentity) throw new Error("This runtime does not support table identity.");
+    return this.db.tableIdentity(table);
+  }
+
+  /** Adopt the private store bridge of the React Native foreground. */
+  attachEncryption(
+    native: NativeEncryptionDb,
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">,
+    createHandle: EncryptionHandleFactory,
+  ): void {
+    this.bindEncryption(native, serving, createHandle);
+    this.signalEncryptionOnline();
+  }
+
+  private bindEncryption(
+    native: NativeEncryptionDb,
+    serving: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">,
+    createHandle: EncryptionHandleFactory,
+  ): void {
+    this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
+  }
+
+  /**
+   * Runs a write, and again once the space's key is ready if it failed
+   * `key-pending`. Closing the database, or this schema view, ends the
+   * wait for the key (`EncryptionError` `closed`); the key's preparation
+   * goes on.
+   */
+  retryAfterKey<T>(operation: () => T): T | Promise<T> {
+    const owner = this.ownerRuntime;
+    const state = owner.encryptionState;
+    if (!state) return operation();
+    return retryAfterKey(operation, async (space, startedAt, repeated) => {
+      const asked = state.native.encryptionCall("retryWrite", { ...space, startedAt, repeated });
+      // A view's own close ends its writes' waits; the owner's ends all.
+      const waiting = owner.untilClosed(asked);
+      return JSON.parse(await (this === owner ? waiting : this.untilClosed(waiting)));
+    });
+  }
+
+  /** Ends each write's wait for a key, as this runtime (or view) closes. */
+  private readonly keyWaits = new Set<(error: EncryptionError) => void>();
+
+  /** `waiting`, unless this runtime closes first: then `closed`. */
+  private async untilClosed<T>(waiting: Promise<T>): Promise<T> {
+    if (this.phase === "closing" || this.phase === "closed") throw keyWaitClosed();
+    let leave!: (error: EncryptionError) => void;
+    const closed = new Promise<never>((_, reject) => {
+      leave = reject;
+    });
+    this.keyWaits.add(leave);
+    try {
+      return await Promise.race([waiting, closed]);
+    } finally {
+      this.keyWaits.delete(leave);
+    }
+  }
+
+  private endKeyWaits(): void {
+    for (const leave of this.keyWaits) leave(keyWaitClosed());
+    this.keyWaits.clear();
+  }
+
+  /**
+   * The encryption handle of this database, when the app declares encryption
+   * and opened with its runtime (`undefined` otherwise).
+   */
+  encryptionHandle(): Encryption | undefined {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state) return undefined;
+    if (!state.handle) {
+      state.handle = state.createHandle(state.native, state.serving.onStateChange);
+      if (this.ownerRuntime.closed) state.handle.stop();
+    }
+    return state.handle;
   }
 
   /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
@@ -1162,8 +1377,23 @@ export class NativeRuntimeAdapter implements Runtime {
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
+      /** An app that declares encryption opens with its runtime installed. */
+      encryption?: NativeEncryptionOptions;
+      /**
+       * A backend of an app that declares encryption holds no keys: it opens
+       * with hooks that relay ciphertext and refuse encrypted columns.
+       */
+      keyless?: { bindings: string; appId: string; environment: string };
+      /** Where the app's declarations make a column plaintext to its code (see {@link plainSchema}). */
+      plainEntries?: PlainEntries;
     },
   ) {
+    // The app's code sees encrypted columns as their plaintext types; what
+    // goes to the database (`schemaBytes`, the hash) stays as stored.
+    // A keyless backend's reads carry no encrypted column: optional there.
+    (this as unknown as { schema: WasmSchema }).schema = plainSchema(schema, opts?.plainEntries, {
+      keyless: opts?.keyless !== undefined,
+    });
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
     this.readAuthorizationHost =
       opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
@@ -1195,6 +1425,99 @@ export class NativeRuntimeAdapter implements Runtime {
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
+    } else if (opts?.keyless) {
+      if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
+      const { bindings, appId, environment } = opts.keyless;
+      if (!opts.backendMode) {
+        // A session's client (one a backend serves a thin session's
+        // transactions with) holds no keys either, but writes as the
+        // session, never as SYSTEM.
+        if (opts.persistentPath) {
+          throw new Error(
+            "A keyless store of an encrypted app opens in memory unless it is the backend's own",
+          );
+        }
+        if (!Runtime.openMemoryKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryKeyless(
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+          opts.selfSignedClientProof ?? null,
+        );
+      } else if (opts.persistentPath) {
+        if (!Runtime.openPersistentAsBackendKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openPersistentAsBackendKeyless(
+          opts.persistentPath,
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+        );
+      } else {
+        if (!Runtime.openMemoryAsBackendKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryAsBackendKeyless(
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+        );
+      }
+    } else if (opts?.encryption) {
+      if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
+      if (opts.backendMode) {
+        throw new Error(
+          "End-to-end encryption is not supported on a backend client yet: a backend cannot hold a device's keys",
+        );
+      }
+      const proof = opts.selfSignedClientProof
+        ? {
+            token: opts.selfSignedClientProof.token,
+            claimedAuthor: opts.selfSignedClientProof.claimedAuthor,
+          }
+        : null;
+      if (opts.persistentPath) {
+        if (!Runtime.openPersistentEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openPersistentEncrypted(
+          opts.persistentPath,
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      } else {
+        if (!Runtime.openMemoryEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryEncrypted(
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      }
+      this.serveEncryption(opts.encryption);
     } else if (opts?.persistentPath) {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
@@ -1239,6 +1562,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
+      this.ownerRuntime.noteTickRequest(urgency);
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
@@ -1295,7 +1619,9 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.connectUpstream();
   }
 
-  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
+  onPeerTransportWork(
+    listener: (requiresDistinctPass?: boolean, passCompleted?: boolean) => void,
+  ): () => void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
     this.peerTransportWorkListeners.add(listener);
     return () => {
@@ -1629,9 +1955,62 @@ export class NativeRuntimeAdapter implements Runtime {
       this.noteNativeAuthRestored();
       this.noteLinkFailure();
     }
+    this.signalEncryptionOnline();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
+  }
+
+  /**
+   * A connection `from` to the shared worker was made: it replaces the one
+   * before it, which may still hold the link it last relayed.
+   */
+  noteWorkerConnection(from: object): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.noteWorkerConnection(from);
+    this.latestWorker = from;
+  }
+
+  /**
+   * The server link of the worker this tab follows, from a link fate the
+   * worker connection `from` received. The tab's encryption is online
+   * only while it is connected.
+   */
+  noteWorkerLink(from: object, link: LinkStatus): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.noteWorkerLink(from, link);
+    this.workerLink = { from, link };
+    this.signalEncryptionOnline();
+  }
+
+  /**
+   * The worker connection `from` failed: until another relays the
+   * worker's link, this tab cannot reach the server. That holds when it is
+   * the connection that relayed the link, and when it is the one that
+   * replaced it: the link relayed before belongs to a connection gone.
+   */
+  forgetWorkerLink(from: object): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.forgetWorkerLink(from);
+    if (this.workerLink?.from !== from && this.latestWorker !== from) return;
+    this.workerLink = { from, link: offlineLink("stopped") };
+    this.signalEncryptionOnline();
+  }
+
+  /**
+   * Tells the encryption runtime when the connection to the server goes away
+   * or comes back: the worker's link in a tab that follows one, this
+   * runtime's own otherwise.
+   */
+  private signalEncryptionOnline(): void {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state || this !== this.ownerRuntime || this.closed) return;
+    const link = this.workerLink?.link ?? this.upstreamLinkStatus();
+    const online = link.state === "connected";
+    if (state.online === online) return;
+    state.online = online;
+    try {
+      state.native.encryptionSetOnline(online);
+    } catch {
+      // The database is closing.
+    }
   }
 
   /** The upstream link as the app sees it; see {@link LinkStatus}. */
@@ -1826,13 +2205,18 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       if (this.phase === "closed") return;
       this.advancePhase("closed");
+      this.endKeyWaits();
       this.closeRuntimeState();
       return;
     }
     if (this.phase === "closing" || this.phase === "closed") return;
+    // Deleting the native store already retired its foreground and encryption runtime.
+    const encryption = this.phase === "storageCleared" ? undefined : this.encryptionState;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.advancePhase("closing");
+    this.encryptionState?.handle?.stop();
+    this.endKeyWaits();
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1844,9 +2228,22 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      this.closeRuntimeState();
-      await this.db.close?.();
+      try {
+        if (encryption) {
+          // Keep serving private-store requests while shutdown finishes, then
+          // release the runtime even if the store has stopped responding.
+          const deadline = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, ENCRYPTION_SHUTDOWN_TIMEOUT_MS);
+          });
+          await Promise.race([encryption.native.encryptionCall("shutdown"), deadline]);
+        }
+      } finally {
+        clearTimeout(timer);
+        this.closeRuntimeState();
+        await this.db.close?.();
+      }
     } finally {
       this.advancePhase("closed");
     }
@@ -1863,6 +2260,8 @@ export class NativeRuntimeAdapter implements Runtime {
   discard(): void {
     if (this.phase !== "open") return;
     this.advancePhase("closed");
+    this.encryptionState?.handle?.stop();
+    this.endKeyWaits();
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -1889,6 +2288,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const write of this.writes.values()) {
       write.close?.();
     }
+    this.encryptionState?.serving.stop({ cancelPending: true });
     this.subscriptions.clear();
     this.pendingTxs.clear();
     this.completedTxs.clear();
@@ -1938,6 +2338,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
+    const addCreatorAsMember = _writeContext
+      ? (JSON.parse(_writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember
+      : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1954,6 +2357,7 @@ export class NativeRuntimeAdapter implements Runtime {
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
+        addCreatorAsMember,
       });
       if (!(rowId instanceof Uint8Array)) {
         throw new Error("Native runtime transaction insert did not return a row id");
@@ -1975,6 +2379,7 @@ export class NativeRuntimeAdapter implements Runtime {
           attribution,
           branch: branchView?.head,
           updatedAtMs: updatedAtMs ?? undefined,
+          addCreatorAsMember,
         }),
       ),
     );
@@ -1996,11 +2401,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission(operation);
     const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const addCreatorAsMember = writeContext
+      ? (JSON.parse(writeContext) as { addCreatorAsMember?: boolean }).addCreatorAsMember
+      : undefined;
     rejectAttributedBranchWrite(attribution, branchView);
     if (tx) {
       this.assertTransactionAttribution(tx, attribution);
@@ -2016,44 +2423,57 @@ export class NativeRuntimeAdapter implements Runtime {
         `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
       );
     }
-    const rowId = objectId ? parseUuid(objectId) : runtimeRandomBytes(16);
+    const rowId = parseUuid(objectId ?? createOpenTransactionId());
     const cells =
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const upload = begin.call(
-      this.db,
-      table,
-      rowId,
-      cells,
-      column,
-      mutation,
-      attribution ? undefined : writeIdentity,
-      attribution,
-      updatedAtMs ?? undefined,
-      branchView?.head,
-      branchView?.base,
-      tx?.id,
-    );
-    if (tx && !upload.finishInTransaction) {
-      await upload.abort();
-      throw new Error("This native runtime does not support streaming inside a transaction yet");
-    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
       releaseAdmission = resolve;
     });
     owner.pendingStreamingMutations.add(admission);
-    const encoder = new TextEncoder();
-    const pushBounded = async (bytes: Uint8Array): Promise<void> => {
-      const hostWindowBytes = 64 * 1024;
-      for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
-        await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
-      }
+    const endAdmission = () => {
+      releaseAdmission();
+      owner.pendingStreamingMutations.delete(admission);
     };
-    let pendingHighSurrogate = "";
+    let opened: NativeStreamingMutation | undefined;
+    let publicationOwnsUpload = false;
     try {
+      // Only opening the upload can be replayed: the caller owns a one-shot source.
+      const opening = this.retryAfterKey(() => {
+        this.assertMutationAdmission(operation);
+        this.applySessionClaims(writeSession);
+        return begin.call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          mutation,
+          attribution ? undefined : writeIdentity,
+          attribution,
+          updatedAtMs ?? undefined,
+          branchView?.head,
+          branchView?.base,
+          tx?.id,
+          mutation === "insert" ? addCreatorAsMember : undefined,
+        );
+      });
+      const upload = opening instanceof Promise ? await opening : opening;
+      opened = upload;
+      if (tx && !upload.finishInTransaction) {
+        throw new Error("This native runtime does not support streaming inside a transaction yet");
+      }
+      const encoder = new TextEncoder();
+      const pushBounded = async (bytes: Uint8Array): Promise<void> => {
+        const hostWindowBytes = 64 * 1024;
+        for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
+          await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
+        }
+      };
+      let pendingHighSurrogate = "";
       for await (const chunk of streamingChunks(source)) {
         if (typeof chunk === "string") {
           if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
@@ -2076,32 +2496,56 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const previousFinalization = owner.streamingFinalization;
-      let releaseFinalization!: () => void;
-      const finalization = new Promise<void>((resolve) => {
-        releaseFinalization = resolve;
+      const previous = owner.streamingFinalization;
+      const id = formatUuid(rowId);
+      let finishStarted = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          if (finishStarted) {
+            reject(new StreamingPublicationTimeoutError(table, id, publication));
+            return;
+          }
+          const error = new Error("Streaming write timed out before publication started");
+          error.name = "TimeoutError";
+          reject(error);
+        }, 10_000);
       });
-      owner.streamingFinalization = previousFinalization.then(() => finalization);
-      await previousFinalization;
-      let receipt: MutationResult;
-      try {
-        if (tx) {
-          await upload.finishInTransaction!();
-          tx.hasStagedMutations = true;
-          receipt = { kind: "staged", openTransactionId: tx.id };
-        } else {
-          receipt = this.finishMutation(await upload.finish());
+      const publish = async (): Promise<StreamingInsertResult> => {
+        try {
+          await Promise.race([previous, deadline]);
+          finishStarted = true;
+          let receipt: MutationResult;
+          if (tx) {
+            await upload.finishInTransaction!();
+            tx.hasStagedMutations = true;
+            receipt = { kind: "staged", openTransactionId: tx.id };
+          } else {
+            receipt = this.finishMutation(await upload.finish());
+          }
+          return { id, ...receipt };
+        } catch (error) {
+          await upload.abort();
+          throw error;
+        } finally {
+          endAdmission();
         }
+      };
+      publicationOwnsUpload = true;
+      const publication = publish();
+      // A queued timeout cannot pass its predecessor. A native finish already
+      // in flight keeps its turn and foreground lease until native settlement.
+      owner.streamingFinalization = Promise.allSettled([previous, publication]).then(() => {});
+      try {
+        return await Promise.race([publication, deadline]);
       } finally {
-        releaseFinalization();
+        clearTimeout(timer!);
       }
-      return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
-      await upload.abort();
+      if (!publicationOwnsUpload) await opened?.abort();
       throw error;
     } finally {
-      releaseAdmission();
-      owner.pendingStreamingMutations.delete(admission);
+      if (!publicationOwnsUpload) endAdmission();
     }
   }
 
@@ -2749,28 +3193,37 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, query, session);
     }
     this.emitQueryCoverageTrace("attach");
+    // Rows the read left out because they could not be decrypted: kept
+    // with the result it returns (see `unreadableRows`).
+    let unreadable: UnreadableRow[] | undefined;
+    const leftOut = (rows: UnreadableRow[]) => {
+      unreadable = rows;
+    };
     if (queryHasArraySubqueries(coreQueryJson)) {
-      if (pendingTx) {
-        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
-        this.emitQueryCoverageTrace("covered");
-        return rowsFromRelationSnapshot(
+      const payload = await this.readRowsForContextAsync(
+        query,
+        opts,
+        readContext,
+        pendingTx?.id,
+        leftOut,
+      );
+      this.emitQueryCoverageTrace("covered");
+      return withUnreadable(
+        rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-        );
-      }
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
-      this.emitQueryCoverageTrace("covered");
-      return rowsFromRelationSnapshot(
-        readRelationSnapshot(payload),
-        this.schema,
-        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        ),
+        unreadable,
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx, leftOut);
     this.emitQueryCoverageTrace("covered");
-    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
+    return withUnreadable(
+      rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns),
+      unreadable,
+    );
   }
 
   createSubscription(
@@ -2794,6 +3247,14 @@ export class NativeRuntimeAdapter implements Runtime {
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
+    const columns = subscription.outputColumns;
+    subscription.spaces =
+      (columns &&
+        this.ownerRuntime.encryptionState?.uses.forSubscription(
+          columns.rootTable,
+          columns.rootColumns,
+        )) ||
+      undefined;
     const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
       const source = subscriptionSource(native);
@@ -2839,7 +3300,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     if (subscription.callback) throw new Error("Subscription has already been activated");
-    subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const deliver = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const spaces = subscription.spaces;
+    subscription.callback = spaces
+      ? (result) => {
+          if (!(result instanceof Error)) spaces.observe(result);
+          deliver(result);
+        }
+      : deliver;
     if (subscription.terminalError) {
       this.deliverSubscriptionFailure(subscription);
       return;
@@ -3125,7 +3593,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
-        // A normal idle connection lets the debounced pump coalesce frames.
         // If the pump is already suspended in a core tick waiting for a chunk,
         // route the frame independently so the response can wake that tick.
         if (this.serverPumpRunning) {
@@ -3660,9 +4127,10 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
     const context = this.nativeReadContext(session, pendingTx);
-    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id);
+    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id, leftOut);
   }
 
   /**
@@ -3691,16 +4159,20 @@ export class NativeRuntimeAdapter implements Runtime {
     return result as Uint8Array;
   }
 
+  /** `leftOut` is told the rows the read left out as undecryptable, if any. */
   private async readRowsForContextAsync(
     query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(
-      this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { tier?: string }).tier,
-    );
+    const started = this.startRowsForContext(query, opts, context, openTransactionId);
+    const bytes = await this.awaitNativeRead(started, (opts as { tier?: string }).tier);
+    const read = await started;
+    const unreadable = isPendingNativeRead(read) ? read.unreadable?.() : null;
+    if (leftOut && unreadable) leftOut(JSON.parse(unreadable) as UnreadableRow[]);
+    return bytes;
   }
 
   private startRowsForContext(
@@ -3767,24 +4239,57 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
-    const cancel = () => result.cancel();
-    this.ownerRuntime.pendingNativeReadCancels.add(cancel);
+    const owner = this.ownerRuntime;
+    let wake: (() => void) | undefined;
+    // Closing the runtime cancels the read and ends its wait at once.
+    const cancel = () => {
+      result.cancel();
+      wake?.();
+    };
+    const onAbort = () => wake?.();
+    owner.pendingNativeReadCancels.add(cancel);
+    signal?.addEventListener("abort", onAbort);
+    let idleMs = 0;
     try {
       for (;;) {
-        if (this.closed || this.ownerRuntime.closed)
+        if (this.closed || owner.closed)
           throw new Error("native read was cancelled by runtime shutdown");
         signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
-        const bytes = result.poll();
+        // A tick this poll asks for (to send what the read still owes) is
+        // started below; it is not news that wakes the read again, whether
+        // the binding calls back during the poll or on a later turn.
+        const bytes = owner.pollPendingRead(result);
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
         this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
-        await sleep(0);
+        // Park until the core can have made progress: a server frame, or a
+        // tick the native core asked for (peer frames, chunk requests, a
+        // local write). The timer is only a fallback for progress nothing
+        // announces; it backs off so an idle read costs a few polls a second
+        // instead of a busy loop.
+        const transportError = tier ? this.waitForServerTransportError(tier) : null;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const woke = await new Promise<"work" | "idle">((resolve) => {
+          wake = () => resolve("work");
+          owner.pendingReadWakes.add(wake);
+          transportError?.promise.catch(() => resolve("work"));
+          timer = setTimeout(() => resolve("idle"), idleMs);
+        });
+        if (wake) owner.pendingReadWakes.delete(wake);
+        wake = undefined;
+        clearTimeout(timer);
+        transportError?.cancel();
+        idleMs = woke === "work" ? 0 : Math.min(PENDING_READ_MAX_IDLE_MS, Math.max(1, idleMs * 2));
+        // Give the host a turn before polling again, so a run of wakes can
+        // never starve socket and storage events.
+        if (woke === "work" && !this.closed && !owner.closed) await hostTurn();
       }
     } finally {
-      this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
+      signal?.removeEventListener("abort", onAbort);
+      owner.pendingNativeReadCancels.delete(cancel);
       cancel();
       // A suspended read may have held the owner while queued commands
       // yielded. Resume those commands even without a network pump.
@@ -4279,6 +4784,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.coreDeadlineTimer = setTimeout(() => {
         this.coreDeadlineTimer = undefined;
         this.coreDeadlineAt = undefined;
+        // A passed deadline can settle a pending read.
+        this.ownerRuntime.nativeWorkSinceTick = true;
         // This tick services every connection. Still-live later obligations
         // re-arm their remaining deadline through the same earliest timer.
         this.scheduleCoreWake("immediate");
@@ -4381,6 +4888,9 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
+        const owner = this.ownerRuntime;
+        const nativeWork = owner.nativeWorkSinceTick;
+        owner.nativeWorkSinceTick = false;
         try {
           await this.db.tick();
         } catch (error) {
@@ -4396,8 +4906,10 @@ export class NativeRuntimeAdapter implements Runtime {
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
         this.pumpSubscriptions();
-        this.scheduleServerPump();
-        this.notifyPeerTransportWork();
+        // A server pass drains the output of the tick it is already awaiting.
+        if (!this.serverPumpRunning) this.scheduleServerPump();
+        this.notifyPeerTransportWork(false, true);
+        if (nativeWork) this.wakePendingReads();
         if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
@@ -4546,6 +5058,9 @@ export class NativeRuntimeAdapter implements Runtime {
       chunk.terminalOperations,
       subscription.outputColumns?.rootColumns,
     );
+    if (chunk.unreadable !== undefined) {
+      delta.unreadable = JSON.parse(chunk.unreadable) as UnreadableRow[];
+    }
     subscription.callback?.(delta);
   }
 
@@ -4557,11 +5072,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
-    setTimeout(() => {
+    queueMicrotask(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
       this.startServerPump();
-    }, SERVER_PUMP_DEBOUNCE_MS);
+    });
   }
 
   /** Run a pump without awaiting it. A failure becomes the connection's
@@ -4573,9 +5088,9 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private notifyPeerTransportWork(requiresDistinctPass = false): void {
+  private notifyPeerTransportWork(requiresDistinctPass = false, passCompleted = false): void {
     for (const listener of this.peerTransportWorkListeners) {
-      listener(requiresDistinctPass);
+      listener(requiresDistinctPass, passCompleted);
     }
   }
 
@@ -4633,7 +5148,9 @@ export class NativeRuntimeAdapter implements Runtime {
           return;
         }
       }
+      // Give the host a turn before continuing a burst that filled every round.
       this.serverPumpAgain = true;
+      await sleep(0);
     } finally {
       this.serverPumpRunning = false;
       if (this.serverPumpAgain) {
@@ -4853,6 +5370,9 @@ export class NativeRuntimeAdapter implements Runtime {
       attempt.carrier === this.serverCarrier;
     if (isCurrent) {
       this.serverConnectionGeneration += 1;
+      // `serverPumpScheduled` stays as it is: a scheduled pump is a microtask
+      // that always runs, clears the flag and pumps whichever link is
+      // current by then, so the replacement link is not left unpumped.
       this.serverConnectionAttempt = null;
       this.serverCarrier = null;
     }
@@ -4934,6 +5454,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    subscription.spaces?.release();
+    subscription.spaces = undefined;
     if (subscription.poolId !== undefined) this.pooledSubscriptions.delete(subscription.poolId);
     subscription.openingAbort?.abort();
     const source = subscription.source;
@@ -5063,6 +5585,48 @@ export class NativeRuntimeAdapter implements Runtime {
   private notifyServerTransportWork(): void {
     this.serverTransportWorkEpoch += 1;
     this.resolveServerTransportWorkWaiters();
+    this.wakePendingReads();
+  }
+
+  /** The core asked for a tick: is it news for the pending reads? */
+  private noteTickRequest(urgency: string | null | undefined): void {
+    // A synchronous binding (wasm) calls back during the poll that asked.
+    if (this.pollingRead) return;
+    // A deadline is news when it passes (its timer marks the tick then), not
+    // when announced: a pending read re-announces its own on every poll.
+    if (typeof urgency === "string" && urgency.startsWith("after:")) return;
+    const counted = urgency === "immediate" ? this.db.tickRequests?.() : undefined;
+    if (counted === undefined) {
+      this.nativeWorkSinceTick = true;
+      return;
+    }
+    // A later-turn callback (napi) covers every request since the last one.
+    const fresh = counted - this.tickRequestsSeen;
+    const own = Math.min(this.readTickRequests, fresh);
+    this.tickRequestsSeen = counted;
+    this.readTickRequests -= own;
+    if (fresh > own) this.nativeWorkSinceTick = true;
+  }
+
+  /** Poll a pending read, keeping the ticks it asks for apart from news. */
+  private pollPendingRead(result: PendingNativeRead): Uint8Array | null {
+    const before = this.db.tickRequests?.();
+    this.pollingRead = true;
+    try {
+      return result.poll();
+    } finally {
+      this.pollingRead = false;
+      if (before !== undefined) {
+        const after = this.db.tickRequests!();
+        this.readTickRequests += Math.max(0, after - Math.max(before, this.tickRequestsSeen));
+      }
+    }
+  }
+
+  private wakePendingReads(): void {
+    const wakes = [...this.ownerRuntime.pendingReadWakes];
+    this.ownerRuntime.pendingReadWakes.clear();
+    for (const wake of wakes) wake();
   }
 
   private resolveServerTransportWorkWaiters(): void {
@@ -5865,6 +6429,22 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
   }
 }
 
+/** One turn of the host's task queue, without a timer (no clamp, no fake clock). */
+function hostTurn(): Promise<void> {
+  if (typeof setImmediate === "function") return new Promise((resolve) => setImmediate(resolve));
+  if (typeof MessageChannel !== "undefined") {
+    return new Promise((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
+  return sleep(0);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5962,8 +6542,10 @@ function writeOrNormalizeRejection<T>(
       const coreReason =
         nativeCoreErrorReason(error) ??
         (reason.startsWith("authorization_denied:") ? "authorization_denied" : undefined);
+      const space = pendingSpace(error);
       throw Object.assign(new Error(`${operation} failed: WriteError("${reason}")`), {
         code: rejectionCode(coreReason),
+        ...(space && { reason: coreReason, space }),
       });
     }
     throw error;
@@ -6034,6 +6616,10 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   identity_mismatch: "write_rejected",
   // A skipped catalogue version, never a write's fate.
   schema_version_unsupported: "write_rejected",
+  // Refused when the call is made (the key or the space's root is missing),
+  // never a write's fate once it is accepted.
+  "key-pending": "write_rejected",
+  "space-pending": "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
@@ -7509,6 +8095,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       coalesced?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
+      /** The rows left out as undecryptable, as JSON, when they changed. */
+      unreadable?: string;
     }
   | {
       type: "rejected";
@@ -7527,6 +8115,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reset?: unknown;
     coalesced?: unknown;
     terminalOperations?: unknown;
+    unreadable?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -7542,6 +8131,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
+      ...(typeof record.unreadable === "string" ? { unreadable: record.unreadable } : {}),
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {
@@ -7758,4 +8348,9 @@ function reportAsyncRuntimeError(error: unknown): void {
   queueMicrotask(() => {
     throw error;
   });
+}
+
+/** A write's wait for its space's key, ended by the database closing. */
+function keyWaitClosed(): EncryptionError {
+  return new EncryptionError("closed", "The database closed while a write waited for its key");
 }

@@ -28,6 +28,7 @@ import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
+import { cloneRowData } from "./structural-values.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -158,6 +159,15 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal The authority's catalogue identity for a table of this schema. */
+  tableIdentity?(table: string): string;
+  /** @internal The thin runtime cannot resolve the space identity for a member add in a transaction. */
+  memberAddRefusal?(table: string): Error;
+  /**
+   * @internal Runs a write, and again after the space's key is ready when it
+   * fails `key-pending` (an encrypted app only).
+   */
+  retryAfterKey?<T>(operation: () => T): T | Promise<T>;
   /**
    * @internal The Db handed over to a successor: end reads not sent yet with
    * a `RuntimeClosedError` cause, so they ask the successor instead.
@@ -195,6 +205,12 @@ export interface Runtime {
    * when this runtime can't tell (the transaction then commits as asked).
    */
   hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
+  /**
+   * @internal Why open transaction `id` can only roll back: an operation in
+   * it was refused (a thin runtime's, touching an end-to-end encrypted
+   * column), even if the app caught that.
+   */
+  transactionRefusal?(id: OpenTransactionId): Error | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
@@ -670,6 +686,7 @@ export interface MutationErrorEvent {
 export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: BranchSelector;
+  addCreatorAsMember?: boolean;
 }
 
 export interface UpdateOptions extends TimestampOverrideOptions {
@@ -709,6 +726,7 @@ interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
+  addCreatorAsMember?: boolean;
   transaction_id?: string;
   target_branch_name?: string;
   branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
@@ -925,6 +943,26 @@ export class WriteWaitTimeoutError extends Error {
   }
 }
 
+/**
+ * A streaming write timed out after publication started. Publication may
+ * still complete. Await {@link settled} and check its outcome before retrying.
+ */
+export class StreamingPublicationTimeoutError extends Error {
+  readonly name = "TimeoutError";
+
+  constructor(
+    table: string,
+    /** The ID of the row being published. */
+    readonly rowId: string,
+    /** Resolves with the publication receipt or rejects with the publication error. */
+    readonly settled: Promise<StreamingInsertResult>,
+  ) {
+    super(
+      `Streaming publication of ${table} row ${rowId} timed out and may still complete. Await error.settled before retrying.`,
+    );
+  }
+}
+
 /** Options for waiting on a write. */
 export interface WriteWaitOptions {
   tier: DurabilityTier;
@@ -981,11 +1019,62 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
 ): T {
   const ready = writeWaitReadiness.get(source);
   if (ready) writeWaitReadiness.set(target, ready);
+  const written = heldBackWrites.get(source);
+  if (written) heldBackWrites.set(target, written);
   return target;
 }
 
-/** Validate JavaScript callers before passing a wait tier to the runtime. */
-function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+/** Held-back writes: the handle each returns once it ran, and whether a wait took it. */
+const heldBackWrites = new WeakMap<
+  object,
+  { handle: Promise<WriteHandle<unknown, unknown>>; observed: boolean }
+>();
+
+/**
+ * @internal `handle` is for a write held back behind earlier ones, which may
+ * run on another client than the one `handle` was made with (the local-first
+ * one, after waiting for it). Its wait is the wait of the handle `written`
+ * resolves to. A failure before the write ran that no wait takes goes to
+ * `unobserved`, once.
+ */
+export function waitAsWritten<T extends WriteHandle<unknown, unknown>>(
+  handle: T,
+  written: Promise<WriteHandle<unknown, unknown>>,
+  unobserved: (error: unknown) => void,
+): T {
+  const entry = { handle: written, observed: false };
+  heldBackWrites.set(handle, entry);
+  written.catch((error: unknown) =>
+    queueMicrotask(() => {
+      if (!entry.observed) unobserved(error);
+    }),
+  );
+  return handle;
+}
+
+/** Wait for a held-back write: for it to run, then as the handle it returned. */
+async function waitForWritten(
+  written: Promise<WriteHandle<unknown, unknown>>,
+  tier: DurabilityTier,
+  timeoutMs: number | undefined,
+): Promise<unknown> {
+  if (timeoutMs === undefined) return (await written).wait({ tier });
+  const deadline = Date.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new WriteWaitTimeoutError(tier, timeoutMs)), timeoutMs);
+  });
+  let handle: WriteHandle<unknown, unknown>;
+  try {
+    handle = await Promise.race([written, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+  return handle.wait({ tier, timeoutMs: Math.max(0, deadline - Date.now()) });
+}
+
+/** @internal Validate JavaScript callers before passing a wait tier to the runtime. */
+export function resolveWriteWaitTier(tier: unknown): DurabilityTier {
   if (tier === "local" || tier === "global") return tier;
   const message =
     tier === "edge"
@@ -1024,6 +1113,11 @@ export class WriteHandle<T = void, WaitResult = void> {
   async wait(options: WriteWaitOptions): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
+    const heldBack = heldBackWrites.get(this);
+    if (heldBack) {
+      heldBack.observed = true;
+      return (await waitForWritten(heldBack.handle, tier, options.timeoutMs)) as WaitResult;
+    }
     const ready = writeWaitReadiness.get(this)?.(tier);
     return (await this.#client.waitForTransaction(
       this.txId,
@@ -1375,6 +1469,11 @@ export class JazzClient {
     return opened;
   }
 
+  /** @internal See {@link Runtime.retryAfterKey}. */
+  retryAfterKey<T>(operation: () => T): T | Promise<T> {
+    return this.runtime.retryAfterKey ? this.runtime.retryAfterKey(operation) : operation();
+  }
+
   /** @internal Shared across schema clients attached to one runtime owner. */
   preparationOwner(): object {
     return this.runtime.preparationOwner ?? this.runtime;
@@ -1517,7 +1616,7 @@ export class JazzClient {
   /** @internal Prepare a return value without publishing or staging a physical row. */
   previewInsertInternal(table: string, values: InsertValues, objectId?: string): Row {
     if (!this.runtime.previewInsert) throw new Error("This runtime cannot prepare an inserted row");
-    return this.runtime.previewInsert(table, structuredClone(values), objectId);
+    return this.runtime.previewInsert(table, cloneRowData(values), objectId);
   }
 
   commitTransaction(id: OpenTransactionId): WriteHandle {
@@ -1550,6 +1649,11 @@ export class JazzClient {
   hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
     if (this.transactionPreparations.get(id)?.unopened) return false;
     return this.runtime.hasStagedTransactionWrites?.(id);
+  }
+
+  /** @internal See {@link Runtime.transactionRefusal}. */
+  transactionRefusal(id: OpenTransactionId): Error | undefined {
+    return this.runtime.transactionRefusal?.(id);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
@@ -1678,7 +1782,12 @@ export class JazzClient {
     {
       updatedAt,
       branch: selected,
-    }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
+      addCreatorAsMember,
+    }: {
+      updatedAt?: number;
+      branch?: BranchView | BranchSelector;
+      addCreatorAsMember?: boolean;
+    } = {},
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
     const session =
@@ -1690,6 +1799,7 @@ export class JazzClient {
       attribution === undefined &&
       !openTransactionId &&
       updatedAt === undefined &&
+      addCreatorAsMember === undefined &&
       !branch
     ) {
       return undefined;
@@ -1699,6 +1809,7 @@ export class JazzClient {
       session &&
       !openTransactionId &&
       updatedAt === undefined &&
+      addCreatorAsMember === undefined &&
       !branch
     ) {
       return JSON.stringify(serializeRuntimeSession(session));
@@ -1713,6 +1824,9 @@ export class JazzClient {
     }
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
+    }
+    if (addCreatorAsMember !== undefined) {
+      payload.addCreatorAsMember = addCreatorAsMember;
     }
     if (openTransactionId) {
       payload.transaction_id = openTransactionId;

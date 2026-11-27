@@ -1,0 +1,130 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "projects": {
+      "columns": {
+        "name": "string",
+        "ownerId": "uuid"
+      }
+    },
+    "tasks": {
+      "columns": {
+        "projectId": "uuid",
+        "title": "bytes",
+        "__e2ee_eq_title": "bytes",
+        "label": "string?",
+        "note": "string?"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "title": "string"
+        },
+        "equality": [
+          "title"
+        ]
+      }
+    },
+    "records": {
+      "columns": {
+        "projectId": "uuid",
+        "data": "bytes",
+        "__e2ee_eq_data": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "data": {
+            "json": true
+          }
+        },
+        "equality": [
+          "data"
+        ]
+      }
+    },
+    "files": {
+      "columns": {
+        "projectId": "uuid",
+        "content": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "content": "bytes"
+        }
+      }
+    },
+    "captionedFiles": {
+      "columns": {
+        "projectId": "uuid",
+        "content": "bytes",
+        "caption": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "content": "bytes",
+          "caption": "string"
+        }
+      }
+    },
+    "notes": {
+      "columns": {
+        "text": "string"
+      }
+    },
+    "comments": {
+      "columns": {
+        "taskId": "uuid",
+        "text": "string"
+      },
+      "relations": {
+        "task": {
+          "rel": "tasks",
+          "column": "taskId"
+        }
+      }
+    },
+    "replies": {
+      "columns": {
+        "noteId": "uuid",
+        "text": "string"
+      },
+      "relations": {
+        "note": {
+          "rel": "notes",
+          "column": "noteId"
+        }
+      }
+    }
+  }
+}

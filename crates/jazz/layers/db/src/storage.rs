@@ -1585,7 +1585,7 @@ pub mod managed_emulation {
             }
             block_on(async {
                 let db = open().await;
-                db.set_authority().await;
+                db.set_authority().await.unwrap();
                 let (peer, mut client) = duplex();
                 let received = Rc::new(Cell::new(false));
                 let old = db

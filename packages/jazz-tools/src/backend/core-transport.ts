@@ -1,7 +1,7 @@
 /**
- * How a backend reaches a core over the network: `fetch` for its HTTP routes
- * and a WebSocket for each session. Node's WebSocket takes upgrade headers.
- * Workerd upgrades with fetch, either over the network or through a binding.
+ * A backend sends HTTP requests and opens a socket per core session.
+ * Node's WebSocket accepts upgrade headers directly. A Worker upgrades with
+ * fetch, using the global fetch for a remote core or stub.fetch for a binding.
  */
 
 import { backendNative } from "./backend-native.js";

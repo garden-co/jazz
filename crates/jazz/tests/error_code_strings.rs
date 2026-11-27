@@ -76,6 +76,8 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",
         Reason::SchemaVersionUnsupported => "schema_version_unsupported",
+        Reason::KeyPending => "key-pending",
+        Reason::SpacePending => "space-pending",
     }
 }
 
@@ -131,19 +133,13 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
             .build(),
     )
     .expect("public schema compiles");
-    let alice = jazz::db::block_on(Db::open(DbConfig {
+    let alice = jazz::db::block_on(Db::open(DbConfig::new(
         schema,
-        identity: DbIdentity {
+        DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
-        id_source: None,
-        chunk_store: None,
-        host_chunk_io: false,
-        clock: None,
-        migrations: Default::default(),
-        system_node: None,
-    }))
+    )))
     .expect("alice opens a database");
 
     let error = alice
@@ -157,5 +153,17 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         error.to_string(),
         "Query: unknown table missing",
         "the binding-visible message is unchanged by the stable code"
+    );
+}
+
+/// Contract: builds recognise the same 15 refusal reasons, including the
+/// names an encrypting client reports.
+#[test]
+fn every_build_recognises_encryption_refusals() {
+    assert_eq!(Reason::ALL.len(), 15);
+    assert_eq!(Reason::from_name("key-pending"), Some(Reason::KeyPending));
+    assert_eq!(
+        Reason::from_name("space-pending"),
+        Some(Reason::SpacePending)
     );
 }

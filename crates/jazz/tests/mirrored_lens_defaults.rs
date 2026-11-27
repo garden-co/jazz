@@ -108,7 +108,7 @@ fn config(schema: JazzSchema, node: u8) -> DbConfig {
 
 fn authority_at(path: &Path) -> Db {
     let db = block_on(Db::open_at(config(v1(), 0), path, FileOptions::default())).unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 

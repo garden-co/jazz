@@ -32,6 +32,8 @@ sql-trace = ["jazz-db/sql-trace"]
 durable-object-limits = ["jazz-db/durable-object-limits"]
 # See jazz-db's `managed-storage-emulation`.
 managed-storage-emulation = ["testing", "jazz-db/managed-storage-emulation"]
+# See jazz-db's `e2ee-client`.
+e2ee-client = ["jazz-db/e2ee-client"]
 testing = [
   "runtime",
   "jazz-types/testing",

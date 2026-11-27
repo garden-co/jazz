@@ -58,6 +58,7 @@ type RelayExports = {
     abiVersion: number;
     openAttached(capability: Uint8Array): {
       readonly supportsSnapshotCapture?: boolean;
+      readonly supportsStoreWake?: boolean;
       execute(command: Uint8Array): Uint8Array;
       tick(): void;
       setWakeTrace?(enabled: boolean): void;
@@ -198,6 +199,22 @@ it.each([undefined, false, true])(
     expect(foreground.execute).toHaveBeenCalledWith(Uint8Array.of(0));
   },
 );
+
+it.each([undefined, true])("forwards native store wake support %s", (supportsStoreWake) => {
+  const foreground = { ...foregroundFixture(), supportsStoreWake, setTickScheduler: jest.fn() };
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: NATIVE_RELAY_ABI_V1,
+    openAttached: jest.fn(() => foreground),
+  };
+  const runtime = loadRelay({
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    execute: jest.fn(),
+  })
+    .installNativeForegroundRuntime()
+    .openAttached(new Uint8Array(32));
+
+  expect(runtime.supportsStoreWake).toBe(supportsStoreWake === true);
+});
 
 it("forwards the private wake trace switch only when the native handle provides it", () => {
   const setWakeTrace = jest.fn();
@@ -715,6 +732,77 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   const malformed = Uint8Array.from([...utf8('["'), 0xc3, 0x28, 34, 93]);
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
+  );
+});
+
+it("decodes a read's rows with the rows it left out, from the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned by reported_rows_answer_has_pinned_bytes in jazz-native-relay.
+  const json = '[{"table":"t","id":"i","column":null,"code":"key-pending"}]';
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const answer = (unreadable: number[]) =>
+    Uint8Array.from([38, 2, 9, 8, unreadable.length, ...unreadable]);
+  expect(relay.decodeNativeForegroundResponse(answer(ascii(json)))).toEqual({
+    type: "rows",
+    rows: Uint8Array.of(9, 8),
+    unreadable: json,
+  });
+  // A read that left none out is the unchanged `Rows` answer.
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(2, 2, 9, 8))).toEqual({
+    type: "rows",
+    rows: Uint8Array.of(9, 8),
+  });
+  for (const malformed of ['{"table":"t"}', "[", ""]) {
+    expect(() => relay.decodeNativeForegroundResponse(answer(ascii(malformed)))).toThrow(
+      /malformed unreadable rows/,
+    );
+  }
+  const whole = answer(ascii(json));
+  expect(() => relay.decodeNativeForegroundResponse(whole.subarray(0, whole.length - 1))).toThrow();
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(38, 5, 9, 8))).toThrow();
+});
+
+it("decodes a delta that names its unreadable rows with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned by unreadable_delta_event_has_pinned_bytes in jazz-native-relay.
+  const json = '[{"table":"t","id":"i","column":null,"code":"key-pending"}]';
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const event = (unreadable: number[]) =>
+    Uint8Array.from([
+      4, // subscription events
+      1, // one event
+      4, // delta with unreadable rows
+      1,
+      0,
+      5,
+      ...ascii("Local"),
+      2,
+      9,
+      8,
+      unreadable.length,
+      ...unreadable,
+    ]);
+  expect(relay.decodeNativeForegroundResponse(event(ascii(json)))).toEqual({
+    type: "subscriptionEvents",
+    events: [
+      {
+        type: "delta",
+        reset: true,
+        settled: false,
+        tier: "Local",
+        delta: Uint8Array.of(9, 8),
+        unreadable: json,
+      },
+    ],
+  });
+  for (const malformed of ['{"table":"t"}', "[", ""]) {
+    expect(() => relay.decodeNativeForegroundResponse(event(ascii(malformed)))).toThrow(
+      /malformed unreadable rows/,
+    );
+  }
+  // Truncated: the list is cut short.
+  expect(() => relay.decodeNativeForegroundResponse(event(ascii(json)).subarray(0, 20))).toThrow(
+    /truncated/,
   );
 });
 

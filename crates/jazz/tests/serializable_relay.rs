@@ -1552,3 +1552,40 @@ fn own_version_under_another_tabs_conflicts(query: Query) {
     );
     assert_eq!(net.holders(), ["carol"]);
 }
+
+/// A tab writes invite X through its worker, so the tab and the worker both
+/// hold it, and no read keeps it current. A direct client revokes it. In the
+/// tab's next serializable transaction, a read pinned to the snapshot must
+/// not return X: the authority's listing as of the snapshot leaves it out, so
+/// the worker drops its copy before serving the tab, and the tab drops its
+/// own (jazz#6399).
+#[test]
+fn a_tabs_pinned_read_leaves_out_a_row_revoked_before_the_snapshot() {
+    let net = Net::new(1);
+    let tab = net.tab(0);
+    let write = block_on(tab.insert("invites", code("x"), Default::default())).unwrap();
+    net.settle(tab, write.mergeable_tx_id())
+        .expect("the tab's invite settles");
+    let invite = tab.prepare_query(&invite_query("x")).unwrap();
+    for db in [tab, &net.worker] {
+        let held = block_on(db.all(&invite, ReadOpts::default())).unwrap();
+        assert_eq!(held.len(), 1, "the tab and its worker hold the invite");
+    }
+    net.revoke(write.row_uuid());
+
+    let open = net.begin_pinned(tab);
+    let rows = net.drive(tab.tx_ref(open).all_prepared(&invite)).unwrap();
+    assert!(
+        rows.is_empty(),
+        "a tab's pinned read returned an invite revoked before its snapshot"
+    );
+    let worker = net.worker.prepare_query(&invite_query("x")).unwrap();
+    assert!(
+        block_on(net.worker.all(&worker, ReadOpts::default()))
+            .unwrap()
+            .is_empty(),
+        "the worker kept the revoked invite"
+    );
+    net.finish(tab, open)
+        .expect("the read-only transaction commits");
+}

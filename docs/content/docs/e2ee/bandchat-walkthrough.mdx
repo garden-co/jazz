@@ -1,0 +1,426 @@
+---
+title: "Walkthrough: an encrypted chat app"
+description: "Build an encrypted app from start to finish, using the encrypted BandChat example: schema, permissions, members, keys, devices, recovery, sign-out and leaving."
+languageTabs: backend
+---
+
+This page walks through one real app. It is BandChat with end-to-end encryption, in
+`examples/band-chat/apps/react-hono-betterauth-e2ee`.
+It is a React app with a Hono server and Better Auth for sign-in.
+
+The code blocks below are included from the app's source, so they are the app's own code. Each
+block is one part of the file named in its title; the text says what a block leaves out. Each
+section links to the reference page that has the full detail.
+
+## What BandChat hides, and what it does not
+
+A room is an encrypted space. Only the room's members hold its key.
+
+These are encrypted:
+
+- The text of a message.
+- The bytes and the name of an attachment.
+- Each member's read marker (the time they last read a room).
+
+The server still sees the rest:
+
+- Who is in which room.
+- Who wrote a message, and when.
+- Room names, reactions and sketches.
+- Each person's profile: their display name and avatar.
+- The type and the size of an attachment.
+- When each read marker was written. The stored time is encrypted. The moment of the write is not,
+  and it shows about when that person read the room.
+
+Read markers are hidden from the server, but not from the room's other members. Every member holds
+the room's key, so every member could open a marker. The read rule keeps the server from sending
+one member another's marker. Reading it takes a member and the server together.
+
+## Declare the encryption in `schema.ts`
+
+Mark each column to seal with `.encrypted()`. Give its table a `space`: the row whose members share
+one key. In BandChat a room is its own space, so the messages and the read markers name `"room"`.
+
+These are the three tables of `schema.ts` that matter here. The file also has the profiles, the
+app's own `roomMembers` table, join requests, reactions and sketches:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-rooms
+</include>
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-read-markers
+</include>
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-messages
+</include>
+
+Run `npx jazz-tools generate`. It writes the encryption into `jazz.app.json` and the typed
+bindings into `jazz.generated.ts`. Your code sees the plain types. `text` is a string, even though
+the server stores bytes. [Getting started](/docs/e2ee/getting-started) has the rules for what
+`generate` refuses.
+
+## Write the permissions with `isMember`
+
+Membership is one thing: the rows of Jazz's members table. `isMember("rooms", roomId)` is true when
+the signed-in account has a member row for that room. Every rule that means "is in this room" says
+that, and nothing else.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-is-member
+</include>
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-rooms
+</include>
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-messages
+</include>
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-read-markers
+</include>
+
+These are the rules for rooms, messages and read markers. The file also has the rules for profiles,
+reactions, sketches, join requests and the app's own `roomMembers` table. Its helpers read as their
+names say: `createdByMe` is `{ "$createdBy.account": session.user }`, `authoredByMe` is
+`{ author: session.user }` and `myReadMarker` is `{ reader: session.user }`.
+
+Two choices matter here.
+
+- **Only the creator updates a room.** The room's update rule is the rule for adding and removing
+  members. A member who could update the room could add anyone.
+- **A space table's read rule is `isMember` of its own `id`.** `rooms` does that. Deploy refuses the
+  app if it does not.
+
+## Give the browser its keys
+
+In a browser, Jazz keeps the device's keys for you, in IndexedDB. You pass `app` so Jazz knows which
+columns are encrypted before the first query. You do not write a private store. Apps on Node and the
+native platforms do: see [Private store](/docs/e2ee/private-store).
+
+This is BandChat's provider. The file also defines the loading, signed-out and error screens it
+names:
+
+<include cwd lang="tsx" meta='title="components/jazz-provider.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/components/jazz-provider.tsx#bandchat-provider-load
+</include>
+
+<include cwd lang="tsx" meta='title="components/jazz-provider.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/components/jazz-provider.tsx#bandchat-provider
+</include>
+
+The app starts on the thin client, which holds no keys. Rooms and other plain data show at once.
+Message text waits for the local-first client. See
+[Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
+
+The server holds no keys at all. `createJazz` stores and relays the encrypted columns as bytes.
+This is `jazz()` in `server/jazz.ts`. It stores the data on a remote Jazz server when one is
+configured, in memory under tests and in SQLite otherwise, and reads the session with Better Auth:
+
+<include cwd lang="ts" meta='title="server/jazz.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/server/jazz.ts#bandchat-server-jazz
+</include>
+
+## Create a room and its first member
+
+A room and its creator's member row commit together. Without the member row, the creator could not
+read their own room.
+
+`members.row` makes the row to insert. The app chooses the room's ID first, so the row can name it.
+This is the body of the new-room dialog's submit handler:
+
+<include cwd lang="tsx" meta='title="src/components/NewRoomDialog.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/NewRoomDialog.tsx#bandchat-create-room
+</include>
+
+`app.roomMembers` is BandChat's own table. It carries each member's profile, so the members list
+can show names. Jazz does not read it. The member row is what decides who holds the key.
+
+## Add people
+
+A room link only lets someone ask to join. They add a join request. The creator then admits them.
+
+Admission is one transaction. It inserts the member row and the `roomMembers` row, and deletes the
+request. Then the app calls `keys.deliver()`.
+
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-admit-member
+</include>
+
+Being admitted does not give the person the key. Their devices get it from a device that already
+holds it. That device has to be online. Until then the new member sees the room's messages as
+**decrypting**, and after ten seconds usually as waiting for the room's key (the notices are
+described under "Messages you cannot read yet").
+
+If `deliver()` fails or reports `failed` above zero, BandChat shows "Key not delivered yet".
+The member is already admitted. The dialog shows the reason when the call returns one.
+The Retry button calls `deliver()` again. Jazz also runs a delivery pass by itself when the app
+starts and when the connection comes back. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+
+## List the members
+
+Ask Jazz for a filter. Then pass it to an ordinary query. If the browser opens offline before
+Jazz knows the room table's identity, the filter can fail. BandChat shows the reason and offers
+a Retry button.
+
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-room-members
+</include>
+
+The list comes from the member rows. A person with a member row is listed, even if they have no
+`roomMembers` row or no profile. They show as "Unknown".
+
+## Remove a member, then change the key
+
+Removal needs two steps. BandChat does both.
+
+1. **Delete the member rows.** The member rows and the `roomMembers` rows go in one serializable
+   transaction. The screen waits until the server accepts it. If another write conflicts, for
+   example an admission of the same person, the transaction runs again. It tries three times in all.
+2. **Rotate the room's key.** Without this, the room is only marked. The key changes at the next
+   encrypted write. With it, the key changes now, so the removed person reads nothing written later.
+
+This is the first step:
+
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-remove-member
+</include>
+
+With `deleteMarkers`, the same transaction also deletes a leaver's read markers.
+
+BandChat asks Jazz to rotate the room's key once the server confirms that member rows were
+removed. A removal count of zero means the creator may be unable to see that member's rows.
+BandChat shows that no member rows were removed. If the room has no key yet, the rotation call
+succeeds and returns `0`. A room gets its key from its first encrypted write.
+
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-renew-room-key
+</include>
+
+If the rotation fails, the dialog says "Removed, but the room's key is not renewed yet" and offers a
+retry. The member is already out. The key is not yet new.
+
+Removal is not instant. Between the removal and the rotation, a message can still be sealed under
+the old key. And removal cannot take back what the person could already read. They keep every
+message they opened before.
+
+Any member can leave a room. Only the creator can remove someone else or renew the key.
+Once the creator's browser learns that a member left, Jazz tries to renew the room's key before
+the creator's next encrypted write.
+
+## Messages you cannot read yet
+
+A browser that lacks a room's key does not show empty rooms. It says how many messages it cannot
+read yet, and why.
+
+Every read result has an `unreadable` list. It names the rows the read left out, each with a
+`code`. `key-pending` means this browser does not currently have the key. For a member, the key
+usually arrives from another member's device:
+
+<include cwd lang="tsx" meta='title="src/components/RoomView.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomView.tsx#bandchat-locked-count
+</include>
+
+BandChat turns that count into one of three notices:
+
+<include cwd lang="tsx" meta='title="src/components/RoomView.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomView.tsx#bandchat-locked-notice
+</include>
+
+`useKeyOnItsWay` picks which one:
+
+<include cwd lang="tsx" meta='title="src/components/RoomView.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomView.tsx#bandchat-key-on-its-way
+</include>
+
+While the key is on its way, the room says its messages are decrypting. A browser known to be
+waiting for approval, or with any message locked for another reason, shows a banner saying how many
+are locked. One whose status is not known yet sees decrypting for ten seconds, then locked. After
+those ten seconds an active browser whose rows are all `key-pending` says the messages are waiting
+for the room's key, since no device may hold it any more. Otherwise, as for a room whose key record
+has not arrived, they show as locked. The messages appear by themselves once the key arrives.
+
+The room list needs no key. For each room it asks for the newest message, using plain columns only:
+
+<include cwd lang="tsx" meta='title="src/components/RoomActivity.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomActivity.tsx#bandchat-newest-message
+</include>
+
+The `["roomId", "$createdAt"]` index in the schema makes this one index entry per room. The list
+orders rooms by it, and marks a room unread when its newest message is newer than the reader's read
+marker. The cost grows with the number of rooms, not with the number of messages. Use it for a
+handful of rooms, not hundreds.
+
+## A second browser: approving a device
+
+Each browser is one device. A new browser starts as **waiting for approval**. Its messages stay
+locked. A device that is already active approves it.
+
+BandChat keeps `db.encryption` in a context as `encryption`. On the new browser, answer the
+challenge. It shows a six-digit code:
+
+<include cwd lang="tsx" meta='title="src/lib/device-state.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/device-state.tsx#bandchat-answer-challenge
+</include>
+
+On the active browser, start the approval, wait for the new browser's answer, then type its code:
+
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-approve-device
+</include>
+
+In BandChat the person types the code that the new browser shows. A wrong code approves nothing.
+The code is how a server that swapped keys gets caught. See
+[Devices and recovery](/docs/e2ee/devices-and-recovery).
+
+A browser can also reload halfway through. BandChat handles that. The new browser may answer
+again, and the active one may start again.
+
+## Recovery: if every device is gone
+
+If a person loses every device and has no recovery, they lose their encrypted messages for good.
+Clearing site data on the only browser does the same. So BandChat has one button: "Set up recovery".
+
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-enable-recovery
+</include>
+
+`enable` saves the secret in a passkey where the browser offers one. Otherwise it returns a
+24-word phrase. BandChat shows the phrase once, keeps it nowhere, and sends it nowhere.
+
+A browser that is waiting for approval offers both ways back, in `RestoreAccess` in
+`src/components/DevicesPanel.tsx`. Its phrase form calls `encryption.recovery.restore(words)` with
+the trimmed phrase, and clears the field before the call. Its passkey button calls
+`encryption.recovery.restoreFromPasskey({ appName: APP_NAME })`, where `APP_NAME` is `"BandChat"`.
+
+## Remove a lost device
+
+Say a laptop is stolen. The person goes to another browser and presses "Remove lost device" on the
+laptop's row. The button is only on devices that are `active`. Jazz refuses to remove a device that
+is waiting.
+
+The laptop may still have an open connection. A removed device must not stay signed in. So the app
+ends the person's sign-ins first, and removes the device second.
+
+1. **The server step.** The browser calls a route on BandChat's own server. The route deletes every
+   Better Auth session of that user except the caller's. Then it calls `jazz.revokeUser`, which
+   closes the user's open connections.
+2. **The device step.** When the route answers, the browser calls `devices.remove(id)`.
+
+<include cwd lang="ts" meta='title="src/lib/end-other-sign-ins.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/end-other-sign-ins.ts#bandchat-end-other-sign-ins
+</include>
+
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-remove-lost-device
+</include>
+
+The route is in `server/index.ts` and `server/jazz.ts`. It lists the user's sessions page by page,
+because Better Auth lists at most 100 at a time, and it deletes them until only the caller's is left.
+
+**This has a cost, and the screen says so before the person confirms.** Every other browser of the
+user is signed out and has to sign in again. Those browsers keep their keys and their device
+records, so they need no new approval. Changes they had not synced yet may be lost.
+
+The server cannot tell which session belongs to which device. A record like that would be the
+device's own claim, and the server holds no keys to check it. So it ends them all.
+
+If the server's answer is lost or it cannot finish, some browsers may already be signed out.
+BandChat keeps the device listed until the sign-out step is confirmed. Press the button again to
+run both steps.
+
+The removed device keeps the keys it already holds. It receives no new keys.
+A device that's connected and watching the room learns of the removal one
+sync round trip after it commits. Other devices learn of it when they next
+sync the room. Writes can still use the current key before the device learns
+of the removal, while offline after learning of it, or when an online
+rotation is refused or undecided by the write's deadline. The write goes ahead and the room's key
+rotates at the next opportunity.
+
+## Sign out, or leave
+
+These are two different things.
+
+**Signing out keeps the keys.** The browser keeps its keys, its local data and its device record.
+The next sign-in on that browser reads at once, with no approval. BandChat does not wipe at
+sign-out.
+
+That is a risk on a shared computer. A later user of the same browser profile, or a script on the
+app's origin, can ask the browser to use the kept keys. There are two ways to remove the device:
+
+- **Before you sign out,** press "Leave this browser".
+- **Afterwards,** press "Remove lost device" on it from another device.
+
+**Leaving** asks another device to remove this browser. It calls `requestRemoval`, after keeping a
+record of the leave (see below):
+
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-leave-browser
+</include>
+
+A sole device cannot leave. Nothing would hold the account's keys. The call fails with the code
+`no-other-device`, and BandChat says an only device cannot leave.
+
+Otherwise, once Jazz lists the published request, the row shows "Removal pending". The browser stays
+usable. When another of the person's devices is online, it completes the removal by itself, sometimes
+before "Removal pending" has shown. Then this browser's keys for the account are
+erased, and the browser signs itself out.
+
+Before sending the request, BandChat records the account and this browser's device ID in
+`localStorage`. That lets it finish leaving even if the tab closes before the answer arrives.
+A refusal clears the record. A different ID for the same account means the old keys are gone,
+because the browser enrols again under a new ID. Then the page signs out and clears the record.
+An ordinary sign-out also clears it.
+
+If erasing the keys fails, Jazz closes its encryption runtime with an error. BandChat says leaving
+did not finish and that the keys may still be in this browser. It stays signed in. Reloading checks
+again.
+
+There are two known behaviours of leaving:
+
+- **It waits for another device to be online.** Jazz wipes nothing before that, so an account is
+  never left without a device that holds its key.
+- **It leaves one extra device on the list.** Once the leaving browser has seen its removal while
+  signed in, it has enrolled again. The person's other devices now list one more device,
+  "waiting for approval". That entry cannot be removed. Ignore it, or approve it to let that
+  browser back in.
+
+Leaving wipes the keys, not the browser's local copy of the plain data.
+
+## Know the limits
+
+- **The server sees more than the content.** It sees who is in which room, who wrote when, room
+  names, reactions, sketches, profile names and avatars, attachment types and sizes, and when each
+  read marker was written. A marker's write time shows about when its reader read.
+- **Read markers are not hidden from co-members.** The room's key seals them, so every member could
+  open one. A deploy of BandChat prints one warning for this: the read-marker rule is narrower than
+  its room's, so every member of a room can decrypt a marker that Jazz does not send them. That is
+  expected.
+- **A join request guards the profile row only.** A room's creator can give any account a member
+  row without a request. So "you only join a room you asked to join" is not enforced by the server.
+  Such a member shows as unknown until they have a profile row. They can leave.
+- **Removing a lost device signs out the person's other browsers.** They keep their keys and device
+  records, and sign in again.
+- **Keys stay in the browser after sign-out.** Use "Leave this browser" while you can still use it
+  to erase its keys. "Remove lost device" revokes the device remotely. Copies of keys on an offline
+  browser can remain there. See the
+  [lost-device removal flow](https://github.com/garden-co/jazz/blob/94cd8e1e45/examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#L270-L291).
+- **Leaving needs another device online.** A sole device cannot leave, and a completed leave adds
+  one entry that cannot be removed.
+- **Removing a member cannot take back what they read.** A message can be sealed under the old key
+  until the key is rotated.
+- **BandChat's Hono server runs on Node.** A Cloudflare Worker can also serve an encrypted app
+  by connecting to a native Jazz core with `remote()`.
+- **The room list is not built for hundreds of rooms.** It runs one live query for each room.
+
+The rest of the limits are on [Encryption limits](/docs/e2ee/limits).
+
+## Where to go next
+
+- [Getting started](/docs/e2ee/getting-started): the schema, the store and reading and writing.
+- [Sharing and keys](/docs/e2ee/sharing-and-keys): members, delivery and rotation.
+- [Devices and recovery](/docs/e2ee/devices-and-recovery): approval and the recovery phrase.
+- [Encryption in the browser](/docs/e2ee/browser): the local-first client and signing out.

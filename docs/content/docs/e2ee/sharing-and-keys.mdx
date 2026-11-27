@@ -1,0 +1,204 @@
+---
+title: Sharing and Keys
+description: "Add and remove the members of an encrypted space, and when their devices get keys."
+languageTabs: backend
+---
+
+A space is a row of the table your encryption declaration names, such as a project or room.
+By default, a signed-in account that creates a space with `insert` joins it in the same
+transaction. With `upsert`, adding the creator takes an explicit membership write, including
+when the space is new.
+To add another account, the caller must be able to read and update the space row.
+
+## Create a space and add members
+
+Insert the space row as usual, then use `members.add` to invite another account.
+
+```ts
+const project = await db
+  .insert(app.projects, { name: "Plans", ownerId: accountId })
+  .wait({ tier: "global" });
+await db.encryption.members.add(app.projects, project.id, otherAccountId).wait({ tier: "global" });
+const members = await db.encryption.members.list(app.projects, project.id);
+await db.encryption.members.remove(app.projects, project.id, otherAccountId);
+```
+
+In Rust, pass the generated space row type as the table. This example waits for the sync
+server to accept the insert and admission.
+
+```rust
+use jazz_app::{DurabilityTier, NewProject, Project};
+
+let durable = jazz.durable(DurabilityTier::GlobalServer);
+let project = durable.insert(NewProject::new("Plans", owner_id)).await?;
+durable.add_member::<Project>(project.id, other_account).await?;
+let members = jazz.list_members::<Project>(project.id).await?;
+let removed = jazz.remove_member::<Project>(project.id, other_account).await?;
+```
+
+Swift and Kotlin expose `addMember`, `listMembers` and `removeMember` on their
+`encryption` handle. In Go, use `AddMember`, `ListMembers` and `RemoveMember` on
+`db.Encryption()`. Pass the scope table name and row ID.
+
+To turn off creator membership for one space, pass `{ addCreatorAsMember: false }` as the insert's
+third argument. To turn it off for all spaces this client creates, set `addCreatorAsMember: false`
+in the client's `encryption` options.
+
+Only device clients add creators: a signed-in browser, React Native, Node or native client with
+its encryption runtime, which holds the account's keys. Backend clients and keyless clients never
+add the creator, whatever these options say, because they don't act as a device of the account.
+A backend that creates a space for a user must add that user's membership itself, in the same
+transaction or afterward.
+
+Adding a member is idempotent. If this client already sees the account as a member of the space,
+`members.add` returns that member's existing row and writes nothing. So code written before
+automatic membership, which still adds the creator after creating a space, leaves one row. In the
+space's creating transaction, an explicit creator row is kept and the automatic one is skipped. In
+TypeScript, await `members.add` for the member row, or call `.wait({ tier })` on it as on an
+insert's result.
+
+The check reads this client's local data. A client that hasn't synced an existing membership yet
+(it's offline, or another device has just added it) adds a second row for the account. So can two
+concurrent adds of the same account that both check before either writes: two calls in
+`Promise.all` in TypeScript, in or out of a transaction, or two separate `add_member` calls joined
+with `join!` in Rust. Inside one Rust transaction, adds run one after another, so adding an account
+twice there gives one row. Removing the member deletes all of its rows. Direct inserts into `app.__e2ee_members` aren't checked.
+
+If you create a space with `upsert`, add the creator with
+`tx.encryption.members.add(app.projects, id, accountId)` in the same transaction. You can also call
+`db.encryption.members.add(app.projects, id, accountId)` after the upsert if you have permission
+to read and update the space.
+
+On a thin browser client, the first space insert that adds its creator loads the local-first
+encryption runtime. Inserts with only plaintext columns can stay on the thin client when you
+turn off automatic membership.
+
+The space's key is made by its first encrypted write. A member gets the key from any device that holds it (the
+first holder to deliver wins), sealed to the member's account, so the member's devices can all read.
+
+Use the generated table named by the encryption declaration's `scope`. The methods also accept a
+space reference such as `{ table: "projects", id: project.id }`. On a fresh device, creating a space
+with automatic membership and using the membership helpers can report `not-observed` until the
+device receives the table's identity from the server.
+
+## Advanced: in your own transaction
+
+Use `tx.encryption.members.add` to stage a member alongside other writes. It returns a promise of
+the member row: await it inside the transaction.
+
+```ts
+const written = await db.transaction(async (tx) => {
+  await tx.encryption.members.add(app.projects, project.id, otherAccountId);
+});
+await written.wait({ tier: "global" });
+```
+
+For direct access to `app.__e2ee_members`, use `await db.encryption.members.row(space, accountId)` to
+prepare the insert values. Use `await db.encryption.members.where(space)` to prepare a query filter.
+Pass an account ID as the second argument to restrict the filter to that account. If you insert the
+creator's member row explicitly in the transaction that creates the space, Jazz keeps that row.
+
+## When keys arrive
+
+A pass over the spaces a device holds keys of delivers keys to members that lack them. It runs by itself
+when the app starts, when the connection comes back, and while the device has a subscription on a space.
+Call it when you want new members served now:
+
+```ts
+const { delivered } = await db.encryption.keys.deliver();
+```
+
+A member's device that reads rows it has no key for yet leaves them out and acquires the key once a
+delivery arrives; read again, or keep a subscription on the space.
+
+## Remove a member
+
+An account can leave a space. Anyone the space's update rule allows to manage members can remove
+another account. `members.remove` deletes only matching member rows the caller is allowed to see. It
+returns the number deleted once the authority accepts the serializable transaction. A result of `0`
+means nothing visible was removed. The account may still be a member if the caller cannot read its
+rows. Removing an already absent account also returns `0`.
+
+A conflicting admission triggers a retry, up to three attempts in all. A refusal reaches the caller.
+Once Jazz sees that a removed member held the space's current key, it marks the space for rotation
+and tries to rotate the key before the next write. If a member removes one of their own devices,
+Jazz also marks the affected spaces for rotation.
+
+Calling `db.encryption.keys.rotate(space)` is optional. Call it if you need to renew the key before the
+next write or if automatic rotation might fail. Each rotation adds to the key history that a new
+device verifies when it first loads the space. If you're removing several members, finish all the
+removals first, then call `keys.rotate` once or let the next write rotate the key.
+The new key and up to 100 deliveries commit together. `keys.rotate` returns the number of
+deliveries in that transaction. Subsequent writes use the new key while Jazz delivers it to
+the remaining members in the background.
+
+If you also need to delete your own app's rows atomically with the membership, use a single
+`db.serializableTransaction`. Inside its callback, read the matching rows with
+`tx.all(app.__e2ee_members.where(filter))` using the filter from `members.where(space, otherAccountId)`,
+then delete them and the related app rows. Await the transaction result's `wait()` before calling
+`keys.rotate`.
+Retry the whole transaction on a serialization conflict.
+
+If the space has no key yet, nothing has been sealed. For an active member, `rotate` succeeds and
+writes nothing. If the space already has a key, a member whose device is waiting for delivery gets
+`rotation-needs-key`. Retry once the device has the current key. The same code can also mean the
+device cannot confirm the space's key state. For example, a missing root with a locally held key
+or a skipped root row yields the same refusal. If the device sees that its account has no membership,
+it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
+If the server hides the key root and the device has no evidence of it, `rotate` returns `0` for an
+active member, just as it does for a space that has never had a key. See the
+[rotation tests](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/spaces.rs#L2239-L2353).
+
+If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
+
+A removed member keeps what they could already read. Jazz's permissions stop them from reading any
+rows after removal.
+
+Before reusing a space key, Jazz checks whether it needs rotation. If account verification or the
+check fails, `onReport` receives `rotation-check-failed` with the space and the original reason.
+Jazz marks the space for rotation. The app receives the original failure even if rotation succeeds.
+
+Automatic rotation happens just before a write. If rotation fails, the write can still go ahead
+under the current key, which the removed member may hold. The runtime sends `onReport` a
+`rotation-failed` report with the space and the `reason`.
+
+`rotate(space)` returns once the new key and its first 100 deliveries are committed. The runtime
+then delivers the new key to the remaining members in the background, to each of them even if
+another member already sent it one (that delivery may not open). If that fails, it tries again
+after 2 seconds, then 4, 8, 16 and 32, and gives up after 6 failed attempts in a row; any member
+holding the new key then delivers it to those left out on its next pass. Failures while offline
+aren't counted, and wait 2 seconds like a first failure. The list of remaining members is kept in
+memory only: if the app stops first, the device that rotated delivers again, the next time it
+starts, to each member that has no delivery of the new key from its account.
+
+`onReport` receives a `delivery-failed` report, with the space and the reason, when the runtime
+fails to deliver keys to a space's members: for the background deliveries after a rotation (once
+per attempt), for the pass it runs when a space's members or keys change, and for the pass over
+every held space when the app starts or reconnects. A space is reported at most once per round
+of these, so starting offline reports each held space once.
+
+The next write can retry after a transient rotation failure. After a permission denial, this client stops
+trying to rotate that space automatically for the rest of the session. A member with permission can
+still call `db.encryption.keys.rotate(space)`. See the
+[rotation refusal handling](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/spaces/delivery.rs#L380-L403).
+
+```ts
+db.encryption.onReport((report) => {
+  if (report.type === "rotation-check-failed")
+    console.warn("rotation check failed", report.space, report.reason);
+  if (report.type === "rotation-failed")
+    console.warn("key not rotated", report.space, report.reason);
+  if (report.type === "delivery-failed")
+    console.warn("key delivery failed", report.space, report.reason);
+});
+```
+
+On Node, the database from `createJazz` can add, list and remove members through `db.encryption.members`.
+When Jazz verifies its own account and finds a signed sealing-key record that does not derive
+from the account key, it ignores the record. `onReport` emits `conflicting-account-key` with
+`recordId`, the signing device’s `signerId` and `epochId`. Jazz remembers the last 10,000 distinct
+event identities and suppresses repeats while an identity is in that history. When a new identity
+displaces the oldest, Jazz can report the evicted conflict again. See the
+[conflicting account key test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/accounts.rs#L110).
+
+The backend holds no encryption keys. Use a device client to rotate keys or manage devices and recovery.

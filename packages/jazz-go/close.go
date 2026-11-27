@@ -8,7 +8,8 @@ import (
 
 // Closing follows jazz-ffi's host sequence (include/jazz_ffi.h): stop
 // admitting calls, "close" (which ends the ones waiting for the server),
-// wait for those in flight, free, and only then forget the token provider.
+// wait for those in flight, free, and only then forget the token provider
+// and the private store.
 
 // acquire is the handle for one call into Jazz, until release: the handle
 // isn't freed before. admitted, if any, runs before a close can begin.
@@ -70,7 +71,7 @@ func (db *DB) closeAndFree(drain time.Duration, end func(h uintptr) error, free 
 		db.mu.Lock()
 		db.handle = 0
 		db.mu.Unlock()
-		releaseProvider(db.provider)
+		releaseCallbacks(db.provider, db.store)
 	}
 	if inside {
 		go finish()

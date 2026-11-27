@@ -401,19 +401,21 @@ impl<'a> Writer<'a> {
         }
         out.push_str("        }\n    }\n}\n\n");
 
-        // Updates.
-        let _ = writeln!(
-            out,
-            "/// Changes to a row of `{}`: a `None` field leaves its column as it is.",
-            table.name
-        );
-        out.push_str("#[derive(Debug, Clone, PartialEq, Default)]\n");
-        let _ = writeln!(out, "pub struct {update} {{");
-        for field in &fields {
-            field.doc(&mut out);
-            let _ = writeln!(out, "    pub {}: {OPTION}<{}>,", field.ident, field.view);
+        // Updates: none for a table whose rows never change.
+        if table.updatable {
+            let _ = writeln!(
+                out,
+                "/// Changes to a row of `{}`: a `None` field leaves its column as it is.",
+                table.name
+            );
+            out.push_str("#[derive(Debug, Clone, PartialEq, Default)]\n");
+            let _ = writeln!(out, "pub struct {update} {{");
+            for field in &fields {
+                field.doc(&mut out);
+                let _ = writeln!(out, "    pub {}: {OPTION}<{}>,", field.ident, field.view);
+            }
+            out.push_str("}\n\n");
         }
-        out.push_str("}\n\n");
 
         let uses_impl = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
 
@@ -449,7 +451,11 @@ impl<'a> Writer<'a> {
             );
         }
         let _ = writeln!(out, "    type New = {new};");
-        let _ = writeln!(out, "    type Update = {update};\n");
+        if table.updatable {
+            let _ = writeln!(out, "    type Update = {update};\n");
+        } else {
+            let _ = writeln!(out, "    type Update = {RT}::NoUpdate;\n");
+        }
         let _ = writeln!(
             out,
             "    fn decode(row: &mut {RT}::Fields<'_>) -> {RT}::Result<Self> {{"
@@ -536,26 +542,30 @@ impl<'a> Writer<'a> {
         let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // Update.
-        let _ = writeln!(out, "impl {RT}::Update for {update} {{");
-        let _ = writeln!(out, "    type Row = {row};\n");
-        let _ = writeln!(
-            out,
-            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<{VEC}<({STRING}, {value})>> {{"
-        );
-        if uses_impl {
-            out.push_str("        let computed = &implementations.get::<Implementations>()?.0;\n");
-        }
-        let _ = writeln!(out, "        let mut cells = {VEC}::new();");
-        for field in &fields {
+        if table.updatable {
+            let _ = writeln!(out, "impl {RT}::Update for {update} {{");
+            let _ = writeln!(out, "    type Row = {row};\n");
             let _ = writeln!(
                 out,
-                "        if let {SOME}(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
-                field.ident,
-                field.name,
-                field.stored_value("value")
+                "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<{VEC}<({STRING}, {value})>> {{"
             );
+            if uses_impl {
+                out.push_str(
+                    "        let computed = &implementations.get::<Implementations>()?.0;\n",
+                );
+            }
+            let _ = writeln!(out, "        let mut cells = {VEC}::new();");
+            for field in &fields {
+                let _ = writeln!(
+                    out,
+                    "        if let {SOME}(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
+                    field.ident,
+                    field.name,
+                    field.stored_value("value")
+                );
+            }
+            let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
         }
-        let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // The table's module.
         let _ = writeln!(
@@ -1048,12 +1058,7 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
     }
     let app = App::load(file.as_bytes())
         .map_err(|error| unusable(&format!("its `APP` no longer loads ({error})")))?;
-    Ok(crate::bindings::Recorded {
-        source,
-        format,
-        current: app.compiled.current,
-        current_schema: app.compiled.current_schema().clone(),
-    })
+    Ok(crate::bindings::Recorded::from_app(app, format))
 }
 
 // ---- names ------------------------------------------------------------------

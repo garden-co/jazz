@@ -3,8 +3,13 @@
  * input of the Rust writer, which checks and prints the file. Nothing here
  * hashes or lowers a schema; Rust does.
  */
+import { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import type { AnyColumnDefinition } from "../dsl.js";
-import { isComputedColumn } from "../dsl.js";
+import {
+  hasEncryptionDeclaration,
+  hasEncryptionDeclarationInJsonSchema,
+  isComputedColumn,
+} from "../dsl.js";
 import type { Column, SqlType } from "../schema.js";
 import type { DefinedTable } from "./table.js";
 
@@ -19,16 +24,11 @@ export type ReadableJson =
 /** A readable Table: `{columns, relations?, indexes?, branchBy?, history?, computed?}`. */
 export type ReadableTable = { [key: string]: ReadableJson };
 
-/** What a schema contributes to `jazz.app.json`: its `tables` and `transforms`. */
+/** What a schema contributes to `jazz.app.json`: its tables, transforms and encryption settings. */
 export interface ReadableApp {
+  encryption?: { readonly allowAccountReset?: boolean };
   tables: { [table: string]: ReadableTable };
   transforms?: { [name: string]: { stored: ReadableJson; view: ReadableJson } };
-}
-
-interface BuilderInternals {
-  _build(name: string): Column;
-  _sqlType: SqlType;
-  _transform?: { name: string; view: BuilderInternals };
 }
 
 const SCALAR_NAMES: Record<string, string> = {
@@ -100,6 +100,30 @@ export function readableColumn(
   return { ...head, ...(column.nullable ? { optional: true } : {}), ...options };
 }
 
+/**
+ * The `space` and `scope` of a table's `encryption` entry: `"id"` and the
+ * table itself, or a forward relation's `uuid` column and its target. What
+ * deploy would refuse is refused here, naming the table.
+ */
+function readableSpace(tableName: string, table: DefinedTable): { space: string; scope: string } {
+  const space = table.space!;
+  if (space === "id") return { space: "id", scope: tableName };
+  const relation = table.relations[space];
+  const how = 'name "id" or a forward relation over a uuid column (s.rel("<table>", "<column>"))';
+  if (!relation || !Object.hasOwn(table.relations, space))
+    throw new Error(`${tableName}: space "${space}" is not a relation of the table; ${how}.`);
+  if (relation.kind !== "forward")
+    throw new Error(`${tableName}: space "${space}" is a reverse relation; ${how}.`);
+  const builder = (table.columns as Record<string, AnyColumnDefinition>)[relation.column];
+  const sqlType = builder && !isComputedColumn(builder) ? builder._sqlType : undefined;
+  if (sqlType !== "UUID")
+    throw new Error(
+      `${tableName}: space "${space}" goes through ${relation.column}, which is not a uuid column ` +
+        `(a row is in exactly one space); ${how}.`,
+    );
+  return { space: relation.column, scope: relation.table };
+}
+
 /** The readable form of every table, by name, plus the transforms they use. */
 export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
   const out: ReadableApp["tables"] = {};
@@ -107,11 +131,18 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
   for (const [tableName, table] of Object.entries(tables)) {
     const columns: { [key: string]: ReadableJson } = {};
     const computed: { [key: string]: ReadableJson } = {};
+    const encrypted: { [key: string]: ReadableJson } = {};
+    const equality: string[] = [];
     for (const [name, definition] of Object.entries(
       table.columns as Record<string, AnyColumnDefinition>,
     )) {
+      const refuse = (reason: string) => {
+        throw new Error(`${tableName}.${name}: ${reason}`);
+      };
       if (isComputedColumn(definition)) {
-        const builder = definition._computed.type as unknown as BuilderInternals;
+        const builder = definition._computed.type;
+        if (hasEncryptionDeclaration(builder))
+          refuse("computed fields cannot be encrypted; encrypt a stored column.");
         const column = builder._build(name);
         const type = readableType(column.sqlType);
         computed[name] = {
@@ -128,8 +159,44 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
         };
         continue;
       }
-      const builder = definition as unknown as BuilderInternals;
+      const builder = definition;
+      if (hasEncryptionDeclaration(builder._element))
+        refuse("array elements cannot be encrypted individually; encrypt the whole array column.");
+      if (hasEncryptionDeclaration(builder._transform?.view))
+        refuse("transform views cannot be encrypted; use a stored column without a transform.");
       const column = builder._build(name);
+      if (
+        typeof column.sqlType === "object" &&
+        column.sqlType.kind === "JSON" &&
+        hasEncryptionDeclarationInJsonSchema(column.sqlType.schema)
+      )
+        refuse(
+          "JSON schema properties cannot be encrypted individually; encrypt the whole JSON column.",
+        );
+      if (builder._encryption) {
+        if (column.mergeStrategy)
+          refuse(
+            "an encrypted column takes no merge strategy: the server can't merge ciphertext, " +
+              "so its writes are last-writer-wins.",
+          );
+        if (builder._transform) refuse("an encrypted column takes no transform.");
+        if (
+          column.references ||
+          Object.values(table.relations).some(
+            (relation) => relation.kind === "forward" && relation.column === name,
+          )
+        )
+          refuse("an encrypted column can't reference a table or carry a relation.");
+        // The device sees the declared type and default; the server stores
+        // required `bytes` (the ciphertext) and, for equality, its tokens.
+        encrypted[name] = readableColumn(column);
+        columns[name] = "bytes";
+        if (builder._encryption.equality) {
+          equality.push(name);
+          columns[`${EQUALITY_PREFIX}${name}`] = "bytes";
+        }
+        continue;
+      }
       const transform = builder._transform;
       if (transform) {
         const stored = readableType(column.sqlType);
@@ -170,6 +237,18 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
     if (table.branchColumns?.length) entry.branchBy = [...table.branchColumns];
     if (table.historyRetention) entry.history = table.historyRetention;
     if (Object.keys(computed).length > 0) entry.computed = computed;
+    if (table.space !== undefined) {
+      entry.encryption = {
+        ...readableSpace(tableName, table),
+        columns: encrypted,
+        ...(equality.length > 0 ? { equality } : {}),
+      };
+    } else if (Object.keys(encrypted).length > 0) {
+      throw new Error(
+        `${tableName}: encrypted columns (${Object.keys(encrypted).join(", ")}) need the table's space: ` +
+          `s.table(columns, relations, { space: "id" | "<relation>" }).`,
+      );
+    }
     out[tableName] = entry;
   }
   return Object.keys(transforms).length > 0 ? { tables: out, transforms } : { tables: out };

@@ -115,6 +115,16 @@ export interface Inherits {
   readonly [inheritsBrand]: true;
 }
 
+/**
+ * `isMember(table, id)`: the session's account is a member of the space `id`
+ * of `table`. `id` is the checked row's `id` (on `table` itself) or a
+ * `uuid` column of it whose forward relation leads to `table`.
+ */
+export type IsMember<S> = <const T extends keyof S & string>(
+  table: T,
+  id: ColumnHandle<string, "uuid", string>,
+) => Policy;
+
 /** A policy an `exists` takes in its conditions: any but one inheriting with `allowedTo`. */
 export type NestedPolicy<X = any> = Policy<X> & { readonly [inheritsBrand]?: never };
 

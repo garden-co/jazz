@@ -43,7 +43,8 @@ pub use transaction::OpenTransactionId;
 
 #[cfg(feature = "runtime")]
 pub use client::{
-    JazzClient, JazzTransaction, MutationError, PermissionAdviceRequest, StreamingUpload,
+    ClientEncryption, EncryptionRuntime, JazzClient, JazzTransaction, MutationError,
+    PermissionAdviceRequest, StartEncryption, StreamingUpload,
 };
 
 pub use crate::object::{BranchName, ObjectId, ResultKey};
@@ -147,8 +148,20 @@ pub enum JazzError {
     #[error("Query error: {0}")]
     Query(String),
 
+    /// A query failure that carries the database's error code.
+    #[error("Query error: {0}")]
+    QueryFailed(#[source] crate::db::Error),
+
     #[error("Write error: {0}")]
     Write(String),
+
+    /// An encryption hook refused the write before it staged anything.
+    #[cfg(feature = "e2ee-client")]
+    #[error("{original}")]
+    KeyRefusal {
+        refusal: crate::e2ee::E2eeRefusal,
+        original: Box<JazzError>,
+    },
 
     #[error("Sync error: {0}")]
     Sync(String),
@@ -190,11 +203,25 @@ pub(crate) const REJECTED_BEFORE: &str = "transaction was rejected before reachi
 
 #[cfg(feature = "runtime")]
 impl JazzError {
+    /// The original write error once the caller is done handling key retries.
+    #[doc(hidden)]
+    pub fn into_original(self) -> Self {
+        #[cfg(feature = "e2ee-client")]
+        if let Self::KeyRefusal { original, .. } = self {
+            return *original;
+        }
+        self
+    }
+
     /// Whether this is [`JazzClient::wait_for_transaction`]'s error for a
     /// transaction the server refused, rather than a wait that failed for
     /// another reason. For `jazz-app-support`'s mutation-error reporting.
     #[doc(hidden)]
     pub fn is_transaction_rejection(&self) -> bool {
+        #[cfg(feature = "e2ee-client")]
+        if let Self::KeyRefusal { original, .. } = self {
+            return original.is_transaction_rejection();
+        }
         matches!(self, Self::WriteRejected { .. })
             || matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
     }
@@ -378,6 +405,7 @@ mod rejection_code_tests {
             code: ErrorCode::WriteRejected,
             reason,
             message: message.to_owned(),
+            space: None,
         }
     }
 
@@ -422,6 +450,7 @@ mod rejection_code_tests {
             code: ErrorCode::TransactionConflict,
             reason: None,
             message: "read changed".to_owned(),
+            space: None,
         };
         assert_eq!(
             pair(&conflict),
@@ -431,6 +460,7 @@ mod rejection_code_tests {
             code: ErrorCode::Storage,
             reason: None,
             message: "disk".to_owned(),
+            space: None,
         };
         assert_eq!(pair(&other), None);
     }

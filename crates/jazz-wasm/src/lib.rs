@@ -42,6 +42,8 @@ mod browser;
 pub mod browser_bench;
 #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
 mod durable_object;
+#[cfg(feature = "e2ee-client")]
+mod encryption;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
@@ -420,6 +422,9 @@ fn not_supported(what: &str) -> JsValue {
 #[derive(Default)]
 struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
+    /// The end-to-end encryption runtime, when the app declares encryption.
+    #[cfg(feature = "e2ee-client")]
+    encryption: RefCell<Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>>,
     /// A thin session's transactions, when this database serves them as
     /// the backend's client (`serveThinTransaction`).
     #[cfg(feature = "backend")]
@@ -476,6 +481,13 @@ struct WasmDbInner {
 }
 
 impl WasmDbInner {
+    #[cfg(feature = "e2ee-client")]
+    fn stop_encryption(&self) {
+        if let Some(runtime) = self.host.encryption.borrow_mut().take() {
+            runtime.stop();
+        }
+    }
+
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (at once without one), then send the acks the database held
     /// for them; fail, with code `storage`, if they could not be written.
@@ -608,6 +620,12 @@ impl WasmDbInner {
             let scheduler = scheduler.tick_scheduler.borrow().clone();
             if let Some(scheduler) = scheduler {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
+            }
+        }));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+            if let Some(scheduler) = timer.tick_scheduler.borrow().clone() {
+                let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(&format!("after:{ms}")));
             }
         }));
         let reporter = Rc::clone(&host);
@@ -759,19 +777,34 @@ impl WasmUpstreamLink {
 
 type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 'static>>;
 
+/// A read waiting for the server, driven by the adapter after its peer
+/// transport makes progress.
+///
+/// A one-shot read that left rows out because the encryption runtime could
+/// not open them comes back as one of these even when it is done at once:
+/// `unreadable()` names those rows, as napi's `PendingNativeRead` does.
 #[wasm_bindgen(js_name = PendingNativeRead)]
 pub struct WasmPendingNativeRead {
     future: Rc<RefCell<Option<WasmReadFuture>>>,
+    /// The answer of a read that was done when it was returned.
+    done: RefCell<Option<Vec<u8>>>,
+    /// The rows the read left out, as JSON, once it is done.
+    unreadable: Rc<RefCell<Option<String>>>,
 }
 
 impl WasmPendingNativeRead {
     fn new(future: WasmReadFuture) -> Self {
         Self {
             future: Rc::new(RefCell::new(Some(future))),
+            done: RefCell::default(),
+            unreadable: Rc::default(),
         }
     }
 
     fn poll_once(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        if let Some(bytes) = self.done.borrow_mut().take() {
+            return Ok(Some(bytes));
+        }
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(JsValue::from_str("native pending read is already complete"));
         };
@@ -797,6 +830,14 @@ impl WasmPendingNativeRead {
 
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.done.borrow_mut().take();
+    }
+
+    /// Once the read is done: the rows it left out because they could not
+    /// be opened, as a JSON array of `{ table, id, column, code }`; `null`
+    /// when it left none out.
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable.borrow().clone()
     }
 }
 
@@ -1018,6 +1059,37 @@ pub struct WasmDb {
     // engine.
     inner: Rc<RefCell<Option<WasmDbInner>>>,
     owns_runtime: bool,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Drop for WasmDb {
+    fn drop(&mut self) {
+        if self.owns_runtime {
+            if let Some(inner) = self.inner.borrow_mut().take() {
+                inner.stop_encryption();
+            }
+        }
+    }
+}
+
+impl WasmDb {
+    fn open_memory_with(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+        configure: impl FnOnce(
+            jazz::db::DbConfig,
+            jazz::db::DbIdentity,
+        ) -> Result<jazz::db::DbConfig, JsValue>,
+    ) -> Result<Self, JsValue> {
+        initialize_wasm_tracing();
+        let (config, identity, trusted) = Self::prepare_open(schema, config, how)?;
+        let db = block_on(binding_host::open_memory(configure(config, identity)?))
+            .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(block_on(Binding::new(
+            db, identity, trusted,
+        ))))
+    }
 }
 
 #[wasm_bindgen]
@@ -1299,8 +1371,12 @@ impl WasmDb {
         ))))
     }
 
-    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
-        initialize_wasm_tracing();
+    /// The configuration, identity and trust of an open.
+    fn prepare_open(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+    ) -> Result<(jazz::db::DbConfig, jazz::db::DbIdentity, bool), JsValue> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
@@ -1309,10 +1385,11 @@ impl WasmDb {
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
-        let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
-        Ok(Self::runtime_owner(block_on(Binding::new(
-            db, identity, trusted,
-        ))))
+        Ok((db_config, identity, trusted))
+    }
+
+    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
+        Self::open_memory_with(schema, config, how, |config, _| Ok(config))
     }
 
     #[wasm_bindgen(js_name = openMemory)]
@@ -1362,7 +1439,42 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
     ) -> Result<WasmDb, JsValue> {
-        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted).await
+        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted, |db| {
+            db
+        })
+        .await
+    }
+
+    /// Open the durable store a browser worker owns for an app that declares
+    /// encryption. The worker holds and relays sealed rows and no keys: it
+    /// opens with keyless hooks built from the app's compiled bindings
+    /// (`bindings`, JSON of `{ schema, relations }`), and the tabs, which
+    /// hold the keys, sync with it.
+    // Flat arguments: the wasm-bindgen ABI, as the neighbouring opens.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(all(target_arch = "wasm32", feature = "e2ee-client"))]
+    #[wasm_bindgen(js_name = openBrowserKeyless)]
+    pub async fn open_browser_keyless(
+        storage: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        database: String,
+        bindings: String,
+        app_id: String,
+        environment: String,
+        proof: JsValue,
+    ) -> Result<WasmDb, JsValue> {
+        let hooks = jazz_e2ee_client::KeylessHooks::relay(encryption::keyless_declarations(
+            &bindings,
+            &app_id,
+            &environment,
+        )?);
+        let proof = encryption::SessionProof::read(&proof);
+        let how = proof.for_app(&app_id);
+        Self::open_browser_as(storage, schema, config, database, how, |db| {
+            db.with_e2ee(hooks)
+        })
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1381,7 +1493,7 @@ impl WasmDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, database, how).await
+        Self::open_browser_as(storage, schema, config, database, how, |db| db).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1391,6 +1503,7 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
         how: OpenAs<'_>,
+        configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
@@ -1405,7 +1518,7 @@ impl WasmDb {
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
-        let (db, store) = browser::open(&spec, db_config).await?;
+        let (db, store) = browser::open(&spec, configure(db_config)).await?;
         // Commits reach IndexedDB only after they return.
         db.defer_durability_acks();
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted).await);
@@ -1517,6 +1630,13 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, table: String) -> Result<String, JsValue> {
+        self.binding()?.table_identity(&table).map_err(host_error)
+    }
+
     /// Exact local state for the write-merge bridge: the row as stored,
     /// deleted or not. Write authorization remains at the mutation boundary;
     /// this is not a query.
@@ -1538,7 +1658,7 @@ impl WasmDb {
     ) -> Result<JsValue, JsValue> {
         let read = self
             .binding()?
-            .all(
+            .all_reporting(
                 query,
                 &options(opts),
                 open_transaction_id.as_deref(),
@@ -1546,7 +1666,7 @@ impl WasmDb {
                 json(claims)?,
             )
             .map_err(host_error)?;
-        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+        wasm_reporting_read_or_pending(read)
     }
 
     /// Bind correlation claims to this already-open client's own identity.
@@ -1582,8 +1702,8 @@ impl WasmDb {
         subscription_stream_to_js(inner, stream)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// The host's tick callback: `"immediate"` for ready sync work or
+    /// `"after:<milliseconds>"` for pending work with a deadline.
     #[wasm_bindgen(js_name = setTickScheduler)]
     pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
         if let Ok(inner) = self.open_inner() {
@@ -1729,10 +1849,20 @@ impl WasmDb {
             Ok(binding) => binding,
             Err(error) => return js_sys::Promise::reject(&error),
         };
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", feature = "e2ee-client"))]
         let inner = self.open_inner().ok();
         future_to_promise(async move {
-            binding.tick().await.map_err(host_error)?;
+            let result = binding.tick().await;
+            #[cfg(feature = "e2ee-client")]
+            if let Some(runtime) = inner
+                .as_ref()
+                .and_then(|inner| inner.host.encryption.borrow().clone())
+            {
+                runtime.drive();
+                encryption::settle_promises();
+                runtime.wake_if_owed();
+            }
+            result.map_err(host_error)?;
             // The tick may have held acks for commits it applied.
             #[cfg(target_arch = "wasm32")]
             if let Some(inner) = inner {
@@ -1787,6 +1917,7 @@ impl WasmDb {
         head: Option<JsValue>,
         base: Option<JsValue>,
         transaction: Option<String>,
+        add_creator_as_member: Option<bool>,
     ) -> Result<WasmStreamingMutation, JsValue> {
         let head = present(head)
             .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
@@ -1795,7 +1926,7 @@ impl WasmDb {
             .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
             .transpose()?;
         let inner = self.open_inner()?;
-        let mutation = inner
+        let mut mutation = inner
             .binding
             .begin_streaming_mutation(
                 table,
@@ -1810,6 +1941,9 @@ impl WasmDb {
                 base,
                 transaction.as_deref(),
             )
+            .map_err(host_error)?;
+        mutation
+            .set_add_creator_as_member(add_creator_as_member)
             .map_err(host_error)?;
         Ok(WasmStreamingMutation {
             db: inner,
@@ -2008,6 +2142,8 @@ impl WasmDb {
         let owns_runtime = self.owns_runtime;
         future_to_promise(async move {
             if owns_runtime {
+                #[cfg(feature = "e2ee-client")]
+                inner.stop_encryption();
                 inner.binding.close().await.map_err(host_error)?;
                 // A last save that fails still closes the store: what it
                 // could not write stays as IndexedDB last held it (whole),
@@ -2159,6 +2295,29 @@ fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
     }
 }
 
+/// [`wasm_read_or_pending`] for a read that reports the rows it left out:
+/// such a read is answered as a [`WasmPendingNativeRead`] even when done at
+/// once, so the rows reach JS with it.
+fn wasm_reporting_read_or_pending(
+    future: binding_host::HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
+) -> Result<JsValue, JsValue> {
+    let unreadable = Rc::<RefCell<Option<String>>>::default();
+    let future = binding_host::reporting_read(future, Rc::clone(&unreadable));
+    let future = Box::pin(async move { future.await.map_err(host_error) });
+    let pending = WasmPendingNativeRead {
+        unreadable,
+        ..WasmPendingNativeRead::new(future)
+    };
+    match pending.poll_once()? {
+        Some(bytes) if pending.unreadable.borrow().is_none() => bytes_to_js(bytes),
+        Some(bytes) => {
+            *pending.done.borrow_mut() = Some(bytes);
+            Ok(pending.into())
+        }
+        None => Ok(pending.into()),
+    }
+}
+
 fn large_value_updates(mutations: JsValue) -> Result<Vec<LargeValueUpdate>, JsValue> {
     serde_wasm_bindgen::from_value(mutations).map_err(|error| {
         JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
@@ -2204,8 +2363,12 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
             coalesced,
             settled,
             tier,
+            unreadable,
         } => {
             set_prop(&object, "type", JsValue::from_str("delta"))?;
+            if let Some(unreadable) = unreadable {
+                set_prop(&object, "unreadable", JsValue::from_str(&unreadable))?;
+            }
             set_prop(
                 &object,
                 "delta",
@@ -2367,6 +2530,16 @@ fn core_error_to_js(error: &Error) -> JsValue {
             &JsValue::from_str("reason"),
             &JsValue::from_str(reason.as_str()),
         );
+    }
+    if let Some(space) = &error.space {
+        let address = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&address, &"scopeId".into(), &space.scope_id.as_str().into());
+        let _ = js_sys::Reflect::set(
+            &address,
+            &"identifier".into(),
+            &space.identifier.as_str().into(),
+        );
+        let _ = js_sys::Reflect::set(&js_error, &"space".into(), &address);
     }
     js_error.into()
 }

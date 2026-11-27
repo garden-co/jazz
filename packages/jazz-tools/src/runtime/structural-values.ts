@@ -1,4 +1,4 @@
-import type { Value } from "../drivers/types.js";
+import type { InsertValues, Value, WasmRow } from "../drivers/types.js";
 
 /** Compare schema values without losing bigint, byte, or floating-point identity. */
 export function structuralValuesEqual(left: Value | undefined, right: Value | undefined): boolean {
@@ -57,4 +57,46 @@ export function structuralBigInt(value: unknown): bigint {
     throw new Error("Invalid structural BigInt default: expected a signed 64-bit integer.");
   }
   return result;
+}
+
+/** Snapshot row data, including nested values, named-value maps and byte arrays. */
+export function cloneRowData<T extends WasmRow | InsertValues>(value: T): T {
+  return cloneRowGraph(value, new WeakMap<object, unknown>());
+}
+
+function cloneRowGraph<T>(value: T, seen: WeakMap<object, unknown>): T {
+  if (typeof value !== "object" || value === null) return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing as T;
+  if (value instanceof Uint8Array) {
+    const clone = new Uint8Array(value);
+    seen.set(value, clone);
+    return clone as T;
+  }
+  if (value instanceof Map) {
+    const clone = new Map<unknown, unknown>();
+    seen.set(value, clone);
+    for (const [key, entry] of value) {
+      clone.set(cloneRowGraph(key, seen), cloneRowGraph(entry, seen));
+    }
+    return clone as T;
+  }
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(value, clone);
+    for (const entry of value) clone.push(cloneRowGraph(entry, seen));
+    return clone as T;
+  }
+
+  const clone = Object.create(Object.getPrototypeOf(value)) as object;
+  seen.set(value, clone);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) continue;
+    if ("value" in descriptor) {
+      descriptor.value = cloneRowGraph(descriptor.value, seen);
+    }
+    Object.defineProperty(clone, key, descriptor);
+  }
+  return clone as T;
 }

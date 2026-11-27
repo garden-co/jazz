@@ -188,6 +188,24 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         issuer: "fixture-issuer",
         userId: "fixture-user",
       },
+      {
+        type: "rows",
+        rows: Uint8Array.of(9, 8),
+        unreadable: '[{"table":"notes","id":"λ","column":null,"code":"key-pending"}]',
+      },
+      {
+        type: "subscriptionEvents",
+        events: [
+          {
+            type: "delta",
+            reset: true,
+            settled: false,
+            tier: "Local",
+            delta: Uint8Array.of(7),
+            unreadable: '[{"table":"notes","id":"λ","column":"body","code":"key-unavailable"}]',
+          },
+        ],
+      },
     ]);
     for (const response of responses) {
       expect(() =>

@@ -1,3 +1,4 @@
+import { plainSchema } from "../encryption/plain-schema.js";
 import { resolveQueryTable } from "./history-relation.js";
 /**
  * Transform WASM row results to typed TypeScript objects.
@@ -383,13 +384,15 @@ function transformPreparedRow<T>(
  */
 export function transformRows<T>(
   rows: WasmRow[],
-  schema: WasmSchema,
+  stored: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},
   projection?: readonly string[],
   transformsByTable?: ReadColumnTransformRegistry,
   applyRootTransforms = true,
 ): T[] {
+  // Encrypted columns read as their plaintext types.
+  const schema = plainSchema(stored);
   const prepared = prepareRowTransform(schema, tableName, includes);
   return rows.map((row: WasmRowWithNamedValues) =>
     transformPreparedRow<T>(
@@ -413,7 +416,7 @@ export function transformRows<T>(
  * reused. The schema must not be mutated while the transformer is in use.
  */
 export function createRowTransformer<T>(
-  schema: WasmSchema,
+  stored: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},
   projection?: readonly string[],
@@ -421,6 +424,7 @@ export function createRowTransformer<T>(
   applyRootTransforms = true,
   relations?: Map<string, Relation[]>,
 ): (row: WasmRow) => T {
+  const schema = plainSchema(stored);
   let prepared: PreparedRowTransform | undefined;
   return (row) => {
     prepared ??= prepareRowTransform(schema, tableName, includes, relations);

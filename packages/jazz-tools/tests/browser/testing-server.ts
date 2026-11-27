@@ -31,8 +31,28 @@ export function jazzCore(server: JazzServerInfo): JazzServerInfo {
   };
 }
 
-export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
-  return jazzServerBrowserCommands().jazzServerInfo(appId);
+export function getJazzServerInfo(
+  appId?: string,
+  options?: { onDisk?: boolean },
+): Promise<JazzServerInfo> {
+  return options
+    ? jazzServerBrowserCommands().jazzServerInfo(appId, options)
+    : jazzServerBrowserCommands().jazzServerInfo(appId);
+}
+
+/**
+ * Whether the store of the core behind `server` holds each of `needles`: its
+ * files, read as an attacker with the server's disk would. The core must have
+ * started on disk (`getJazzServerInfo(appId, { onDisk: true })`).
+ */
+export function jazzServerStoreHolds(
+  server: JazzServerInfo,
+  needles: string[],
+): Promise<boolean[]> {
+  const holds = jazzServerBrowserCommands().jazzServerStoreHolds;
+  if (!holds)
+    throw new Error("This browser test config does not register the jazzServerStoreHolds command");
+  return holds(jazzCore(server).serverUrl, needles);
 }
 
 /**

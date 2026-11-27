@@ -103,6 +103,11 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
+    /// How this client takes part in end-to-end encryption.
+    pub(crate) encryption: crate::encryption::Participation,
+    /// The app's encryption declarations, for a device's plain view of the
+    /// schema ([`Jazz::plain_schema`]).
+    pub(crate) declarations: Option<Arc<jazz::tools::public_schema::E2eeDeclarations>>,
     /// Its client's run, for whoever opens or deletes its store.
     pub(crate) life: Arc<crate::lifecycle::Life>,
     /// Its [`crate::JazzSession`] replaced it, with that session's closing
@@ -284,6 +289,8 @@ impl Jazz {
             backend,
             backend_client,
             memory,
+            encryption,
+            declarations,
             storage_dir,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
@@ -302,6 +309,8 @@ impl Jazz {
                 opened_with,
                 backend_client,
                 memory,
+                encryption,
+                declarations,
                 replaced: std::sync::OnceLock::new(),
             }),
             scope: None,
@@ -344,6 +353,15 @@ impl Jazz {
     /// Whether this handle acts for one of the backend's users.
     pub fn acts_for_user(&self) -> bool {
         self.for_user
+    }
+
+    /// The catalogue identity of table `table`, which a member row's
+    /// `scopeId` holds for its space table (see
+    /// [`JazzClient::table_identity`]).
+    pub async fn table_identity(&self, table: &str) -> Result<ObjectId> {
+        let table = table.to_owned();
+        self.with_client(move |client| async move { Ok(client.table_identity(&table).await?) })
+            .await
     }
 
     /// Runs `job` with the untyped client on its thread: for what the typed
@@ -442,6 +460,36 @@ impl Jazz {
         let _ = self.info.replaced.set(session_closing);
     }
 
+    /// Whether the caller runs on this app's client thread: inside a
+    /// callback the client makes there (a foreign private store's), where
+    /// waiting for the client deadlocks, as it waits for the caller. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn on_client_thread(&self) -> bool {
+        CLIENT_THREAD.get() == Arc::as_ptr(&self.info.life) as usize
+    }
+
+    /// On this app's client thread ([`Self::on_client_thread`]), the writes
+    /// a [`Self::close`] with `timeout` would report lost now, without
+    /// waiting for them: [`Error::Unsynced`]'s `pending`, by its rule (a
+    /// store in memory, a server, and a non-zero `timeout`, which asks for
+    /// them). `None` when it would lose none, or off that thread. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn unsynced_here(&self, timeout: std::time::Duration) -> Option<usize> {
+        if self.for_user
+            || !self.on_client_thread()
+            || timeout.is_zero()
+            || !self.info.memory
+            || self.info.serverless
+        {
+            return None;
+        }
+        CLIENT_HERE
+            .with(|here| here.borrow().as_ref().map(JazzClient::pending_uploads))
+            .filter(|pending| *pending > 0)
+    }
+
     /// This handle with its calls' waits on the server ended once `ends`
     /// reads true: for a binding's handle that closes while the client
     /// lives on. Not public API.
@@ -533,7 +581,7 @@ impl Jazz {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let (row, written) = insert(&client, new, &implementations)?;
+            let (row, written) = insert_waiting(&client, new, &implementations).await?;
             settle.settle(&client, written).await?;
             Ok(row)
         })
@@ -546,7 +594,10 @@ impl Jazz {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
-            let written = client.update(<U::Row as Table>::NAME, id, cells)?;
+            let written = crate::encryption::with_key_wait(&client, || {
+                client.update(<U::Row as Table>::NAME, id, cells.clone())
+            })
+            .await?;
             settle.settle(&client, written).await
         })
         .await
@@ -556,7 +607,8 @@ impl Jazz {
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = client.delete(T::NAME, id)?;
+            let written =
+                crate::encryption::with_key_wait(&client, || client.delete(T::NAME, id)).await?;
             settle.settle(&client, written).await
         })
         .await
@@ -720,11 +772,51 @@ pub(crate) fn insert<N: Insert>(
 ) -> Result<(N::Row, Option<TransactionId>)> {
     let name = <N::Row as Table>::NAME;
     let (id, values, written) = client.insert(name, new.into_cells(implementations)?)?;
+    inserted::<N>(client, id, values, written, implementations)
+}
+
+/// [`insert`], waiting for the key of an encrypted space this device does not
+/// hold yet (see [`crate::encryption::with_key_wait`]).
+pub(crate) async fn insert_waiting<N: Insert>(
+    client: &JazzClient,
+    new: N,
+    implementations: &Implementations,
+) -> Result<(N::Row, Option<TransactionId>)> {
+    let name = <N::Row as Table>::NAME;
+    let cells = new.into_cells(implementations)?;
+    // A space may use the row's own ID to look up its encryption key.
+    let row_id = ObjectId::new();
+    let (id, values, written) = crate::encryption::with_key_wait(client, || {
+        client.insert_with_id(name, *row_id.uuid(), cells.clone())
+    })
+    .await?;
+    inserted::<N>(client, id, values, written, implementations)
+}
+
+fn inserted<N: Insert>(
+    client: &JazzClient,
+    id: ObjectId,
+    values: Vec<jazz::tools::Value>,
+    written: Option<TransactionId>,
+    implementations: &Implementations,
+) -> Result<(N::Row, Option<TransactionId>)> {
+    let fields = inserted_fields(client, <N::Row as Table>::NAME, values)?;
+    Ok((table::decode(id, fields, implementations)?, written))
+}
+
+/// Names an insert's returned values using the stored schema's column order,
+/// including any internal columns absent from the app's plaintext schema.
+#[doc(hidden)]
+pub fn inserted_fields(
+    client: &JazzClient,
+    name: &str,
+    values: Vec<jazz::tools::Value>,
+) -> Result<Vec<jazz::tools::QueryResultField>> {
     let schema = client.schema()?;
     let table = schema
         .get(&TableName::new(name))
         .ok_or_else(|| Error::App(format!("the app has no table {name}")))?;
-    let fields = table
+    Ok(table
         .columns
         .columns
         .iter()
@@ -733,8 +825,7 @@ pub(crate) fn insert<N: Insert>(
             name: column.name.as_str().to_owned(),
             value,
         })
-        .collect();
-    Ok((table::decode(id, fields, implementations)?, written))
+        .collect())
 }
 
 pub(crate) fn decode_result<T: Row>(
@@ -790,6 +881,7 @@ fn run(
     // runtime.
     let store = std::rc::Rc::new(std::cell::RefCell::new(None::<crate::lifecycle::StoreDir>));
     let life = stopper.life.clone();
+    CLIENT_THREAD.set(Arc::as_ptr(&life) as usize);
     let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -846,6 +938,11 @@ fn run(
             // Answered below, with the store let go of.
             Err(error) => return End::Failed(ready, error),
         };
+        CLIENT_HERE.with(|here| *here.borrow_mut() = Some(client.clone()));
+        #[cfg(feature = "e2ee-client")]
+        if opened.encryption == crate::encryption::Participation::Device {
+            crate::encryption::spawn_start();
+        }
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             endpoint_connector.settle(STREAM_SESSION_END).await;
@@ -916,6 +1013,7 @@ fn run(
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
         crate::lifecycle::run_before_stop(&client).await;
+        CLIENT_HERE.with(|here| here.borrow_mut().take());
         let result = client.shutdown().await;
         endpoint_connector.settle(session_end).await;
         End::Stopped(result, stopped)
@@ -951,6 +1049,15 @@ fn run(
     }
 }
 
+thread_local! {
+    /// On a client's thread, its run's [`crate::lifecycle::Life`] (by
+    /// address): what [`Jazz::on_client_thread`] reads.
+    static CLIENT_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// On a client's thread, its client while it runs: what
+    /// [`Jazz::unsynced_here`] counts.
+    static CLIENT_HERE: std::cell::RefCell<Option<JazzClient>> = const { std::cell::RefCell::new(None) };
+}
+
 /// How a client's run ended.
 enum End {
     Failed(oneshot::Sender<Result<Opened>>, Error),
@@ -974,6 +1081,8 @@ struct Opened {
     backend: Option<BackendLink>,
     backend_client: Option<crate::backend_client::BackendClientLink>,
     memory: bool,
+    encryption: crate::encryption::Participation,
+    declarations: Option<Arc<jazz::tools::public_schema::E2eeDeclarations>>,
     /// The dir of the store held (`<dir>/<account>/` for a user).
     storage_dir: Option<std::path::PathBuf>,
 }
@@ -988,7 +1097,26 @@ async fn connect(
     endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     mut place: Place<'_>,
 ) -> Result<(JazzClient, Opened)> {
-    let mut loaded = files.load()?;
+    // A client with encryption hooks reads the app's declarations too.
+    #[cfg(feature = "e2ee-client")]
+    let environment = config
+        .encryption
+        .as_ref()
+        .map_or("dev".to_owned(), |encryption| {
+            encryption.environment.clone()
+        });
+    #[cfg(feature = "e2ee-client")]
+    let mut loaded = files.load(Some((config.app_id, &environment)))?;
+    #[cfg(not(feature = "e2ee-client"))]
+    let mut loaded = files.load(None)?;
+    let plan = crate::encryption::Plan::new(loaded.declarations.take(), &config);
+    let backend_side = config.backend.is_some() || matches!(config.user, Some(Auth::Credential(_)));
+    let participation = plan.participation(backend_side);
+    // Only an end user's device holds keys; a client with no user (local
+    // only) has no account to hold them for.
+    if participation == crate::encryption::Participation::Device && config.user.is_none() {
+        return Err(Error::App(crate::encryption::NEEDS_DEVICE.to_owned()));
+    }
     // The endpoint's client evaluates the sessions it acts for locally too:
     // its schema carries the permissions the backend publishes, as
     // `createJazz`'s backend session compiles them. Policies are not part
@@ -1063,6 +1191,7 @@ async fn connect(
                 credential,
                 endpoint,
                 own_bundle,
+                &plan,
                 &mut place,
             )
             .await?;
@@ -1073,8 +1202,15 @@ async fn connect(
             (client, Some((user, credential)))
         }
         (Some(auth), Some(endpoint)) => {
-            let (client, user, credential) =
-                connect_user(context, endpoint_connector, auth, endpoint, &mut place).await?;
+            let (client, user, credential) = connect_user(
+                context,
+                endpoint_connector,
+                auth,
+                endpoint,
+                &plan,
+                &mut place,
+            )
+            .await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
@@ -1082,13 +1218,16 @@ async fn connect(
         // user's an earlier version kept there.
         _ if context.server_url.is_empty() => {
             place.hold(&mut context, Owner::Nobody)?;
-            (JazzClient::connect(context).await?, None)
+            (
+                JazzClient::connect_with(context, None, None, plan.keyless()).await?,
+                None,
+            )
         }
         // The app's backend.
         _ => {
             place.hold(&mut context, Owner::Machine)?;
             (
-                JazzClient::connect_with_native_transport(context, connector).await?,
+                JazzClient::connect_with(context, Some(connector), None, plan.keyless()).await?,
                 None,
             )
         }
@@ -1121,6 +1260,8 @@ async fn connect(
             backend: link,
             backend_client,
             memory,
+            encryption: participation,
+            declarations: plan.declarations(),
             storage_dir: place.dir,
         },
     ))
@@ -1183,6 +1324,7 @@ async fn connect_user(
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
+    plan: &crate::encryption::Plan,
     place: &mut Place<'_>,
 ) -> Result<(JazzClient, User, Credential)> {
     let app = context.app_id;
@@ -1192,7 +1334,9 @@ async fn connect_user(
             place.hold(&mut context, Owner::Account(account))?;
             context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
             context.account_id = Some(account);
-            let client = JazzClient::connect_with_native_transport(context, connector).await?;
+            let encryption = plan.device(account, Some(&key)).await?;
+            let client =
+                JazzClient::connect_with(context, Some(connector), None, encryption).await?;
             let user = User {
                 account,
                 issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.to_owned(),
@@ -1216,7 +1360,7 @@ async fn connect_user(
                 }
                 backend::SignIn::Unreachable(error) => {
                     return open_offline(
-                        context, connector, provider, token, endpoint, place, error,
+                        context, connector, provider, token, endpoint, plan, place, error,
                     )
                     .await;
                 }
@@ -1240,7 +1384,8 @@ async fn connect_user(
                 claims: signed_in.claims,
                 kind: UserKind::Backend,
             };
-            let client = connect_bearer(context, connector, &user, &token, place, false).await?;
+            let client =
+                connect_bearer(context, connector, &user, &token, plan, place, false).await?;
             Ok((
                 client,
                 user,
@@ -1261,6 +1406,7 @@ async fn connect_bearer(
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     user: &User,
     token: &str,
+    plan: &crate::encryption::Plan,
     place: &mut Place<'_>,
     held: bool,
 ) -> Result<JazzClient> {
@@ -1269,11 +1415,14 @@ async fn connect_bearer(
     context.account_id = Some(user.account);
     context.backend_session = Some(session);
     place.hold(&mut context, Owner::Account(user.account))?;
+    // The device's keys are in its private store here, so an app that
+    // declares encryption opens offline too.
+    let encryption = plan.device(user.account, None).await?;
     let token = token.to_owned();
     Ok(if held {
-        JazzClient::connect_with_native_transport_bearer_held(context, connector, token).await?
+        JazzClient::connect_with_held(context, connector, token, encryption).await?
     } else {
-        JazzClient::connect_with_native_transport_bearer(context, connector, token).await?
+        JazzClient::connect_with(context, Some(connector), Some(token), encryption).await?
     })
 }
 
@@ -1283,12 +1432,14 @@ async fn connect_bearer(
 /// files can read it). The client reaches the server only once the session
 /// signs the bearer in again as that account; until then nothing uploads,
 /// and writes queue.
+#[allow(clippy::too_many_arguments)]
 async fn open_offline(
     context: AppContext,
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     provider: crate::auth::Bearer,
     token: String,
     endpoint: &str,
+    plan: &crate::encryption::Plan,
     place: &mut Place<'_>,
     unreachable: String,
 ) -> Result<(JazzClient, User, Credential)> {
@@ -1322,7 +1473,7 @@ async fn open_offline(
         kind: UserKind::Backend,
     };
     let app = context.app_id;
-    let client = connect_bearer(context, connector, &user, &token, place, true).await?;
+    let client = connect_bearer(context, connector, &user, &token, plan, place, true).await?;
     let unverified = crate::session::Unverified {
         endpoint: endpoint.to_owned(),
         app,

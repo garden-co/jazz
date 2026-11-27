@@ -11,6 +11,10 @@ rust-version.workspace = true
 include = ["src/**", "build.rs", "README.md"]
 
 [features]
+# End-to-end encryption for device apps (`Config::encryption`: the runtime
+# over a private store the app supplies) and keyless backends. Off, an app
+# that declares encryption is refused.
+e2ee-client = ["dep:jazz-e2ee-client", "jazz/e2ee-client"]
 # Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
 # a native main server for an app's users. Run main backends with TS
 # `createJazz`.
@@ -39,6 +43,7 @@ axum = { version = "0.8.9", optional = true, default-features = false, features 
   "ws",
 ] }
 jazz = { workspace = true, features = ["runtime"] }
+jazz-e2ee-client = { workspace = true, optional = true }
 jazz-native-transport.workspace = true
 base64 = "0.22"
 jazz-text.workspace = true
@@ -79,6 +84,7 @@ name = "test_relay_bin"
 required-features = ["test-relay"]
 
 [dev-dependencies]
+jazz-e2ee-client = { workspace = true, features = ["testing"] }
 hmac = "0.12"
 sha2 = "0.10"
 jazz-codegen = { path = "../jazz-codegen" }

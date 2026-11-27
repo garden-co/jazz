@@ -110,8 +110,7 @@ impl JazzCore {
                 (StorageBackend::Persistent { path }, identity.app_id, blobs)
             }
         };
-        let app_id =
-            AppId::from_string(&app_id_text).unwrap_or_else(|_| AppId::from_name(&app_id_text));
+        let app_id = AppId::from_text(&app_id_text);
         let built = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_storage(storage)

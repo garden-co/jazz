@@ -585,7 +585,7 @@ async fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Resul
     .await
 }
 
-async fn put_if_absent(
+pub(crate) async fn put_if_absent(
     conn: &Storage,
     table: HostTable,
     key: &[u8],

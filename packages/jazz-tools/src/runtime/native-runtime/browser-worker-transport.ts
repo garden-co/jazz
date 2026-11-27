@@ -21,7 +21,9 @@ export type AuxiliaryRelayTrace = Readonly<{
 }>;
 
 export interface PeerTransportRuntime {
-  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void;
+  onPeerTransportWork(
+    listener: (requiresDistinctPass?: boolean, passCompleted?: boolean) => void,
+  ): () => void;
   notifyPeerTransportActivity?(): void;
   progressPeerTransport(): Promise<void>;
   retirePeerTransport(transport: Transport): Promise<void>;
@@ -45,8 +47,15 @@ export class BrowserWorkerTransportPump {
   private completedGeneration = 0;
   private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
-  private readonly handleRuntimeWork = (requiresDistinctPass?: boolean) =>
-    this.schedule(requiresDistinctPass ?? false);
+  private readonly handleRuntimeWork = (requiresDistinctPass = false, passCompleted = false) => {
+    if (passCompleted && !requiresDistinctPass && this.transport.setOutboundScheduler) {
+      // A completed tick has queued its frames. Requesting another tick
+      // here would let several idle peers wake one another indefinitely.
+      this.scheduleOutboundDrain();
+      return;
+    }
+    this.schedule(requiresDistinctPass);
+  };
   constructor(
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,

@@ -29,6 +29,7 @@ import {
   jazzAppSignUp,
   jazzAppRequest,
   jazzServerInfo,
+  jazzServerStoreHolds,
   jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
@@ -46,6 +47,7 @@ import {
   pageCacheKeepsSharedWorkerPages,
   sessionTabNavigationType,
 } from "./tests/browser/session-tab-node.js";
+import { encryptedSessionTab } from "./tests/browser/session-tab-encrypted-node.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
@@ -258,7 +260,9 @@ export default defineConfig({
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
-        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzServerInfo: async (_context, appId, options) => jazzServerInfo(appId, options),
+        jazzServerStoreHolds: async (_context, serverUrl, needles) =>
+          jazzServerStoreHolds(serverUrl, needles),
         jazzTestDeployment: async (_context, bound, permissions) =>
           jazzTestDeployment(bound, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
@@ -273,6 +277,8 @@ export default defineConfig({
         sessionTabHoldBackend: async (_context, id, hold) => holdSessionTabBackend(id, hold),
         sessionTabRun: async (_context, id, action, title) => runInSessionTab(id, action, title),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
+        encryptedSessionTab: async ({ context, page }, input) =>
+          encryptedSessionTab(context, page, input),
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
         sessionTabLeave: async (_context, id) => leaveSessionTab(id),
         sessionTabReturn: async (_context, id) => returnToSessionTab(id),

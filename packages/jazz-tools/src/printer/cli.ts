@@ -42,13 +42,11 @@ export async function printTs(options: PrintTsOptions): Promise<string[]> {
   });
   const files: Record<string, string> = { ...printed.files };
   const unsupported = [...printed.unsupported];
-  if (app.history || app.migrations?.length) {
-    const migrations = await printMigrations(app, {
-      snapshot: options.snapshot ?? (await defaultSnapshot()),
-    });
-    Object.assign(files, migrations.files);
-    unsupported.push(...migrations.unsupported);
-  }
+  const migrations = await printMigrations(app, {
+    snapshot: options.snapshot ?? (await defaultSnapshot()),
+  });
+  Object.assign(files, migrations.files);
+  unsupported.push(...migrations.unsupported);
   if (unsupported.length > 0) throw new PrintRefusal(unsupported);
 
   const existing = Object.keys(files).filter((f) => existsSync(join(appDir, f)));

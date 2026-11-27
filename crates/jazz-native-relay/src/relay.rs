@@ -57,10 +57,11 @@ use thiserror::Error;
 
 use crate::node_lease::ForegroundNodeLease;
 use crate::{
-    FOREGROUND_WAKE_IMMEDIATE, ForegroundDbCommandRequest, ForegroundDbCommandResponse,
-    ForegroundMutationKind, ForegroundPermissionAdvice, ForegroundPermissionAdviceAction,
-    ForegroundSubscriptionEvent, ForegroundTransactionKind, ForegroundWakeState,
-    NATIVE_RELAY_ABI_V1, NativeRelayAbiRange, ensure_native_relay_abi_compatible,
+    FOREGROUND_WAKE_ENCRYPTION_STATE, FOREGROUND_WAKE_IMMEDIATE, ForegroundDbCommandRequest,
+    ForegroundDbCommandResponse, ForegroundMutationKind, ForegroundPermissionAdvice,
+    ForegroundPermissionAdviceAction, ForegroundSubscriptionEvent, ForegroundTransactionKind,
+    ForegroundWakeState, NATIVE_RELAY_ABI_V1, NativeRelayAbiRange,
+    ensure_native_relay_abi_compatible,
 };
 
 /// Frames one host-carried queue holds before a producer sees backpressure.
@@ -80,7 +81,7 @@ const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
 /// its first answer, a read waiting for the server) while some is pending.
 const NATIVE_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Bounds on the per-foreground handles a JavaScript runtime may hold open.
-const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
+pub(crate) const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
 /// Committed writes a foreground remembers for later waits by transaction id.
 const NATIVE_RELAY_FOREGROUND_WRITES_MAX: usize = 16 * 1024;
@@ -157,9 +158,30 @@ pub struct RelayOpenConfig {
     /// ships them: the store keeps each column where the authority does.
     pub migrations: Migrations,
     pub identity: DbIdentity,
+    pub(crate) declarations: Option<Declarations>,
 }
 
 impl RelayOpenConfig {
+    /// Creates a relay configuration for an app without encryption declarations.
+    pub fn new(
+        supported_abi: NativeRelayAbiRange,
+        scope: RelayScope,
+        sqlite_path: PathBuf,
+        schema: JazzSchema,
+        migrations: Migrations,
+        identity: DbIdentity,
+    ) -> Self {
+        Self {
+            supported_abi,
+            scope,
+            sqlite_path,
+            schema,
+            migrations,
+            identity,
+            declarations: None,
+        }
+    }
+
     /// What identifies this config's schema history: its earlier versions
     /// and its content-addressed lenses, in the order shipped. A scope
     /// reopened with another history is another configuration.
@@ -244,6 +266,13 @@ impl NativeRelayWire {
         Ok(Self::lock(&self.outbound).frames.drain(..).collect())
     }
 
+    /// Signalled when frames for the server are queued: a test carrying the
+    /// wire itself waits on it instead of polling.
+    #[cfg(test)]
+    pub(crate) fn outbound_ready(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.outbound_ready)
+    }
+
     /// Queued (inbound, outbound) frames.
     pub fn queue_depths(&self) -> (usize, usize) {
         (
@@ -298,6 +327,10 @@ impl NativeRelayWire {
 
 // ---- the relay handle ---------------------------------------------------------------
 
+use crate::encryption::Declarations;
+use crate::encryption::{Built as BuiltDevice, ForegroundEncryption};
+use jazz_e2ee_client::host::bridge::{JsStore, StoreWake};
+
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
 
 enum RelayCommand {
@@ -319,6 +352,7 @@ struct RelayInner {
     schema_version: jazz::ids::SchemaVersionId,
     migrations: MigrationsKey,
     identity: DbIdentity,
+    declarations: Option<Declarations>,
 }
 
 impl RelayInner {
@@ -364,12 +398,17 @@ impl Drop for OwnerAlive {
 impl NativeRelay {
     /// Open the scope's SQLite store on a new owner thread.
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
+        Self::spawn_with(config)
+    }
+
+    fn spawn_with(config: RelayOpenConfig) -> Result<Self, RelayError> {
         // Before the thread exists and before SQLite is touched.
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
         let migrations = config.migrations_key();
         let identity = config.identity;
+        let declarations = config.declarations.clone();
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
@@ -404,6 +443,7 @@ impl NativeRelay {
                 schema_version,
                 migrations,
                 identity,
+                declarations,
             }),
         })
     }
@@ -447,6 +487,51 @@ impl NativeRelay {
             return Err(RelayError::ScopeConfigurationMismatch);
         }
         let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water))?;
+        Ok(NativeRelayClient {
+            relay: self.clone(),
+            id,
+        })
+    }
+
+    pub(crate) fn attach_foreground_encrypted(
+        &self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        lease: ForegroundNodeLease,
+        encryption: ForegroundEncryption,
+        device_account_secret: Option<jazz::identity::DeviceAccountSecret>,
+    ) -> Result<NativeRelayClient, RelayError> {
+        if identity.author != self.inner.identity.author
+            || self.inner.declarations.as_ref() != Some(&encryption.declarations)
+        {
+            return Err(RelayError::ScopeConfigurationMismatch);
+        }
+        let id = self.run(move |worker| {
+            let account = identity
+                .author
+                .account_id()
+                .ok_or(RelayError::ScopeConfigurationMismatch)?;
+            let store = Rc::new(JsStore::default());
+            let build = encryption.build(
+                account.0.to_string(),
+                device_account_secret,
+                Rc::clone(&store),
+            );
+            worker.next_client += 1;
+            let id = worker.next_client;
+            worker.encrypted_opens.insert(
+                id,
+                EncryptedOpen {
+                    identity,
+                    claims,
+                    high_water: lease.high_water,
+                    store,
+                    build: EncryptedBuild::Building(Box::pin(build)),
+                    wake: None,
+                },
+            );
+            Ok(id)
+        })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -541,13 +626,27 @@ impl NativeRelay {
         &self,
         operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
+        self.enqueue(operation)?
+            .recv()
+            .map_err(|_| self.owner_closed())?
+    }
+
+    fn enqueue<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
+    ) -> Result<mpsc::Receiver<Result<T, RelayError>>, RelayError> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.send_job(Box::new(move |worker| {
+            let _ = response_tx.send(operation(worker));
+        }))?;
+        Ok(response_rx)
+    }
+
+    /// Queue `job` for the owner thread.
+    fn send_job(&self, job: RelayJob) -> Result<(), RelayError> {
         if !self.is_alive() {
             return Err(RelayError::Closed);
         }
-        let (response_tx, response_rx) = mpsc::channel();
-        let job: RelayJob = Box::new(move |worker| {
-            let _ = response_tx.send(operation(worker));
-        });
         {
             let commands = self
                 .inner
@@ -563,10 +662,108 @@ impl NativeRelay {
                     mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
                 })?;
         }
-        response_rx.recv().map_err(|_| {
-            self.inner.alive.store(false, Ordering::Release);
-            RelayError::Closed
-        })?
+        Ok(())
+    }
+
+    fn owner_closed(&self) -> RelayError {
+        self.inner.alive.store(false, Ordering::Release);
+        RelayError::Closed
+    }
+}
+
+/// A foreground waiter is polled by JavaScript without waiting on the relay
+/// owner. The owner alone requests and observes verification.
+#[derive(Clone)]
+pub(crate) struct ForegroundReady {
+    request: Arc<Mutex<ForegroundReadyState>>,
+    started: Instant,
+    timeout: Duration,
+}
+
+type ReadyOutcome = Result<&'static str, String>;
+
+enum ForegroundReadyState {
+    Waiting(Option<ReadyOutcome>),
+    Settled(ReadyOutcome),
+    Cancelled,
+}
+
+impl ForegroundReady {
+    pub(crate) fn new(started: Instant, timeout: Duration) -> Self {
+        Self {
+            request: Arc::new(Mutex::new(ForegroundReadyState::Waiting(None))),
+            started,
+            timeout,
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.timeout
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ForegroundReadyState> {
+        self.request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn cancel(&self) {
+        *self.state() = ForegroundReadyState::Cancelled;
+    }
+
+    pub(crate) fn poll(&self) -> Option<ForegroundDbCommandResponse> {
+        let mut state = self.state();
+        if matches!(*state, ForegroundReadyState::Waiting(_)) && !self.expired() {
+            return None;
+        }
+        let result = match std::mem::replace(&mut *state, ForegroundReadyState::Cancelled) {
+            ForegroundReadyState::Settled(result) | ForegroundReadyState::Waiting(Some(result)) => {
+                result
+            }
+            _ => Err(
+                "timeout: the account was not verified in time (waiting: relay owner)".to_owned(),
+            ),
+        };
+        Some(operation_response(
+            result
+                .map(|status| ForegroundDbCommandResponse::EncryptionResult {
+                    json: serde_json::Value::from(status).to_string(),
+                })
+                .map_err(HostError::Argument),
+        ))
+    }
+
+    fn admit(
+        &self,
+        encryption: Option<&jazz_e2ee_client::host::runtime::Encryption>,
+    ) -> Option<u64> {
+        let mut state = self.state();
+        if !matches!(*state, ForegroundReadyState::Waiting(_)) || self.expired() {
+            return None;
+        }
+        match encryption {
+            Some(encryption) => Some(encryption.request_foreground_ready()),
+            None => {
+                *state = ForegroundReadyState::Settled(Err(
+                    "the app does not declare encryption".to_owned()
+                ));
+                None
+            }
+        }
+    }
+
+    /// Returns true while the owner should keep observing this waiter.
+    fn observe(&self, encryption: &jazz_e2ee_client::host::runtime::Encryption, pass: u64) -> bool {
+        let mut state = self.state();
+        if !matches!(*state, ForegroundReadyState::Waiting(_)) || self.expired() {
+            return false;
+        }
+        if let Some(result) = encryption.foreground_ready_outcome(pass, false) {
+            *state = ForegroundReadyState::Settled(result);
+            return false;
+        }
+        *state = ForegroundReadyState::Waiting(encryption.foreground_ready_outcome(pass, true));
+        true
     }
 }
 
@@ -582,11 +779,37 @@ impl NativeRelayClient {
         self.id
     }
 
+    pub(crate) fn enqueue_foreground_ready(
+        &self,
+        ready: ForegroundReady,
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.enqueue(move |worker| {
+            let client = worker.clients.get_mut(&id);
+            let encryption = client
+                .as_ref()
+                .and_then(|client| client.encryption.as_deref());
+            if let Some(pass) = ready.admit(encryption)
+                && ready.observe(encryption.expect("encrypted foreground"), pass)
+            {
+                client
+                    .expect("encrypted foreground")
+                    .readiness
+                    .push((ready, pass));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Run one ordinary core turn for this foreground and its relay. A
     /// failure of an earlier drive is reported once.
     pub(crate) fn pump_foreground(&self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
+            if worker.encrypted_opens.contains_key(&id) {
+                return Ok(());
+            }
             worker.client(id)?;
             worker.drive();
             match worker.drive_error.take() {
@@ -613,8 +836,29 @@ impl NativeRelayClient {
     ) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            let client = worker.client_mut(id)?;
-            client.wake = wake.map(|wake| (foreground, wake));
+            let store = if let Some(open) = worker.encrypted_opens.get_mut(&id) {
+                open.wake = wake.clone().map(|wake| (foreground, wake));
+                Some(open.store.as_ref())
+            } else {
+                let client = worker.client_mut(id)?;
+                client.wake = wake.clone().map(|wake| (foreground, wake));
+                client
+                    .encryption
+                    .as_ref()
+                    .map(|runtime| runtime.bridge_store())
+            };
+            if let Some(store) = store {
+                store.set_store_wake(wake.map(|wake| {
+                    Box::new(move |event| {
+                        let kind = match event {
+                            StoreWake::Request => FOREGROUND_WAKE_IMMEDIATE,
+                            StoreWake::EncryptionState => FOREGROUND_WAKE_ENCRYPTION_STATE,
+                            StoreWake::Deadline(_) => return,
+                        };
+                        wake.wake(foreground, kind, 0);
+                    }) as Box<dyn Fn(_)>
+                }));
+            }
             Ok(())
         })
     }
@@ -623,8 +867,12 @@ impl NativeRelayClient {
     /// lease's next holder starts above it.
     pub(crate) fn minted_high_water(&self) -> Result<u64, RelayError> {
         let id = self.id;
-        self.relay
-            .run(move |worker| Ok(worker.client(id)?.binding.db.seq_high_water()))
+        self.relay.run(move |worker| {
+            if let Some(open) = worker.encrypted_opens.get(&id) {
+                return Ok(open.high_water);
+            }
+            Ok(worker.client(id)?.binding.db.seq_high_water())
+        })
     }
 
     /// Run an operation against this UI peer's database on the owner thread.
@@ -708,6 +956,7 @@ struct Foreground {
     /// a relay answers its own subscribers' advice requests `Unknown`.
     authority: Binding,
     dirty: Rc<Cell<bool>>,
+    deadline: Rc<Cell<Option<Instant>>>,
     /// The foreground's upstream link to the relay.
     link: Link,
     /// The relay's subscriber link serving it.
@@ -726,6 +975,9 @@ struct Foreground {
     /// Something changed for this foreground since the drive began.
     notify: bool,
     next_handle: u64,
+    /// A device's encryption runtime, driven with each drive of the relay.
+    encryption: Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>,
+    readiness: Vec<(ForegroundReady, u64)>,
 }
 
 impl Foreground {
@@ -826,29 +1078,12 @@ impl Foreground {
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
-                let event = match binding_host::event_chunk(event).map_err(|e| e.to_string())? {
-                    EventChunk::Delta {
-                        delta,
-                        reset,
-                        settled,
-                        tier,
-                        // Not in the foreground ABI yet: a coalesced backlog
-                        // reaches React Native as a plain reset.
-                        coalesced: _,
-                    } => ForegroundSubscriptionEvent::Delta {
-                        reset,
-                        settled,
-                        tier,
-                        delta,
-                    },
-                    EventChunk::Rejected { detail, .. } => {
-                        ForegroundSubscriptionEvent::Rejected { reason: detail }
-                    }
-                    EventChunk::Closed => {
-                        subscription.closed = true;
-                        ForegroundSubscriptionEvent::Closed
-                    }
-                };
+                let event = foreground_subscription_event(
+                    binding_host::event_chunk(event).map_err(|e| e.to_string())?,
+                );
+                if event == ForegroundSubscriptionEvent::Closed {
+                    subscription.closed = true;
+                }
                 subscription.buffer.push_back(event);
                 self.notify = true;
             }
@@ -858,6 +1093,9 @@ impl Foreground {
 
     /// Whether time-bound work is pending that a drive must re-check.
     fn awaits_time(&self) -> bool {
+        if !self.readiness.is_empty() {
+            return true;
+        }
         !self.pending.is_empty() || self.subscriptions.values().any(|s| !s.opened)
     }
 
@@ -883,6 +1121,9 @@ impl Foreground {
             let _ = upload.abort();
         }
         self.subscriptions.clear();
+        if let Some(encryption) = &self.encryption {
+            encryption.stop();
+        }
         self.link.close();
         self.served.close();
         let _ = block_on(self.binding.close());
@@ -895,14 +1136,30 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
         .poll(&mut Context::from_waker(Waker::noop()))
 }
 
+struct EncryptedOpen {
+    identity: DbIdentity,
+    claims: BTreeMap<String, Value>,
+    high_water: u64,
+    store: Rc<JsStore>,
+    build: EncryptedBuild,
+    wake: Option<(u64, Arc<ForegroundWakeState>)>,
+}
+
+enum EncryptedBuild {
+    Building(Pin<Box<dyn Future<Output = Result<BuiltDevice, String>>>>),
+    Failed(String),
+}
+
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
     migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
+    persistent_deadline: Rc<Cell<Option<Instant>>>,
     upstream: Option<UpstreamConnection>,
     generation: u64,
     clients: BTreeMap<u64, Foreground>,
+    encrypted_opens: BTreeMap<u64, EncryptedOpen>,
     next_client: u64,
     /// The last drive failed; reported by the next foreground tick.
     drive_error: Option<String>,
@@ -925,14 +1182,26 @@ pub(crate) struct RelayWorker {
     redrive: bool,
     /// When time-bound waits were last evaluated.
     timed: Instant,
+    /// The keyless hooks an encrypted relay's databases open with unless a
+    /// device UI peer brings the runtime's.
+    keyless: Option<Rc<dyn jazz::e2ee::E2eeHooks>>,
 }
 
-/// A binding's tick requests set `dirty`; the owner's drive ticks it.
-fn hook(binding: &Binding) -> Rc<Cell<bool>> {
+/// The owner services immediate ticks and the earliest delayed tick per binding.
+fn hook(binding: &Binding) -> (Rc<Cell<bool>>, Rc<Cell<Option<Instant>>>) {
     let dirty = Rc::new(Cell::new(true));
     let flag = Rc::clone(&dirty);
     *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
-    dirty
+    let deadline = Rc::new(Cell::new(None));
+    let next = Rc::clone(&deadline);
+    *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+        if let Some(at) = Instant::now().checked_add(Duration::from_millis(ms))
+            && next.get().is_none_or(|current| at < current)
+        {
+            next.set(Some(at));
+        }
+    }));
+    (dirty, deadline)
 }
 
 /// Refuse a file a pre-SQLite native relay wrote: its ordered-KV tables
@@ -999,28 +1268,46 @@ fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrat
 }
 
 impl RelayWorker {
+    /// The config of one of this relay's databases, with the keyless hooks
+    /// of an encrypted relay.
+    fn db_config(&self, schema: JazzSchema, identity: DbIdentity) -> DbConfig {
+        let config = relay_db_config(schema, identity, &self.migrations);
+        if let Some(hooks) = &self.keyless {
+            return config.with_e2ee(Rc::clone(hooks));
+        }
+        config
+    }
+
     fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
+        let keyless = config.declarations.clone().map(crate::encryption::keyless);
         ensure_sqlite_store(&config.sqlite_path)?;
         if let Some(parent) = config.sqlite_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
-        let db = block_on(Db::open_at(
-            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
+        let mut db_config =
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations);
+        if let Some(hooks) = &keyless {
+            db_config = db_config.with_e2ee(Rc::clone(hooks));
+        }
+        let db = block_on(binding_host::open_file(
+            db_config,
             &config.sqlite_path,
             FileOptions::default(),
         ))
         .map_err(|error| RelayError::Host(error.into()))?;
         let persistent = block_on(Binding::new(db, config.identity, false));
-        let persistent_dirty = hook(&persistent);
+        let (persistent_dirty, persistent_deadline) = hook(&persistent);
         Ok(Self {
             schema: config.schema,
             migrations: config.migrations,
             persistent,
             persistent_dirty,
+            persistent_deadline,
             upstream: None,
             generation: 0,
             clients: BTreeMap::new(),
+            encrypted_opens: BTreeMap::new(),
             next_client: 0,
             drive_error: None,
             refusal: None,
@@ -1031,19 +1318,45 @@ impl RelayWorker {
             rebuilt: false,
             redrive: false,
             timed: Instant::now(),
+            keyless,
         })
     }
 
     fn run(&mut self, receiver: mpsc::Receiver<RelayCommand>) {
+        let mut clock_checked = Instant::now();
         loop {
-            let command = if self.redrive {
+            let deadline = self
+                .persistent_deadline
+                .get()
+                .into_iter()
+                .chain(self.clients.values().flat_map(|client| {
+                    let store_deadline = client.encryption.as_ref().and_then(|encryption| {
+                        encryption.bridge_store().next_deadline_after(clock_checked)
+                    });
+                    client.deadline.get().into_iter().chain(store_deadline)
+                }))
+                .min();
+            let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+            let wait = if self.awaits_time() {
+                Some(
+                    wait.unwrap_or(NATIVE_RELAY_POLL_INTERVAL)
+                        .min(NATIVE_RELAY_POLL_INTERVAL),
+                )
+            } else {
+                wait
+            };
+            // Encryption can request another tick after the database tick rounds.
+            let command = if self.redrive
+                || self.persistent_dirty.get()
+                || self.clients.values().any(|client| client.dirty.get())
+            {
                 match receiver.try_recv() {
                     Ok(command) => Some(command),
                     Err(mpsc::TryRecvError::Empty) => None,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
-            } else if self.awaits_time() {
-                match receiver.recv_timeout(NATIVE_RELAY_POLL_INTERVAL) {
+            } else if let Some(wait) = wait {
+                match receiver.recv_timeout(wait) {
                     Ok(command) => Some(command),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1075,6 +1388,7 @@ impl RelayWorker {
                 }
                 self.persistent_dirty.set(true);
             }
+            clock_checked = Instant::now();
             self.drive();
         }
         self.shutdown();
@@ -1085,6 +1399,7 @@ impl RelayWorker {
     }
 
     fn shutdown(&mut self) {
+        self.encrypted_opens.clear();
         for (_, client) in std::mem::take(&mut self.clients) {
             client.close();
         }
@@ -1117,12 +1432,30 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(relay_db_config(
-            self.schema.clone(),
-            identity,
-            &self.migrations,
-        )))
-        .map_err(|error| RelayError::Host(error.into()))?;
+        self.next_client += 1;
+        let id = self.next_client;
+        self.finish_attach(id, identity, claims, high_water, None)?;
+        self.drive();
+        Ok(id)
+    }
+
+    fn finish_attach(
+        &mut self,
+        id: u64,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        high_water: u64,
+        runtime: Option<BuiltDevice>,
+    ) -> Result<(), RelayError> {
+        // A device brings the runtime's hooks; any other peer of an
+        // encrypted relay is keyless like the relay.
+        let mut db_config = self.db_config(self.schema.clone(), identity);
+        if let Some(runtime) = &runtime {
+            db_config = db_config.with_e2ee(runtime.built.client().hooks());
+            db_config.add_creator_as_member = runtime.add_creator_as_member;
+        }
+        let db = block_on(binding_host::open_memory(db_config))
+            .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -1131,7 +1464,18 @@ impl RelayWorker {
         block_on(db.set_identity_claims(identity.author, claims.clone()));
         let binding = block_on(Binding::new(db, identity, false));
         block_on(binding.set_non_durable_client());
-        let dirty = hook(&binding);
+        let (dirty, deadline) = hook(&binding);
+        let encryption = runtime.map(|built| {
+            let flag = Rc::clone(&dirty);
+            built.store.set_wake(Box::new(move || flag.set(true)));
+            let wake_store = Rc::clone(&built.store);
+            jazz_e2ee_client::host::runtime::Encryption::new_native(
+                built.built,
+                Some(built.store),
+                Rc::clone(&binding.db),
+                Rc::new(move || wake_store.request_wake()),
+            )
+        });
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
         *binding.hooks.rejected.borrow_mut() =
@@ -1153,14 +1497,13 @@ impl RelayWorker {
         let link = binding.connect_upstream();
         // The foreground store and this relay run the same build.
         link.set_features(jazz::wire::current_wire_features());
-        self.next_client += 1;
-        let id = self.next_client;
         self.clients.insert(
             id,
             Foreground {
                 binding,
                 authority: self.persistent.clone(),
                 dirty,
+                deadline,
                 link,
                 served,
                 subscriptions: BTreeMap::new(),
@@ -1174,13 +1517,17 @@ impl RelayWorker {
                 wake: None,
                 notify: false,
                 next_handle: 0,
+                encryption,
+                readiness: Vec::new(),
             },
         );
-        self.drive();
-        Ok(id)
+        Ok(())
     }
 
     fn detach(&mut self, id: u64) -> Result<(), RelayError> {
+        if self.encrypted_opens.remove(&id).is_some() {
+            return Ok(());
+        }
         let client = self
             .clients
             .remove(&id)
@@ -1200,6 +1547,9 @@ impl RelayWorker {
         );
         self.persistent.hooks.progress.wake_all();
         self.persistent_dirty.set(true);
+        for open in self.encrypted_opens.values_mut() {
+            open.claims = claims.clone();
+        }
         for client in self.clients.values() {
             block_on(
                 client
@@ -1376,8 +1726,8 @@ impl RelayWorker {
         }
         block_on(self.persistent.close()).map_err(|error| error.to_string())?;
         delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
-        let db = block_on(Db::open_at(
-            relay_db_config(self.schema.clone(), self.identity, &self.migrations),
+        let db = block_on(binding_host::open_file(
+            self.db_config(self.schema.clone(), self.identity),
             &self.sqlite_path,
             FileOptions::default(),
         ))
@@ -1392,7 +1742,7 @@ impl RelayWorker {
         let claims = self.claims.clone().unwrap_or_default();
         block_on(db.set_identity_claims(author, claims.clone()));
         self.persistent = block_on(Binding::new(db, self.identity, false));
-        self.persistent_dirty = hook(&self.persistent);
+        (self.persistent_dirty, self.persistent_deadline) = hook(&self.persistent);
         for client in self.clients.values_mut() {
             client.authority = self.persistent.clone();
             client.served = block_on(self.persistent.accept_subscriber(author, claims.clone()))
@@ -1410,6 +1760,7 @@ impl RelayWorker {
     /// Tick what asked for a tick and move frames until nothing moves.
     pub(crate) fn drive(&mut self) {
         self.redrive = false;
+        let now = Instant::now();
         for round in 0.. {
             if round == NATIVE_RELAY_DRIVE_ROUNDS {
                 self.redrive = true;
@@ -1424,7 +1775,9 @@ impl RelayWorker {
                 }
             }
             for client in self.clients.values() {
-                if client.dirty.replace(false) {
+                if client.dirty.replace(false) || client.deadline.get().is_some_and(|at| at <= now)
+                {
+                    client.deadline.set(None);
                     if let Err(error) = block_on(client.binding.tick()) {
                         self.drive_error = Some(error.to_string());
                     }
@@ -1436,7 +1789,10 @@ impl RelayWorker {
                     progressed = true;
                 }
             }
-            if self.persistent_dirty.replace(false) {
+            if self.persistent_dirty.replace(false)
+                || self.persistent_deadline.get().is_some_and(|at| at <= now)
+            {
+                self.persistent_deadline.set(None);
                 if let Err(error) = block_on(self.persistent.tick()) {
                     self.drive_error = Some(error.to_string());
                 }
@@ -1454,6 +1810,16 @@ impl RelayWorker {
             }
             if !progressed {
                 break;
+            }
+        }
+        // A device's encryption runtime goes on as far as it can without
+        // waiting.
+        for client in self.clients.values_mut() {
+            if let Some(encryption) = &client.encryption {
+                encryption.drive();
+                client
+                    .readiness
+                    .retain(|(ready, pass)| ready.observe(encryption, *pass));
             }
         }
         // A refused upstream syncs nothing: stop its connection and say why,
@@ -1487,12 +1853,60 @@ impl RelayWorker {
         id: u64,
         command: ForegroundDbCommandRequest,
     ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        use ForegroundDbCommandRequest as Request;
+        if self.encrypted_opens.contains_key(&id) {
+            let response = match command {
+                Request::EncryptionOpen => self.finish_encrypted_open(id),
+                Request::TakeStoreRequests => Ok(ForegroundDbCommandResponse::StoreRequests {
+                    requests: self.encrypted_opens[&id].store.take_requests(),
+                }),
+                Request::ReplyStore {
+                    id: request,
+                    ok,
+                    payload,
+                } => reply_store(&self.encrypted_opens[&id].store, &request, ok, &payload),
+                _ => Err("the encrypted foreground is still opening".into()),
+            };
+            return Ok(operation_response(response));
+        }
         let client = self.client_mut(id)?;
         let response = match foreground_command(client, command) {
             Ok(response) => response,
             Err(error) => operation_error(error),
         };
         Ok(response)
+    }
+
+    fn finish_encrypted_open(&mut self, id: u64) -> Result<ForegroundDbCommandResponse, HostError> {
+        let open = self.encrypted_opens.get_mut(&id).expect("encrypted open");
+        let built = match &mut open.build {
+            EncryptedBuild::Building(build) => match poll_once(build) {
+                Poll::Pending => {
+                    return Ok(ForegroundDbCommandResponse::EncryptionOpen { ready: false });
+                }
+                Poll::Ready(built) => built,
+            },
+            EncryptedBuild::Failed(reason) => return Err(reason.clone().into()),
+        };
+        let mut open = self.encrypted_opens.remove(&id).expect("encrypted open");
+        let result = built.and_then(|built| {
+            self.finish_attach(
+                id,
+                open.identity,
+                open.claims.clone(),
+                open.high_water,
+                Some(built),
+            )
+            .map_err(|error| error.to_string())
+        });
+        if let Err(reason) = result {
+            open.build = EncryptedBuild::Failed(reason.clone());
+            self.encrypted_opens.insert(id, open);
+            return Err(reason.into());
+        }
+        self.clients.get_mut(&id).expect("attached client").wake = open.wake;
+        self.drive();
+        Ok(ForegroundDbCommandResponse::EncryptionOpen { ready: true })
     }
 }
 
@@ -1501,13 +1915,27 @@ impl RelayWorker {
 /// The response for a failed foreground operation: a core error keeps its
 /// display text and adds its stable code and reason name.
 fn operation_error(error: HostError) -> ForegroundDbCommandResponse {
-    match error {
-        HostError::Engine(error) => ForegroundDbCommandResponse::CodedOperationError {
-            code: error.code.as_str().to_owned(),
-            reason_name: error.reason.map(|reason| reason.as_str().to_owned()),
-            reason: error.to_string(),
-        },
-        HostError::Argument(reason) => ForegroundDbCommandResponse::OperationError { reason },
+    let core = match error {
+        HostError::Engine(core) => core,
+        HostError::Argument(reason) => {
+            return ForegroundDbCommandResponse::OperationError { reason };
+        }
+    };
+    let code = core.code.as_str().to_owned();
+    let reason = core.to_string();
+    if let (Some(space), Some(name)) = (core.space, core.reason) {
+        return ForegroundDbCommandResponse::KeyRefusal {
+            code,
+            reason_name: name.as_str().to_owned(),
+            reason,
+            scope_id: space.scope_id,
+            identifier: space.identifier,
+        };
+    }
+    ForegroundDbCommandResponse::CodedOperationError {
+        code,
+        reason_name: core.reason.map(|name| name.as_str().to_owned()),
+        reason,
     }
 }
 
@@ -1515,6 +1943,55 @@ fn operation_response(
     result: Result<ForegroundDbCommandResponse, HostError>,
 ) -> ForegroundDbCommandResponse {
     result.unwrap_or_else(operation_error)
+}
+
+fn reply_store(
+    store: &JsStore,
+    request: &str,
+    ok: bool,
+    payload: &str,
+) -> Result<ForegroundDbCommandResponse, HostError> {
+    let request = request
+        .parse()
+        .map_err(|_| HostError::Argument("invalid store request ID".to_owned()))?;
+    Ok(ForegroundDbCommandResponse::StoreReply {
+        accepted: store.reply(request, ok, payload),
+    })
+}
+
+fn foreground_encryption(
+    client: &Foreground,
+) -> Result<Rc<jazz_e2ee_client::host::runtime::Encryption>, HostError> {
+    client
+        .encryption
+        .clone()
+        .ok_or_else(|| "the app does not declare encryption".into())
+}
+
+fn foreground_encryption_call(
+    client: &mut Foreground,
+    op: String,
+    args_json: &str,
+) -> Result<ForegroundDbCommandResponse, HostError> {
+    let encryption = foreground_encryption(client)?;
+    let result = |value: serde_json::Value| ForegroundDbCommandResponse::EncryptionResult {
+        json: value.to_string(),
+    };
+    if op == "ready" {
+        return Err("readiness must start at the foreground host".into());
+    }
+    let args =
+        serde_json::from_str(args_json).map_err(|error| HostError::Argument(error.to_string()))?;
+    client.pending_or_ready(
+        Box::pin(async move {
+            let value = encryption
+                .call(op, args)
+                .await
+                .map_err(HostError::Argument)?;
+            Ok(result(value))
+        }),
+        None,
+    )
 }
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
@@ -1658,6 +2135,8 @@ struct StreamingOptions {
     base: Option<jazz::protocol::BranchViewBase>,
     /// The open transaction the finished value is staged in.
     transaction: Option<String>,
+    /// A streamed insert's `addCreatorAsMember`.
+    add_creator_as_member: Option<bool>,
 }
 
 fn foreground_command(
@@ -1676,7 +2155,7 @@ fn foreground_command(
             let transaction = transaction
                 .map(|handle| client.transaction(handle).map(|(id, _)| id.clone()))
                 .transpose()?;
-            let read = binding.all(
+            let read = binding.all_reporting(
                 query,
                 &json(&options_json)?,
                 transaction.as_deref(),
@@ -1684,7 +2163,10 @@ fn foreground_command(
                 None,
             )?;
             client.pending_or_ready(
-                Box::pin(async move { Ok(Response::Rows { rows: read.await? }) }),
+                Box::pin(async move {
+                    let (rows, unreadable) = read.await?;
+                    Ok(rows_response(rows, &unreadable))
+                }),
                 None,
             )?
         }
@@ -1999,7 +2481,7 @@ fn foreground_command(
                     HostError::Argument(format!("invalid streaming mutation options: {error}"))
                 })?,
             };
-            let upload = binding.begin_streaming_mutation(
+            let mut upload = binding.begin_streaming_mutation(
                 table,
                 &row_id,
                 &cells,
@@ -2012,6 +2494,7 @@ fn foreground_command(
                 options.base,
                 options.transaction.as_deref(),
             )?;
+            upload.set_add_creator_as_member(options.add_creator_as_member)?;
             let handle = client.handle();
             client.uploads.insert(handle, upload);
             Response::StreamingMutationOpened { upload: handle }
@@ -2110,6 +2593,29 @@ fn foreground_command(
                 row_id: *row.as_bytes(),
             }
         }
+        Request::EncryptionOpen => {
+            foreground_encryption(client)?;
+            Response::EncryptionOpen { ready: true }
+        }
+        Request::TakeStoreRequests => Response::StoreRequests {
+            requests: foreground_encryption(client)?
+                .bridge_store()
+                .take_requests(),
+        },
+        Request::ReplyStore { id, ok, payload } => {
+            return reply_store(
+                foreground_encryption(client)?.bridge_store(),
+                &id,
+                ok,
+                &payload,
+            );
+        }
+        Request::EncryptionCall { op, args_json } => {
+            return foreground_encryption_call(client, op, &args_json);
+        }
+        Request::TakeEncryptionReports => Response::EncryptionReports {
+            reports: foreground_encryption(client)?.take_reports(),
+        },
         // Host-level commands never reach a foreground's owner.
         Request::Probe
         | Request::Tick
@@ -2206,6 +2712,13 @@ pub struct NativeRelayRegistry {
 
 impl NativeRelayRegistry {
     pub fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
+        self.open_admitted_with(config)
+    }
+
+    pub(crate) fn open_admitted_with(
+        &self,
+        config: RelayOpenConfig,
+    ) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
             .relays
@@ -2216,6 +2729,7 @@ impl NativeRelayRegistry {
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
+                || existing.inner.declarations != config.declarations
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
@@ -2234,7 +2748,7 @@ impl NativeRelayRegistry {
         {
             return Err(RelayError::StorageAlreadyOwned);
         }
-        let relay = NativeRelay::spawn(config.clone())?;
+        let relay = NativeRelay::spawn_with(config.clone())?;
         relays.insert(config.scope, relay.clone());
         Ok(relay)
     }
@@ -2978,6 +3492,66 @@ pub enum RelayError {
     Socket(String),
 }
 
+/// A one-shot read's answer: `ReportedRows` when it left rows out because
+/// the encryption runtime could not open them, else `Rows`.
+pub(crate) fn rows_response(
+    rows: Vec<u8>,
+    unreadable: &[jazz::db::UnreadableRow],
+) -> ForegroundDbCommandResponse {
+    if unreadable.is_empty() {
+        ForegroundDbCommandResponse::Rows { rows }
+    } else {
+        ForegroundDbCommandResponse::ReportedRows {
+            rows,
+            unreadable_json: binding_host::unreadable_json(unreadable),
+        }
+    }
+}
+
+/// One subscription event in the foreground ABI.
+pub(crate) fn foreground_subscription_event(chunk: EventChunk) -> ForegroundSubscriptionEvent {
+    match chunk {
+        EventChunk::Delta {
+            delta,
+            reset,
+            settled,
+            tier,
+            // Not in the foreground ABI yet: a coalesced backlog reaches
+            // React Native as a plain reset.
+            coalesced: _,
+            unreadable,
+        } => match unreadable {
+            // A reset with no rows left out is a plain reset: the reader
+            // takes a reset without a list as an empty one. So an app
+            // without encryption keeps event 0.
+            Some(json) if reset && json == "[]" => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+            // The list changed, or a reset restates a non-empty one.
+            Some(unreadable_json) => ForegroundSubscriptionEvent::UnreadableDelta {
+                reset,
+                settled,
+                tier,
+                delta,
+                unreadable_json,
+            },
+            None => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+        },
+        EventChunk::Rejected { detail, .. } => {
+            ForegroundSubscriptionEvent::Rejected { reason: detail }
+        }
+        EventChunk::Closed => ForegroundSubscriptionEvent::Closed,
+    }
+}
+
 #[cfg(test)]
 mod relay_config_tests {
     use super::*;
@@ -2994,6 +3568,101 @@ mod relay_config_tests {
         let config = relay_db_config(schema, identity, &Migrations::default());
         assert!(config.chunk_store.is_none());
         assert!(!config.host_chunk_io);
+    }
+
+    /// Alice's local-first read settles on the relay when the authority
+    /// stays silent. Use the core subscriber directly so the foreground's
+    /// pending-operation polling cannot supply the missing database tick.
+    ///
+    /// Alice ──read──► relay ──read──► silent authority
+    /// Alice ◄──local settlement on deadline── relay
+    #[test]
+    fn an_unanswered_read_settles_at_the_relay_deadline() {
+        use jazz::db::{ReadSpan, ReadTier, SyncMessage, Transport};
+        use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+        struct Peer {
+            read: Option<SyncMessage>,
+            settled: mpsc::Sender<Instant>,
+        }
+
+        impl Transport for Peer {
+            fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+                if matches!(
+                    message,
+                    SyncMessage::Settled {
+                        id: 1,
+                        global: false,
+                        ..
+                    }
+                ) {
+                    let _ = self.settled.send(Instant::now());
+                }
+                Ok(())
+            }
+
+            fn try_recv(&mut self) -> Option<SyncMessage> {
+                self.read.take()
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let author = AuthorSubject::for_test_bytes([2; 16]);
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("notes").column("title", ColumnType::Text))
+            .build();
+        let relay = NativeRelay::spawn(RelayOpenConfig::new(
+            NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            directory.path().join("relay.sqlite"),
+            JazzSchema::new(&schema).unwrap(),
+            Migrations::default(),
+            DbIdentity {
+                node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+                author,
+            },
+        ))
+        .unwrap();
+        let _upstream = relay.wire().unwrap();
+        relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
+        let (settled, answer) = mpsc::channel();
+        let started = Instant::now();
+        relay
+            .run(move |worker| {
+                let read = SyncMessage::Read {
+                    id: 1,
+                    query: Box::new(jazz::query::Query::from("notes")),
+                    binding: BTreeMap::new(),
+                    include_deleted: false,
+                    tier: ReadTier::LocalFirst,
+                    wait: Some(150),
+                    view: Box::new(jazz::protocol::ReadViewSourceSpec::Current),
+                    since: None,
+                    span: ReadSpan::Live,
+                };
+                block_on(worker.persistent.db.accept_subscriber(
+                    Box::new(Peer {
+                        read: Some(read),
+                        settled,
+                    }),
+                    author,
+                ))
+                .unwrap();
+                worker.persistent_dirty.set(true);
+                Ok(())
+            })
+            .unwrap();
+        let settled = answer
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the relay must wake at the database's read deadline");
+        assert!(settled.duration_since(started) >= Duration::from_millis(150));
     }
 }
 

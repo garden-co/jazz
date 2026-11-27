@@ -42,8 +42,8 @@ use crate::model::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
 use crate::model::public_schema::{
-    ColumnDescriptor, ColumnType, OrderedRowDelta, QueryResult, Row, Schema, Session, TableName,
-    TableSchema, Value, WriteContext, validate_json_value,
+    ColumnDescriptor, ColumnType, E2eeDeclarations, EncryptionEntry, OrderedRowDelta, QueryResult,
+    Row, Schema, Session, TableName, TableSchema, Value, WriteContext, validate_json_value,
 };
 use crate::model::transaction::{OpenTransactionId, TransactionId};
 use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
@@ -51,6 +51,7 @@ use crate::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec, Snapsh
 use crate::query::Query;
 use crate::records::Value as CoreValue;
 use crate::schema::history;
+use crate::tools::deployment::artifact::encryption::is_equality_token_column;
 use crate::tools::native_transport_connector::{
     NativeTransportConnector, NativeTransportError, NativeTransportFuture, NativeTransportLink,
     NativeTransportRequest, NativeTransportTerminal, NativeTransportTerminalFuture,
@@ -86,6 +87,53 @@ const CLIENT_ID_FILE: &str = "client_id";
 /// The RocksDB store written before the SQLite engine.
 const PRE_SQLITE_STORE: &str = "jazz-core.rocksdb";
 
+/// The end-to-end encryption runtime a client drives: built by the layer
+/// above (which knows the app's declarations and its private store), run
+/// by the client between ticks.
+pub trait EncryptionRuntime {
+    /// Called after every tick: lets the runtime's loop go on as far as it
+    /// can without waiting, and asks for a tick if it owes one.
+    fn after_tick(&self);
+    /// Open an upload, preparing the space first when the hooks ask.
+    /// Await each attempt before starting another. A wait for the space's
+    /// key ends when `ended` does (the client closing):
+    /// [`JazzError::ChannelClosed`].
+    fn begin_streaming_upload<'a>(
+        &self,
+        begin: &'a mut dyn FnMut() -> futures::future::LocalBoxFuture<
+            'a,
+            Result<crate::db::StreamingValueUpload>,
+        >,
+        ended: futures::future::LocalBoxFuture<'a, ()>,
+    ) -> futures::future::LocalBoxFuture<'a, Result<crate::db::StreamingValueUpload>>;
+    /// Called when the client shuts down: ends the loop.
+    fn stop(&self);
+}
+
+/// Starts an [`EncryptionRuntime`] over the open database; the second
+/// argument asks the client for a tick.
+pub type StartEncryption = Box<dyn FnOnce(Rc<Db>, Rc<dyn Fn()>) -> Rc<dyn EncryptionRuntime>>;
+
+/// What a client opens an app that declares encryption with.
+#[cfg(feature = "e2ee-client")]
+pub struct ClientEncryption {
+    /// The hooks the database is opened with: a device's (the runtime's)
+    /// or a backend's keyless ones.
+    pub hooks: Rc<dyn crate::e2ee::E2eeHooks>,
+    /// A device starts its runtime over the open database; a backend, which
+    /// holds no keys, has none.
+    pub start: Option<StartEncryption>,
+    /// Add the signed-in creator as a member of each space they insert.
+    pub add_creator_as_member: bool,
+}
+
+/// With the `e2ee-client` feature off a client has no hooks to open an
+/// encrypted app with: there is nothing to carry.
+#[cfg(not(feature = "e2ee-client"))]
+pub struct ClientEncryption {
+    _none: std::convert::Infallible,
+}
+
 /// Jazz client for building applications.
 ///
 /// Combines local storage with server sync.
@@ -120,7 +168,11 @@ struct BranchScope {
 }
 
 struct Shared {
-    db: Db,
+    db: Rc<Db>,
+    /// The encryption runtime of an app that declares encryption, which the
+    /// layer above built ([`JazzClient::connect_with`]).
+    encryption: Option<Rc<dyn EncryptionRuntime>>,
+    encryption_declarations: Option<E2eeDeclarations>,
     /// The app, named in slow-query reports.
     app: String,
     identity: DbIdentity,
@@ -267,6 +319,10 @@ struct Forwarder {
 }
 
 impl Shared {
+    fn encryption_entry(&self, table: &str) -> Option<&EncryptionEntry> {
+        self.encryption_declarations.as_ref()?.tables.get(table)
+    }
+
     fn state(&self) -> std::cell::RefMut<'_, State> {
         self.state.borrow_mut()
     }
@@ -419,6 +475,10 @@ impl Shared {
             tracing::warn!(app = %self.app, "{line}");
         }
         self.forward();
+        // The encryption runtime goes on as far as it can without waiting.
+        if let Some(encryption) = &self.encryption {
+            encryption.after_tick();
+        }
         // Waiters re-poll and see a stopped driver as an error.
         self.progress.send_modify(|generation| *generation += 1);
     }
@@ -448,14 +508,7 @@ impl Shared {
                         settled,
                         coalesced,
                         ..
-                    } => match forwarder.delta(
-                        &self.schema,
-                        &self.db,
-                        reset,
-                        added,
-                        updated,
-                        removed,
-                    ) {
+                    } => match forwarder.delta(self, reset, added, updated, removed) {
                         // Not yet settled at the tier the subscription asked for.
                         Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
                             pending: !settled || forwarder.unsettleable,
@@ -499,14 +552,13 @@ impl Forwarder {
 
     fn delta(
         &mut self,
-        schema: &Schema,
-        db: &Db,
+        shared: &Shared,
         reset: bool,
         added_rows: Vec<SubscriptionOutputRow>,
         updated_rows: Vec<SubscriptionOutputRow>,
         removed_rows: Vec<RemovedRow>,
     ) -> Result<OrderedRowDelta> {
-        let decoder = Decoder::new(schema, &self.query, Some(db));
+        let decoder = Decoder::new(shared, &self.query, Some(&shared.db));
         let mut delta = OrderedRowDelta::default();
         if reset {
             // A reset replaces the whole result: everything held leaves,
@@ -892,7 +944,7 @@ impl JazzClient {
     /// use [`Self::connect_with_native_transport`] from their process or
     /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context, None, None, false).await
+        Self::connect_inner(context, None, None, None, false).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -900,7 +952,7 @@ impl JazzClient {
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self> {
-        Self::connect_inner(context, Some(connector), None, false).await
+        Self::connect_inner(context, Some(connector), None, None, false).await
     }
 
     /// Connect as a user of an app whose backend (`createJazz`) signs its
@@ -915,7 +967,7 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
-        Self::connect_bearer(context, connector, bearer, false).await
+        Self::connect_with(context, Some(connector), Some(bearer), None).await
     }
 
     /// [`Self::connect_with_native_transport_bearer`], but nothing reaches
@@ -928,13 +980,51 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
-        Self::connect_bearer(context, connector, bearer, true).await
+        Self::connect_with_held(context, connector, bearer, None).await
+    }
+
+    /// Any of the connections above, optionally with end-to-end encryption
+    /// ([`ClientEncryption`]): `connector` is the native transport (none for
+    /// an offline client), `bearer` an app's own token (see
+    /// [`Self::connect_with_native_transport_bearer`]).
+    ///
+    /// An app that declares encryption opens only with `encryption`. Build
+    /// its hooks from the same app and schema version as `context.schema`,
+    /// using the app ID and environment this client opens.
+    pub async fn connect_with(
+        context: AppContext,
+        connector: Option<Arc<dyn NativeTransportConnector>>,
+        bearer: Option<String>,
+        encryption: Option<ClientEncryption>,
+    ) -> Result<Self> {
+        let Some(bearer) = bearer else {
+            return Self::connect_inner(context, connector, None, encryption, false).await;
+        };
+        let Some(connector) = connector else {
+            return Err(JazzError::Connection(
+                "a bearer connection needs a native transport".to_owned(),
+            ));
+        };
+        Self::connect_bearer(context, connector, bearer, encryption, false).await
+    }
+
+    /// [`Self::connect_with`] for a bearer, held as
+    /// [`Self::connect_with_native_transport_bearer_held`] is: nothing
+    /// reaches the server until [`Self::release_held`].
+    pub async fn connect_with_held(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+        encryption: Option<ClientEncryption>,
+    ) -> Result<Self> {
+        Self::connect_bearer(context, connector, bearer, encryption, true).await
     }
 
     async fn connect_bearer(
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
+        encryption: Option<ClientEncryption>,
         held: bool,
     ) -> Result<Self> {
         // A trusted backend client states a stand-in secret its credential
@@ -951,6 +1041,7 @@ impl JazzClient {
             context,
             Some(connector),
             Some(format!("Bearer {bearer}")),
+            encryption,
             held,
         )
         .await
@@ -960,6 +1051,7 @@ impl JazzClient {
         context: AppContext,
         connector: Option<Arc<dyn NativeTransportConnector>>,
         authorization: Option<String>,
+        encryption: Option<ClientEncryption>,
         held: bool,
     ) -> Result<Self> {
         let has_server = !context.server_url.is_empty();
@@ -992,6 +1084,27 @@ impl JazzClient {
             .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
         let mut config = DbConfig::new(core_schema, identity);
+        // An app that declares encryption opens with the hooks the layer
+        // above built from its declarations; without them it is refused.
+        #[cfg(feature = "e2ee-client")]
+        let encryption = match encryption {
+            Some(encryption) => {
+                config = config.with_e2ee(Rc::clone(&encryption.hooks));
+                config.add_creator_as_member = encryption.add_creator_as_member;
+                Some(encryption)
+            }
+            None => None,
+        };
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = encryption;
+        #[cfg(feature = "e2ee-client")]
+        let encryption_declarations = encryption
+            .as_ref()
+            .map(|encryption| encryption.hooks.declarations().clone());
+        #[cfg(not(feature = "e2ee-client"))]
+        let encryption_declarations = None;
+        crate::binding_host::refuse_encrypted_app(&config)
+            .map_err(|error| JazzError::Schema(error.to_string()))?;
         config.migrations = context.migrations.clone();
         let db = match context.storage {
             ClientStorage::Memory => Db::open(config).await,
@@ -1015,10 +1128,24 @@ impl JazzClient {
                 db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?),
             );
         }
+        let db = Rc::new(db);
         let work = Arc::new(Notify::new());
+        // The runtime of an encrypted device, started over the open
+        // database; it asks for a tick through `work`.
+        #[cfg(feature = "e2ee-client")]
+        let runtime = encryption.and_then(|encryption| {
+            let wake = Arc::clone(&work);
+            encryption
+                .start
+                .map(|start| start(Rc::clone(&db), Rc::new(move || wake.notify_one())))
+        });
+        #[cfg(not(feature = "e2ee-client"))]
+        let runtime: Option<Rc<dyn EncryptionRuntime>> = None;
         let (progress, _) = watch::channel(0);
         let shared = Rc::new(Shared {
             db,
+            encryption: runtime,
+            encryption_declarations,
             app: context.app_id.to_string(),
             identity,
             schema: context.schema.clone(),
@@ -1088,6 +1215,11 @@ impl JazzClient {
                 credentials,
             ));
             shared.state().tasks.push(keeper);
+            shared.ensure_driven();
+        }
+        // The runtime's loop runs between ticks, so a client with one is
+        // driven from the start, with or without a server.
+        if shared.encryption.is_some() {
             shared.ensure_driven();
         }
         Ok(Self {
@@ -1244,21 +1376,28 @@ impl JazzClient {
     }
 
     fn ordered_values(&self, table: &str, values: &HashMap<String, Value>) -> Result<Vec<Value>> {
+        let encryption = self.shared.encryption_entry(table);
         self.table_schema(table)?
             .columns
             .columns
             .iter()
             .map(|column| {
+                let name = column.name_str();
+                let (default, nullable) = match encryption.and_then(|entry| entry.columns.get(name))
+                {
+                    Some(column) => (&column.plain.default, column.plain.nullable),
+                    None => (&column.default, column.nullable),
+                };
                 values
-                    .get(column.name.as_str())
+                    .get(name)
                     .cloned()
-                    .or_else(|| column.default.clone())
-                    .or_else(|| column.nullable.then_some(Value::Null))
+                    .or_else(|| default.clone())
+                    .or_else(|| nullable.then_some(Value::Null))
+                    // Keep a placeholder in the stored schema's column order
+                    // for a token the encryption hooks generate.
+                    .or_else(|| is_equality_token_column(encryption, name).then_some(Value::Null))
                     .ok_or_else(|| {
-                        JazzError::Write(format!(
-                            "insert is missing required column {}",
-                            column.name.as_str()
-                        ))
+                        JazzError::Write(format!("insert is missing required column {name}"))
                     })
             })
             .collect()
@@ -1464,12 +1603,18 @@ impl JazzClient {
                         &prepared,
                         false,
                         session,
-                        ReadTier::LocalFirst,
+                        opts.tier,
                         &opts.read_view.source,
                     )),
             )
             .await?
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            .map_err(|error| {
+                if opts.tier == ReadTier::Remote {
+                    JazzError::QueryFailed(error)
+                } else {
+                    JazzError::Query(error.to_string())
+                }
+            })?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
         {
@@ -1505,7 +1650,7 @@ impl JazzClient {
             .await?
             .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        Decoder::new(&self.shared.schema, &query, None).results(&rows)
+        Decoder::new(&self.shared, &query, None).results(&rows)
     }
 
     /// Read a byte range from a bytes or string cell.
@@ -1574,15 +1719,82 @@ impl JazzClient {
                 ));
             }
         }
-        let cells = self.core_cells(table, values)?;
-        let write = self
+        let kind = crate::db::StreamingMutationKind::Insert;
+        let (id, mut upload) = self
+            .begin_streaming_upload_for(kind, table, None, values, column)
+            .await?;
+        upload.upload = self
             .db()?
-            .insert_streaming_value(table, cells, column, reader)
+            .feed_streaming_value_from_reader(upload.upload, reader)
             .await
             .map_err(write_error)?;
+        let (id, written) = self.finish_streaming_upload(upload, kind, Some(id)).await?;
+        Ok((id, written.expect("standalone insert commits")))
+    }
+
+    /// Open an upload for a known mutation, reserving a new row ID if needed.
+    /// Prepare a missing space key before touching the source. Finish with the
+    /// returned row ID and the same mutation kind.
+    pub async fn begin_streaming_upload_for(
+        &self,
+        kind: crate::db::StreamingMutationKind,
+        table: &str,
+        object_id: Option<ObjectId>,
+        values: HashMap<String, Value>,
+        column: &str,
+    ) -> Result<(ObjectId, StreamingUpload)> {
+        self.reject_updated_at_override("streaming uploads")?;
+        let db = self.db()?;
+        let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        let transaction = self.open_transaction()?;
+        let cells = Cell::new(self.core_cells(table, values)?);
+        let begin = || async {
+            let mut attempt_cells = cells.take();
+            let result = match transaction {
+                Some(id) => {
+                    db.tx_ref(id)
+                        .begin_streaming_value_upload_for(
+                            kind,
+                            table,
+                            row,
+                            &mut attempt_cells,
+                            column,
+                            &WriteTarget::Root,
+                        )
+                        .await
+                }
+                None => {
+                    db.begin_streaming_value_upload_for(
+                        kind,
+                        table,
+                        row,
+                        &mut attempt_cells,
+                        column,
+                        &WriteTarget::Root,
+                    )
+                    .await
+                }
+            };
+            cells.set(attempt_cells);
+            result.map_err(write_error)
+        };
+        let upload = match &self.shared.encryption {
+            Some(runtime) => {
+                runtime
+                    .begin_streaming_upload(&mut || Box::pin(begin()), Box::pin(self.waits_ended()))
+                    .await?
+            }
+            None => begin().await?,
+        };
         Ok((
-            ObjectId::from_uuid(write.row_uuid().0),
-            self.committed(write.mergeable_tx_id()),
+            ObjectId::from_uuid(row.0),
+            StreamingUpload {
+                upload,
+                table: table.to_owned(),
+                column: column.to_owned(),
+                cells: cells.into_inner(),
+                transaction,
+            },
         ))
     }
 
@@ -2051,18 +2263,37 @@ impl JazzClient {
 
     /// Commit an open transaction by transaction id.
     pub fn commit_transaction(&self, transaction_id: OpenTransactionId) -> Result<TransactionId> {
+        self.commit(transaction_id, false)
+    }
+
+    /// Commit an open transaction, allowing a serializable commit with only reads.
+    #[doc(hidden)]
+    pub fn commit_transaction_validating_reads(
+        &self,
+        transaction_id: OpenTransactionId,
+    ) -> Result<TransactionId> {
+        self.commit(transaction_id, true)
+    }
+
+    fn commit(
+        &self,
+        transaction_id: OpenTransactionId,
+        commit_read_only: bool,
+    ) -> Result<TransactionId> {
         self.ensure_transaction_open(transaction_id)?;
-        if !self.shared.state.borrow().transactions[&transaction_id] {
-            return Err(JazzError::Write(
-                "transaction cannot commit without writes".to_string(),
-            ));
-        }
         let mergeable = self
             .shared
             .state
             .borrow()
             .mergeable_transactions
             .contains(&transaction_id);
+        if (mergeable || !commit_read_only)
+            && !self.shared.state.borrow().transactions[&transaction_id]
+        {
+            return Err(JazzError::Write(
+                "transaction cannot commit without writes".to_string(),
+            ));
+        }
         let db = self.db()?;
         let receipt = if mergeable {
             crate::db::block_on(db.commit_mergeable_handle(transaction_id))
@@ -2264,6 +2495,20 @@ impl JazzClient {
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
         Ok(self.shared.schema.clone())
+    }
+
+    /// The catalogue identity of table `table`: the `uuid` the authority
+    /// mints for it, the same for every client and for the table's whole
+    /// life. A member row names its space table by it (`scopeId`, E2EE
+    /// protocol §1.3). Fails until the client has seen the authority's
+    /// catalogue with this schema version in it (code `NotObserved`), and
+    /// for a table the schema doesn't have.
+    pub async fn table_identity(&self, table: &str) -> Result<ObjectId> {
+        match self.db()?.table_identity(table).await {
+            Ok(Some(identity)) => Ok(ObjectId::from_uuid(identity.0)),
+            Ok(None) => Err(JazzError::Schema(format!("no table {table}"))),
+            Err(error) => Err(JazzError::QueryFailed(error)),
+        }
     }
 
     /// Present a new bearer token upstream. A live link reconnects with it;
@@ -2553,6 +2798,9 @@ impl JazzClient {
             task.abort();
         }
         detach(&self.shared);
+        if let Some(encryption) = &self.shared.encryption {
+            encryption.stop();
+        }
         // Wake waiters so they observe the shutdown.
         self.shared
             .progress
@@ -2965,6 +3213,17 @@ impl Deref for JazzTransaction {
 /// id, a local transaction conflict) carries TS's code, as TS's
 /// synchronous writes do, with the core's detail as its reason.
 fn write_error(error: CoreError) -> JazzError {
+    #[cfg(feature = "e2ee-client")]
+    if let Some(refusal) = crate::e2ee::E2eeRefusal::of(&error) {
+        return JazzError::KeyRefusal {
+            refusal,
+            original: Box::new(write_failure(error)),
+        };
+    }
+    write_failure(error)
+}
+
+fn write_failure(error: CoreError) -> JazzError {
     let Some((code, _)) = super::rejection_code_and_reason(&error) else {
         return JazzError::Write(error.to_string());
     };
@@ -3330,7 +3589,7 @@ fn core_to_public_value_for_column_type(
 
 /// Decodes engine rows into public results for the caller's query.
 struct Decoder<'a> {
-    schema: &'a Schema,
+    shared: &'a Shared,
     query: &'a Query,
     /// Where a delivered row's provenance is read when the query does not
     /// project it.
@@ -3340,9 +3599,9 @@ struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    fn new(schema: &'a Schema, query: &'a Query, db: Option<&'a Db>) -> Self {
+    fn new(shared: &'a Shared, query: &'a Query, db: Option<&'a Db>) -> Self {
         Self {
-            schema,
+            shared,
             query,
             db,
             fields: std::cell::OnceCell::new(),
@@ -3358,7 +3617,8 @@ impl<'a> Decoder<'a> {
     }
 
     fn table_schema(&self, table: &str) -> Result<&TableSchema> {
-        self.schema
+        self.shared
+            .schema
             .get(&TableName::new(
                 history::history_source_table(table).unwrap_or(table),
             ))
@@ -3407,14 +3667,18 @@ impl<'a> Decoder<'a> {
             let mut fields = Vec::new();
             for (source, table) in sources {
                 let source_schema = self.table_schema(&table)?;
-                for name in projected(&Query::from(table.as_str()), source_schema) {
+                let encryption = self.shared.encryption_entry(&table);
+                for name in projected(&Query::from(table.as_str()), source_schema, encryption) {
                     let ty = column_type(source_schema, &name);
                     fields.push((format!("{source}.{name}"), ty));
                 }
             }
             return Ok(fields);
         }
-        let mut fields: Vec<_> = projected(query, table_schema)
+        let encryption = self
+            .shared
+            .encryption_entry(history::history_source_table(&query.table).unwrap_or(&query.table));
+        let mut fields: Vec<_> = projected(query, table_schema, encryption)
             .into_iter()
             .map(|name| {
                 let ty = column_type(table_schema, &name);
@@ -3534,7 +3798,11 @@ impl<'a> Decoder<'a> {
 }
 
 /// The columns a read of `table` projects, in order.
-fn projected(query: &Query, table: &TableSchema) -> Vec<String> {
+fn projected(
+    query: &Query,
+    table: &TableSchema,
+    encryption: Option<&EncryptionEntry>,
+) -> Vec<String> {
     if let Some(columns) = &query.select {
         return columns.clone();
     }
@@ -3542,7 +3810,8 @@ fn projected(query: &Query, table: &TableSchema) -> Vec<String> {
         .columns
         .columns
         .iter()
-        .map(|column| column.name.as_str().to_owned())
+        .filter(|column| !is_equality_token_column(encryption, column.name_str()))
+        .map(|column| column.name_str().to_owned())
         .collect();
     if history::is_history_table(&query.table) {
         columns.extend(
@@ -3625,6 +3894,56 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
+
+    /// Alice's upload yields while another write holds the database operation
+    /// lock, so that write can finish on the same thread. The client fixture
+    /// uses the core directly to hold the lock across polls.
+    #[cfg(feature = "e2ee-client")]
+    #[test]
+    fn streaming_upload_begin_yields_while_a_write_holds_the_lock() {
+        use crate::db::{ErrorCode, StreamingMutationKind};
+        use crate::time::TxTime;
+
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let schema = SchemaBuilder::new()
+                    .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+                    .build();
+                let alice = JazzClient::test_client(schema).await;
+                let db = alice.db().unwrap();
+                let (release, released) = oneshot::channel();
+                let key = TxId::new(TxTime(1), NodeUuid(Uuid::new_v4()));
+                let mut write = pin!(db.write_as_origin(key, &AuthorSubject::SYSTEM, async |_| {
+                    released.await.unwrap();
+                    Err(CoreError::new(ErrorCode::WriteRejected, "abandoned write"))
+                }));
+                assert!(futures::poll!(&mut write).is_pending());
+
+                let mut upload = pin!(alice.begin_streaming_upload_for(
+                    StreamingMutationKind::Insert,
+                    "notes",
+                    None,
+                    HashMap::new(),
+                    "title",
+                ));
+                assert!(futures::poll!(&mut upload).is_pending());
+                release.send(()).unwrap();
+                assert!(write.await.is_err());
+                assert!(upload.await.is_ok());
+            });
+            finished.send(()).unwrap();
+        });
+        assert_ne!(
+            result.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "upload begin blocked Alice's thread"
+        );
+        worker.join().unwrap();
+    }
 
     struct NoopTransport;
 

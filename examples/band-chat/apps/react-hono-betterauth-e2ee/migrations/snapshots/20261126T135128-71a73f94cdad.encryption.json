@@ -1,0 +1,20 @@
+{
+  "tables": {
+    "readMarkers": {
+      "space": "roomId",
+      "scope": "rooms",
+      "columns": {
+        "lastReadAt": "timestamp"
+      }
+    },
+    "messages": {
+      "space": "roomId",
+      "scope": "rooms",
+      "columns": {
+        "text": "string",
+        "attachment": "bytes?",
+        "attachmentName": "string?"
+      }
+    }
+  }
+}

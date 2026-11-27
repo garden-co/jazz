@@ -24,6 +24,9 @@ catalogs:
     '@vitest/browser-playwright':
       specifier: 5.1.0
       version: 5.1.0
+    jsdom:
+      specifier: 26.1.0
+      version: 26.1.0
     next:
       specifier: 16.2.11
       version: 16.2.11
@@ -56,7 +59,6 @@ catalogs:
       version: 2.2.12
 
 overrides:
-  libsodium-wrappers@0.8.3>libsodium: 0.8.3
   react: 19.2.4
   react-dom: 19.2.4
 
@@ -773,6 +775,79 @@ importers:
       wrangler:
         specifier: ^4.80.0
         version: 4.80.0
+
+  examples/band-chat/apps/react-hono-betterauth-e2ee:
+    dependencies:
+      '@astryxdesign/core':
+        specifier: 0.6.3
+        version: 0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@garden-co/design':
+        specifier: github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2
+        version: https://codeload.github.com/garden-co/design/tar.gz/fe96522c2484b894380fab7f0217b76ee4bda3a2(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
+      '@hono/node-server':
+        specifier: ^1.19.11
+        version: 1.19.12(hono@4.12.9)
+      better-auth:
+        specifier: 1.7.22
+        version: 1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2))
+      hono:
+        specifier: ^4.12.9
+        version: 4.12.9
+      jazz-napi:
+        specifier: workspace:*
+        version: link:../../../../crates/jazz-napi
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../../../packages/jazz-tools
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
+      ws:
+        specifier: ^8.19.0
+        version: 8.19.0
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.58.2
+        version: 1.58.2
+      '@testing-library/react':
+        specifier: ^16.3.2
+        version: 16.3.2(@testing-library/dom@10.4.2)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@types/node':
+        specifier: catalog:default
+        version: 22.19.13
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
+      '@vitejs/plugin-react':
+        specifier: catalog:default
+        version: 6.3.0(babel-plugin-react-compiler@1.0.0)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+      concurrently:
+        specifier: ^9.1.0
+        version: 9.2.5
+      jsdom:
+        specifier: catalog:default
+        version: 26.1.0
+      typescript:
+        specifier: catalog:default
+        version: 6.0.2
+      vite:
+        specifier: catalog:default
+        version: 8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      vitest:
+        specifier: catalog:default
+        version: 5.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@5.1.0)(@vitest/browser-preview@5.1.0)(@vitest/ui@5.1.0)(happy-dom@20.8.4)(jsdom@26.1.0)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+      wait-on:
+        specifier: ^8.0.2
+        version: 8.0.5
 
   examples/big-label:
     dependencies:
@@ -2419,12 +2494,6 @@ importers:
       jsdom:
         specifier: ^26.0.0
         version: 26.1.0
-      libsodium:
-        specifier: 0.8.3
-        version: 0.8.3
-      libsodium-wrappers:
-        specifier: 0.8.3
-        version: 0.8.3
       miniflare:
         specifier: 4.20260730.0
         version: 4.20260730.0
@@ -10660,12 +10729,6 @@ packages:
   leven@3.1.0:
     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
     engines: {node: '>=6'}
-
-  libsodium-wrappers@0.8.3:
-    resolution: {integrity: sha512-Ri4G16uT3HiJsvIobXp1G1bpvGN4dcIjLONh8CHuzwqsT92F3GZ7EAxk3sL53NeuFCwi1XWSggsMMpGJ4Y+x/g==}
-
-  libsodium@0.8.3:
-    resolution: {integrity: sha512-wl+twQjqb04RUbqlkCBV6qoFyajrSlSkquMBLbREDPPBriM8fd9HTIFVmhruGnpaidY6HfhvdYqrwHFMlUFCWw==}
 
   lighthouse-logger@1.4.2:
     resolution: {integrity: sha512-gPWxznF6TKmUHrOQjlVo2UbaL2EJ71mb2CCeRs/2qBpi4L/g4LUVc9+3lKQ6DTUZwJswfM7ainGrLO1+fOqa2g==}
@@ -23183,12 +23246,6 @@ snapshots:
 
   leven@3.1.0: {}
 
-  libsodium-wrappers@0.8.3:
-    dependencies:
-      libsodium: 0.8.3
-
-  libsodium@0.8.3: {}
-
   lighthouse-logger@1.4.2:
     dependencies:
       debug: 2.6.9
@@ -26965,6 +27022,34 @@ snapshots:
       '@types/node': 22.19.13
       '@vitest/browser-playwright': 5.1.0(playwright@1.58.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@5.1.0)
       '@vitest/browser-preview': 5.1.0(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@5.1.0)
+      '@vitest/ui': 5.1.0(vitest@5.1.0)
+      happy-dom: 20.8.4
+      jsdom: 26.1.0
+    transitivePeerDependencies:
+      - msw
+
+  vitest@5.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@5.1.0)(@vitest/browser-preview@5.1.0)(@vitest/ui@5.1.0)(happy-dom@20.8.4)(jsdom@26.1.0)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)):
+    dependencies:
+      '@types/chai': 5.2.3
+      '@vitest/mocker': 5.1.0(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+      chai: 6.3.0
+      es-module-lexer: 2.3.2
+      expect-type: 1.4.0
+      magic-string: 1.4.5
+      obug: 3.0.0
+      picomatch: 4.0.7
+      std-env: 4.3.0
+      tinybench: 6.2.4
+      tinyexec: 1.3.1
+      tinyglobby: 0.2.17
+      vite: 8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      why-is-node-running: 3.2.1
+    optionalDependencies:
+      '@edge-runtime/vm': 3.2.0
+      '@opentelemetry/api': 1.9.1
+      '@types/node': 22.19.13
+      '@vitest/browser-playwright': 5.1.0(playwright@1.58.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@5.1.0)
+      '@vitest/browser-preview': 5.1.0(vite@8.3.8(@types/node@22.19.13)(esbuild@0.28.2)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@5.1.0)
       '@vitest/ui': 5.1.0(vitest@5.1.0)
       happy-dom: 20.8.4
       jsdom: 26.1.0

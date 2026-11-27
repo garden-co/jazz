@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../address_policy_encoding.rs"]
+mod address_policy_encoding;
 #[path = "../aggregate_nullable_keys.rs"]
 mod aggregate_nullable_keys;
 #[path = "../aggregate_ordering.rs"]
@@ -15,6 +17,8 @@ mod aggregate_ordering;
 mod array_columns;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
+#[path = "../band_chat_room_list_plan.rs"]
+mod band_chat_room_list_plan;
 #[path = "../binding_host.rs"]
 mod binding_host;
 #[path = "../branch_column_evolution.rs"]
@@ -25,6 +29,8 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
+#[path = "../catalogue_keeping.rs"]
+mod catalogue_keeping;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../catalogue_unsupported_versions.rs"]
@@ -49,6 +55,15 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../e2ee_author_columns.rs"]
+mod e2ee_author_columns;
+#[cfg(feature = "e2ee-client")]
+#[path = "../e2ee_client_hooks.rs"]
+mod e2ee_client_hooks;
+#[path = "../e2ee_declarations.rs"]
+mod e2ee_declarations;
+#[path = "../e2ee_system_tables.rs"]
+mod e2ee_system_tables;
 #[path = "../enum_tags.rs"]
 mod enum_tags;
 #[path = "../error_code_strings.rs"]
@@ -69,6 +84,8 @@ mod flat_joins;
 mod follow_memo;
 #[path = "../follow_memo_policy.rs"]
 mod follow_memo_policy;
+#[path = "../frozen_reference_column.rs"]
+mod frozen_reference_column;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
@@ -77,6 +94,10 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../inherits_from_policies.rs"]
+mod inherits_from_policies;
+#[path = "../inherits_from_refusals.rs"]
+mod inherits_from_refusals;
 #[path = "../kept_plans.rs"]
 mod kept_plans;
 #[path = "../large_value_append.rs"]
@@ -261,6 +282,14 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../system_only_policy_nodes.rs"]
+mod system_only_policy_nodes;
+#[path = "../system_table_joins.rs"]
+mod system_table_joins;
+#[path = "../system_table_row_id_joins.rs"]
+mod system_table_row_id_joins;
+#[path = "../system_table_upgrade.rs"]
+mod system_table_upgrade;
 #[path = "../text_affix_predicates.rs"]
 mod text_affix_predicates;
 #[path = "../text_merge.rs"]

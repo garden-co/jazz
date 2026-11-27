@@ -22,6 +22,8 @@ export async function bundleWorker(entry: string): Promise<string> {
     external: ["cloudflare:*", "node:*", ...builtinModules],
     loader: { ".wasm": "copy" },
     alias: {
+      "jazz-tools": join(src, "index.ts"),
+      "jazz-tools/package.json": join(src, "../package.json"),
       "jazz-tools/durable-object": join(src, "durable-object/index.ts"),
       // The workerd entry, as the package's `workerd` condition picks it.
       "jazz-tools/backend": join(src, "backend/workerd.ts"),

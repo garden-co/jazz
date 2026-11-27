@@ -27,7 +27,8 @@ const source = execFileSync(
   [
     "-C", root, "ls-tree", "-r", "--full-tree", "HEAD", "--",
     "Cargo.lock", "Cargo.toml",
-    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-native-transport",
+    "crates/jazz", "crates/jazz-compression", "crates/jazz-e2ee", "crates/jazz-e2ee-client",
+    "crates/jazz-native-relay", "crates/jazz-native-transport",
     "crates/jazz-rn/scripts/build-relay-artifacts.sh",
   ],
 );

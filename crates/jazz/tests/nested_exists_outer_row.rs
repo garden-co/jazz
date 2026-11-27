@@ -133,13 +133,13 @@ fn a_store_holding_such_a_policy_still_opens() {
     let path = dir.path().join("core.sqlite");
     let bundle = {
         let db = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
-        jazz::db::block_on(db.set_authority());
+        jazz::db::block_on(db.set_authority()).unwrap();
         // Published past the deployment check, as a store written before
         // it (or by hand) holds it.
         block_on(db.publish_bundle(&schema(nested_outer()))).unwrap()
     };
     let db = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     let rows = db.catalogue().unwrap();
     assert!(
         rows.bundles.iter().any(|row| row.id == bundle),

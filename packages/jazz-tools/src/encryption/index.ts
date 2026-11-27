@@ -1,0 +1,1030 @@
+/**
+ * End-to-end encryption for an app on Node: the handle an app uses
+ * (`db.encryption`), the private store it supplies, and the errors.
+ *
+ * Keys and decryption live in Jazz's runtime; this module is the app's side:
+ * device approval, device removal, recovery and the reports of what could
+ * not be read. Ordinary reads and writes of encrypted columns need nothing
+ * from it.
+ */
+import type { WasmSchema } from "../drivers/types.js";
+import {
+  PersistedWriteRejectedError,
+  resolveWriteWaitTier,
+  validateWriteWaitTimeout,
+  type Runtime,
+  type WriteResult,
+  type WriteWaitOptions,
+} from "../runtime/client.js";
+import { bytesToHex } from "../runtime/hex.js";
+import type { Db } from "../runtime/db.js";
+import { boundApp, TypedTableQueryBuilder, type TableMeta } from "../typed-app.js";
+import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
+import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
+import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
+import { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
+import { isOlderBuildSecretRefusal, SECRET_FORMAT_MISMATCH } from "./secret-format.js";
+
+export {
+  memoryPrivateStore,
+  servePrivateStore,
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+} from "./private-store.js";
+export type { PrivateStore, StoredDocument, StoreTarget } from "./private-store.js";
+export { unreadableRows } from "./unreadable.js";
+export type { UnreadableRow } from "./unreadable.js";
+
+/** The account's state as this device sees it. */
+export type AccountStatus = "active" | "awaiting-approval" | "reenrolled";
+
+/** `db.encryption` was used on an app whose files declare no encryption. */
+export class EncryptionNotDeclaredError extends Error {
+  constructor() {
+    super("This app does not declare encryption: no table of its app files is encrypted.");
+    this.name = "EncryptionNotDeclaredError";
+  }
+}
+
+/** The app declares encryption but supplied no private store. */
+export class EncryptionStoreRequiredError extends Error {
+  constructor() {
+    super(
+      "This app declares end-to-end encryption, so it needs a private store for the device's keys: pass `encryption: { store }` (see the encryption docs for a store to start from).",
+    );
+    this.name = "EncryptionStoreRequiredError";
+  }
+}
+
+/**
+ * A failure of an encryption call; `code` is stable (`approval-answered`,
+ * `approval-code-mismatch`, `no-challenge`, `store`, `closed`, a protocol
+ * refusal's own code such as `recovery-root-mismatch` or `stale-state`, and
+ * `protocol` for a protocol failure without one, ...).
+ */
+export class EncryptionError extends Error {
+  readonly code:
+    | "rotation-needs-key"
+    | "not-a-member"
+    | "device-account-root-required"
+    | "device-account-secret-required"
+    | "no-account"
+    | "secret-format-mismatch"
+    | (string & Record<never, never>);
+  declare readonly stage?: "account-reset";
+  declare readonly outcome?: "refused" | "unknown";
+  declare readonly recordIds?: readonly [string, string, string];
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "EncryptionError";
+    this.code = code;
+  }
+}
+
+export interface DeviceInfo {
+  id: string;
+  status: "active" | "waiting";
+  /** Whether this is the device that asked. */
+  isThisDevice: boolean;
+  /** Whether this device has published a request to be removed. */
+  removalRequested: boolean;
+}
+
+export interface RemovalOutcome {
+  deviceId: string;
+  error: string | null;
+}
+
+/** A reported space carries its stable scope ID and, when known in this schema, its table name. */
+export interface ReportSpace {
+  scopeId: string;
+  id: string;
+  table?: string;
+}
+
+/** What Jazz reports about encrypted data, as it happens. */
+export type EncryptionReport =
+  | {
+      type: "unreadable";
+      table: string;
+      id: string | null;
+      column: string | null;
+      code: string;
+      space: ReportSpace | null;
+    }
+  | { type: "challenged" }
+  /** Account verification or the space rotation check failed before a write. */
+  | { type: "rotation-check-failed"; space: ReportSpace; reason: string }
+  /**
+   * A rotation Jazz tried before a write to `space` failed or was refused,
+   * for `reason`. The write was sealed under the space's current key all the
+   * same, so a member or device removed since may still read it. Told once
+   * per failed attempt; the next write tries again.
+   */
+  | { type: "rotation-failed"; space: ReportSpace; reason: string }
+  /** A background pass could not deliver keys to members of the space. */
+  | { type: "delivery-failed"; space: ReportSpace; reason: string }
+  /**
+   * Reports Jazz kept for the app while nothing took them, past its limit:
+   * `count` reports were dropped. Ordinary reports go first. If all queued
+   * reports are challenges, only a new challenge can replace the oldest.
+   */
+  | { type: "reports-dropped"; count: number }
+  /** A new listener could not replay existing reports and will receive live reports. */
+  | { type: "report-replay-failed"; code: string; message: string }
+  | { type: string; [key: string]: unknown };
+
+/** The native calls the handle is built on. */
+export interface EncryptionNative {
+  encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string>;
+  takeEncryptionReports(): string[];
+  /**
+   * The loop's account status, last error and stage, and whether the client
+   * can read encrypted rows yet (`readable`), as JSON text.
+   */
+  encryptionState(): string;
+}
+
+export interface EncryptionOptions {
+  /**
+   * The device account's secret (`jazz-auth-v1:...`), when the account is
+   * a device account: it is its recovery secret, so the device registers recovery
+   * and recovers with it by itself. Read from the session when needed, never
+   * stored by encryption.
+   */
+  accountSecret?: () => string | undefined | Promise<string | undefined>;
+  /** The native host verifies the account and performs device-account recovery. */
+  nativeReadiness?: boolean;
+  /** The native host's account uses its own secret for encryption recovery. */
+  deviceAccount?: boolean;
+  /** How often to look for reports to deliver, in milliseconds. */
+  reportIntervalMs?: number;
+  /** @internal Subscribe to the host's encryption state wake. */
+  stateChanges?: (listener: () => void) => () => void;
+}
+
+/** Takes ownership of the decoded backup secret passed to the native host. */
+function takeSecretHex(bytes: Uint8Array): string {
+  try {
+    return bytesToHex(bytes);
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+function failure(error: unknown, operation?: string): EncryptionError {
+  // Only these calls hand the runtime the account secret's text.
+  const secretCall = operation === "recoveryRegister" || operation === "recoveryRestore";
+  if (secretCall && isOlderBuildSecretRefusal(error)) {
+    return new EncryptionError("secret-format-mismatch", SECRET_FORMAT_MISMATCH);
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (operation === "spaceRow") {
+    if (message.startsWith("NotObserved: ")) {
+      return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
+    }
+    if (error instanceof Error && "code" in error && error.code === "not_observed") {
+      return new EncryptionError("not-observed", message);
+    }
+  }
+  const match = /^([a-z-]+): ([\s\S]*)$/.exec(message);
+  if (!match) return new EncryptionError("error", message);
+  const [, code, detail] = match;
+  if (operation === "resetAccount" && code === "publication") {
+    const { code, message, stage, outcome, recordIds } = JSON.parse(detail!);
+    return Object.assign(new EncryptionError(code, message), { stage, outcome, recordIds });
+  }
+  // For a protocol refusal, the runtime gives its reason in the code.
+  return new EncryptionError(code!, detail === "E2EE operation refused" ? message : detail!);
+}
+
+/** `waiting`, unless one of `waits` (told as the handle stops) ends it first. */
+async function untilStopped<T>(
+  waits: Set<(error: EncryptionError) => void>,
+  waiting: Promise<T>,
+): Promise<T> {
+  let leave!: (error: EncryptionError) => void;
+  const stopped = new Promise<never>((_, reject) => {
+    leave = reject;
+  });
+  waits.add(leave);
+  try {
+    return await Promise.race([waiting, stopped]);
+  } finally {
+    waits.delete(leave);
+  }
+}
+
+function verificationTimeout(state: { error?: string | null; stage?: string }): EncryptionError {
+  return failure(
+    state.error ??
+      `database: the account was not verified in time (waiting: ${state.stage ?? "unknown"})`,
+  );
+}
+
+/** The handle an app uses; see the docs. */
+export class Encryption {
+  readonly devices: Devices;
+  readonly recovery: Recovery;
+  readonly keys: Keys;
+  readonly members: Members;
+  private readonly listeners = new Set<(report: EncryptionReport) => void>();
+  private readonly stateWaiters = new Set<() => void>();
+  private readonly stopStateChanges: (() => void) | undefined;
+  private readonly pendingReports: EncryptionReport[] = [];
+  private readonly waitingListeners = new Set<(report: EncryptionReport) => void>();
+  private reportsDuringReplay: EncryptionReport[] | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private closed = false;
+  private readonly assertOpen = () => {
+    if (this.closed) throw new EncryptionError("closed", "The encryption handle is closed");
+  };
+
+  constructor(
+    private readonly native: EncryptionNative,
+    private readonly options: EncryptionOptions = {},
+  ) {
+    const call = <T>(op: string, args: Record<string, unknown> = {}) => this.call<T>(op, args);
+    this.devices = new Devices(call);
+    this.recovery = new Recovery(call, options, this.assertOpen);
+    this.keys = new Keys(call);
+    this.members = new Members((space) => call("spaceRow", { ...space }));
+    this.stopStateChanges = options.stateChanges?.(() => this.stateChanged());
+  }
+
+  private async call<T>(op: string, args: Record<string, unknown>): Promise<T> {
+    this.assertOpen();
+    try {
+      const response = await this.native.encryptionCall(op, args);
+      this.assertOpen();
+      return JSON.parse(response) as T;
+    } catch (error) {
+      this.assertOpen();
+      throw failure(error, op);
+    }
+  }
+
+  /**
+   * Start a new encryption generation on this waiting device after losing
+   * access to all devices and recovery credentials. The app must enable
+   * allowAccountReset and authenticate the account through its own sign-in.
+   * Device accounts cannot reset. Earlier devices lose access to the
+   * account. Space members can deliver keys to the new generation.
+   */
+  resetAccount(): Promise<AccountStatus> {
+    return this.call("resetAccount", {});
+  }
+
+  /** This installation's device ID. */
+  deviceId(): Promise<string> {
+    return this.call("deviceId", {});
+  }
+
+  /**
+   * Verifies the account, enrols this device or founds the account's first
+   * device, and, for a device account, registers recovery or recovers
+   * with the account secret. Called for you when the database opens; call it
+   * to wait for the result. The first verification belongs to the runtime's
+   * own loop, which tries again with a growing wait while the server cannot
+   * be reached or has not yet accepted what this device published; this
+   * waits for it, up to `timeoutMs` (default 30 seconds), then fails.
+   * Concurrent calls share verification and recovery, each with its own
+   * timeout. Later calls verify again at once.
+   */
+  async ready(options: { timeoutMs?: number } = {}): Promise<AccountStatus> {
+    this.assertOpen();
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    // Closing ends the wait (`closed`); the verification itself goes on.
+    if (this.options.nativeReadiness) {
+      return untilStopped(this.readyWaits, this.call("ready", { timeoutMs }));
+    }
+    const deadline = Number.isNaN(timeoutMs) ? Infinity : Date.now() + timeoutMs;
+    this.verificationDeadline = Math.max(this.verificationDeadline, deadline);
+    const attempt = (this.verifying ??= this.verifyOnce().finally(() => {
+      this.verifying = undefined;
+      this.verificationDeadline = 0;
+    }));
+    if (deadline === Infinity) return untilStopped(this.readyWaits, attempt);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = new Promise<void>((resolve) => {
+        // Longer delays overflow a single platform timer.
+        const schedule = () => {
+          const left = deadline - Date.now();
+          const maxDelay = 2_147_483_647;
+          timer = setTimeout(left > maxDelay ? schedule : resolve, Math.min(left, maxDelay));
+          (timer as { unref?: () => void }).unref?.();
+        };
+        schedule();
+      }).then(() => {
+        this.assertOpen();
+        throw verificationTimeout(JSON.parse(this.native.encryptionState()));
+      });
+      return await untilStopped(this.readyWaits, Promise.race([attempt, expired]));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Ends each {@link ready} still waiting, as the handle closes. */
+  private readonly readyWaits = new Set<(error: EncryptionError) => void>();
+
+  /**
+   * Resolves once this client can open the encrypted rows its store holds:
+   * it knows the app's catalogue identities (synced once, then kept with
+   * the store) and has loaded the keys it holds. A device that synced
+   * before is readable at once, with or without the server; one that never
+   * synced waits, without a deadline, for its first sync. Live queries on
+   * encrypted columns wait for the same thing and stay loading until then,
+   * so while this has not resolved, a loading query is waiting for the
+   * device's first sync. Unlike {@link ready} it does not wait for the
+   * account's verification, which can need the server. Rejects only when
+   * the runtime can no longer answer. Through `db.encryption` on a browser
+   * Db that started thin, it first waits for the encryption runtime to load
+   * and then for the account's verification, so a returning device can be
+   * waiting for those alone. Both share one 30-second deadline: it rejects if
+   * the runtime has not loaded by then, while a verification that failed or
+   * is still running at the deadline does not reject it.
+   */
+  async readable(): Promise<void> {
+    for (;;) {
+      this.assertOpen();
+      const state = JSON.parse(this.native.encryptionState()) as { readable?: boolean };
+      if (state.readable) return;
+      await this.waitForStateChange(50);
+    }
+  }
+
+  /** The loop's verification, once it has one (see {@link ready}). */
+  private async verified(): Promise<AccountStatus> {
+    for (;;) {
+      this.assertOpen();
+      const state = JSON.parse(this.native.encryptionState()) as {
+        status: AccountStatus | null;
+        error: string | null;
+        stage?: string;
+      };
+      if (state.status !== null) return state.status;
+      if (Date.now() >= this.verificationDeadline) throw verificationTimeout(state);
+      await this.waitForStateChange(100, this.verificationDeadline);
+    }
+  }
+
+  private readonly waitForStateChange = (pollMs: number, deadline = Infinity): Promise<void> => {
+    return new Promise((resolve) => {
+      const finish = () => {
+        this.stateWaiters.delete(finish);
+        clearTimeout(timer);
+        resolve();
+      };
+      const remaining = deadline - Date.now();
+      // Custom hosts without a wake callback still need to check the state.
+      const delay = this.stopStateChanges ? remaining : Math.min(remaining, pollMs);
+      const timer = Number.isFinite(delay)
+        ? setTimeout(finish, Math.min(delay, 2_147_483_647))
+        : undefined;
+      (timer as { unref?: () => void } | undefined)?.unref?.();
+      this.stateWaiters.add(finish);
+    });
+  };
+
+  private readonly stateChanged = (): void => {
+    for (const wake of this.stateWaiters) wake();
+  };
+
+  // A recovery spends the approval nonce once. Keep waiting for the longest
+  // waiter, while each caller can stop waiting for the shared attempt sooner.
+  private verifying: Promise<AccountStatus> | undefined;
+  private verificationDeadline = 0;
+
+  private async verifyOnce(): Promise<AccountStatus> {
+    const known = JSON.parse(this.native.encryptionState()) as { status: AccountStatus | null };
+    const status =
+      known.status === null ? await this.verified() : await this.call<AccountStatus>("ready", {});
+    const secret = await this.options.accountSecret?.();
+    this.assertOpen();
+    if (secret === undefined || status === "reenrolled") return status;
+    const restored = await this.call<AccountStatus | null>("recoveryRestore", {
+      secret,
+      automatic: true,
+      verifiedStatus: status,
+    });
+    return restored ?? status;
+  }
+
+  private runner: { stopped: boolean } | undefined;
+
+  /**
+   * Starts the verification's follow-up in the background: for a device
+   * account, registering recovery or recovering with the account secret once
+   * the runtime's loop has verified the account. A refusal that will not pass
+   * is reported (`ready-failed`). Called for you when the database opens.
+   */
+  start(): void {
+    if (this.runner || this.closed) return;
+    const runner = { stopped: false };
+    this.runner = runner;
+    void (async () => {
+      while (!runner.stopped) {
+        try {
+          await this.ready({ timeoutMs: 60_000 });
+          return;
+        } catch (error) {
+          if (runner.stopped) return;
+          const failed = failure(error);
+          // The loop owns the retries; only the wait for its first answer ran out.
+          if (failed.code === "database" || failed.code === "store") continue;
+          this.pendingReports.push({
+            type: "ready-failed",
+            code: failed.code,
+            message: failed.message,
+          });
+          return;
+        }
+      }
+    })();
+  }
+
+  /** Permanently closes this handle at teardown, ending verification and report delivery. */
+  stop(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.stopStateChanges?.();
+    for (const leave of this.readyWaits) {
+      leave(new EncryptionError("closed", "The encryption handle is closed"));
+    }
+    this.readyWaits.clear();
+    this.stateChanged();
+    if (this.runner) this.runner.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.listeners.clear();
+    this.waitingListeners.clear();
+  }
+
+  private emit(report: EncryptionReport) {
+    for (const listener of this.listeners) notify(listener, report);
+  }
+
+  /** Listens to reports; returns the function that stops it. */
+  onReport(listener: (report: EncryptionReport) => void): () => void {
+    this.assertOpen();
+    if (!this.listeners.has(listener)) this.waitingListeners.add(listener);
+    this.timer ??= setInterval(() => this.deliver(), this.options.reportIntervalMs ?? 25);
+    (this.timer as { unref?: () => void }).unref?.();
+    return () => {
+      this.listeners.delete(listener);
+      this.waitingListeners.delete(listener);
+      if (this.listeners.size === 0 && this.waitingListeners.size === 0 && this.timer) {
+        clearInterval(this.timer);
+        this.timer = undefined;
+      }
+    };
+  }
+
+  /**
+   * Reports of type `unreadable`, including those for a space and notices
+   * about rows returned. For rows omitted from a read, see {@link unreadableRows}.
+   */
+  onUnreadable(listener: (report: EncryptionReport) => void): () => void {
+    return this.onReport((report) => {
+      if (report.type === "unreadable") listener(report);
+    });
+  }
+
+  /** A device awaiting approval was challenged: answer with `devices.answer()`. */
+  onChallenge(listener: () => void): () => void {
+    return this.onReport((report) => {
+      if (report.type === "challenged") listener();
+    });
+  }
+
+  private deliver() {
+    if (!this.reportsDuringReplay && this.waitingListeners.size > 0) {
+      // Deliver what is queued before taking the snapshot: the snapshot call
+      // drives the runtime, which can queue newer reports for the next tick.
+      // With no established listeners, leave the queue for the snapshot.
+      const beforeSnapshot = this.listeners.size > 0 ? this.emitQueued() : [];
+      void this.replayReports(beforeSnapshot);
+      return;
+    }
+    if (this.listeners.size === 0) return;
+    const delivered = this.emitQueued();
+    this.reportsDuringReplay?.push(...delivered);
+  }
+
+  /** Emits the pending and native reports to established listeners; returns them. */
+  private readonly emitQueued = (): EncryptionReport[] => {
+    const reports = [
+      ...this.pendingReports.splice(0),
+      ...parseReports(this.native.takeEncryptionReports()),
+    ];
+    for (const report of reports) this.emit(report);
+    return reports;
+  };
+
+  private readonly replayReports = async (beforeSnapshot: EncryptionReport[]) => {
+    const reportsDuringReplay: EncryptionReport[] = [];
+    this.reportsDuringReplay = reportsDuringReplay;
+    try {
+      const snapshot = await this.call<{ active: EncryptionReport[]; queued: string[] }>(
+        "reportsForListener",
+        {},
+      ).catch((error: EncryptionError) => ({ error }));
+      if (this.closed) return;
+
+      const waiting = [...this.waitingListeners];
+      let replay: EncryptionReport[];
+      if ("error" in snapshot) {
+        const { code, message } = snapshot.error;
+        // Without the active set this is no full replay: after the failure
+        // notice, the reports established listeners got meanwhile.
+        replay = [
+          { type: "report-replay-failed", code, message },
+          ...beforeSnapshot,
+          ...reportsDuringReplay,
+        ];
+      } else {
+        const queued = parseReports(snapshot.queued);
+        const pending = this.pendingReports.splice(0);
+        for (const report of [...pending, ...queued]) this.emit(report);
+
+        // The native queue puts the overflow notice first.
+        const dropped = queued[0]?.type === "reports-dropped" ? queued.splice(0, 1) : [];
+        // The active set already accounts for unreadables and withdrawals
+        // taken before it.
+        const held = (report: EncryptionReport) =>
+          report.type === "unreadable" || report.type === "withdrawn";
+        replay = [
+          ...dropped,
+          ...snapshot.active,
+          ...beforeSnapshot.filter((report) => !held(report)),
+          ...pending,
+          ...queued.filter((report) => !held(report)),
+          ...reportsDuringReplay,
+        ];
+      }
+      for (const listener of waiting) {
+        if (!this.waitingListeners.delete(listener)) continue;
+        this.listeners.add(listener);
+        for (const report of replay) {
+          if (!this.listeners.has(listener)) break;
+          notify(listener, report);
+        }
+      }
+    } finally {
+      this.reportsDuringReplay = undefined;
+    }
+  };
+}
+
+/** The runtime's reports; one that is not valid JSON is logged and skipped. */
+function parseReports(texts: readonly string[]): EncryptionReport[] {
+  const reports: EncryptionReport[] = [];
+  for (const text of texts) {
+    try {
+      reports.push(JSON.parse(text) as EncryptionReport);
+    } catch (error) {
+      console.error("Jazz encryption report is not valid JSON", error);
+    }
+  }
+  return reports;
+}
+
+/** Calls one report listener; a throw is logged and the other listeners still run. */
+function notify(listener: (report: EncryptionReport) => void, report: EncryptionReport) {
+  try {
+    listener(report);
+  } catch (error) {
+    console.error("Jazz encryption report listener failed", error);
+  }
+}
+
+type Call = <T>(op: string, args?: Record<string, unknown>) => Promise<T>;
+
+/** One approval an approving device started. */
+export class ApprovalSession {
+  constructor(
+    private readonly call: Call,
+    readonly deviceId: string,
+  ) {}
+
+  /** The code this device computes once the new device answered, else `null`. */
+  code(): Promise<string | null> {
+    return this.call("approvalCode", { deviceId: this.deviceId });
+  }
+
+  /** Approves once the user confirmed both devices show this code. */
+  async approve(code: string): Promise<void> {
+    await this.call("approve", { deviceId: this.deviceId, code });
+  }
+}
+
+export class Devices {
+  constructor(private readonly call: Call) {}
+
+  /** Devices of this account: those active and those waiting for approval. */
+  async list(): Promise<DeviceInfo[]> {
+    const [listed, mine] = await Promise.all([
+      this.call<Omit<DeviceInfo, "isThisDevice">[]>("devices"),
+      this.call<string>("deviceId"),
+    ]);
+    return listed.map((device) => ({ ...device, isThisDevice: device.id === mine }));
+  }
+
+  /** On an approved device: challenge a waiting device. */
+  async challenge(deviceId: string): Promise<ApprovalSession> {
+    await this.call("challenge", { deviceId });
+    return new ApprovalSession(this.call, deviceId);
+  }
+
+  /** On the new device: answer the challenge; returns the code to show. */
+  answer(): Promise<string> {
+    return this.call("answer");
+  }
+
+  /** Removes a device and rotates the account. */
+  async remove(deviceId: string): Promise<void> {
+    await this.call("remove", { deviceId });
+  }
+
+  /** This device asks to be removed; another device completes it. */
+  async requestRemoval(): Promise<void> {
+    await this.call("requestRemoval");
+  }
+
+  /** Completes pending removal requests. */
+  completeRemovals(): Promise<RemovalOutcome[]> {
+    return this.call("completeRemovals");
+  }
+}
+
+export class Recovery {
+  constructor(
+    private readonly call: Call,
+    private readonly options: EncryptionOptions,
+    private readonly assertOpen: () => void = () => {},
+  ) {}
+
+  private async phraseSecret(phrase: string): Promise<string> {
+    return takeSecretHex(RecoveryPhrase.toBytes(phrase));
+  }
+
+  /**
+   * For an account the app signs in itself (not a device account): a new recovery
+   * secret as a 24-word phrase to keep. It registers nothing. (A device
+   * account's recovery is its account secret, handled for you.)
+   */
+  create(): string {
+    this.refuseForDeviceAccount();
+    const secret = runtimeRandomBytes(32);
+    try {
+      return RecoveryPhrase.fromBytes(secret);
+    } finally {
+      secret.fill(0);
+    }
+  }
+
+  /**
+   * For an account the app signs in itself: makes a recovery secret, backs it
+   * up and registers it, in one call. Call it from a button the user pressed
+   * (creating a passkey needs a user gesture), when `recovery.list()` shows
+   * the account has none. Where the browser has passkeys the secret is kept
+   * in one, as a credential whose name says it is the encryption recovery
+   * key, and `method` is `"passkey"`; otherwise, or if the user declines the
+   * passkey, `method` is `"phrase"` and `phrase` holds the 24 words to keep.
+   * Either way the recovery is registered.
+   */
+  async enable(options: {
+    /** Names the passkey's relying party, as the app is called to the user. */
+    appName: string;
+    /** Who the account is, as the passkey shows it (the encryption recovery key of whom). */
+    accountName: string;
+    /** The passkey's relying-party ID; defaults to the page's host name. */
+    appHostname?: string;
+  }): Promise<{ method: "passkey" } | { method: "phrase"; phrase: string }> {
+    this.refuseForDeviceAccount();
+    const secret = runtimeRandomBytes(32);
+    try {
+      let phrase: string | undefined;
+      try {
+        await new BrowserPasskeyBackup({
+          appName: options.appName,
+          appHostname: options.appHostname,
+        }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
+      } catch (error) {
+        if (!(error instanceof PasskeyBackupError)) throw error;
+        phrase = RecoveryPhrase.fromBytes(secret);
+      }
+      await this.call("recoveryRegister", { secret: takeSecretHex(secret) });
+      return phrase === undefined ? { method: "passkey" } : { method: "phrase", phrase };
+    } finally {
+      secret.fill(0);
+    }
+  }
+
+  /**
+   * On a new device of an account the app signs in itself: reads the recovery
+   * secret from the passkey that `enable` made and approves this device with
+   * it. Call it from a button (reading a passkey needs a user gesture).
+   */
+  async restoreFromPasskey(options: {
+    appName: string;
+    appHostname?: string;
+  }): Promise<AccountStatus> {
+    this.refuseForDeviceAccount();
+    const secret = await new BrowserPasskeyBackup({
+      appName: options.appName,
+      appHostname: options.appHostname,
+    }).restore();
+    return this.call("recoveryRestore", { secret: takeSecretHex(parseSecret(secret)) });
+  }
+
+  /** Registers the recovery root this phrase gives for the account. */
+  async register(phrase: string): Promise<void> {
+    this.refuseForDeviceAccount();
+    await this.call("recoveryRegister", { secret: await this.phraseSecret(phrase) });
+  }
+
+  /** On a new device: approves it with the phrase. */
+  async restore(phrase: string): Promise<AccountStatus> {
+    this.refuseForDeviceAccount();
+    return this.call("recoveryRestore", { secret: await this.phraseSecret(phrase) });
+  }
+
+  /** The recovery credentials registered for this account. */
+  list(): Promise<{ id: string; device: string }[]> {
+    return this.call("recoveryList");
+  }
+
+  /** Retires a recovery credential by its root ID. */
+  async retire(rootId: string): Promise<void> {
+    await this.call("recoveryRetire", { rootId });
+  }
+
+  private refuseForDeviceAccount() {
+    this.assertOpen();
+    if (this.options.accountSecret || this.options.deviceAccount) {
+      throw new EncryptionError(
+        "device-account",
+        "A device account's recovery is its account secret: restore the account and encryption follows.",
+      );
+    }
+  }
+}
+
+/**
+ * The handle of an app that declares no encryption: every use throws. What
+ * looks at a value without using it is answered instead: `await` and
+ * promise checks (`then`), `JSON.stringify` (`toJSON`), `console.log` and
+ * the inspector (`util.inspect`, other symbols), so logging or awaiting
+ * `db.encryption` is not an error.
+ */
+export function notDeclaredEncryption(): Encryption {
+  return new Proxy({} as Encryption, {
+    get(_target, property) {
+      if (property === "then" || property === "toJSON" || typeof property === "symbol") {
+        return undefined;
+      }
+      throw new EncryptionNotDeclaredError();
+    },
+  });
+}
+
+/** A space: a row of the table that holds the space's members and keys. */
+export interface SpaceRef {
+  table: string;
+  id: string;
+}
+
+/** A generated table whose rows are encryption spaces. */
+export interface EncryptionSpaceTable {
+  readonly _encryptionSpace: true;
+  readonly _table: string;
+  readonly _schema: WasmSchema;
+}
+
+export type MemberAddress = { scopeId: string; identifier: string; accountId: string };
+export type MemberRow = MemberAddress & { id: string };
+type MemberTable = TableMeta<"__e2ee_members", MemberRow, MemberAddress, Partial<MemberAddress>>;
+type MemberSpace = [space: SpaceRef] | [table: EncryptionSpaceTable, id: string];
+export type AddMemberArgs = [...MemberSpace, accountId: string];
+
+function memberSpace(table: EncryptionSpaceTable | SpaceRef, id?: string): SpaceRef {
+  return "_table" in table ? { table: table._table, id: id! } : table;
+}
+
+function spaceTables(schema: WasmSchema): Set<string> {
+  const compiled = boundApp(schema)?.schema;
+  const entries = compiled?.encryption?.versions?.[compiled.current] as
+    | Record<string, { scope: string }>
+    | undefined;
+  return new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
+}
+
+function requireSpaceTable(tables: Set<string>, table: string): void {
+  if (!tables.has(table)) {
+    throw new EncryptionError(
+      "not-space-table",
+      `Table '${table}' is not a declared encryption space table.`,
+    );
+  }
+}
+
+/** @internal Lower a member insert using the runtime's already observed catalogue. */
+export function memberInsert(
+  fallbackSchema: WasmSchema | null,
+  runtime: (schema: WasmSchema, spaceTable: string) => Runtime | null,
+  args: AddMemberArgs,
+): [table: TypedTableQueryBuilder<MemberTable>, data: MemberAddress] {
+  const [table, idOrAccount, account] = args;
+  const schema = "_schema" in table ? table._schema : fallbackSchema;
+  if (!schema) throw new EncryptionNotDeclaredError();
+  const space = memberSpace(table, idOrAccount);
+  requireSpaceTable(spaceTables(schema), space.table);
+  const client = runtime(schema, space.table);
+  if (!client?.tableIdentity) throw new Error("The runtime cannot resolve space table identities.");
+  let scopeId: string;
+  try {
+    scopeId = client.tableIdentity(space.table);
+  } catch (error) {
+    throw failure(error, "spaceRow");
+  }
+  return [
+    new TypedTableQueryBuilder<MemberTable>("__e2ee_members", schema),
+    { scopeId, identifier: space.id, accountId: account ?? idOrAccount },
+  ];
+}
+
+/**
+ * The result of `db.encryption.members.add`. Await it for the member row once
+ * it's applied locally, or call `wait` as on an insert's result. When the
+ * account was already a member, both give its existing row at once: nothing
+ * was written.
+ */
+export class MemberWrite implements PromiseLike<MemberRow> {
+  readonly #added: Promise<{ row: MemberRow; write?: WriteResult<MemberRow> }>;
+
+  /** @internal */
+  constructor(added: Promise<{ row: MemberRow; write?: WriteResult<MemberRow> }>) {
+    this.#added = added;
+    // A caller may never await it: the error still reaches whoever does.
+    added.catch(() => {});
+  }
+
+  /** Wait for the member row to be persisted at a given durability tier. */
+  async wait(options: WriteWaitOptions): Promise<MemberRow> {
+    resolveWriteWaitTier(options.tier);
+    validateWriteWaitTimeout(options.timeoutMs);
+    const { row, write } = await this.#added;
+    return write ? write.wait(options) : row;
+  }
+
+  then<TResult1 = MemberRow, TResult2 = never>(
+    onfulfilled?: ((value: MemberRow) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    return this.#added.then(({ row }) => row).then(onfulfilled, onrejected);
+  }
+}
+
+export class Keys {
+  constructor(private readonly call: Call) {}
+
+  /**
+   * Runs a delivery pass now over every space this device holds keys of:
+   * new members, newly approved devices and rotated spaces get their keys.
+   * It also runs by itself at start, on reconnect and when a member
+   * changes in a space in use.
+   */
+  deliver(): Promise<{ delivered: number; failed: number }> {
+    return this.call("keysDeliver");
+  }
+
+  /**
+   * Rotates a space's key at once (whoever may update the space's row can).
+   * Call it right after removing a member: rotation is otherwise lazy.
+   * Returns the number of deliveries committed with the new key (up to 100),
+   * or zero if the space has no key yet. The runtime delivers to the
+   * remaining members in the background.
+   */
+  async rotate(space: SpaceRef): Promise<number> {
+    const done = await this.call<{ delivered: number }>("keysRotate", { ...space });
+    return done.delivered;
+  }
+
+  /** After user confirmation, rotate from the newest key this device holds. */
+  async recoverRotation(space: SpaceRef): Promise<number> {
+    const done = await this.call<{ delivered: number }>("keysRecoverRotation", { ...space });
+    return done.delivered;
+  }
+}
+
+type SpaceAddress = { scopeId: string; identifier: string };
+
+/** Bind member queries and writes to the database whose handle the caller took. */
+export function encryptionForDb(real: Encryption, db: Db, schema: WasmSchema): Encryption {
+  const members = new Members((space) => real.members.where(space), { db, schema });
+  return new Proxy(real, {
+    get(target, name) {
+      return name === "members" ? members : Reflect.get(target, name);
+    },
+  });
+}
+
+export class Members {
+  private readonly spaceTables?: Set<string>;
+  constructor(
+    private readonly address: (space: SpaceRef) => Promise<SpaceAddress>,
+    private readonly context?: { db: Db; schema: WasmSchema },
+  ) {
+    if (context) {
+      this.spaceTables = spaceTables(context.schema);
+    }
+  }
+
+  /** The values to insert into `app.__e2ee_members` to admit an account. */
+  async row(
+    space: SpaceRef,
+    accountId: string,
+  ): Promise<{ scopeId: string; identifier: string; accountId: string }> {
+    return { ...(await this.where(space)), accountId };
+  }
+
+  /** A filter for the space's member rows, optionally restricted to one account. */
+  async where(space: SpaceRef, accountId?: string): Promise<SpaceAddress & { accountId?: string }> {
+    if (this.spaceTables) requireSpaceTable(this.spaceTables, space.table);
+    const at = await this.address(space);
+    return accountId === undefined ? at : { ...at, accountId };
+  }
+
+  /**
+   * Add an account to the space. Await the result for the member row, or wait
+   * on it as you would for an insert. If this client already sees the account
+   * as a member, the result is that member's existing row and nothing is
+   * written, so adding an account twice leaves one row. The check reads this
+   * client's local data: a client that hasn't synced an existing membership
+   * yet adds a second row for the account. So can two concurrent calls for the
+   * same account (in `Promise.all`, say), as both may read before either
+   * writes. `remove` deletes every row.
+   * Automatic creator membership applies to `insert`. When `upsert` creates a
+   * space, add the creator explicitly with `tx.encryption.members.add` in the
+   * same transaction, or call this method afterward if permissions allow it.
+   */
+  add(...args: AddMemberArgs): MemberWrite {
+    if (!this.context) throw new Error("Adding members requires a database.");
+    const { db, schema } = this.context;
+    const [table, row] = memberInsert(schema, (schema) => db.runtimeForEncryption(schema), args);
+    return new MemberWrite(
+      (async () => {
+        const existing = await db.one(table.where(row));
+        if (existing) return { row: existing };
+        const write = db.insert<MemberRow, MemberAddress>(table, row);
+        return { row: write.value, write };
+      })(),
+    );
+  }
+
+  /** List the space's member rows visible to the caller. */
+  async list(...args: MemberSpace): Promise<MemberRow[]> {
+    if (!this.context) throw new Error("Listing members requires a database.");
+    const { db, schema } = this.context;
+    const filter = await this.where(memberSpace(args[0], args[1]));
+    const table = new TypedTableQueryBuilder<MemberTable>("__e2ee_members", schema);
+    return db.all(table.where(filter));
+  }
+
+  /**
+   * Delete this account's member rows that the caller can see in the space.
+   * Return the number deleted once the authority accepts the transaction.
+   * Zero means nothing visible was removed. The account may still be a member
+   * if the caller cannot read its rows. Call `keys.rotate` for immediate rotation.
+   */
+  async remove(...args: AddMemberArgs): Promise<number> {
+    const [tableOrSpace, idOrAccount, account] = args;
+    const accountId = account ?? idOrAccount;
+    if (typeof accountId !== "string")
+      throw new TypeError("Removing a member requires an account ID.");
+    const filter = await this.where(memberSpace(tableOrSpace, idOrAccount), accountId);
+    if (!this.context) throw new Error("Removing members requires a database.");
+    const { db, schema } = this.context;
+    const table = new TypedTableQueryBuilder("__e2ee_members", schema);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const written = await db.serializableTransaction(async (tx) => {
+          const rows = await tx.all(table.where(filter), { tier: "remote" });
+          for (const row of rows) tx.delete(table, row.id);
+          return rows.length;
+        });
+        return await written.wait();
+      } catch (error) {
+        if (
+          attempt >= 3 ||
+          !(error instanceof PersistedWriteRejectedError) ||
+          (error.code !== "serialization_conflict" && error.code !== "transaction_conflict")
+        )
+          throw error;
+      }
+    }
+  }
+}

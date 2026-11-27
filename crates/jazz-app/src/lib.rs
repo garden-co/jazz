@@ -70,6 +70,7 @@ mod branch;
 mod config;
 mod control;
 mod edit;
+mod encryption;
 #[cfg(feature = "unstable-endpoint")]
 pub mod endpoint;
 mod error;
@@ -79,6 +80,7 @@ mod include;
 mod jazz_session;
 mod large;
 mod lifecycle;
+mod members;
 mod query;
 mod read;
 mod relation;
@@ -99,15 +101,25 @@ pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
 pub use control::{CallControl, Interruption};
 pub use edit::{Edits, TextColumn};
+pub use encryption::Encryption;
+#[cfg(feature = "e2ee-client")]
+pub use encryption::EncryptionConfig;
+#[doc(hidden)]
+pub use encryption::with_key_wait;
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
+#[doc(hidden)]
+pub use handle::inserted_fields;
 pub use handle::{DEFAULT_FIRST_LOAD_REMOTE_WAIT, DefaultRead, Jazz};
 pub use history::Version;
 pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
+#[cfg(feature = "e2ee-client")]
+#[doc(hidden)]
+pub use jazz_e2ee_client::{PrivateStore, StoreError, Stored};
 pub use jazz_session::{
     Initial, JazzSession, Recovery, SessionConfig, SessionError, SessionSnapshot, SessionStatus,
 };
@@ -115,6 +127,7 @@ pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 #[doc(hidden)]
 pub use lifecycle::before_client_stops;
+pub use members::{NewSpaceMember, SpaceMember};
 pub use query::{
     Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, ValuePart, created_at,
     deleted_at, id, updated_at,
@@ -125,7 +138,7 @@ pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, ValueSplice};
-pub use table::{Fields, Implementations, Insert, Table, Update};
+pub use table::{Fields, Implementations, Insert, NoUpdate, Table, Updatable, Update};
 pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 #[doc(hidden)]

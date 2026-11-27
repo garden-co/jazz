@@ -9,7 +9,14 @@ const BINDINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bindings");
 
 #[test]
 fn committed_bindings_are_generated() {
-    for app in ["todos", "tasks", "guarded", "drafts", "clashes"] {
+    for app in [
+        "todos",
+        "tasks",
+        "guarded",
+        "drafts",
+        "clashes",
+        "encrypted",
+    ] {
         let file = std::fs::read(format!("{FIXTURES}/{app}/jazz.app.json")).unwrap();
         let generated = jazz_codegen::generate(Lang::Rust, &file).unwrap();
         let path = format!("{BINDINGS}/{app}.rs");

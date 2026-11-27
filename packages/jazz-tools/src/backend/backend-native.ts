@@ -19,6 +19,8 @@ export interface BackendNative {
   readonly ThinRouter: typeof Napi.NapiThinRouter;
   /** An in-process core (`sqlite()`, `memory()`): Node only. */
   readonly JazzCore?: typeof Napi.JazzCore;
+  /** The end-to-end encryption runtime of a user client that holds keys: Node only. */
+  readonly EncryptionRuntime?: typeof Napi.EncryptionRuntime;
   readonly captureTextAnchor: typeof Napi.captureTextAnchor;
   readonly captureTextRange: typeof Napi.captureTextRange;
   readonly resolveTextAnchor: typeof Napi.resolveTextAnchor;
@@ -51,6 +53,7 @@ export function napiBackendNative(
     Db: napi.NapiDb,
     ThinRouter: napi.NapiThinRouter,
     JazzCore: napi.JazzCore,
+    EncryptionRuntime: napi.EncryptionRuntime,
     captureTextAnchor: napi.captureTextAnchor,
     captureTextRange: napi.captureTextRange,
     resolveTextAnchor: napi.resolveTextAnchor,

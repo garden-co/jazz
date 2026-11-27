@@ -1322,6 +1322,20 @@ impl Table {
         name == "id" || self.column(name).is_some()
     }
 
+    /// Inherited checks use USING for a missing UPDATE WITH CHECK.
+    pub fn inherited_clauses(
+        &self,
+        operation: crate::tools::Operation,
+    ) -> impl Iterator<Item = Option<&PolicyExpr>> {
+        let (clauses, count) = if operation == crate::tools::Operation::Update {
+            let [using, check] = self.policies.inherited_clauses(operation);
+            ([using, check.or(using)], 2)
+        } else {
+            ([self.policy(operation), None], 1)
+        };
+        clauses.into_iter().take(count)
+    }
+
     /// The policy that gates `operation`, or `None` (deny).
     pub fn policy(&self, operation: crate::tools::Operation) -> Option<&PolicyExpr> {
         use crate::tools::Operation::*;

@@ -13,6 +13,7 @@ export function beginNativeAccountSession(
   session: Session,
   /** For a user signed in through the app's backend: the app's own bearer. */
   bearer?: string,
+  encrypted = false,
 ): Uint8Array {
   assertAccountConfig(config);
   if (!config.accountId || !config.accountRegistryAuthority) {
@@ -31,6 +32,14 @@ export function beginNativeAccountSession(
   const credential = config.cookieSession
     ? { bearer: requireBearer(bearer) }
     : { jwt: config.jwtToken };
+  const deviceAccountSecret =
+    encrypted &&
+    !config.cookieSession &&
+    session.issuer === "urn:jazz:local-first" &&
+    session.authMode === "device-account" &&
+    getTrustedReservedSession(config)?.user_id === session.user_id
+      ? config.encryption?.accountSecret?.()
+      : undefined;
   return factory.beginAccountSession(
     JSON.stringify({
       registry: config.accountRegistryAuthority,
@@ -40,6 +49,7 @@ export function beginNativeAccountSession(
       issuer: session.issuer,
       subject: session.user_id,
       ...credential,
+      device_account_secret: deviceAccountSecret,
       claims: session.claims,
       server_url: config.serverUrl ?? null,
     }),

@@ -820,6 +820,8 @@ fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
             settled,
             tier,
             coalesced: _,
+            // A thin client's server has no encryption hooks.
+            unreadable: _,
         }) => (
             ThinBody::Event {
                 delta,

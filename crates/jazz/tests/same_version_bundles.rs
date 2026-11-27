@@ -87,7 +87,7 @@ fn core_at(schema: &PublicSchema, path: &Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 

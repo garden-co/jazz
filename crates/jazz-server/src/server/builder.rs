@@ -299,6 +299,8 @@ impl ServerBuilder {
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             panic_during_shutdown_for_test: Default::default(),
+            #[cfg(any(test, feature = "test"))]
+            deploy_hooks: Default::default(),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 

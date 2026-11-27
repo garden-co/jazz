@@ -240,7 +240,7 @@ fn open_server(path: &Path) -> Result<Db, jazz::db::Error> {
         path,
         FileOptions::default(),
     ))?;
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     Ok(db)
 }
 
@@ -394,7 +394,7 @@ fn produce_sqlite_storage_corpus_v1() {
             FileOptions::default(),
         ))
         .unwrap();
-        jazz::db::block_on(server.set_authority());
+        jazz::db::block_on(server.set_authority()).unwrap();
         let client = open_client(&client_path);
 
         // Two authors (interned), history (updates), a soft delete, a large

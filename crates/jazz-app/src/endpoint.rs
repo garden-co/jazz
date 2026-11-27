@@ -1229,6 +1229,7 @@ impl Endpoint {
             backend_secret: core.backend_secret.clone(),
             bundle: self.inner.bundle.clone(),
             auth,
+            declarations: self.inner.jazz.info.declarations.clone(),
         };
         // A thin client (its Hello asks for thin results) has its
         // transaction requests served here, not by the core (SPEC 8.14).
