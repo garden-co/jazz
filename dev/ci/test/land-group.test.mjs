@@ -260,3 +260,49 @@ test("land-group stops when a merge leaves main on an unexpected tree", () => {
   assert.notEqual(result.status, 0);
   assert.deepEqual(state.merged, [21]);
 });
+
+test("land-group stops merging once a containing PR has landed the rest of the group", () => {
+  const { dir, git, commitFile, cut } = makeRepo();
+  const main = commitFile("base");
+  git("checkout", "-qb", "b", main);
+  const b = commitFile("b");
+  git("checkout", "-qb", "a", b);
+  const a = commitFile("a");
+  // #21's head contains #22's, as a stack's top does: landing #21 lands both.
+  const group = cut(main, "g8", [
+    [21, a],
+    [22, b],
+  ]);
+  assert.equal(group.trees[0], group.trees[1]);
+  const green = [
+    { context: "full-suite", state: "success", creator: { login: "github-actions[bot]" } },
+  ];
+  const approved = (sha) => [
+    { author_association: "OWNER", body: `Approved by Anselm (via project chat) at ${sha}` },
+  ];
+  const gh = fakeGh(dir, {
+    mainTree: git("rev-parse", `${main}^{tree}`),
+    merged: [],
+    pulls: {
+      21: { merged: false, head: { sha: a }, landsTree: group.trees[0] },
+      // GitHub marks #22 merged on its own once #21 lands; merging it again 404s.
+      22: { merged: false, head: { sha: b }, landsTree: "f".repeat(40) },
+    },
+    comments: { 21: approved(a), 22: approved(b) },
+    statuses: { [a]: green, [b]: green },
+  });
+  const result = run(landGroup, [group.final, "g8"], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: `${gh.bin}:${process.env.PATH}`,
+      REPO: "o/r",
+      GH_TOKEN: "x",
+      LAND_WAIT_SECONDS: "0",
+      LAND_TREE_POLL_SECONDS: "0",
+    },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /already includes the group/);
+  assert.deepEqual(gh.read().merged, [21]);
+});

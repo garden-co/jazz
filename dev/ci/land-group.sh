@@ -73,7 +73,26 @@ expect_main_tree() {
   return 1
 }
 
+# Index of the last PR whose post-merge tree main is on now, or -1. A PR that
+# contains later PRs' heads (a stack's top) lands them all at once: GitHub then
+# marks those PRs merged itself, and main is already past them.
+landed_through() {
+  local tree t k found=-1
+  tree="$(main_tree)"
+  for k in "${!prs[@]}"; do
+    read -r _ _ t <<<"${prs[$k]}"
+    [ "${tree}" = "${t}" ] && found="${k}"
+  done
+  echo "${found}"
+}
+
 for ((i = start; i < ${#prs[@]}; i++)); do
+  reached="$(landed_through)"
+  if [ "${reached}" -ge "${i}" ]; then
+    echo "main already includes the group through PR $((reached + 1)) of ${#prs[@]}; skipping ahead"
+    i="${reached}"
+    continue
+  fi
   read -r pr sha tree <<<"${prs[$i]}"
   echo "::group::#${pr} at ${sha:0:8}"
   pull="$(gh api "repos/${REPO}/pulls/${pr}")"
