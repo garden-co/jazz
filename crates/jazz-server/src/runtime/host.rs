@@ -38,7 +38,7 @@ pub(super) struct Runtime {
 /// Open the runtime on the store.
 pub(super) struct Start {
     pub(super) runtime: Runtime,
-    pub(super) initial: Option<CatalogueChange>,
+    pub(super) initial: Option<InitialCatalogue>,
     pub(super) reply: std_mpsc::Sender<Result<(), CatalogueApplyError>>,
 }
 
@@ -596,8 +596,9 @@ impl AppStore {
         &self,
         schema: JazzSchema,
         change: CatalogueChange,
+        kept: crate::portable::deployment::KeptValues,
     ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
-        self.start_with_catalogue(schema, NodeRole::Core, true, false, Some(change))
+        self.start_with_catalogue(schema, NodeRole::Core, true, false, Some((change, kept)))
     }
 
     fn start_with_catalogue(
@@ -606,7 +607,7 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
         owns_store: bool,
-        initial: Option<CatalogueChange>,
+        initial: Option<InitialCatalogue>,
     ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite"
@@ -906,7 +907,7 @@ impl StoreLoop {
     pub(super) fn open_runtime(
         &mut self,
         runtime: Runtime,
-        initial: Option<CatalogueChange>,
+        initial: Option<InitialCatalogue>,
     ) -> Result<(), CatalogueApplyError> {
         let file = match std::mem::replace(&mut self.state, State::Idle(Err(String::new()))) {
             State::Idle(file) => file,
@@ -924,6 +925,7 @@ impl StoreLoop {
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
+                    self.source.reader().is_ok(),
                     initial,
                 )
             }))
@@ -1625,8 +1627,21 @@ impl ServerRuntimeHandle {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
+        self.apply_catalogue_keeping(change, supersedes, Vec::new())
+            .await
+    }
+
+    /// [`Self::apply_catalogue`] that also keeps `kept` host-table values
+    /// (table, key, value) in the same transaction: a key holding a different
+    /// value fails the whole change ([`Db::apply_catalogue_checked`]).
+    pub async fn apply_catalogue_keeping(
+        &self,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+        kept: crate::portable::deployment::KeptValues,
+    ) -> Result<(), CatalogueApplyError> {
         let (ended, result) = self
-            .run(move |owner| Ok(owner.apply_catalogue(change, supersedes)))
+            .run(move |owner| Ok(owner.apply_catalogue_keeping(change, supersedes, &kept)))
             .await
             .unwrap_or_else(|error| (0, Err(CatalogueApplyError::Failed(error))));
         // Sessions that ended are gone even when a later step failed: the
@@ -1641,6 +1656,17 @@ impl ServerRuntimeHandle {
     /// which a change that committed and then failed may have left behind.
     pub async fn reload_catalogue(&self) -> Result<(), String> {
         self.run(|owner| owner.reload_catalogue()).await
+    }
+
+    /// Whether the app the runtime serves has Jazz's E2EE system tables.
+    pub async fn encrypts(&self) -> Result<bool, String> {
+        self.run(|owner| Ok(owner.encrypts())).await
+    }
+
+    /// Whether the runtime has the account registry its checks read, which
+    /// an app that encrypts columns needs.
+    pub async fn has_account_registry(&self) -> Result<bool, String> {
+        self.run(|owner| Ok(owner.registry_installed)).await
     }
 
     /// Tests: how many sessions (sync and thin) the runtime serves now.

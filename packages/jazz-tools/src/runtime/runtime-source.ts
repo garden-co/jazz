@@ -7,6 +7,7 @@ import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import type { TextAnchors } from "./text-anchors.js";
+import type { Encryption } from "../encryption/index.js";
 
 export interface RuntimeTokenOptions {
   secret: string;
@@ -189,6 +190,14 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     waitForReconnect?(signal?: AbortSignal): Promise<void>;
     onExplicitOfflineChange?(listener: (offline: boolean) => void, signal: AbortSignal): void;
   };
+
+  /**
+   * The end-to-end encryption handle of the database this source opened,
+   * for an app that declares encryption and a host that installed its runtime.
+   */
+  encryptionHandle(): Encryption | undefined {
+    return undefined;
+  }
 
   /** Admission-bound native sources reject updates before any public state changes. */
   assertAuthUpdateAllowed(): void {}

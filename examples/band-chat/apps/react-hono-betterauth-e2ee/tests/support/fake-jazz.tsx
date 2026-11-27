@@ -1,0 +1,163 @@
+// A recording stand-in for the generated `app` and for `jazz-tools/react`, so
+// component tests can say what each query returns and see what each screen
+// asked for and wrote, with no runtime behind them.
+import { vi } from "vitest";
+
+// What jsdom lacks and the design system's shell and dialogs call.
+if (typeof window !== "undefined") {
+  window.matchMedia ??= ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    dispatchEvent: () => false,
+    onchange: null,
+  })) as typeof window.matchMedia;
+  (globalThis as { CSS?: unknown }).CSS ??= {
+    escape: (value: string) => value,
+    supports: () => false,
+  };
+  window.scrollTo = (() => undefined) as typeof window.scrollTo;
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  const dialog = HTMLDialogElement.prototype;
+  dialog.showModal ??= function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  dialog.show ??= dialog.showModal;
+  dialog.close ??= function (this: HTMLDialogElement) {
+    this.removeAttribute("open");
+  };
+}
+
+export interface Q {
+  table: string;
+  filter?: Record<string, unknown>;
+  columns?: string[];
+  order?: [string, string];
+  max?: number;
+}
+
+function builder(q: Q): Q & Record<string, unknown> {
+  return {
+    ...q,
+    where: (filter: Record<string, unknown>) => builder({ ...q, filter }),
+    select: (...columns: string[]) => builder({ ...q, columns }),
+    orderBy: (column: string, direction: string) => builder({ ...q, order: [column, direction] }),
+    limit: (max: number) => builder({ ...q, max }),
+  };
+}
+
+/** Stands in for the generated `app`: `app.messages.where(...)` is a recorded `Q`. */
+export const fakeApp = new Proxy({} as Record<string, Q>, {
+  get: (_target, table: string) => builder({ table }),
+});
+
+const omittedRows = new WeakMap<unknown[], unknown[]>();
+
+type Answer = { data?: unknown[]; unreadable?: unknown[]; error?: Error } | undefined;
+
+export const world = {
+  /** What a query returns; undefined = still loading. */
+  answer: (_q: Q): Answer => undefined,
+  /** Every query a component opened, in order. */
+  asked: [] as Q[],
+  account: "alice-account",
+};
+
+export function resetWorld() {
+  world.answer = () => undefined;
+  world.asked = [];
+  world.account = "alice-account";
+  for (const fn of Object.values(db) as unknown[]) if (vi.isMockFunction(fn)) fn.mockClear();
+  db.all.mockReset().mockResolvedValue([{ id: "m" }]);
+  db.encryption.onReport.mockClear();
+  db.encryption.keys.deliver.mockReset().mockResolvedValue({ delivered: 1, failed: 0 });
+  db.encryption.keys.rotate.mockReset().mockResolvedValue(1);
+  db.encryption.members.where.mockReset().mockImplementation(async (space, accountId) => ({
+    scopeId: "scope",
+    identifier: space.id,
+    ...(accountId ? { accountId } : {}),
+  }));
+  db.encryption.members.row.mockReset().mockImplementation(async (space, accountId) => ({
+    scopeId: "scope",
+    identifier: space.id,
+    accountId,
+  }));
+}
+
+const written = (): { wait: (options?: unknown) => Promise<unknown> } => ({
+  wait: async () => undefined,
+});
+
+export const db = {
+  insert: vi.fn((..._args: unknown[]) => written()),
+  update: vi.fn((..._args: unknown[]) => written()),
+  delete: vi.fn((..._args: unknown[]) => written()),
+  transaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
+  serializableTransaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
+  /** Read results can be configured by component tests that exercise downloads. */
+  all: vi.fn(async (..._args: unknown[]) => [{ id: "m" }] as unknown[]),
+  subscribe: vi.fn(
+    (
+      query: Q,
+      callbacks: { onUpdate: (rows: unknown[]) => void; onError: (error: Error) => void },
+    ) => {
+      const answer = world.answer(query);
+      if (answer?.error) callbacks.onError(answer.error);
+      if (answer?.data) {
+        omittedRows.set(answer.data, answer.unreadable ?? []);
+        callbacks.onUpdate(answer.data);
+      }
+      return () => undefined;
+    },
+  ),
+  beginTransaction: vi.fn(),
+  onMutationError: vi.fn(() => () => undefined),
+  encryption: {
+    onReport: vi.fn((_callback: (report: unknown) => void) => () => undefined),
+    members: {
+      where: vi.fn(async (space: { id: string }, accountId?: string) => ({
+        scopeId: "scope",
+        identifier: space.id,
+        ...(accountId ? { accountId } : {}),
+      })),
+      row: vi.fn(async (space: { id: string }, accountId: string) => ({
+        scopeId: "scope",
+        identifier: space.id,
+        accountId,
+      })),
+    },
+    keys: {
+      deliver: vi.fn(async () => ({ delivered: 1, failed: 0 })),
+      rotate: vi.fn(async (_space: unknown) => 1),
+    },
+  },
+};
+
+/** The `jazz-tools/react` module as the screens see it. */
+export const reactMock = {
+  useDb: () => db,
+  unreadableRows: (rows: unknown[]) => (omittedRows.get(rows) ?? []) as { code: string }[],
+  useAll: (q?: Q) => {
+    if (q) world.asked.push(q);
+    const answer = q ? world.answer(q) : undefined;
+    return {
+      data: answer?.data,
+      unreadable: answer?.unreadable ?? [],
+      isLoading: !answer,
+      error: answer?.error ?? null,
+      db,
+    };
+  },
+  useJazzSession: () => ({ user: { accountId: world.account } }),
+  JazzProvider: ({ children }: { children: unknown }) => children,
+};
+
+export const sameFilter = (q: Q, filter: Record<string, unknown>) =>
+  JSON.stringify(q.filter) === JSON.stringify(filter);

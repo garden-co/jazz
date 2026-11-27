@@ -1,0 +1,236 @@
+import { setTimeout as realDelay } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Encryption, memoryPrivateStore } from "../encryption/index.js";
+import type { Db } from "../runtime/db.js";
+import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
+import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
+import { cleanUpTestApp, memoryTestAccountStore as memoryStore } from "../testing/index.js";
+import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  gatedLoader,
+  serveThinTestApp,
+  thinHandleApp as app,
+  thinHandlePermissions as permissions,
+} from "../../tests/fixtures/thin-session.js";
+
+// Calls on a db.encryption handle taken while thin: what starts the load, what a listener receives, and how a call ends at a failed or a stalled load.
+
+const cleanups: Array<() => Promise<unknown>> = [];
+afterEach(async () => {
+  await cleanUpTestApp(cleanups);
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+const serve = () => serveThinTestApp(app, permissions, cleanups);
+type Host = Awaited<ReturnType<typeof serve>>;
+
+/** The page is still loading: the background upgrade waits for a load event that doesn't come. */
+function pageStillLoading() {
+  const events = { addEventListener() {}, removeEventListener() {} };
+  vi.stubGlobal("document", { ...events, readyState: "loading", visibilityState: "visible" });
+  vi.stubGlobal("window", {
+    ...events,
+    document: globalThis.document,
+    performance: globalThis.performance,
+  });
+}
+
+/** A thin session of an account the app signs in itself. */
+async function thinSession(host: Host, client: LocalFirstLoader): Promise<BrowserJazzSession> {
+  const session = await openBrowserSessionCore({
+    scope: host.jazz.appId,
+    serverUrl: host.serverUrl,
+    store: memoryStore(),
+    driver: { type: "memory" },
+    initial: "device",
+    encryption: { app, store: memoryPrivateStore() },
+    client,
+  } as never);
+  cleanups.push(() => session.close());
+  return session;
+}
+
+const db = (session: BrowserJazzSession): Db => session.getSnapshot().client!.db;
+
+function sync(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+describe("calls on a db.encryption handle taken while thin", () => {
+  it("waits for local-first before dispatching an account reset", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    const resetAccount = vi.spyOn(Encryption.prototype, "resetAccount").mockResolvedValue("active");
+    const reset = kept.encryption.resetAccount();
+    await expect.poll(() => gate.calls).toBe(1);
+    expect(resetAccount).not.toHaveBeenCalled();
+    gate.release();
+    await expect(reset).resolves.toBe("active");
+    expect(isThinDb(kept)).toBe(false);
+    expect(resetAccount).toHaveBeenCalledOnce();
+  }, 60_000);
+
+  it("recovery.create() refuses and itself starts the load", async () => {
+    const host = await serve();
+    // No background upgrade: only the call can start the load.
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    expect(isThinDb(kept)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(gate.calls).toBe(0);
+
+    const refused = sync(() => kept.encryption.recovery.create());
+    expect(refused).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((refused as EncryptionNeedsLocalFirstError).reason).toBe("not-loaded");
+    await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+  }, 60_000);
+
+  it("delivers reports to listeners attached while thin, and not to a stopped one", async () => {
+    const host = await serve();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    const handle = kept.encryption;
+    const reports: unknown[] = [];
+    const unreadable: unknown[] = [];
+    let challenged = 0;
+    let stoppedHeard = 0;
+    handle.onReport((report) => reports.push(report));
+    handle.onUnreadable((report) => unreadable.push(report));
+    handle.onChallenge(() => challenged++);
+    handle.onReport(() => stoppedHeard++)();
+
+    const upgrading = kept.upgradeToLocalFirst(gate.loader);
+    gate.release();
+    await upgrading;
+    await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
+    // The runtime reports once each; the listeners attached while thin hear them.
+    const sent = [
+      {
+        type: "unreadable",
+        table: "tasks",
+        id: null,
+        column: "title",
+        code: "no-key",
+        space: null,
+      },
+      { type: "challenged" },
+    ];
+    const native = (kept.encryption as unknown as { native: { takeEncryptionReports(): string[] } })
+      .native;
+    let pending = sent.map((report) => JSON.stringify(report));
+    native.takeEncryptionReports = () => pending.splice(0);
+    await expect.poll(() => challenged, { timeout: 10_000 }).toBe(1);
+    expect(reports).toEqual(sent);
+    expect(unreadable).toEqual([sent[0]]);
+    expect(stoppedHeard).toBe(0);
+  }, 90_000);
+
+  it("ends a call at a failed load with the load's failure", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const cause = new Error("chunk failed");
+    const kept = db(await thinSession(host, (async () => Promise.reject(cause)) as never));
+    const error = await kept.encryption.deviceId().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((error as EncryptionNeedsLocalFirstError).reason).toBe("load-failed");
+    expect((error as Error).cause).toBe(cause);
+    expect(isThinDb(kept)).toBe(true);
+  }, 60_000);
+
+  it("applies the caller's shorter ready({ timeoutMs }) while thin", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    const started = Date.now();
+    const error = await kept.encryption.ready({ timeoutMs: 300 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((error as EncryptionNeedsLocalFirstError).reason).toBe("timeout");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(isThinDb(kept)).toBe(true);
+  }, 30_000);
+
+  it("goes ahead after a load when the account's verification is still pending at the deadline", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    // Verification that has not finished at the deadline, as for a device offline: it joins
+    // one already in flight, which can wait longer (on its own deadline, or on the app's
+    // account-secret provider), so it does not end by itself here.
+    vi.spyOn(Encryption.prototype, "ready").mockImplementation(() => new Promise(() => {}));
+    // The full client's own handle, which the call reaches once the wait releases it.
+    const fullDeviceId = vi.spyOn(Encryption.prototype, "deviceId");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const call = kept.encryption.deviceId().then(
+      (id) => ({ id }),
+      (error: unknown) => error,
+    );
+    try {
+      await vi.waitFor(() => expect(gate.calls).toBe(1));
+      gate.release();
+      await vi.waitFor(() => expect(isThinDb(kept)).toBe(false));
+      let elapsed = 0;
+      let releasedAt: number | undefined;
+      while (elapsed < 31_000 && releasedAt === undefined) {
+        await vi.advanceTimersByTimeAsync(100);
+        elapsed += 100;
+        if (fullDeviceId.mock.calls.length > 0) releasedAt = elapsed;
+      }
+      expect(releasedAt).toBeLessThanOrEqual(31_000);
+
+      // The dispatched call can wait for verification driven by real socket I/O
+      // and Rust's monotonic clock. Keep the fake clock frozen during this wait.
+      const outcome = await Promise.race([call, realDelay(5_000, undefined, { ref: false })]);
+      expect(outcome, "the dispatched device ID lookup").toEqual({ id: expect.any(String) });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 90_000);
+
+  it("ends a call at a stalled load at the deadline, and at sign-out", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const session = await thinSession(host, gate.loader);
+    const kept = db(session);
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let done = false;
+    const timedOut = settle(kept.encryption.deviceId()).then((e) => ((done = true), e));
+    await vi.waitFor(() => expect(gate.calls).toBe(1));
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_500);
+    const error = await timedOut;
+    expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((error as EncryptionNeedsLocalFirstError).reason).toBe("timeout");
+    vi.useRealTimers();
+
+    // A call still waiting when the session signs out ends there too.
+    const waiting = settle(kept.encryption.devices.list());
+    await session.logout();
+    expect(await waiting).toBeInstanceOf(Error);
+  }, 90_000);
+});

@@ -475,7 +475,7 @@ fn a_handed_over_node_stays_handed_over_after_a_restart() {
             jazz::db::FileOptions::default(),
         ))
         .unwrap();
-        jazz::db::block_on(server.set_authority());
+        jazz::db::block_on(server.set_authority()).unwrap();
         server.track_closed_subscribers();
         server
     };
@@ -728,7 +728,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
             FileOptions::default(),
         ))
         .unwrap();
-        jazz::db::block_on(db.set_authority());
+        jazz::db::block_on(db.set_authority()).unwrap();
         db
     };
     let server = open();

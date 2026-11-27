@@ -8,8 +8,10 @@
 //! The diff is the one `jazz-tools migrations create` ran in TS
 //! (`dev/migrations.ts`), moved here so every language shares it.
 
-use jazz::tools::deployment::artifact::{self, json::Json};
-use jazz::tools::public_schema::{ColumnDescriptor, ColumnType, Schema, SchemaHash, TableSchema};
+use jazz::tools::deployment::artifact::{self, encryption, json::Json};
+use jazz::tools::public_schema::{
+    ColumnDescriptor, ColumnType, Schema, SchemaHash, TableName, TableSchema,
+};
 
 use crate::bindings;
 use crate::model::App;
@@ -55,21 +57,44 @@ pub fn create(
     // there is nothing to write. Otherwise it may not load (#6296): a
     // migration without `to` targets the current `tables`, so editing them
     // retargets it until the version it was written for is named below.
-    // Read the edited `tables` alone, then.
-    if let Ok(app) = App::load(app_json)
-        && app
-            .compiled
-            .schemas
-            .iter()
-            .any(|(h, _)| *h == recorded.current)
-    {
-        return Ok(unchanged());
-    }
+    // Read the edited `tables` alone, then. Either way, no version the
+    // bindings were generated from may change its encryption declarations.
+    let loaded = match App::load(app_json) {
+        Ok(app) => {
+            if bindings::check_recorded_version(&app.compiled, &recorded)? {
+                return Ok(unchanged());
+            }
+            Ok(app)
+        }
+        Err(error) => {
+            let (versions, declared) =
+                artifact::read_declared_versions(app_json).map_err(CodegenError::from_artifact)?;
+            bindings::check_declarations_of(versions.iter().copied(), Some(&declared), &recorded)?;
+            // If history already holds the bindings' version, another stub
+            // would duplicate it. Report why the authored file failed.
+            if versions
+                .split_last()
+                .is_some_and(|(_, history)| history.contains(&recorded.current))
+            {
+                return Err(CodegenError::from_artifact(error));
+            }
+            Err(error)
+        }
+    };
     let from = &recorded.current_schema;
-    let to = &artifact::read_current_schema(app_json).map_err(CodegenError::from_artifact)?;
+    // The current version as the file will load once the migration below
+    // leads to it from the bindings' version: with Jazz's system tables
+    // when it declares encryption or that version has them.
+    let (to, fragment) =
+        artifact::migration_target_schema(app_json, from).map_err(CodegenError::from_artifact)?;
+    let to = &to;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
+        // No migration will repair an invalid file. Once it loads, check the
+        // declarations against the version whose rows it will keep.
+        let app = loaded.map_err(CodegenError::from_artifact)?;
+        bindings::check_index_transition(&recorded, to, app.compiled.current_entries())?;
         return Ok(Created {
             note: Some(
                 "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
@@ -83,6 +108,12 @@ pub fn create(
     let Json::Object(top) = &mut root else {
         unreachable!("read above")
     };
+    if let Some(version) = fragment.filter(|version| *version > 1) {
+        *entry(top, "systemTablesVersion", || Json::Null, "tables") =
+            Json::Number(version.to_string());
+    } else {
+        top.retain(|(key, _)| key != "systemTablesVersion");
+    }
     let history = entry(top, "history", || Json::Object(Vec::new()), "tables");
     let Json::Object(versions) = history else {
         unreachable!("read above")
@@ -94,8 +125,11 @@ pub fn create(
             artifact::APP_FILE
         )));
     }
-    let tables = artifact::version_tables(from).map_err(CodegenError::from_artifact)?;
-    versions.push((version.clone(), Json::object(vec![("tables", tables)])));
+    // The version keeps its own encryption declarations: without them the
+    // deploy would read its encrypted columns as plaintext ones.
+    let history_version = artifact::declared_history_version(from, &recorded.encryption)
+        .map_err(CodegenError::from_artifact)?;
+    versions.push((version.clone(), history_version));
     // Every migration written without `to` was written for the bindings'
     // version, which is in `history` now: name it, so the edited `tables`
     // don't become its target.
@@ -116,7 +150,13 @@ pub fn create(
         ("name".to_string(), Json::string(name)),
         ("from".to_string(), Json::string(&version)),
     ];
-    migration.extend(diff(from, to)?);
+    // Jazz's system tables are Jazz's: the loader adds or drops them with
+    // the encryption declarations, so the authored diff leaves them out.
+    let source_tables = authored_tables(from);
+    let target_tables = authored_tables(to);
+    if source_tables != target_tables {
+        migration.extend(diff(&source_tables, &target_tables)?);
+    }
     let migrations = entry(top, "migrations", || Json::Array(Vec::new()), "history");
     let Json::Array(items) = migrations else {
         unreachable!("loaded above")
@@ -132,6 +172,15 @@ pub fn create(
         // A stub without TODOs must load: what the diff decided passes
         // every lens check a deployment runs.
         artifact::load_app(out.as_bytes()).map_err(CodegenError::from_artifact)?;
+    } else {
+        let (versions, declared) =
+            artifact::read_declared_versions(app_json).map_err(CodegenError::from_artifact)?;
+        let empty = encryption::Entries::new();
+        let after = versions
+            .last()
+            .and_then(|version| declared.entries(&version.to_string()))
+            .unwrap_or(&empty);
+        check_encryption_diff(&source_tables, &target_tables, &recorded.encryption, after)?;
     }
     Ok(Created {
         app: out,
@@ -139,6 +188,13 @@ pub fn create(
         todos,
         note: None,
     })
+}
+
+/// `schema` without Jazz's system tables.
+fn authored_tables(schema: &Schema) -> Schema {
+    let mut schema = schema.clone();
+    schema.retain(|name, _| !artifact::system_tables::is_system_table(name.as_str()));
+    schema
 }
 
 /// `top[key]`, inserted after `after` (or at the end) when absent.
@@ -792,6 +848,196 @@ pub fn diff_steps_json(from_json: &[u8], to_json: &[u8]) -> Result<String, Codeg
     };
     let steps = diff_steps(&read(from_json)?, &read(to_json)?)?;
     Ok(serde_json::to_string(&steps).expect("plain data"))
+}
+
+/// Check the encryption changes a migration stub can resolve before the
+/// author supplies defaults and chooses whether to rename columns.
+pub fn check_encryption_migration(from_json: &[u8], to_json: &[u8]) -> Result<(), CodegenError> {
+    let from = artifact::load_app(from_json).map_err(CodegenError::from_artifact)?;
+    let to = artifact::load_app(to_json).map_err(CodegenError::from_artifact)?;
+    let entries = |app: &artifact::AppDefinition| {
+        app.encryption()
+            .entries(&app.current_hash().to_string())
+            .cloned()
+    };
+    let before = entries(&from).unwrap_or_default();
+    let after = entries(&to).unwrap_or_default();
+    let (old, new) = (from.current_schema(), to.current_schema());
+    let refusal = |reason| CodegenError::new(format!("{}: {reason}", artifact::APP_FILE));
+    if from.current_hash() == to.current_hash() {
+        return encryption::check_redeclaration(old, &before, &after).map_err(refusal);
+    }
+    if bindings::differs_only_in_indexes(old, new) {
+        return encryption::check_index_transition((old, &before), &after).map_err(refusal);
+    }
+
+    check_encryption_diff(old, new, &before, &after)
+}
+
+fn check_encryption_diff(
+    old: &Schema,
+    new: &Schema,
+    before: &encryption::Entries,
+    after: &encryption::Entries,
+) -> Result<(), CodegenError> {
+    if before.is_empty() && after.is_empty() {
+        return Ok(());
+    }
+    let refusal = |reason| CodegenError::new(format!("{}: {reason}", artifact::APP_FILE));
+    let diff = diff_steps(old, new)?;
+    // First check the changes whose column identities the stub already knows.
+    let mut definite = after.clone();
+    for table in &diff.migrate {
+        if let Some(entry) = definite.get_mut(&table.table) {
+            for step in &table.steps {
+                if let ColumnStep::MaybeRenamed { column, .. } = step {
+                    entry.columns.remove(column);
+                    entry.equality.retain(|name| name != column);
+                }
+            }
+        }
+    }
+
+    let old_table = |name: &str| {
+        diff.rename_tables
+            .iter()
+            .find(|rename| rename.to == name)
+            .map(|rename| rename.from.clone())
+            .or_else(|| {
+                old.contains_key(&TableName::from(name))
+                    .then(|| name.to_owned())
+            })
+    };
+    let new_table = |name: &str| {
+        diff.rename_tables
+            .iter()
+            .find(|rename| rename.from == name)
+            .map(|rename| rename.to.clone())
+            .or_else(|| {
+                new.contains_key(&TableName::from(name))
+                    .then(|| name.to_owned())
+            })
+    };
+    let has_column = |schema: &Schema, table: &str, column: &str| {
+        schema.get(&TableName::from(table)).is_some_and(|table| {
+            table
+                .columns
+                .columns
+                .iter()
+                .any(|candidate| candidate.name_str() == column)
+        })
+    };
+    let check = |before: &encryption::Entries,
+                 after: &encryption::Entries,
+                 rename_table: &str,
+                 renames: &[(&str, &str)]| {
+        encryption::check_mapped_columns(
+            (old, before),
+            after,
+            old_table,
+            new_table,
+            |table, name| {
+                if table == rename_table
+                    && let Some((from, _)) = renames.iter().find(|(_, to)| *to == name)
+                {
+                    return Some((*from).to_owned());
+                }
+                old_table(table)
+                    .filter(|table| has_column(old, table, name))
+                    .map(|_| name.to_owned())
+            },
+            |table, name| {
+                let next = new_table(table)?;
+                if next == rename_table
+                    && let Some((_, to)) = renames.iter().find(|(from, _)| *from == name)
+                {
+                    return Some((*to).to_owned());
+                }
+                if has_column(new, &next, name) {
+                    return Some(name.to_owned());
+                }
+                if next == rename_table {
+                    return None;
+                }
+                // Before choosing renames, a candidate may preserve the space column.
+                let new_space = &after.get(&next)?.space;
+                if before.get(table)?.space != name {
+                    return None;
+                }
+                diff.migrate
+                    .iter()
+                    .find(|t| t.table == next)?
+                    .steps
+                    .iter()
+                    .find_map(|step| match step {
+                        ColumnStep::MaybeRenamed { column, candidates }
+                            if column == new_space
+                                && candidates.iter().any(|candidate| candidate == name) =>
+                        {
+                            Some(column.clone())
+                        }
+                        _ => None,
+                    })
+            },
+            false,
+        )
+    };
+    check(before, &definite, "", &[]).map_err(refusal)?;
+
+    for table in &diff.migrate {
+        let name = &table.table;
+        let Some(entry) = after.get(name) else {
+            continue;
+        };
+        const MAX_RENAMES: usize = 8;
+        let possible: Vec<_> = table
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                ColumnStep::MaybeRenamed { column, candidates } => Some(
+                    candidates
+                        .iter()
+                        .map(move |candidate| (candidate.as_str(), column.as_str())),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .take(MAX_RENAMES + 1)
+            .collect();
+        // The number of assignments grows exponentially with the number of
+        // candidate pairs. Let generate check the author's choices above the cap.
+        if possible.is_empty() || possible.len() > MAX_RENAMES {
+            continue;
+        }
+        let old_entries = encryption::Entries::from_iter(
+            before.get(name).map(|entry| (name.clone(), entry.clone())),
+        );
+        let new_entries = encryption::Entries::from([(name.clone(), entry.clone())]);
+        let Err(add_error) = check(&old_entries, &new_entries, name, &[]) else {
+            continue;
+        };
+
+        let viable = (1..(1 << possible.len())).any(|assignment| {
+            let mut renames = Vec::new();
+            for (index, &(from, to)) in possible.iter().enumerate() {
+                if assignment & (1 << index) == 0 {
+                    continue;
+                }
+                if renames
+                    .iter()
+                    .any(|&(source, target)| source == from || target == to)
+                {
+                    return false;
+                }
+                renames.push((from, to));
+            }
+            check(&old_entries, &new_entries, name, &renames).is_ok()
+        });
+        if !viable {
+            return Err(refusal(add_error));
+        }
+    }
+    Ok(())
 }
 
 /// The fields of the migration from `from` to `to`, after `name` and

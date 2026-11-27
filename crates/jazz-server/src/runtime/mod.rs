@@ -353,6 +353,9 @@ struct Owner {
     catalogue: Catalogue,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Whether the account registry the checks beside the account tables
+    /// read is installed.
+    registry_installed: bool,
     /// Runs a network chunk store's I/O beside this thread.
     #[cfg(feature = "native")]
     chunk_io: Option<ChunkIoRunner>,
@@ -1044,11 +1047,19 @@ impl Owner {
     }
 }
 
+type InitialCatalogue = (CatalogueChange, crate::portable::deployment::KeptValues);
+
+#[cfg(feature = "native")]
+fn schema_encrypts<'a>(mut table_names: impl Iterator<Item = &'a str>) -> bool {
+    table_names.any(|name| name == jazz::tools::deployment::artifact::system_tables::MEMBERS)
+}
+
 impl Owner {
     /// Open the runtime on `file` with the native host's chunk store (see
     /// [`Self::open_on`]): a network one gets its I/O runner, which wakes
     /// the store thread through `wake`.
     #[cfg(feature = "native")]
+    #[allow(clippy::too_many_arguments)]
     fn open(
         schema: JazzSchema,
         file: StoreFile,
@@ -1056,8 +1067,21 @@ impl Owner {
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         app: Option<String>,
-        initial: Option<CatalogueChange>,
+        registry_available: bool,
+        initial: Option<InitialCatalogue>,
     ) -> Result<Self, CatalogueApplyError> {
+        const REGISTRY_REQUIRED: &str = "this app encrypts columns, which needs the account registry \
+            of an app's store: open the store for an app (`set_app`) with its host tables";
+        if (!registry_available || app.is_none())
+            && let Some((change, _)) = &initial
+            && std::iter::once(&schema)
+                .chain(change.admit.iter().map(|(schema, _)| schema))
+                .any(|schema| {
+                    schema_encrypts(schema.tables().iter().map(|table| table.name.as_str()))
+                })
+        {
+            return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
+        }
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
                 Some(ChunkIoRunner::start(Arc::clone(&choice.store), wake)?)
@@ -1075,6 +1099,21 @@ impl Owner {
                 }
             })?;
         owner.chunk_io = chunk_io;
+        // The checks beside the E2EE account tables' policies read the
+        // account registry the store keeps beside the rows.
+        // The registry names the app's founding namespace, parsed as device
+        // accounts' ids derive from it (`device_account_founding_app`).
+        let installed = match (registry_available, owner.app.as_deref()) {
+            (true, Some(_)) => owner.install_registry(),
+            _ => false,
+        };
+        // Without a registry an account founded locally that later signs in
+        // through an external login would count as founded by the app, so
+        // an encrypted app is not served without one.
+        owner.registry_installed = installed;
+        if owner.registry_missing() {
+            return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
+        }
         Ok(owner)
     }
 
@@ -1090,7 +1129,7 @@ impl Owner {
         file: StoreFile,
         any_stored_catalogue: bool,
         app: Option<String>,
-        initial: Option<CatalogueChange>,
+        initial: Option<InitialCatalogue>,
         configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<Self, CatalogueApplyError> {
         let rows =
@@ -1120,11 +1159,17 @@ impl Owner {
         };
         let config = configure(config(current));
         let db = match initial {
-            Some(change) => block_on(Db::open_file_with_catalogue(config, file, change)),
+            Some((change, kept)) => block_on(Db::open_file_with_catalogue_checked(
+                config,
+                file,
+                change,
+                &kept,
+                async |db| crate::portable::deployment::check_stored_columns(db, &kept).await,
+            )),
             None => block_on(Db::open_file(config, file)),
         }
         .map_err(CatalogueApplyError::from)?;
-        jazz::db::block_on(db.set_authority());
+        block_on(db.set_authority())?;
         db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
@@ -1139,11 +1184,47 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
+            registry_installed: false,
             #[cfg(feature = "native")]
             chunk_io: None,
             #[cfg(all(test, feature = "native"))]
             fail_next_reload: false,
         })
+    }
+
+    /// Install the account registry the checks beside the E2EE account
+    /// tables' policies read, on the store's own connection
+    /// ([`crate::portable::accounts::RegistryFounders`]). The registry names
+    /// the app's founding namespace, parsed as device accounts' ids derive
+    /// from it (`device_account_founding_app`). False, and nothing
+    /// installed, for a core opened for no app.
+    fn install_registry(&mut self) -> bool {
+        let Some(app) = self.app.as_deref() else {
+            return false;
+        };
+        let app = crate::portable::accounts::device_account_founding_app(app);
+        self.db
+            .set_account_registry(Rc::new(crate::portable::accounts::RegistryFounders::new(
+                *app.uuid(),
+            )));
+        self.registry_installed = true;
+        true
+    }
+
+    /// Whether the app encrypts columns and no account registry is
+    /// installed: such a runtime is not served, since an account founded
+    /// locally that later signs in through an external login would count as
+    /// founded by the app.
+    fn registry_missing(&self) -> bool {
+        !self.registry_installed && self.encrypts()
+    }
+
+    /// Whether the app's schema has Jazz's E2EE system tables.
+    fn encrypts(&self) -> bool {
+        // The admitted versions, not the owner's schema: a running server
+        // keeps its first schema while deployments admit later ones.
+        self.db
+            .admits_table(jazz::tools::deployment::artifact::system_tables::MEMBERS)
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
@@ -1152,25 +1233,24 @@ impl Owner {
         Ok(())
     }
 
-    /// Apply `change` to the store's catalogue in one transaction, and with
-    /// `supersedes` (a bundle the change publishes new to this store) end
-    /// every session pinned to another bundle (see
+    /// Apply `change` to the store's catalogue in one transaction, keeping
+    /// `kept` host-table values in it (see [`Db::apply_catalogue_checked`]),
+    /// and with `supersedes` (a bundle the change publishes new to this
+    /// store) end every session pinned to another bundle (see
     /// `ServerRuntimeHandle::apply_catalogue`). How many sessions ended,
     /// which they did even when a later step failed, and the outcome.
-    fn apply_catalogue(
+    fn apply_catalogue_keeping(
         &mut self,
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
+        kept: &[crate::portable::deployment::KeptValue],
     ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            block_on(self.db.apply_catalogue(change)).map_err(|error| {
-                if error.code == jazz::db::ErrorCode::Storage {
-                    CatalogueApplyError::Failed(error.to_string())
-                } else {
-                    CatalogueApplyError::Rejected(error.to_string())
-                }
-            })?;
+            block_on(self.db.apply_catalogue_checked(change, kept, async |db| {
+                crate::portable::deployment::check_stored_columns(db, kept).await
+            }))
+            .map_err(CatalogueApplyError::from)?;
             if let Some(published) = supersedes {
                 ended = self.end_pinned_sessions(
                     &|bundle| *bundle != published,
@@ -3264,5 +3344,268 @@ mod tests {
         backoff.ended_at(true, 7);
         assert!(backoff.waiting_at(7));
         assert!(!backoff.waiting_at(8));
+    }
+    /// An opened server checks an account root's `kind` against how the
+    /// account was founded, as the account registry in its own store says,
+    /// not against the session's issuer alone. The registry holds alice's
+    /// account as founded by an external login; a session of a device-account
+    /// identity writes as that account.
+    ///
+    /// ```text
+    /// registry: alice's account founded by an external login (app)
+    /// alice's account, from a device-account session:
+    ///   device request ──► ✓
+    ///   identity + root "device-account" ──► ✗ (founded by the app)
+    ///   identity + root "app"         ──► ✓
+    /// ```
+    #[test]
+    fn an_account_root_must_name_how_the_registry_says_its_account_was_founded() {
+        let dir = tempfile::tempdir().unwrap();
+        account_root_follows_the_registry(
+            AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap(),
+            true,
+        );
+    }
+
+    /// A store whose registry tables were never created reads as an error,
+    /// not as an account nobody founded: the check refuses the upload
+    /// instead of falling back to the session's issuer.
+    #[test]
+    fn a_store_without_the_registry_tables_refuses_account_records() {
+        account_root_follows_the_registry(AppStore::memory().unwrap(), false);
+    }
+
+    /// The same on a memory store, a shared in-memory database without a
+    /// write-ahead log: the registry is read on a second connection while
+    /// the store's own connection holds the upload's write transaction.
+    #[test]
+    fn an_account_root_is_checked_against_the_registry_on_a_memory_store() {
+        account_root_follows_the_registry(AppStore::memory().unwrap(), true);
+    }
+
+    /// With `registry`, the account's registry is opened and names the app
+    /// as its founder; without, the store has no registry tables at all.
+    fn account_root_follows_the_registry(store: AppStore, registry: bool) {
+        use crate::server::account_store::StoredAccountRegistry;
+        use jazz::db::{InsertOptions, WriteIdentity};
+        use jazz::ids::RowUuid;
+        use jazz::tools::OpenTransactionId;
+        use jazz::tools::deployment::artifact::system_tables::{
+            self, derive_e2ee_policies, with_e2ee_fragment,
+        };
+        use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType};
+
+        let app = "founders-view-test";
+        store.set_app(app);
+        let alice = if registry {
+            StoredAccountRegistry::open(store.sql().unwrap())
+                .unwrap()
+                .login_or_register(&jazz::account_registry::Principal {
+                    issuer: "https://issuer.example".into(),
+                    subject: "alice".into(),
+                })
+                .unwrap()
+                .assignment
+                .account
+        } else {
+            jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0xa1; 16]))
+        };
+
+        // Tasks encrypt their title in their project's space.
+        let encrypted = BTreeMap::from([(
+            "tasks".to_owned(),
+            EncryptionEntry {
+                space: "projectId".to_owned(),
+                scope: "projects".to_owned(),
+                columns: BTreeMap::from([(
+                    "title".to_owned(),
+                    EncryptedColumn {
+                        plain: PlainType {
+                            column_type: ColumnType::Text,
+                            nullable: false,
+                            default: None,
+                        },
+                        sealed_type: None,
+                    },
+                )]),
+                equality: Vec::new(),
+            },
+        )]);
+        let mut tables = with_e2ee_fragment(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+                .table(
+                    TableSchema::builder("tasks")
+                        .fk_column("projectId", "projects")
+                        .column("title", ColumnType::Bytea),
+                )
+                .build(),
+        );
+        for (table, policies) in
+            derive_e2ee_policies(&tables, &encrypted, &Default::default()).unwrap()
+        {
+            tables.get_mut(&table).unwrap().policies = policies;
+        }
+        let runtime = store
+            .start_runtime(JazzSchema::new(&tables).unwrap(), NodeRole::Core, false)
+            .unwrap();
+
+        let subject = uuid::Uuid::from_bytes([0x1f; 16]).to_string();
+        let session = AuthorSubject::reserved(jazz::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .unwrap()
+            .with_account(alice);
+        let bytes = move |text: &str| Value::Bytes(text.as_bytes().to_vec());
+        let device = RowUuid(uuid::Uuid::new_v4());
+        let epoch = uuid::Uuid::new_v4();
+        let commit =
+            move |db: &Db, writes: Vec<(&'static str, RowUuid, BTreeMap<String, Value>)>| {
+                let id = OpenTransactionId::new();
+                block_on(db.begin_mergeable(id)).map_err(|error| error.message)?;
+                let tx = db.tx_ref(id);
+                for (table, row, cells) in writes {
+                    let staged = block_on(tx.insert(
+                        table,
+                        cells,
+                        InsertOptions {
+                            row_id: Some(row),
+                            identity: WriteIdentity::Session(session),
+                            ..Default::default()
+                        },
+                    ));
+                    if let Err(error) = staged {
+                        let _ = db.abandon_transaction_handle(id);
+                        return Err(error.message);
+                    }
+                }
+                block_on(db.commit_mergeable_handle(id))
+                    .map(drop)
+                    .map_err(|error| error.message)
+            };
+        let request = BTreeMap::from([
+            ("publicKey".to_owned(), bytes("pk")),
+            ("mechanism".to_owned(), Value::String("m".to_owned())),
+            ("version".to_owned(), Value::I64(1)),
+            ("signingPublicKey".to_owned(), bytes("spk")),
+            ("signingMechanism".to_owned(), Value::String("s".to_owned())),
+            ("signingVersion".to_owned(), Value::I64(1)),
+            ("nonceCommitment".to_owned(), bytes("n")),
+        ]);
+        let identity_and_root = move |kind: &'static str| {
+            vec![
+                (
+                    system_tables::ACCOUNT_IDENTITIES,
+                    RowUuid(alice.0),
+                    BTreeMap::from([
+                        ("ledgerVersion".to_owned(), Value::I64(1)),
+                        ("generation".to_owned(), Value::I64(0)),
+                        ("deviceId".to_owned(), Value::Uuid(device.0)),
+                        ("epochId".to_owned(), Value::Uuid(epoch)),
+                        ("envelope".to_owned(), bytes("e")),
+                        ("verification".to_owned(), bytes("v")),
+                    ]),
+                ),
+                (
+                    system_tables::ACCOUNT_ROOTS,
+                    RowUuid(uuid::Uuid::new_v4()),
+                    BTreeMap::from([
+                        ("ledgerVersion".to_owned(), Value::I64(1)),
+                        ("generation".to_owned(), Value::I64(0)),
+                        ("accountId".to_owned(), Value::Uuid(alice.0)),
+                        ("deviceId".to_owned(), Value::Uuid(device.0)),
+                        ("epochId".to_owned(), Value::Uuid(epoch)),
+                        ("kind".to_owned(), Value::String(kind.to_owned())),
+                    ]),
+                ),
+            ]
+        };
+
+        block_on(runtime.with_db_for_test(move |db| {
+            commit(db, vec![(system_tables::DEVICE_REQUESTS, device, request)])
+                .map_err(|error| format!("the device request: {error}"))?;
+            if !registry {
+                // Not "no registry, so the session's issuer decides": the
+                // unreadable registry refuses either root.
+                for kind in ["device-account", "app"] {
+                    let error = commit(db, identity_and_root(kind))
+                        .expect_err("a store without the registry tables");
+                    assert!(error.contains("account registry"), "{kind}: {error}");
+                }
+                return Ok(());
+            }
+            // Without the registry the session's issuer would decide, and
+            // a device-account session's root would have to say
+            // "device-account".
+            // The refusal is the policy check's, not some other error.
+            let error = commit(db, identity_and_root("device-account"))
+                .expect_err("the registry says the app founded the account");
+            assert!(
+                error.contains("INSERT policy denied") && error.contains("account_roots"),
+                "{error}"
+            );
+            commit(db, identity_and_root("app"))
+                .map_err(|error| format!("the root the registry names: {error}"))
+        }))
+        .unwrap();
+        store.close().unwrap();
+    }
+
+    /// A store opened for no app has no account registry, so an encrypted
+    /// app is not served from it: an account founded locally that later
+    /// signs in through an external login would count as app-founded.
+    #[test]
+    fn an_encrypted_app_is_not_served_without_the_account_registry() {
+        use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+        let tables = with_e2ee_fragment(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+                .build(),
+        );
+        let schema = || JazzSchema::new(&tables).unwrap();
+        assert!(schema_encrypts(
+            schema().tables().iter().map(|table| table.name.as_str())
+        ));
+        let store = AppStore::memory().unwrap();
+        let Err(error) = store.start_runtime(schema(), NodeRole::Core, false) else {
+            panic!("no app named, so no registry");
+        };
+        assert!(error.contains("account registry"), "{error}");
+        store.close().unwrap();
+
+        // An encrypted schema admitted through an initial catalogue needs the
+        // registry before the runtime can open.
+        let change = CatalogueChange {
+            admit: vec![(schema(), Vec::new())],
+            ..Default::default()
+        };
+        let (wake, _receiver) = std_mpsc::channel();
+        let result = Owner::open(
+            schema(),
+            block_on(StoreFile::memory()).unwrap(),
+            None,
+            wake,
+            false,
+            None,
+            false,
+            Some((change, Vec::new())),
+        );
+        assert!(matches!(
+            result,
+            Err(CatalogueApplyError::Rejected(message)) if message.contains("account registry")
+        ));
+
+        // Nor from a runtime started through the public API, which owns its
+        // store and has no registry.
+        let Err(error) = ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::InMemory)
+        else {
+            panic!("a store-owning runtime has no registry either");
+        };
+        assert!(error.contains("account registry"), "{error}");
+
+        let store = AppStore::memory().unwrap();
+        store.set_app("the-encrypted-app");
+        store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .expect("an app's store serves it");
+        store.close().unwrap();
     }
 }

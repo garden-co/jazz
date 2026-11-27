@@ -38,7 +38,7 @@ fn open(s: JazzSchema) -> Db {
         },
     )))
     .unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 fn seed(db: &Db, t: &str, n: u8, cells: BTreeMap<String, Value>) {
@@ -130,7 +130,7 @@ fn isolated_scope(default_author: bool, scope: ClaimScope) {
         },
     )))
     .unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     seed(
         &db,
         "notes",

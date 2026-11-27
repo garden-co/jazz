@@ -114,8 +114,7 @@ impl JazzCore {
                 identity.app_id,
             )
         };
-        let app_id =
-            AppId::from_string(&app_id_text).unwrap_or_else(|_| AppId::from_name(&app_id_text));
+        let app_id = AppId::from_text(&app_id_text);
         let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
             (None | Some("sqlite"), None) => BlobStore::Sqlite,
             (Some("files"), dir) => BlobStore::Files {

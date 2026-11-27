@@ -1,6 +1,9 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
+import type { Encryption } from "../encryption/index.js";
+import { declaresEncryption, keylessBackend, keylessEncryption } from "../encryption/node-host.js";
+import { declaredEntries } from "../encryption/plain-schema.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
 import { backendNative } from "./backend-native.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -80,6 +83,9 @@ export interface BackendNodeClock {
 }
 
 type FlushableRuntime = Runtime & { flush?: () => void };
+
+/** The environment a backend context opens the app in when its config names none. */
+export const DEFAULT_ENVIRONMENT = "dev";
 
 /** Pre-listener mutation errors a backend context retains for its first listener. */
 export const MAX_PENDING_MUTATION_ERROR_EVENTS = 256;
@@ -196,6 +202,14 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     return this.runtime;
   }
 
+  encryptionFor(db: Db): Encryption | undefined {
+    const { app } = this.config;
+    const runtime = this.runtime;
+    if (app && runtime instanceof NativeRuntimeAdapter && declaresEncryption(app)) {
+      return keylessEncryption(db, resolveSchemaSource(app), runtime);
+    }
+  }
+
   admitSession(session: Session): void {
     this.assertOpen();
     const proof = verifiedLocalFirstRequestProof(session);
@@ -228,7 +242,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const env = this.config.env ?? "dev";
+    const env = this.config.env ?? DEFAULT_ENVIRONMENT;
     // SYSTEM provenance names this stable node. A persistent store keeps its
     // transaction counter, so it writes as that node too. A memory store
     // starts its counter over on every open, so it writes as a random node:
@@ -259,6 +273,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         },
         subscriptionBacklogRows: this.config.subscriptionBacklogRows,
         migrations,
+        plainEntries: this.config.app
+          ? declaredEntries(resolveSchemaSource(this.config.app))
+          : undefined,
+        keyless: this.config.app
+          ? keylessBackend(this.config.app, this.config.appId, env)
+          : undefined,
       },
     );
 
@@ -555,6 +575,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 }
 
 class BackendDb extends Db implements BackendMutationErrorSink {
+  private keylessEncryption?: Encryption;
+
   constructor(
     config: DbConfig,
     private readonly coreSource: BackendRuntimeSource,
@@ -573,6 +595,10 @@ class BackendDb extends Db implements BackendMutationErrorSink {
           }
         : undefined,
     );
+  }
+
+  override get encryption(): Encryption {
+    return (this.keylessEncryption ??= this.coreSource.encryptionFor(this)) ?? super.encryption;
   }
 
   protected override getAccessContext(): DbAccessContext | null {

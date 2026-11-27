@@ -58,6 +58,8 @@ type Error struct {
 	// Kind is one of the Kind constants.
 	Kind    string
 	Message string
+	// Code identifies an encryption failure, if present.
+	Code string
 	// Table and Column name what the error is about, where known.
 	Table, Column string
 	// UserID is the user a KindNoAccount error is about.
@@ -108,6 +110,7 @@ func parseError(text string) error {
 	var e struct {
 		Kind    string `json:"kind"`
 		Message string `json:"message"`
+		Code    string `json:"code"`
 		Table   string `json:"table"`
 		Column  string `json:"column"`
 		UserID  string `json:"userId"`
@@ -123,7 +126,7 @@ func parseError(text string) error {
 		e.Kind, e.Message = KindRefused, text
 	}
 	kind := normalizeKind(e.Kind, e.Message)
-	return &Error{Kind: kind, Message: e.Message, Table: e.Table, Column: e.Column,
+	return &Error{Kind: kind, Message: e.Message, Code: e.Code, Table: e.Table, Column: e.Column,
 		UserID: e.UserID, Pending: e.Pending,
 		SessionStatus: SessionPhase(e.Status), OwnBundle: e.Own, ServedBundle: e.Served}
 }

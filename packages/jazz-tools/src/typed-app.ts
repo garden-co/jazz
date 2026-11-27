@@ -35,6 +35,11 @@ export interface ColumnTypes {
   readonly nullable: boolean;
   /** The stored value's TS type (for a transformed column, before its transform). */
   readonly value: unknown;
+  /**
+   * An encrypted column (`value` is then its plaintext type): only a client
+   * holding the keys reads it; a keyless backend never does (`KeylessTypes`).
+   */
+  readonly encrypted?: true;
 }
 
 /**
@@ -1382,7 +1387,17 @@ export type TableHandle<TTable extends string, TSchema extends SchemaLike> = Tab
 
 export type App<TSchema extends SchemaLike> = Simplify<
   {
-    [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
+    /**
+     * The types the app was bound with: on its type only (never set at
+     * runtime), so a type can map them, as `keyless` does for a backend.
+     * A string key, so declarations of an app name it without an import.
+     */
+    readonly "~types"?: TSchema;
+  } & {
+    [TTable in TableName<TSchema>]: Table<TTable, TSchema> &
+      (TSchema[TTable] extends { readonly encryptionSpace: true }
+        ? { readonly _encryptionSpace: true }
+        : unknown);
   } & {
     /** Read-only queries over accepted content versions of each table. */
     readonly $history: {
@@ -1465,6 +1480,16 @@ export interface CompiledAppSchema {
   readonly computed?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
   /** Transformed columns: table → column → transform name. */
   readonly transforms?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Encrypted columns: schema hash → table → the declaration of its encryption. */
+  readonly encryption?: {
+    /** The app-wide settings (Rust `EncryptionSettings`). */
+    readonly settings?: {
+      readonly allowAccountReset?: boolean;
+      /** The mechanism selection and allow-list, as written in the app file. */
+      readonly mechanisms?: unknown;
+    };
+    readonly versions?: Readonly<Record<string, object>>;
+  };
 }
 
 /** Relations as the generator may emit them beside `schema`. */
@@ -1785,6 +1810,11 @@ function createAppForTables(
   registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
   const history = {} as Record<string, unknown>;
+  const compiled = boundApp(wasmSchema)?.schema;
+  const entries = compiled?.encryption?.versions?.[compiled.current] as
+    | Record<string, { scope: string }>
+    | undefined;
+  const spaceTables = new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
@@ -1794,6 +1824,9 @@ function createAppForTables(
       columnTransformsByTable?.[tableName],
       columnTransformsByTable,
     );
+    if (spaceTables.has(tableName)) {
+      Object.defineProperty(tables[tableName], "_encryptionSpace", { value: true });
+    }
     Object.defineProperty(history, tableName, {
       enumerable: true,
       get: () =>

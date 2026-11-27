@@ -102,6 +102,20 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
+/// [`crate::portable::accounts::refuse_foreign_founding`] for this server:
+/// whether the runtime's app encrypts is asked only for a foreign namespace.
+async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result<(), &'static str> {
+    let encrypts = if app == *state.app_id.uuid() {
+        false
+    } else {
+        match state.runtime() {
+            Some(runtime) => accounts::encrypts_or_unknown(runtime.encrypts().await),
+            None => false,
+        }
+    };
+    crate::portable::accounts::refuse_foreign_founding(*state.app_id.uuid(), app, || encrypts)
+}
+
 /// The app's backend vouches for a local-first guest
 /// ([`FoundDeviceAccountRequest`]).
 pub(super) async fn found_device_account_for_admin(
@@ -114,6 +128,14 @@ pub(super) async fn found_device_account_for_admin(
     let registry = owner(&state)?;
     let app =
         accounts::founding_app(request.audience.as_deref(), *state.app_id.uuid()).map_err(fail)?;
+    refuse_foreign_founding(&state, app)
+        .await
+        .map_err(|reason| {
+            fail(crate::portable::accounts::RouteFailure {
+                status: 400,
+                body: reason,
+            })
+        })?;
     let result = registry
         .execute(AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
@@ -237,7 +259,7 @@ pub(super) async fn backend_signing_key_for_admin(
 
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
-pub(super) enum AdmissionError {
+pub(in crate::server) enum AdmissionError {
     Denied(String),
     /// The user's sessions were revoked after this one was authenticated:
     /// the backend asks its `authenticate` again.
@@ -354,7 +376,7 @@ pub(super) async fn resolve_assignment(
 /// local-first guest, in the namespace of the audience its proof was
 /// verified against (see
 /// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
-pub(super) async fn admit_local_founder(
+pub(in crate::server) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,
@@ -367,6 +389,11 @@ pub(super) async fn admit_local_founder(
     let Some(command) = crate::portable::guest::founding_command(principal, &audience) else {
         return Ok(());
     };
+    refuse_foreign_founding(
+        state,
+        *crate::portable::accounts::device_account_founding_app(&audience).uuid(),
+    )
+    .await?;
     if let Some(registry) = &state.accounts {
         registry
             .execute(command)

@@ -1,0 +1,1009 @@
+//! The database's encryption hooks over the keys this device holds
+//! (`E2EE_PROTOCOL.md` §4, §5; core hooks note H2–H5).
+//!
+//! They never await and never call the database: what they lack they
+//! report. A write to a space with no usable held key is `NeedsKey`; a
+//! read leaves out the rows whose version this device does not hold and
+//! lists the versions for the runtime. A held key permits the write
+//! (§5.1): nothing else is checked here.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
+use jazz::db::{CurrentRow, Error, ErrorCode, WireOp, WireWrite};
+use jazz::e2ee::{
+    E2eeDeclarations, E2eeHooks, E2eeRefusal, EpochSetId, OpenOutcome, QueryPlan, ReadSite,
+    Residual, ResidualPred, SealError, StreamSealer, StreamTarget, Unreadable, UnreadableCode,
+    WriteCells, WriteKind,
+};
+use jazz::ids::RowUuid;
+use jazz::query::{Operand, Predicate, Query};
+use jazz::records::Value;
+use jazz::tools::deployment::artifact::encryption::equality_column;
+use jazz_e2ee::Zeroizing;
+use jazz_e2ee::agility::StreamWriter;
+use jazz_e2ee::primitives::hash::sha256;
+use jazz_e2ee::protocol::content::cells::{CellInput, Opened, begin_stream, open_cell, seal_cells};
+use jazz_e2ee::protocol::content::equality::{
+    QueryPlan as EqualityPlan, TableTarget, plan_equality,
+};
+use jazz_e2ee::protocol::content::{
+    ContentError, DataError, EncryptedColumn, KeyMark, RowTarget, WriteChoice, WriteKey,
+};
+use jazz_e2ee::protocol::records::space::SpaceAddress;
+use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
+
+use crate::account::rows::{Row, SPACE_ROOTS, unwrap_optional};
+use crate::state::{
+    Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
+    push_bounded, unchecked_address,
+};
+use crate::values::ColumnCodec;
+
+/// The hooks a database opens with; a handle on the runtime's state.
+pub(crate) struct Hooks {
+    pub(crate) declarations: E2eeDeclarations,
+    pub(crate) shared: Rc<Shared>,
+}
+
+fn rejected(message: impl Into<String>) -> Error {
+    Error::new(ErrorCode::WriteRejected, message)
+}
+
+fn closed() -> Error {
+    Error::new(ErrorCode::Protocol, "the encryption runtime was closed")
+}
+
+/// A failure of the crypto provider or the library: loud, never a data
+/// error (protocol §0, §7).
+fn failed(error: ContentError) -> Error {
+    Error::new(ErrorCode::Protocol, format!("encryption failed: {error}"))
+}
+
+pub(crate) fn unsupported_query(what: &str, table: &str) -> Error {
+    Error::new(
+        ErrorCode::Query,
+        format!("Reading encrypted table `{table}` with {what} is not supported yet"),
+    )
+}
+
+/// A space cell's row ID, `None` when it is null or absent.
+fn identifier(value: Option<&Value>) -> Result<Option<String>, ()> {
+    match value.and_then(unwrap_optional) {
+        None => Ok(None),
+        Some(Value::Uuid(id)) => Ok(Some(id.to_string())),
+        Some(_) => Err(()),
+    }
+}
+
+/// An omitted space keeps the stored coordinate. A named space, including
+/// null, must match the coordinate of an existing row.
+pub(super) fn write_space(
+    given: Option<&Value>,
+    stored: Option<&Value>,
+) -> Result<Option<String>, SealError> {
+    let parse = |cell| {
+        identifier(cell)
+            .map_err(|()| SealError::Refused(rejected("an encrypted row's space is not a row ID")))
+    };
+    let Some(value) = given else {
+        return parse(stored);
+    };
+    let space = parse(Some(value))?;
+    if stored.is_some() && space != parse(stored)? {
+        return Err(SealError::Refused(rejected(
+            "an encrypted row cannot change its space through an ordinary write",
+        )));
+    }
+    Ok(space)
+}
+
+pub(crate) fn code(error: DataError) -> UnreadableCode {
+    match error {
+        DataError::KeyUnavailable => UnreadableCode::KeyUnavailable,
+        DataError::KeyPending => UnreadableCode::KeyPending,
+        DataError::SpacePending => UnreadableCode::SpacePending,
+        DataError::UnsupportedFormat => UnreadableCode::UnsupportedFormat,
+        DataError::EmptyCell => UnreadableCode::EmptyCell,
+        DataError::StaleSpace => UnreadableCode::StaleSpace,
+        DataError::InvalidCiphertext | DataError::EncryptionFailed => {
+            UnreadableCode::InvalidCiphertext
+        }
+    }
+}
+
+fn column<'a>(
+    catalogue: &'a Catalogue,
+    table: &str,
+    name: &str,
+    codec: &'a ColumnCodec,
+) -> Result<EncryptedColumn<'a>, Error> {
+    Ok(EncryptedColumn {
+        column_id: catalogue.column(table, name)?,
+        cell_type: &codec.cell_type,
+        equality: codec.equality,
+        is_bytes: codec.is_bytes,
+    })
+}
+
+impl Hooks {
+    fn stage_write_root(
+        &self,
+        address: &SpaceAddress,
+        key: &WriteKey<'_>,
+        rows: &mut Vec<(String, RowUuid, BTreeMap<String, Value>)>,
+    ) -> Result<(), SealError> {
+        // The key is this device's own creation, not yet accepted: the
+        // write stages its prepared root, once (protocol §3.2, §5.4).
+        if matches!(key.mark(), KeyMark::Unpublished { .. }) {
+            let mut creations = self.shared.creations.borrow_mut();
+            if creations
+                .prepared
+                .get(address)
+                .is_some_and(|root| root.id == key.root_id())
+            {
+                let root = creations.prepared.remove(address).expect("checked above");
+                let row = uuid::Uuid::parse_str(&root.id)
+                    .map_err(|_| SealError::Refused(rejected("a space root's ID is not a UUID")))?;
+                let cells = root.cells().ok_or_else(|| {
+                    SealError::Refused(rejected("a space root's IDs are not UUIDs"))
+                })?;
+                rows.push((SPACE_ROOTS.to_owned(), RowUuid(row), cells));
+                creations.staged.insert(root.id);
+            }
+        }
+        Ok(())
+    }
+
+    fn plan(&self, table: &str) -> Option<&TablePlan> {
+        self.shared.plans.get(table)
+    }
+
+    fn address(keys: &KeyState, plan: &TablePlan, identifier: &str) -> Result<SpaceAddress, Error> {
+        let catalogue = keys.catalogue.as_ref().ok_or_else(not_observed)?;
+        SpaceAddress::new(catalogue.table(&plan.entry.scope)?, identifier)
+            .map_err(|_| rejected("an encrypted row's space is not a row ID"))
+    }
+
+    /// Ask the binding to serve pending removals and rotate before choosing the write key.
+    fn check_rotation(&self, address: &SpaceAddress) -> Result<(), SealError> {
+        // The space joins the watch of its member accounts, and an update
+        // of theirs the runtime has not served yet is taken now.
+        self.shared.note_write(address);
+        self.shared.notice_member_changes();
+        let mut keys = self.shared.keys.borrow_mut();
+        let tried = keys.rotation_tried.remove(&(None, address.clone()));
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        // A key of a space whose mark this runtime has not evaluated may be
+        // one a removed device holds (see `KeyState::needs_evaluation`): the
+        // runtime reads the space first. Only a creation this run prepared
+        // or staged is new to everyone; a key held `unpublished` from an
+        // earlier run may be the space's accepted root, settled later.
+        let unevaluated = keys.needs_evaluation(address)
+            && match keys
+                .held
+                .write_key(address, keys.creation_refused.contains(address))
+            {
+                WriteChoice::Key(key) => {
+                    let creations = self.shared.creations.borrow();
+                    let created_here = matches!(key.mark(), KeyMark::Unpublished { .. })
+                        && (creations.staged.contains(key.root_id())
+                            || creations
+                                .prepared
+                                .get(address)
+                                .is_some_and(|root| root.id == key.root_id()));
+                    !created_here
+                }
+                _ => false,
+            };
+        if keys.online
+            && !tried
+            && (keys.rotation_pending.contains(address) || removal || unevaluated)
+        {
+            return Err(SealError::Pending(E2eeRefusal::NeedsKey {
+                space: db_address(address),
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// Whether the stored `cell` names an epoch whose key this device holds only
+/// as the key of a refused or lost creation of `address`.
+fn under_refused_key(keys: &KeyState, address: &SpaceAddress, cell: &[u8]) -> bool {
+    let Ok(record) = read_stored_record(cell) else {
+        return false;
+    };
+    keys.held.roots_of(address).into_iter().any(|space| {
+        space
+            .depth_of(record.epoch_id)
+            .is_some_and(|depth| space.mark(depth) == Some(&KeyMark::Refused))
+    })
+}
+
+/// The key a write to `address` seals under, or the reason it cannot yet
+/// (protocol §3.2, §5.1). The key of a root whose staging was `dropped` is
+/// not used: the runtime abandons that creation first.
+pub(crate) fn write_key<'k>(
+    keys: &'k KeyState,
+    dropped: &BTreeSet<String>,
+    address: &SpaceAddress,
+) -> Result<WriteKey<'k>, SealError> {
+    let space = || db_address(address);
+    match keys
+        .held
+        .write_key(address, keys.creation_refused.contains(address))
+    {
+        WriteChoice::Key(key)
+            if matches!(key.mark(), KeyMark::Unpublished { .. })
+                && dropped.contains(key.root_id()) =>
+        {
+            Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() }))
+        }
+        WriteChoice::Key(key) => Ok(key),
+        WriteChoice::NeedsKey => Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() })),
+        WriteChoice::SpacePending => Err(SealError::Pending(E2eeRefusal::SpacePending {
+            space: space(),
+        })),
+        // Competing roots: the runtime reads the chain and tries again;
+        // offline it cannot, and the write waits (protocol §3.2).
+        WriteChoice::NeedsChainRead if keys.online => {
+            Err(SealError::Pending(E2eeRefusal::NeedsKey { space: space() }))
+        }
+        WriteChoice::NeedsChainRead => Err(SealError::Pending(E2eeRefusal::SpacePending {
+            space: space(),
+        })),
+    }
+}
+
+/// Whether `cell` holds the value a migration gave rows stored before
+/// `column` existed ([`ReadSite::is_lens_default`]), an optional stored
+/// column's cell compared without its nullable wrapper.
+fn lens_supplied(site: &ReadSite<'_>, column: &str, cell: &Value) -> bool {
+    let Some(default) = site.lens_defaults.get(column) else {
+        return false;
+    };
+    match cell {
+        Value::Nullable(Some(inner)) => **inner == *default || cell == default,
+        _ => cell == default,
+    }
+}
+
+/// One streamed value: the routing record and header, then the sealed
+/// source bytes, then the final record.
+struct Sealer {
+    writer: Box<dyn StreamWriter>,
+    prefix: Vec<u8>,
+}
+
+impl StreamSealer for Sealer {
+    fn push(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = std::mem::take(&mut self.prefix);
+        self.writer
+            .update(plaintext, &mut out)
+            .map_err(|error| failed(error.into()))?;
+        Ok(out)
+    }
+
+    fn finish(self: Box<Self>) -> Result<Vec<u8>, Error> {
+        let mut out = self.prefix;
+        self.writer
+            .finish(&mut out)
+            .map_err(|error| failed(error.into()))?;
+        Ok(out)
+    }
+}
+
+impl E2eeHooks for Hooks {
+    fn declarations(&self) -> &E2eeDeclarations {
+        &self.declarations
+    }
+
+    /// A runtime is built from the declarations `load_client_encrypted`
+    /// returns for an encrypted app, which name no table for a version that
+    /// keeps Jazz's system tables without declaring an encrypted column.
+    fn built_from_encrypted_app(&self) -> bool {
+        true
+    }
+
+    fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
+        // A member row this client adds or changes: the space is served by
+        // the next pass after the write commits (protocol §3.4).
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(
+                write.kind,
+                WriteKind::Insert | WriteKind::Update | WriteKind::Upsert
+            )
+            && let (Some(Value::Uuid(scope)), Some(Value::Uuid(id))) =
+                (write.cells.get("scopeId"), write.cells.get("identifier"))
+        {
+            let mut changes = self.shared.member_changes.borrow_mut();
+            push_bounded(
+                &mut changes,
+                (
+                    write.row,
+                    SpaceAddress {
+                        scope_id: scope.to_string(),
+                        identifier: id.to_string(),
+                    },
+                    self.shared.now(),
+                ),
+                crate::state::MAX_REPORTS,
+            );
+        }
+        // A member row this client deletes, a removal: the space is served
+        // before the next encrypted write, so the pass sets the
+        // needs-rotation mark and that write rotates first (protocol §3.4,
+        // §3.5). A delete names no cells: the runtime finds the space from
+        // the deleted row.
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(write.kind, WriteKind::Delete)
+        {
+            let mut removals = self.shared.member_removals.borrow_mut();
+            push_bounded(
+                &mut removals,
+                (write.row, self.shared.now()),
+                crate::state::MAX_REPORTS,
+            );
+        }
+        let Some(plan) = self.plan(write.table) else {
+            return Ok(());
+        };
+        let refused = |message: &str| SealError::Refused(rejected(message));
+        if self.shared.keys.borrow().closed {
+            return Err(SealError::Refused(closed()));
+        }
+        let space = if plan.self_space() {
+            Some(write.row.0.to_string())
+        } else {
+            write_space(write.cells.get(&plan.entry.space), write.stored_space)?
+        };
+        // A write that creates its row seals every encrypted column it
+        // leaves out: null for an optional column, the declared default
+        // for a required one. An upsert may find the row only at the authority.
+        // Keep its generated values separate so they apply only on insertion.
+        let mut defaults = BTreeMap::new();
+        let creates = match write.kind {
+            WriteKind::Insert => true,
+            WriteKind::Upsert => write.stored_space.is_none(),
+            _ => false,
+        };
+        if creates {
+            for (name, codec) in &plan.columns {
+                if write.cells.contains_key(name) || write.streamed_column == Some(name) {
+                    continue;
+                }
+                let filled = match &codec.empty {
+                    Some(empty) => Some(empty.clone()),
+                    None if write.streamed_column.is_some() => {
+                        return Err(refused(&format!(
+                            "a streamed row requires encrypted column `{}.{name}`",
+                            write.table
+                        )));
+                    }
+                    None => None,
+                };
+                if let Some(value) = filled {
+                    defaults.insert(name.clone(), value);
+                }
+            }
+        }
+        let encrypted: Vec<String> = write
+            .cells
+            .keys()
+            .chain(defaults.keys())
+            .filter(|name| plan.columns.contains_key(*name))
+            .cloned()
+            .collect();
+        let encrypted_stream = write
+            .streamed_column
+            .is_some_and(|name| plan.columns.contains_key(name));
+        if encrypted.is_empty() && !encrypted_stream {
+            return Ok(());
+        }
+        let row_id = write.row.0.to_string();
+        let identifier = space.ok_or_else(|| refused("an encrypted write names its space"))?;
+        let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
+            .map_err(SealError::Refused)?;
+        // An encrypted upload checked for rotation before consuming its source.
+        if !encrypted_stream {
+            self.check_rotation(&address)?;
+        }
+        let keys = self.shared.keys.borrow();
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
+        let catalogue = keys
+            .catalogue
+            .as_ref()
+            .ok_or(SealError::Refused(not_observed()))?;
+        let table_id = catalogue.table(write.table).map_err(SealError::Refused)?;
+        let mut plaintexts = Vec::with_capacity(encrypted.len());
+        let mut equalities: Vec<Option<EqualityValue>> = Vec::with_capacity(encrypted.len());
+        let mut columns = Vec::with_capacity(encrypted.len());
+        for name in &encrypted {
+            let codec = &plan.columns[name];
+            let value = write.cells.get(name).unwrap_or_else(|| &defaults[name]);
+            let wrong_type = || refused("an encrypted cell takes its column's plaintext type");
+            plaintexts.push(Zeroizing::new(codec.encode(value).ok_or_else(wrong_type)?));
+            equalities.push(match codec.equality {
+                Some(_) => Some(codec.equality_value(value).ok_or_else(wrong_type)?),
+                None => None,
+            });
+            columns.push(column(catalogue, write.table, name, codec).map_err(SealError::Refused)?);
+        }
+        let inputs: Vec<CellInput<'_>> = columns
+            .iter()
+            .zip(&plaintexts)
+            .zip(&equalities)
+            .map(|((column, value), equality)| CellInput {
+                column: *column,
+                value,
+                equality: equality.as_ref(),
+            })
+            .collect();
+        let suite = self
+            .shared
+            .registry
+            .select(&self.shared.selected)
+            .map_err(|error| SealError::Refused(failed(ContentError::from(error))))?;
+        let row = RowTarget {
+            domain: &self.shared.content,
+            space: &address,
+            table_id,
+            row_id: &row_id,
+        };
+        let sealed = seal_cells(
+            &suite,
+            &key,
+            &row,
+            &inputs,
+            &mut **self.shared.random.borrow_mut(),
+        )
+        .map_err(|error| SealError::Refused(failed(error)))?;
+        for (name, cell) in encrypted.iter().zip(sealed.cells) {
+            let cells = if write.kind == WriteKind::Upsert && defaults.contains_key(name) {
+                &mut *write.insert_only
+            } else {
+                &mut *write.cells
+            };
+            cells.insert(name.clone(), Value::Bytes(cell.stored));
+            if let Some(token) = cell.equality_token {
+                cells.insert(format!("__e2ee_eq_{name}"), Value::Bytes(token));
+            }
+        }
+        if write.streamed_column.is_some() {
+            write.stream_root = Some(key.root_id().to_owned());
+            return Ok(());
+        }
+        self.stage_write_root(&address, &key, write.companion_rows)
+    }
+
+    fn claim_stream_companions(
+        &self,
+        table: &str,
+        space: Option<&Value>,
+        root: Option<&str>,
+        rows: &mut Vec<(String, RowUuid, BTreeMap<String, Value>)>,
+    ) -> Result<(), SealError> {
+        let keys = self.shared.keys.borrow();
+        if keys.closed {
+            return Err(SealError::Refused(closed()));
+        }
+        let Some(root) = root else {
+            return Ok(());
+        };
+        let id = identifier(space)
+            .ok()
+            .flatten()
+            .ok_or_else(|| SealError::Refused(rejected("an encrypted write names its space")))?;
+        let address = Self::address(&keys, self.plan(table).expect("sealed table"), &id)
+            .map_err(SealError::Refused)?;
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
+        if key.root_id() != root {
+            return Err(SealError::Refused(rejected(
+                "the space root changed during the upload",
+            )));
+        }
+        self.stage_write_root(&address, &key, rows)
+    }
+
+    /// A space root a write staged and the database dropped: its creation
+    /// did not happen, and the runtime abandons it before the next write.
+    fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        let mut creations = self.shared.creations.borrow_mut();
+        for (table, row) in rows {
+            let id = row.0.to_string();
+            if table == SPACE_ROOTS && creations.staged.remove(&id) {
+                creations.dropped.insert(id);
+            }
+        }
+    }
+
+    fn transaction_refused(&self, ops: &[WireOp], error: &Error) {
+        let keys = self.shared.keys.borrow();
+        let mut creations = self.shared.creations.borrow_mut();
+        for op in ops {
+            if let WireWrite::Insert { table, row, .. } = &op.write
+                && table == SPACE_ROOTS
+            {
+                let id = uuid::Uuid::from_bytes(*row).to_string();
+                if keys
+                    .held
+                    .space(&id)
+                    .is_some_and(crate::spaces::has_unpublished)
+                {
+                    creations.refused.insert(id, error.clone());
+                }
+            }
+        }
+    }
+
+    fn open_rows(
+        &self,
+        site: &ReadSite<'_>,
+        rows: &mut Vec<CurrentRow>,
+    ) -> Result<OpenOutcome, Error> {
+        let mut outcome = OpenOutcome::default();
+        let Some(plan) = self.plan(site.table) else {
+            return Ok(outcome);
+        };
+        if rows.is_empty() {
+            return Ok(outcome);
+        }
+        let keys = self.shared.keys.borrow();
+        if keys.closed {
+            return Err(closed());
+        }
+        // Aggregate results contain no encrypted cells. An output alias can
+        // share the name of an encrypted column in the source table.
+        if site.query.aggregate.is_some() {
+            return Ok(outcome);
+        }
+        let catalogue = keys.catalogue.as_ref().ok_or_else(not_observed)?;
+        let table_id = catalogue.table(site.table)?;
+        let report = |outcome: &mut OpenOutcome, unreadable: Unreadable| {
+            self.shared.report(Report::Unreadable(unreadable.clone()));
+            outcome.unreadable.push(unreadable);
+        };
+        let mut kept = Vec::with_capacity(rows.len());
+        for mut row in rows.drain(..) {
+            let row_uuid: RowUuid = row.row_uuid();
+            let row_id = row_uuid.0.to_string();
+            // A read that selects no encrypted column has nothing to open
+            // and needs no space.
+            if !plan.columns.keys().any(|name| row.cell(name).is_some()) {
+                kept.push(row);
+                continue;
+            }
+            let identifier = match plan.self_space() {
+                true => Some(row_id.clone()),
+                false => identifier(row.cell(&plan.entry.space).as_ref())
+                    .ok()
+                    .flatten(),
+            };
+            let Some(address) = identifier.and_then(|id| Self::address(&keys, plan, &id).ok())
+            else {
+                report(
+                    &mut outcome,
+                    Unreadable {
+                        table: site.table.to_owned(),
+                        id: Some(row_uuid),
+                        column: Some(plan.entry.space.clone()),
+                        code: UnreadableCode::InvalidCiphertext,
+                        space: None,
+                    },
+                );
+                continue;
+            };
+            let target = RowTarget {
+                domain: &self.shared.content,
+                space: &address,
+                table_id,
+                row_id: &row_id,
+            };
+            let mut readable = true;
+            for (name, codec) in &plan.columns {
+                let Some(cell) = row.cell(name) else {
+                    continue;
+                };
+                // Whether a migration supplied this cell, judged on the cell
+                // as stored, before it is opened.
+                let lens_supplied = lens_supplied(site, name, &cell);
+                if codec.equality.is_some() {
+                    row.remove_cell(&equality_column(name));
+                }
+                // A stored cell is bytes; a physical null reads like the
+                // empty value, "never written"; anything else no writer
+                // could have sealed.
+                let stored = match unwrap_optional(&cell) {
+                    Some(Value::Bytes(bytes)) => Ok(Some(bytes.as_slice())),
+                    None => Ok(None),
+                    Some(_) => Err(()),
+                };
+                let column = column(catalogue, site.table, name, codec)?;
+                let opened = match stored {
+                    Err(()) => Opened::Unreadable(DataError::InvalidCiphertext),
+                    Ok(None) => Opened::Empty,
+                    Ok(Some(stored)) => {
+                        open_cell(&self.shared.registry, &keys.held, &target, &column, stored)
+                            .map_err(failed)?
+                    }
+                };
+                let stored = stored.ok().flatten();
+                let streamed = stored.is_some_and(|stored| {
+                    read_stored_record(stored).is_ok_and(|record| record.kind == RecordKind::Stream)
+                });
+                let notice = |code: UnreadableCode, space: &SpaceAddress| Unreadable {
+                    table: site.table.to_owned(),
+                    id: Some(row_uuid),
+                    column: Some(name.clone()),
+                    code,
+                    space: Some(db_address(space)),
+                };
+                let value = match opened {
+                    Opened::Value(plaintext) => Some((plaintext, None)),
+                    Opened::StaleSpace { value, space } => Some((value, Some(space))),
+                    // Never written: the declared default, and a notice
+                    // only when a writer stored the empty value (not a
+                    // migration). The row is always returned.
+                    Opened::Empty => match &codec.empty {
+                        Some(empty) => {
+                            row.set_cell(name, Some(empty.clone()), codec.value_type.clone());
+                            if !lens_supplied && stored.is_some() {
+                                report(&mut outcome, notice(UnreadableCode::EmptyCell, &address));
+                            }
+                            None
+                        }
+                        // A required column without a default has nothing a
+                        // never written cell reads as: the row is withheld
+                        // and the empty cell reported.
+                        None => {
+                            report(&mut outcome, notice(UnreadableCode::EmptyCell, &address));
+                            readable = false;
+                            None
+                        }
+                    },
+                    Opened::Missing { epoch_id } => {
+                        let space = db_address(&address);
+                        self.shared.report(Report::MissingKey {
+                            table: site.table.to_owned(),
+                            space: space.clone(),
+                            epoch_id: epoch_id.clone(),
+                        });
+                        self.shared.missing(Missing {
+                            table: site.table.to_owned(),
+                            id: row_uuid,
+                            column: name.clone(),
+                            space: address.clone(),
+                            epoch_id: epoch_id.clone(),
+                        });
+                        outcome
+                            .missing_reports
+                            .insert(outcome.unreadable.len(), epoch_id.clone());
+                        outcome
+                            .unreadable
+                            .push(notice(keys.missing_key_code(&address), &address));
+                        outcome.missing_epochs.push((space, epoch_id));
+                        readable = false;
+                        None
+                    }
+                    Opened::Unreadable(error) => {
+                        report(&mut outcome, notice(code(error), &address));
+                        readable = false;
+                        None
+                    }
+                };
+                let Some((plaintext, stale)) = value else {
+                    continue;
+                };
+                let decoded = match streamed {
+                    true if codec.is_bytes => Some(Value::Bytes(plaintext.to_vec())),
+                    true => None,
+                    false => codec.decode(&plaintext),
+                };
+                let Some(decoded) = decoded else {
+                    report(
+                        &mut outcome,
+                        notice(UnreadableCode::InvalidCiphertext, &address),
+                    );
+                    readable = false;
+                    continue;
+                };
+                let decoded = match (codec.nullable, decoded) {
+                    (true, Value::Nullable(inner)) => Value::Nullable(inner),
+                    (true, value) => Value::Nullable(Some(Box::new(value))),
+                    (false, value) => value,
+                };
+                row.set_cell(name, Some(decoded), codec.value_type.clone());
+                // A cell that opened under the key of a refused or lost
+                // creation is for the repair to rewrite (protocol §3.2).
+                if let Some(stored) = stored
+                    && under_refused_key(&keys, &address, stored)
+                {
+                    self.shared
+                        .note_repairable(site.table, row_uuid, &address, name);
+                }
+                if let Some(space) = stale {
+                    report(&mut outcome, notice(UnreadableCode::StaleSpace, &space));
+                }
+            }
+            if readable {
+                kept.push(row);
+            }
+        }
+        *rows = kept;
+        Ok(outcome)
+    }
+
+    fn plan_query(&self, query: &Query) -> Result<QueryPlan, Error> {
+        // Joins, reachability and inheritance compare no sealed bytes: core
+        // refuses every condition of them that names an encrypted column, so
+        // what reaches this hook leaves the query's own rows alone and is
+        // planned like any other query of the table.
+        let Some(plan) = self.plan(&query.table) else {
+            return Ok(QueryPlan::Plain);
+        };
+        let table = query.table.as_str();
+        if let Some(select) = &query.select
+            && select.iter().any(|name| plan.columns.contains_key(name))
+            && !plan.self_space()
+            && !select.contains(&plan.entry.space)
+        {
+            return Err(unsupported_query(
+                "encrypted columns selected without the space column",
+                table,
+            ));
+        }
+        // Core refuses every encrypted condition but a top-level `eq` of an
+        // equality column with a literal, a parameter or a claim before
+        // this hook runs, and again after a plain plan. What is left here:
+        // the literals, which this hook turns into tokens.
+        let mut searched = Vec::new();
+        for (index, filter) in query.filters.iter().enumerate() {
+            let Predicate::Eq(Operand::Column(name), value) = filter else {
+                continue;
+            };
+            if !plan.columns.contains_key(name) {
+                continue;
+            }
+            // The encrypted filter is applied after opening the rows, which
+            // is too late to decide which rows contribute to an aggregate.
+            if query.aggregate.is_some() {
+                return Err(unsupported_query(
+                    "an aggregate with an encrypted filter",
+                    table,
+                ));
+            }
+            let Operand::Literal(value) = value else {
+                return Err(unsupported_query(
+                    "an encrypted predicate other than eq with a value",
+                    table,
+                ));
+            };
+            searched.push((index, name.clone(), value.clone()));
+        }
+        if searched.is_empty() {
+            return Ok(QueryPlan::Plain);
+        }
+        let space_column = plan.entry.space.as_str();
+        let identifier = query.filters.iter().find_map(|filter| match filter {
+            Predicate::Eq(Operand::Column(name), Operand::Literal(Value::Uuid(id)))
+                if name == space_column =>
+            {
+                Some(id.to_string())
+            }
+            _ => None,
+        });
+        let Some(identifier) = identifier else {
+            return Err(unsupported_query(
+                "an encrypted predicate without eq on the space column",
+                table,
+            ));
+        };
+        let keys = self.shared.keys.borrow();
+        if keys.closed {
+            return Err(closed());
+        }
+        let address = Self::address(&keys, plan, &identifier)?;
+        let catalogue = keys.catalogue.as_ref().ok_or_else(not_observed)?;
+        let tagger = self
+            .shared
+            .registry
+            .select(&self.shared.selected)
+            .map_err(|error| failed(error.into()))?
+            .equality;
+        let target = TableTarget {
+            domain: &self.shared.content,
+            space: &address,
+            table_id: catalogue.table(table)?,
+        };
+        let mut physical = query.clone();
+        physical.limit = None;
+        physical.offset = 0;
+        let mut residual = Residual {
+            preds: Vec::new(),
+            limit: query.limit,
+            offset: query.offset,
+        };
+        let mut epochs = Vec::new();
+        let mut incomplete = false;
+        let mut dropped = Vec::new();
+        for (index, name, value) in searched {
+            let codec = &plan.columns[&name];
+            // Rows stored before a migration added the column read this
+            // value but carry no token: the index would miss them silently.
+            if catalogue.lens_added(table, &name) && codec.is_empty_value(&value) {
+                return Err(unsupported_query(
+                    &format!(
+                        "eq on `{name}`, which a migration added, for the value its older \
+                         rows read (its default)"
+                    ),
+                    table,
+                ));
+            }
+            let equality = codec.equality_value(&value).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Query,
+                    format!("eq on `{name}` compares a value of another type"),
+                )
+            })?;
+            let column = column(catalogue, table, &name, codec)?;
+            match plan_equality(tagger, &keys.held, &target, &column, &equality, keys.online)
+                .map_err(failed)?
+            {
+                EqualityPlan::Tokens(tokens) => {
+                    physical.filters[index] = Predicate::In(
+                        Operand::Column(format!("__e2ee_eq_{name}")),
+                        tokens
+                            .tokens
+                            .into_iter()
+                            .map(|token| Operand::Literal(Value::Bytes(token)))
+                            .collect(),
+                    );
+                    epochs.extend(tokens.epochs);
+                    incomplete |= tokens.incomplete;
+                }
+                EqualityPlan::Offline => dropped.push(index),
+                EqualityPlan::NeedsKey => {
+                    return Ok(QueryPlan::NeedsKey {
+                        space: db_address(&address),
+                    });
+                }
+            }
+            let mut any_of = vec![value.clone()];
+            if codec.nullable {
+                any_of.push(Value::Nullable(Some(Box::new(value))));
+            }
+            residual.preds.push(ResidualPred {
+                column: name,
+                any_of,
+            });
+        }
+        for index in dropped.into_iter().rev() {
+            physical.filters.remove(index);
+        }
+        epochs.sort();
+        epochs.dedup();
+        // An online plan has at least one epoch (none is `NeedsKey`) and an
+        // offline one none, so the two never share a digest.
+        let mut digest = Vec::new();
+        for epoch in &epochs {
+            digest.extend_from_slice(epoch.as_bytes());
+            digest.push(b'\n');
+        }
+        Ok(QueryPlan::Rewritten {
+            physical: Box::new(physical),
+            residual,
+            epochs: EpochSetId(sha256(&digest)),
+            incomplete: incomplete.then(|| db_address(&address)),
+        })
+    }
+
+    fn report_incomplete_query(&self, table: &str, space: &jazz::e2ee::SpaceAddress) {
+        let code = self
+            .shared
+            .keys
+            .borrow()
+            .incomplete_query_code(&unchecked_address(space));
+        self.shared.report(Report::Unreadable(Unreadable {
+            table: table.to_owned(),
+            id: None,
+            column: None,
+            code,
+            space: Some(space.clone()),
+        }));
+    }
+
+    fn seal_stream(&self, target: &StreamTarget<'_>) -> Result<Box<dyn StreamSealer>, SealError> {
+        let refused = |message: &str| SealError::Refused(rejected(message));
+        let plan = self
+            .plan(target.table)
+            .ok_or_else(|| refused("a streamed value of a table that is not encrypted"))?;
+        let codec = plan
+            .columns
+            .get(target.column)
+            .ok_or_else(|| refused("a streamed value of a column that is not encrypted"))?;
+        if self.shared.keys.borrow().closed {
+            return Err(SealError::Refused(closed()));
+        }
+        let row_id = target.row.0.to_string();
+        let identifier = match plan.self_space() {
+            true => Some(row_id.clone()),
+            false => identifier(target.space)
+                .map_err(|()| refused("a streamed value's space is not a row ID"))?,
+        }
+        .ok_or_else(|| refused("a streamed value names its space"))?;
+        let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
+            .map_err(SealError::Refused)?;
+        self.check_rotation(&address)?;
+        let keys = self.shared.keys.borrow();
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
+        let catalogue = keys
+            .catalogue
+            .as_ref()
+            .ok_or(SealError::Refused(not_observed()))?;
+        let column =
+            column(catalogue, target.table, target.column, codec).map_err(SealError::Refused)?;
+        let suite = self
+            .shared
+            .registry
+            .select(&self.shared.selected)
+            .map_err(|error| SealError::Refused(failed(error.into())))?;
+        let row = RowTarget {
+            domain: &self.shared.content,
+            space: &address,
+            table_id: catalogue.table(target.table).map_err(SealError::Refused)?,
+            row_id: &row_id,
+        };
+        let (writer, prefix) = begin_stream(
+            &suite,
+            &key,
+            &row,
+            &column,
+            &mut **self.shared.random.borrow_mut(),
+        )
+        .map_err(|error| match error {
+            ContentError::NotStreamable => refused("only unindexed bytes columns stream"),
+            error => SealError::Refused(failed(error)),
+        })?;
+        Ok(Box::new(Sealer { writer, prefix }))
+    }
+}
+
+/// The plans of every declared table.
+pub(crate) fn plans(
+    declarations: &E2eeDeclarations,
+) -> Result<BTreeMap<String, TablePlan>, crate::error::ClientError> {
+    use crate::error::ClientError;
+    let mut plans = BTreeMap::new();
+    for (table, entry) in &declarations.tables {
+        if let Some(name) = entry
+            .equality
+            .iter()
+            .find(|name| !entry.columns.contains_key(*name))
+        {
+            return Err(ClientError::Settings(format!(
+                "table `{table}`: the equality index `{name}` is not an encrypted column"
+            )));
+        }
+        let mut columns = BTreeMap::new();
+        for (name, column) in &entry.columns {
+            columns.insert(
+                name.clone(),
+                ColumnCodec::new(
+                    name,
+                    &column.plain,
+                    column.cell_type(),
+                    entry.equality.contains(name),
+                )?,
+            );
+        }
+        plans.insert(
+            table.clone(),
+            TablePlan {
+                entry: entry.clone(),
+                columns,
+            },
+        );
+    }
+    Ok(plans)
+}

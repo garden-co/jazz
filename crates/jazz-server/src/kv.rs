@@ -8,8 +8,8 @@
 //! rows use too, and wait for it (at most the one runtime job or tick slice
 //! in progress). The store commits with `synchronous = FULL`, so a returned
 //! write is durable and `flush` has nothing left to do. Reads see what was
-//! committed when they begin, on a connection of their own: they never wait
-//! for the runtime.
+//! committed when they begin. Reads on a separate connection do not wait
+//! for the runtime. Reads on the store thread wait for preceding work.
 
 use std::sync::{Arc, mpsc};
 
@@ -22,7 +22,8 @@ pub(crate) type KvResult<T> = Result<T, String>;
 
 pub(crate) struct HostKv {
     table: HostTable,
-    /// Reads go here; servers only write through `HostKv` so far.
+    /// Reads go here, seeing what the store committed; servers only write
+    /// through `HostKv` and read through the store's thread, so far.
     #[cfg_attr(not(test), allow(dead_code))]
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
@@ -46,21 +47,58 @@ impl HostKv {
         &self,
         f: impl FnOnce(&dyn HostTables, HostTable) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
+        self.call_queued(f, || {})
+    }
+
+    /// [`Self::call`], running `queued` once `f` is queued on the store's
+    /// thread, before waiting for its answer.
+    fn call_queued<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&dyn HostTables, HostTable) -> Result<T, jazz::db::Error> + Send + 'static,
+        queued: impl FnOnce(),
+    ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         let table = self.table;
         self.store.send(Box::new(move |tables| {
             let _ = reply.send(f(tables, table).map_err(|error| error.to_string()));
         }))?;
+        queued();
         answer
             .recv()
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    /// The value at `key`, read on a connection of its own: what the store
+    /// has committed, without waiting for the store's thread (a held runtime
+    /// job does not delay it). On a shared in-memory database that
+    /// connection is locked out while the store's connection holds a write;
+    /// use [`Self::all_on_store`] where that can matter.
     #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
             .map_err(|error| error.to_string())
+    }
+
+    /// Every pair of the table, read on the store's own connection in one
+    /// job. This waits for an open write rather than reading through a
+    /// second connection, which can be locked out on a memory store.
+    /// `queued` runs once the read is queued on the store's thread.
+    pub(crate) fn all_on_store(&self, queued: impl FnOnce()) -> KvResult<Vec<HostPair>> {
+        self.call_queued(
+            move |tables, table| jazz::db::block_on(tables.host_prefix(table, &[])),
+            queued,
+        )
+    }
+
+    /// Write `value` at `key` unless a value is there already: the value
+    /// in force afterwards, `None` when it is `value`.
+    #[cfg(test)]
+    pub(crate) fn put_if_absent(&self, key: &[u8], value: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        let (key, value) = (key.to_vec(), value.to_vec());
+        self.call(move |tables, table| {
+            jazz::db::block_on(tables.host_put_if_absent(table, &key, &value))
+        })
     }
 
     /// Write every pair in one transaction: all or none.

@@ -1,0 +1,165 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "31110b9dad163ba4b8f325e3b30fb0a3c1b469c9a42f4ed87d4ad9bd0762330c"
+  },
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "canvases": {
+      "columns": { "roomId": "uuid", "title": "string" },
+      "relations": {
+        "messagesViaCanvas": { "reverse": "messages", "relation": "canvas" },
+        "room": { "rel": "rooms", "column": "roomId" },
+        "strokesViaCanvas": { "reverse": "strokes", "relation": "canvas" }
+      }
+    },
+    "joinRequests": {
+      "columns": { "roomId": "uuid", "requester": "uuid", "profileId": "uuid" },
+      "relations": {
+        "profile": { "rel": "profiles", "column": "profileId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "messages": {
+      "columns": {
+        "roomId": "uuid",
+        "senderId": "uuid",
+        "text": "bytes",
+        "attachment": "bytes",
+        "attachmentName": "bytes",
+        "attachmentType": "string?",
+        "attachmentSize": "int?",
+        "canvasId": "uuid?"
+      },
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "reactionsViaMessage": { "reverse": "reactions", "relation": "message" },
+        "room": { "rel": "rooms", "column": "roomId" },
+        "sender": { "rel": "profiles", "column": "senderId" }
+      },
+      "indexes": [["roomId", "$createdAt"]],
+      "encryption": {
+        "space": "roomId",
+        "scope": "rooms",
+        "columns": { "attachment": "bytes?", "attachmentName": "string?", "text": "string" }
+      }
+    },
+    "profiles": {
+      "columns": {
+        "author": "uuid",
+        "displayName": "string",
+        "avatar": "bytes?",
+        "avatarType": "string?"
+      },
+      "relations": {
+        "joinRequestsViaProfile": { "reverse": "joinRequests", "relation": "profile" },
+        "membershipsViaProfile": { "reverse": "roomMembers", "relation": "memberProfile" },
+        "messagesViaSender": { "reverse": "messages", "relation": "sender" }
+      }
+    },
+    "reactions": {
+      "columns": { "roomId": "uuid", "messageId": "uuid", "author": "uuid", "emoji": "string" },
+      "relations": {
+        "message": { "rel": "messages", "column": "messageId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "readMarkers": {
+      "columns": { "roomId": "uuid", "reader": "uuid", "lastReadAt": "bytes" },
+      "relations": { "room": { "rel": "rooms", "column": "roomId" } },
+      "encryption": {
+        "space": "roomId",
+        "scope": "rooms",
+        "columns": { "lastReadAt": "timestamp" }
+      }
+    },
+    "roomMembers": {
+      "columns": { "roomId": "uuid", "memberAuthor": "uuid", "memberProfileId": "uuid?" },
+      "relations": {
+        "memberProfile": { "rel": "profiles", "column": "memberProfileId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "rooms": {
+      "columns": { "name": "string" },
+      "relations": {
+        "canvasesViaRoom": { "reverse": "canvases", "relation": "room" },
+        "joinRequestsViaRoom": { "reverse": "joinRequests", "relation": "room" },
+        "messagesViaRoom": { "reverse": "messages", "relation": "room" },
+        "reactionsViaRoom": { "reverse": "reactions", "relation": "room" },
+        "readMarkersViaRoom": { "reverse": "readMarkers", "relation": "room" },
+        "roomMembersViaRoom": { "reverse": "roomMembers", "relation": "room" }
+      }
+    },
+    "strokes": {
+      "columns": {
+        "canvasId": "uuid",
+        "roomId": "uuid",
+        "author": "uuid",
+        "color": "string",
+        "width": "int",
+        "points": { "array": "int" }
+      },
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    }
+  }
+}

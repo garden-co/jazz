@@ -26,3 +26,11 @@ export {
   type TestJazz,
   type TestUserConfig,
 } from "./test-jazz.js";
+export {
+  serveEncryptedTestApp,
+  openEncryptedTestDevice,
+  memoryTestAccountStore,
+  cleanUpTestApp,
+} from "./encrypted-app.js";
+export { pollTestValue } from "./poll-test-value.js";
+export { storedBytes } from "./stored-bytes.js";

@@ -9,6 +9,7 @@ import type { Db } from "./db.js";
 import { beginDbTransactionAfter } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { translateQuery } from "./query-adapter.js";
+import { retryAfterKey } from "../encryption/key-retry.js";
 
 // Use the real database and handles with a controlled asynchronous preparation callback.
 class PreparationSource extends DefaultRuntimeSource {
@@ -326,4 +327,30 @@ it("queues restoration with defaults and isolates returned and input bytes", asy
     payload: new Uint8Array([5]),
     label: "untitled",
   });
+});
+
+it("returns the committed row id when a transaction insert waits for its space key", async () => {
+  // The first attempt fails for want of a key and stores nothing; the write
+  // is staged again once the key is ready.
+  let keyPending = true;
+  vi.spyOn(source.client, "retryAfterKey").mockImplementation(<T>(operation: () => T) =>
+    retryAfterKey(
+      () => {
+        if (keyPending) {
+          keyPending = false;
+          throw Object.assign(new Error("key needed"), {
+            reason: "key-pending",
+            space: { scopeId: "0a", identifier: "0b" },
+          });
+        }
+        return operation();
+      },
+      async () => "retry",
+    ),
+  );
+  const tx = db.beginTransaction();
+  const inserted = tx.insert(app.documents, { payload: new Uint8Array([4]) });
+  expect(inserted.id).toEqual(expect.any(String));
+  await tx.commit().wait({ tier: "local" });
+  await expect(db.all(app.documents, { tier: "local-first" })).resolves.toEqual([inserted]);
 });

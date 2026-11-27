@@ -18,7 +18,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz-native-relay = { path = "../jazz-native-relay", optional = true }
-jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = [
+  "runtime",
+  "e2ee-client",
+] }
+jazz-e2ee-client = { path = "../jazz-e2ee-client" }
 jazz-codegen.workspace = true
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
@@ -28,7 +32,6 @@ futures = "0.3"
 base64 = "0.22"
 napi = { version = "3", features = ["napi6", "serde-json", "async"] }
 napi-derive = "3"
-libsodium-sys-stable = "=1.24.0"
 postcard = { version = "1.1", features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

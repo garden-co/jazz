@@ -233,18 +233,25 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
     }
 
     // The type map.
+    let encryption_entries = app.compiled.current_entries();
     out.push_str("interface Types extends AppTypes {\n");
     for table in &app.tables {
         let n = &table_names[&table.name];
         let _ = writeln!(out, "  {}: {{", prop(&table.name));
         let _ = writeln!(out, "    row: {};", n.row);
         let _ = writeln!(out, "    insert: {};", n.insert);
+        if encryption_entries.is_some_and(|entries| entries.values().any(|e| e.scope == table.name))
+        {
+            out.push_str("    encryptionSpace: true;\n");
+        }
         let columns: Vec<String> = table
             .columns
             .iter()
             .map(|c| {
+                // `encrypted: true` lets a keyless backend's types drop the
+                // column: its reads never carry one.
                 format!(
-                    "{}: {{ kind: \"{}\"; nullable: {}; value: {} }};",
+                    "{}: {{ kind: \"{}\"; nullable: {}; value: {}{} }};",
                     prop(&c.name),
                     kind(&c.ty.ty),
                     c.ty.nullable,
@@ -254,7 +261,8 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                             .fields
                             .get(&c.name)
                             .map_or_else(|| ts_type(&c.ty.ty), |row| row.clone()),
-                    }
+                    },
+                    if c.encrypted { "; encrypted: true" } else { "" }
                 )
             })
             .collect();

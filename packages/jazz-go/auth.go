@@ -282,20 +282,6 @@ func onToken(ctx, reason, token uintptr) (status int32) {
 	return 0 // "" signs the user out
 }
 
-func openUser(config string, id uint64, provider TokenProvider) (uintptr, uint64, error) {
-	providers.Store(id, provider)
-	var cerr uintptr
-	h := ffi.openUser(cstr(config), ffi.tokenCallback, uintptr(id), &cerr)
-	if err := takeError(cerr); err != nil || h == 0 {
-		releaseProvider(id)
-		if err == nil {
-			err = &Error{Kind: KindRefused, Message: "open failed"}
-		}
-		return 0, 0, err
-	}
-	return h, id, nil
-}
-
 // SessionStatus is whether someone is signed in.
 type SessionStatus string
 

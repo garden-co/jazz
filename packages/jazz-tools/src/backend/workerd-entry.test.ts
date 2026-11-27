@@ -65,4 +65,44 @@ describe("jazz-tools/backend under the workerd condition", () => {
     expect([...staticImports].filter((path) => /^jazz-wasm(\/pkg|$)/.test(path))).toEqual([]);
     expect([...reached].filter((path) => path.startsWith("jazz-wasm/pkg"))).toEqual([]);
   });
+
+  it("exports what the Node entry does, except the key-holding memoryPrivateStore", async () => {
+    // Value exports of each entry, by esbuild's metafile (types aside: the
+    // typecheck of an app's imports covers those).
+    const exportsOf = async (entry: string) => {
+      const result = await build({
+        entryPoints: [new URL(entry, import.meta.url).pathname],
+        bundle: true,
+        write: false,
+        metafile: true,
+        outdir: "out",
+        format: "esm",
+        platform: "neutral",
+        logLevel: "silent",
+        plugins: [
+          {
+            name: "external",
+            setup(b) {
+              b.onResolve({ filter: /^[^./]/ }, (args) => ({ path: args.path, external: true }));
+            },
+          },
+        ],
+      });
+      const [output] = Object.values(result.metafile.outputs).filter((o) => o.entryPoint);
+      return new Set(output!.exports);
+    };
+    const node = await exportsOf("./index.ts");
+    const workerd = await exportsOf("./workerd.ts");
+
+    // A Worker holds no keys, so nothing to keep in a private store.
+    const nodeOnly = ["memoryPrivateStore"];
+    // The Durable Object surface only exists in a Worker.
+    const workerdOnly = ["jazzBackend", "routeToJazzBackend", "serveJazz"];
+
+    expect([...node].filter((name) => !workerd.has(name)).sort()).toEqual(nodeOnly);
+    expect([...workerd].filter((name) => !node.has(name)).sort()).toEqual(workerdOnly);
+    for (const name of ["keyless", "EncryptionError", "unreadableRows"]) {
+      expect(workerd, name).toContain(name);
+    }
+  });
 });

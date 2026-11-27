@@ -117,6 +117,7 @@ pub(crate) async fn connect(
     credential: Bearer,
     endpoint: &str,
     own_bundle: Option<String>,
+    plan: &crate::encryption::Plan,
     place: &mut crate::handle::Place<'_>,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
     let app = context.app_id;
@@ -135,9 +136,13 @@ pub(crate) async fn connect(
         };
         context.backend_secret = Some(STAND_IN_SECRET.to_owned());
         place.hold(&mut context, crate::handle::Owner::Machine)?;
-        let client =
-            JazzClient::connect_with_native_transport_bearer(context, connector, first.clone())
-                .await?;
+        let client = JazzClient::connect_with(
+            context,
+            Some(connector),
+            Some(first.clone()),
+            plan.keyless(),
+        )
+        .await?;
         let user = User {
             account: SYSTEM_ACCOUNT_ID,
             issuer: SYSTEM_ISSUER.to_owned(),
@@ -169,8 +174,13 @@ pub(crate) async fn connect(
         &mut context,
         crate::handle::Owner::Account(signed_in.account),
     )?;
-    let client =
-        JazzClient::connect_with_native_transport_bearer(context, connector, first.clone()).await?;
+    let client = JazzClient::connect_with(
+        context,
+        Some(connector),
+        Some(first.clone()),
+        plan.keyless(),
+    )
+    .await?;
     let user = User {
         account: signed_in.account,
         issuer: signed_in.identity.issuer,

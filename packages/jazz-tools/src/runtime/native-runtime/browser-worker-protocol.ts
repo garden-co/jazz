@@ -406,6 +406,12 @@ export interface BrowserWorkerInitOptions {
   sessionClaims: Record<string, unknown>;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
+  /**
+   * For an app that declares encryption: its compiled bindings and
+   * environment, from which the worker builds keyless hooks. The worker keeps
+   * sealed rows and holds no keys.
+   */
+  keyless?: { bindings: string; environment: string };
 }
 
 export interface BrowserSharedWorkerConnectRequest {

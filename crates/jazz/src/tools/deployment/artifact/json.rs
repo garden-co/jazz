@@ -332,10 +332,54 @@ fn inline(value: &Json) -> String {
     }
 }
 
+/// `value` on one line, if that takes at most `budget` columns. Stops as
+/// soon as it doesn't fit, so deciding costs at most a line's width: printing
+/// each subtree whole at every level made printing quadratic in the depth.
+fn inline_within(value: &Json, budget: usize) -> Option<String> {
+    fn push(out: &mut String, used: &mut usize, text: &str, budget: usize) -> bool {
+        *used += text.chars().count();
+        if *used > budget {
+            return false;
+        }
+        out.push_str(text);
+        true
+    }
+    fn walk(out: &mut String, used: &mut usize, value: &Json, budget: usize) -> bool {
+        match value {
+            Json::Null => push(out, used, "null", budget),
+            Json::Bool(b) => push(out, used, if *b { "true" } else { "false" }, budget),
+            Json::Number(n) => push(out, used, n, budget),
+            Json::String(s) => push(out, used, &quote(s), budget),
+            Json::Array(items) => {
+                push(out, used, "[", budget)
+                    && items.iter().enumerate().all(|(i, item)| {
+                        (i == 0 || push(out, used, ", ", budget)) && walk(out, used, item, budget)
+                    })
+                    && push(out, used, "]", budget)
+            }
+            Json::Object(entries) if entries.is_empty() => push(out, used, "{}", budget),
+            Json::Object(entries) => {
+                push(out, used, "{ ", budget)
+                    && entries.iter().enumerate().all(|(i, (key, item))| {
+                        (i == 0 || push(out, used, ", ", budget))
+                            && push(out, used, &quote(key), budget)
+                            && push(out, used, ": ", budget)
+                            && walk(out, used, item, budget)
+                    })
+                    && push(out, used, " }", budget)
+            }
+        }
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    walk(&mut out, &mut used, value, budget).then_some(out)
+}
+
 /// `prefix` is how many columns precede the value on its line.
 fn write_value(out: &mut String, value: &Json, indent: usize, prefix: usize) {
-    let flat = inline(value);
-    let fits = prefix + flat.chars().count() <= WIDTH && !flat.contains('\n');
+    let flat = inline_within(value, WIDTH.saturating_sub(prefix))
+        .filter(|flat| prefix <= WIDTH && !flat.contains('\n'));
+    let fits = flat.is_some();
     match value {
         Json::Array(items) if !fits && !items.is_empty() => {
             out.push_str("[\n");
@@ -365,7 +409,10 @@ fn write_value(out: &mut String, value: &Json, indent: usize, prefix: usize) {
             pad(out, indent);
             out.push('}');
         }
-        _ => out.push_str(&flat),
+        _ => match flat {
+            Some(flat) => out.push_str(&flat),
+            None => out.push_str(&inline(value)),
+        },
     }
 }
 
@@ -391,4 +438,84 @@ fn quote(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod print_tests {
+    use super::*;
+
+    fn object(entries: Vec<(&str, Json)>) -> Json {
+        Json::Object(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+        )
+    }
+
+    fn text(s: &str) -> Json {
+        Json::String(s.to_owned())
+    }
+
+    #[test]
+    fn prints_a_value_on_one_line_only_when_it_fits() {
+        let short = object(vec![("a", Json::Array(vec![text("x"), Json::Null]))]);
+        assert_eq!(print(&short), "{ \"a\": [\"x\", null] }\n");
+        // 100 columns fit; 101 don't, and the key's column counts.
+        let fits = object(vec![("k", text(&"x".repeat(100 - 11)))]);
+        assert_eq!(print(&fits).lines().count(), 1);
+        assert_eq!(print(&fits).trim_end().chars().count(), 100);
+        let over = object(vec![("k", text(&"x".repeat(100 - 10)))]);
+        assert_eq!(
+            print(&over),
+            format!("{{\n  \"k\": \"{}\"\n}}\n", "x".repeat(90))
+        );
+        let nested = object(vec![(
+            "outer",
+            object(vec![
+                (
+                    "inner",
+                    Json::Array(vec![text(&"y".repeat(60)), text(&"z".repeat(30))]),
+                ),
+                ("n", Json::Number("1".into())),
+            ]),
+        )]);
+        assert_eq!(
+            print(&nested),
+            format!(
+                "{{\n  \"outer\": {{\n    \"inner\": [\n      \"{}\",\n      \"{}\"\n    ],\n    \"n\": 1\n  }}\n}}\n",
+                "y".repeat(60),
+                "z".repeat(30)
+            )
+        );
+    }
+
+    /// Whether a value fits on its line is decided by looking at no more
+    /// than the line's width of it, not by printing its whole subtree at
+    /// every level: a deep, wide document (an app's system tables and their
+    /// policies) prints in time linear in its size.
+    #[test]
+    fn printing_a_deep_wide_document_does_not_reprint_each_subtree() {
+        let mut value = Json::Null;
+        for depth in 0..400 {
+            let mut entries: Vec<(String, Json)> = (0..50)
+                .map(|i| {
+                    (
+                        format!("key{i}"),
+                        Json::String(format!("value {depth} {i}")),
+                    )
+                })
+                .collect();
+            entries.push(("child".to_owned(), value));
+            value = Json::Object(entries);
+        }
+        let started = std::time::Instant::now();
+        let printed = print(&value);
+        let took = started.elapsed();
+        assert!(printed.len() > 400 * 50 * 10);
+        assert!(
+            took < std::time::Duration::from_millis(1500),
+            "printing took {took:?}"
+        );
+    }
 }

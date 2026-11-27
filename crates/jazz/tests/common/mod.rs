@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use jazz::schema::JazzSchema;
-use jazz::tools::{PolicyExpr, Schema, TablePolicies};
+use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, Schema, TablePolicies};
 
 pub mod member_chat;
 
@@ -37,6 +37,34 @@ pub fn session_eq(column: &str, path: &[&str]) -> PolicyExpr {
 
 pub fn outer_eq(column: &str, outer_column: &str) -> PolicyExpr {
     session_eq(column, &["__jazz_outer_row", outer_column])
+}
+
+pub fn member_of_same_space(members_table: &str) -> PolicyExpr {
+    exists(
+        members_table,
+        vec![
+            outer_eq("scopeId", "scopeId"),
+            outer_eq("identifier", "identifier"),
+            session_eq("accountId", &["user"]),
+        ],
+    )
+}
+
+pub fn member_of_space(members_table: &str, space_table: &str, row_column: &str) -> PolicyExpr {
+    exists(
+        members_table,
+        vec![
+            PolicyExpr::Cmp {
+                column: "scopeId".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::TableIdentity {
+                    table: space_table.to_owned(),
+                },
+            },
+            outer_eq("identifier", row_column),
+            session_eq("accountId", &["user"]),
+        ],
+    )
 }
 
 pub fn exists(table: &str, conditions: Vec<PolicyExpr>) -> PolicyExpr {
@@ -164,7 +192,7 @@ pub fn reinstall(
     ))
     .unwrap();
     if authority {
-        jazz::db::block_on(db.set_authority());
+        jazz::db::block_on(db.set_authority()).unwrap();
     }
     db
 }

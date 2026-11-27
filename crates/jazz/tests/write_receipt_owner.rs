@@ -40,7 +40,7 @@ fn open(node: u8, path: Option<&Path>) -> Binding {
         None => block_on(Db::open(config)),
     }
     .unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     jazz::db::block_on(Binding::new(db, identity, true))
 }
 

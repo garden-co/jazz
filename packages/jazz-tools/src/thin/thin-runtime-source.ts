@@ -15,7 +15,8 @@ import {
   type RuntimeTokenOptions,
 } from "../runtime/runtime-source.js";
 import { ANONYMOUS_ISSUER, LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
-import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
+import { ThinRuntime, type ThinRefusalReview, type ThinRuntimeOptions } from "./thin-runtime.js";
+import type { ThinRefusalReason } from "./encrypted-guard.js";
 import { accountConfigBearer } from "../accounts/config-capability.js";
 import { bearerWebSocket } from "../runtime/credentialed-transport.js";
 
@@ -27,7 +28,13 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
   override readonly supportsBrowserWorker = false;
   override readonly supportsPolicyBypass = false;
 
-  constructor(private readonly options: ThinRuntimeOptions = {}) {
+  constructor(
+    private readonly options: ThinRuntimeOptions = {},
+    /** @internal How a refused operation on an encrypted column advises the app. */
+    private readonly refusalReason?: () => ThinRefusalReason,
+    /** @internal What such a refusal becomes (see `ThinRuntime.adviseRefusals`). */
+    private readonly refusalReview?: ThinRefusalReview,
+  ) {
     super();
   }
 
@@ -69,15 +76,16 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
       config.cookieSession && config.accountId ? accountConfigBearer(config) : undefined;
     const webSocket =
       this.options.WebSocket ?? (bearer ? bearerWebSocket(config.serverUrl!, bearer) : undefined);
-    return JazzClient.connectWithRuntime(
-      new ThinRuntime(schema, {
-        ...this.options,
-        ...(webSocket ? { WebSocket: webSocket } : {}),
-        ...(author ? { author } : {}),
-      }),
-      context,
-      runtimeOptions,
-    );
+    const runtime = new ThinRuntime(schema, {
+      ...this.options,
+      addCreatorAsMember:
+        !!(session?.account_id ?? config.accountId) &&
+        config.encryption?.addCreatorAsMember !== false,
+      ...(webSocket ? { WebSocket: webSocket } : {}),
+      ...(author ? { author } : {}),
+    });
+    if (this.refusalReason) runtime.adviseRefusals(this.refusalReason, this.refusalReview);
+    return JazzClient.connectWithRuntime(runtime, context, runtimeOptions);
   }
 
   override mintLocalFirstToken(options: RuntimeTokenOptions): string {

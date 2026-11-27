@@ -1,4 +1,5 @@
 import type { VitestPluginContext } from "vitest/node";
+import { storedBytes } from "../../src/testing/stored-bytes.js";
 import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
@@ -26,16 +27,28 @@ interface StartedJazzServer {
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  /** Its store is on disk, in `server.dataDir`. */
+  onDisk: boolean;
+}
+
+/** How a test's core starts; the first `jazzServerInfo` for an app id decides. */
+export interface JazzServerStartOptions {
+  /** Keep the core's store on disk (default: in memory), for {@link jazzServerStoreHolds}. */
+  onDisk?: boolean;
 }
 
 const DEFAULT_JAZZ_SERVER_KEY = "__default__";
 const jazzServerPromises = new Map<string, Promise<StartedJazzServer>>();
-async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
+async function startJazzServer(
+  appId?: string,
+  options: JazzServerStartOptions = {},
+): Promise<StartedJazzServer> {
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
   const server = await startLocalJazzServer({
     appId: appId ?? "00000000-0000-0000-0000-000000000001",
-    inMemory: true,
+    // On disk only for a test that looks at what the core stores.
+    inMemory: !options.onDisk,
     adminSecret,
     backendSecret,
   });
@@ -44,15 +57,19 @@ async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
     appId: server.appId,
     serverUrl: server.url,
     adminSecret: server.adminSecret,
+    onDisk: !!options.onDisk,
   };
 }
 
-async function getOrStartJazzServer(appId?: string): Promise<StartedJazzServer> {
+async function getOrStartJazzServer(
+  appId?: string,
+  options?: JazzServerStartOptions,
+): Promise<StartedJazzServer> {
   const key = appId ?? DEFAULT_JAZZ_SERVER_KEY;
   const existing = jazzServerPromises.get(key);
 
   if (!existing) {
-    const startedServer = startJazzServer(appId).catch((error) => {
+    const startedServer = startJazzServer(appId, options).catch((error) => {
       jazzServerPromises.delete(key);
       throw error;
     });
@@ -63,12 +80,15 @@ async function getOrStartJazzServer(appId?: string): Promise<StartedJazzServer> 
   return existing;
 }
 
-export async function jazzServerInfo(appId?: string): Promise<{
+export async function jazzServerInfo(
+  appId?: string,
+  options?: JazzServerStartOptions,
+): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const started = await getOrStartJazzServer(appId);
+  const started = await getOrStartJazzServer(appId, options);
   return {
     appId: started.appId,
     serverUrl: started.serverUrl,
@@ -87,6 +107,24 @@ async function startedFor(url: string): Promise<[string, StartedJazzServer] | un
 async function stopStarted(started: StartedJazzServer): Promise<void> {
   await started.front?.stop();
   await started.server.stop();
+}
+
+/**
+ * Whether the files of the on-disk core at `serverUrl` (its own URL or its
+ * app backend's) hold each of `needles`, as UTF-8 bytes: what the server
+ * stores, read as an attacker with its disk would.
+ */
+export async function jazzServerStoreHolds(
+  serverUrl: string,
+  needles: string[],
+): Promise<boolean[]> {
+  const started = (await startedFor(serverUrl))?.[1];
+  if (!started) throw new Error(`No Jazz test server is running at ${serverUrl}`);
+  const dataDir = started.server.dataDir;
+  if (!started.onDisk || !dataDir)
+    throw new Error("This core keeps its store in memory: start it with onDisk");
+  const stored = await storedBytes(dataDir);
+  return needles.map((needle) => stored.includes(Buffer.from(needle, "utf8")));
 }
 
 /** Stop a core (named by its own URL or its app backend's) and its app backend. */

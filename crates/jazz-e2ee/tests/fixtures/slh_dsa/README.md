@@ -1,0 +1,3 @@
+The ACVP fixture is a byte-for-byte decoding of a hexadecimal field from NIST's SLH-DSA-SHA2-128s sample vectors: `keygen-1-sk` is the secret key of key-generation test case 1. This extract was made on 2026-11-26. See [NIST ACVP-Server at the source revision](https://github.com/usnistgov/ACVP-Server/tree/112690e8484dba7077709a05b1f3af58ddefdd5d/gen-val/json-files) and [the NIST notice](COPYRIGHT.txt).
+
+For the Jazz fixture, the commitment seed is the 32 bytes from 00 to 1f. Python's hashlib.blake2b with digest_size=32 produced the first 16 bytes under each of the three zero-terminated labels, concatenated in SK.seed, SK.prf, PK.seed order. From those bytes, fips205 0.5.0 produced the public key.

@@ -45,6 +45,11 @@ import {
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import { randomNodeUuidBytes } from "./runtime-entropy.js";
+import { buildEncryption, compiledBindings } from "../encryption/build.js";
+import { browserPrivateStore } from "../encryption/browser-store.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { declaredEntries, declaresEncryption } from "../encryption/plain-schema.js";
+import { Encryption } from "../encryption/index.js";
 import { accountConfigBearer } from "../accounts/config-capability.js";
 import { bearerWebSocket } from "./credentialed-transport.js";
 import type { WebSocketConstructor } from "./native-runtime/websocket.js";
@@ -166,8 +171,50 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     return this.module;
   }
 
+  /** The end-to-end encryption runtime built for this tab's account, for an app that declares encryption. */
+  private encryption:
+    | {
+        runtime: import("../encryption/private-store.js").StoreTarget;
+        store: import("../encryption/private-store.js").PrivateStore;
+        accountSecret?: () => string | undefined;
+        app: import("../schema-source.js").SchemaSourceInput;
+      }
+    | undefined;
+
   override async load(config: DbConfig): Promise<void> {
     this.module ??= await loadWasmModule(config.runtimeSources);
+    if (config.encryption && !this.encryption) {
+      if (!config.accountId) {
+        throw new Error("End-to-end encryption needs an account: sign in before opening the app");
+      }
+      if (!declaresEncryption(config.encryption.app)) return;
+      const host = this.module.EncryptionRuntime;
+      if (!host) {
+        throw new Error(
+          "The WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
+        );
+      }
+      const secret = config.encryption.accountSecret?.();
+      const built = await buildEncryption({
+        host,
+        app: config.encryption.app,
+        appId: clientScope(config),
+        environment: config.env ?? "dev",
+        accountId: config.accountId,
+        deviceAccountSecret: secret,
+        store: config.encryption.store ?? browserPrivateStore(),
+        addCreatorAsMember: config.encryption.addCreatorAsMember,
+      });
+      this.encryption = {
+        ...built,
+        accountSecret: config.encryption.accountSecret,
+        app: config.encryption.app,
+      };
+    }
+  }
+
+  override encryptionHandle(): Encryption | undefined {
+    return this.ownerRuntime?.encryptionHandle();
   }
 
   override admitConfig(config: DbConfig): void {
@@ -306,6 +353,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser worker connections require the native runtime adapter");
     }
+    ({ onRemoteLinkChange, onFailure } = relayWorkerLink(runtime, onRemoteLinkChange, onFailure));
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const backendMode = isBackendRuntime(config);
@@ -358,6 +406,15 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
+        // The worker holds and relays sealed rows and no keys: the tabs hold them.
+        ...(this.encryption
+          ? {
+              keyless: {
+                bindings: compiledBindings(this.encryption.app),
+                environment: config.env ?? "dev",
+              },
+            }
+          : {}),
       },
       createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
       {
@@ -387,6 +444,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
+    ({ onRemoteLinkChange, onFailure } = relayWorkerLink(runtime, onRemoteLinkChange, onFailure));
     const sessionClaims = sessionFromConfig(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
@@ -419,6 +477,18 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     subscriptionBacklogRows?: number,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
+      const encryption = this.encryption;
+      // The encryption runtime is built in `load` (it waits on the private
+      // store) and given to the first owner runtime, which owns it from then
+      // on. A runtime opened here after that one closed would have none, and
+      // building another cannot happen in this synchronous path: say so,
+      // rather than fail later with the wasm runtime's "not ready". Each
+      // `createDb` has its own source, so a new client is the way back.
+      if (this.ownerRuntime && encryption) {
+        throw new Error(
+          "This database's runtime closed, and its encryption runtime with it: open a new client to use an encrypted app again",
+        );
+      }
       this.ownerRuntime = new NativeRuntimeAdapter(
         this.wasmModule.WasmDb,
         schema,
@@ -434,6 +504,20 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           subscriptionBacklogRows,
           migrations,
           webSocket,
+          ...(encryption
+            ? {
+                encryption: {
+                  runtime: encryption.runtime,
+                  store: encryption.store,
+                  createHandle: (native, stateChanges) =>
+                    new Encryption(native, {
+                      accountSecret: encryption.accountSecret,
+                      stateChanges,
+                    }),
+                },
+                plainEntries: declaredEntries(resolveSchemaSource(encryption.app)),
+              }
+            : {}),
         },
       );
       return this.ownerRuntime;
@@ -489,5 +573,32 @@ export function browserWorkerTransportAuth(config: DbConfig): Record<string, unk
     // Sending them here would override JWT admission at the server and remove
     // this connection's scope-isolated client-relay capability.
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
+  };
+}
+
+/**
+ * The callbacks of one connection to the shared worker, also telling the
+ * tab's runtime the worker's server link: a tab has no link of its own, and
+ * its encryption is online only while the worker is connected. A connection
+ * that fails takes its link with it, as does one that replaced it.
+ *
+ * @internal Exported for tests.
+ */
+export function relayWorkerLink(
+  runtime: NativeRuntimeAdapter,
+  onRemoteLinkChange: BrowserWorkerConnectionContext["onRemoteLinkChange"],
+  onFailure: BrowserWorkerConnectionContext["onFailure"],
+): Pick<BrowserWorkerConnectionContext, "onRemoteLinkChange" | "onFailure"> {
+  const connection = {};
+  runtime.noteWorkerConnection(connection);
+  return {
+    onRemoteLinkChange: (state, link) => {
+      if (link) runtime.noteWorkerLink(connection, link);
+      onRemoteLinkChange?.(state, link);
+    },
+    onFailure: (error) => {
+      runtime.forgetWorkerLink(connection);
+      onFailure(error);
+    },
   };
 }

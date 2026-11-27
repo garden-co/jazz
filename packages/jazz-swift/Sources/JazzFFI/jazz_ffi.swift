@@ -831,6 +831,12 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func editText(table: String, id: String, column: String, editedFrom: String, text: String) throws 
     
     /**
+     * One end-to-end encryption operation by name, with JSON arguments and
+     * result. See the crate README for the operation names.
+     */
+    func encryptionCall(op: String, argsJson: String) throws  -> String
+    
+    /**
      * On a trusted backend client, a handle acting as `user_id` (the id the
      * main backend's `authenticate` names them by), with `claims_json` (a
      * JSON object; empty for `{}`) as the claims its permissions see. It
@@ -860,6 +866,26 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * `Session.linkDeviceAccount`.
      */
     func link(bearer: String) throws  -> String
+    
+    /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert. If the account is
+     * already a member, as this client has synced, returns that member's
+     * existing row and writes nothing. Two concurrent calls for the same
+     * account can both write a row.
+     */
+    func memberAdd(table: String, id: String, accountId: String, tier: String?) throws  -> String
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+    func memberList(table: String, id: String) throws  -> String
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+    func memberRemove(table: String, id: String, accountId: String) throws  -> UInt64
     
     /**
      * The first row the query matches.
@@ -1059,6 +1085,24 @@ public static func `open`(configJson: String)throws  -> JazzHandle  {
         uniffiCallStatus in
     uniffi_jazz_ffi_fn_constructor_jazzhandle_open(
         FfiConverterString.lower(configJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Opens an app that declares end-to-end encryption as an end user:
+     * `store` is this device's private store, which the app supplies (the
+     * config's `"environment"` names the deployment's environment, default
+     * `dev`). `tokens` is for `"auth": { "bearer": true }`, as in
+     * [`Self::open_with_tokens`].
+     */
+public static func openWithStore(configJson: String, store: PrivateStore, tokens: TokenProvider?)throws  -> JazzHandle  {
+    return try  FfiConverterTypeJazzHandle_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_constructor_jazzhandle_open_with_store(
+        FfiConverterString.lower(configJson),
+        FfiConverterTypePrivateStore_lower(store),
+        FfiConverterOptionTypeTokenProvider.lower(tokens),uniffiCallStatus
     )
 })
 }
@@ -1314,6 +1358,21 @@ open func editText(table: String, id: String, column: String, editedFrom: String
 }
     
     /**
+     * One end-to-end encryption operation by name, with JSON arguments and
+     * result. See the crate README for the operation names.
+     */
+open func encryptionCall(op: String, argsJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_encryption_call(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(op),
+        FfiConverterString.lower(argsJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * On a trusted backend client, a handle acting as `user_id` (the id the
      * main backend's `authenticate` names them by), with `claims_json` (a
      * JSON object; empty for `{}`) as the claims its permissions see. It
@@ -1376,6 +1435,56 @@ open func link(bearer: String)throws  -> String  {
     uniffi_jazz_ffi_fn_method_jazzhandle_link(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(bearer),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Admits an account to the space. Returns the membership row as JSON,
+     * with the same durability options as an insert. If the account is
+     * already a member, as this client has synced, returns that member's
+     * existing row and writes nothing. Two concurrent calls for the same
+     * account can both write a row.
+     */
+open func memberAdd(table: String, id: String, accountId: String, tier: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_add(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),
+        FfiConverterOptionString.lower(tier),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The visible membership rows of the space, as a JSON array.
+     */
+open func memberList(table: String, id: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_list(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Deletes the account's visible memberships. Returns the number the
+     * authority accepted in a serializable transaction.
+     */
+open func memberRemove(table: String, id: String, accountId: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_member_remove(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(accountId),uniffiCallStatus
     )
 })
 }
@@ -1716,6 +1825,498 @@ public func FfiConverterTypeJazzHandle_lift(_ handle: UInt64) throws -> JazzHand
 #endif
 public func FfiConverterTypeJazzHandle_lower(_ value: JazzHandle) -> UInt64 {
     return FfiConverterTypeJazzHandle.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A device's private store. Callbacks run synchronously on the client's
+ * thread. The app provides storage and platform protection for its keys.
+ */
+public protocol PrivateStore: AnyObject, Sendable {
+    
+    func openScope(scope: String) throws  -> UInt64
+    
+    func load(scope: String, doc: String) throws  -> StoredDocument?
+    
+    func save(scope: String, incarnation: UInt64, doc: String, bytes: Data, expected: UInt64?) throws  -> UInt64
+    
+    func list(scope: String) throws  -> [String]
+    
+    func delete(scope: String) throws 
+    
+    func protect(secret: Data) throws  -> Data
+    
+    func unprotect(blob: Data) throws  -> Data
+    
+    /**
+     * Reads every document and its revision in one snapshot of the opened
+     * scope. Return Wiped if the scope is missing or its incarnation changed.
+     */
+    func loadAll(scope: String, incarnation: UInt64) throws  -> [ScopeDocument]
+    
+}
+/**
+ * A device's private store. Callbacks run synchronously on the client's
+ * thread. The app provides storage and platform protection for its keys.
+ */
+open class PrivateStoreImpl: PrivateStore, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_jazz_ffi_fn_clone_privatestore(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_jazz_ffi_fn_free_privatestore(handle, $0) }
+    }
+
+    
+
+    
+open func openScope(scope: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_open_scope(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),uniffiCallStatus
+    )
+})
+}
+    
+open func load(scope: String, doc: String)throws  -> StoredDocument?  {
+    return try  FfiConverterOptionTypeStoredDocument.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_load(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterString.lower(doc),uniffiCallStatus
+    )
+})
+}
+    
+open func save(scope: String, incarnation: UInt64, doc: String, bytes: Data, expected: UInt64?)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_save(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterUInt64.lower(incarnation),
+        FfiConverterString.lower(doc),
+        FfiConverterData.lower(bytes),
+        FfiConverterOptionUInt64.lower(expected),uniffiCallStatus
+    )
+})
+}
+    
+open func list(scope: String)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_list(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),uniffiCallStatus
+    )
+})
+}
+    
+open func delete(scope: String)throws   {try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),uniffiCallStatus
+    )
+}
+}
+    
+open func protect(secret: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_protect(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(secret),uniffiCallStatus
+    )
+})
+}
+    
+open func unprotect(blob: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_unprotect(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(blob),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Reads every document and its revision in one snapshot of the opened
+     * scope. Return Wiped if the scope is missing or its incarnation changed.
+     */
+open func loadAll(scope: String, incarnation: UInt64)throws  -> [ScopeDocument]  {
+    return try  FfiConverterSequenceTypeScopeDocument.lift(try rustCallWithError(FfiConverterTypePrivateStoreError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_privatestore_load_all(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scope),
+        FfiConverterUInt64.lower(incarnation),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfacePrivateStore {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfacePrivateStore = UniffiVTableCallbackInterfacePrivateStore(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypePrivateStore.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface PrivateStore: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypePrivateStore.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface PrivateStore: handle missing in uniffiClone")
+            }
+        },
+        openScope: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<UInt64>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> UInt64 in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.openScope(
+                     scope: try FfiConverterString.lift(scope)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterUInt64.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        load: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            doc: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> StoredDocument? in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.load(
+                     scope: try FfiConverterString.lift(scope),
+                     doc: try FfiConverterString.lift(doc)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeStoredDocument.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        save: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            incarnation: UInt64,
+            doc: RustBuffer,
+            bytes: RustBuffer,
+            expected: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<UInt64>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> UInt64 in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.save(
+                     scope: try FfiConverterString.lift(scope),
+                     incarnation: try FfiConverterUInt64.lift(incarnation),
+                     doc: try FfiConverterString.lift(doc),
+                     bytes: try FfiConverterData.lift(bytes),
+                     expected: try FfiConverterOptionUInt64.lift(expected)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterUInt64.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        list: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [String] in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.list(
+                     scope: try FfiConverterString.lift(scope)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        delete: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.delete(
+                     scope: try FfiConverterString.lift(scope)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        protect: { (
+            uniffiHandle: UInt64,
+            secret: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.protect(
+                     secret: try FfiConverterData.lift(secret)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        unprotect: { (
+            uniffiHandle: UInt64,
+            blob: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.unprotect(
+                     blob: try FfiConverterData.lift(blob)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        },
+        loadAll: { (
+            uniffiHandle: UInt64,
+            scope: RustBuffer,
+            incarnation: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [ScopeDocument] in
+                guard let uniffiObj = try? FfiConverterTypePrivateStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadAll(
+                     scope: try FfiConverterString.lift(scope),
+                     incarnation: try FfiConverterUInt64.lift(incarnation)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeScopeDocument.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePrivateStoreError_lower
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfacePrivateStore> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfacePrivateStore>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitPrivateStore() {
+    uniffi_jazz_ffi_fn_init_callback_vtable_privatestore(UniffiCallbackInterfacePrivateStore.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivateStore: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<PrivateStore>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = PrivateStore
+
+    public static func lift(_ handle: UInt64) throws -> PrivateStore {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return PrivateStoreImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: PrivateStore) -> UInt64 {
+         if let rustImpl = value as? PrivateStoreImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivateStore {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PrivateStore, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateStore_lift(_ handle: UInt64) throws -> PrivateStore {
+    return try FfiConverterTypePrivateStore.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateStore_lower(_ value: PrivateStore) -> UInt64 {
+    return FfiConverterTypePrivateStore.lower(value)
 }
 
 
@@ -3440,6 +4041,121 @@ public func FfiConverterTypeWatch_lower(_ value: Watch) -> UInt64 {
 
 
 /**
+ * One named document in a private-store snapshot.
+ */
+public struct ScopeDocument: Equatable, Hashable {
+    public var doc: String
+    public var bytes: Data
+    public var revision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(doc: String, bytes: Data, revision: UInt64) {
+        self.doc = doc
+        self.bytes = bytes
+        self.revision = revision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ScopeDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScopeDocument: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScopeDocument {
+        return
+            try ScopeDocument(
+                doc: FfiConverterString.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScopeDocument, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.doc, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScopeDocument_lift(_ buf: RustBuffer) throws -> ScopeDocument {
+    return try FfiConverterTypeScopeDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScopeDocument_lower(_ value: ScopeDocument) -> RustBuffer {
+    return FfiConverterTypeScopeDocument.lower(value)
+}
+
+
+public struct StoredDocument: Equatable, Hashable {
+    public var bytes: Data
+    public var revision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(bytes: Data, revision: UInt64) {
+        self.bytes = bytes
+        self.revision = revision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StoredDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStoredDocument: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StoredDocument {
+        return
+            try StoredDocument(
+                bytes: FfiConverterData.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StoredDocument, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.bytes, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoredDocument_lift(_ buf: RustBuffer) throws -> StoredDocument {
+    return try FfiConverterTypeStoredDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoredDocument_lower(_ value: StoredDocument) -> RustBuffer {
+    return FfiConverterTypeStoredDocument.lower(value)
+}
+
+
+/**
  * What a call failed with. The field is `reason`, not `message`: in
  * Kotlin, `message` would clash with `Throwable.message`.
  */
@@ -3520,6 +4236,13 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Interrupted(interruption: String, queued: Bool, reason: String
     )
+    /**
+     * Contract 2: encryption refused the operation (`code` names the
+     * refusal), or hit an I/O failure (`io`). Last, so the variants before
+     * it keep their indexes.
+     */
+    case Encryption(code: String, reason: String, io: Bool
+    )
 
     
 
@@ -3589,6 +4312,11 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             interruption: try FfiConverterString.read(from: &buf), 
             queued: try FfiConverterBool.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
+            )
+        case 13: return .Encryption(
+            code: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf), 
+            io: try FfiConverterBool.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -3667,6 +4395,13 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             FfiConverterBool.write(queued, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             
+        
+        case let .Encryption(code,reason,io):
+            writeInt(&buf, Int32(13))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            FfiConverterBool.write(io, into: &buf)
+            
         }
     }
 }
@@ -3684,6 +4419,93 @@ public func FfiConverterTypeJazzError_lift(_ buf: RustBuffer) throws -> JazzErro
 #endif
 public func FfiConverterTypeJazzError_lower(_ value: JazzError) -> RustBuffer {
     return FfiConverterTypeJazzError.lower(value)
+}
+
+
+public 
+enum PrivateStoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case Conflict
+    case Wiped
+    case Failed(reason: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension PrivateStoreError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivateStoreError: FfiConverterRustBuffer {
+    typealias SwiftType = PrivateStoreError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivateStoreError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Conflict
+        case 2: return .Wiped
+        case 3: return .Failed(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrivateStoreError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .Conflict:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .Wiped:
+            writeInt(&buf, Int32(2))
+        
+        
+        case let .Failed(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateStoreError_lift(_ buf: RustBuffer) throws -> PrivateStoreError {
+    return try FfiConverterTypePrivateStoreError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateStoreError_lower(_ value: PrivateStoreError) -> RustBuffer {
+    return FfiConverterTypePrivateStoreError.lower(value)
 }
 
 #if swift(>=5.8)
@@ -3781,6 +4603,80 @@ fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeStoredDocument: FfiConverterRustBuffer {
+    typealias SwiftType = StoredDocument?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeStoredDocument.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeStoredDocument.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeScopeDocument: FfiConverterRustBuffer {
+    typealias SwiftType = [ScopeDocument]
+
+    public static func write(_ value: [ScopeDocument], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeScopeDocument.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ScopeDocument] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ScopeDocument]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeScopeDocument.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * A new device account's key as `jazz-auth-v1:…` text, for `"auth":
  * {"deviceKey": …}`: keep it as a password, in the platform's keychain.
@@ -3862,6 +4758,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_edit_text() != 14218) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_encryption_call() != 26273) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_for_user() != 56172) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3872,6 +4771,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_add() != 33716) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_list() != 47296) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_member_remove() != 50047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one() != 37106) {
@@ -4033,10 +4941,37 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_watch_cancel() != 64151) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_open_scope() != 60275) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_load() != 44620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_save() != 56055) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_list() != 38498) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_delete() != 32747) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_protect() != 49210) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_unprotect() != 58200) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_privatestore_load_all() != 33044) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_constructor_callcontrol_new() != 41143) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open() != 17356) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_store() != 6503) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_tokens() != 11789) {
@@ -4046,6 +4981,7 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitPrivateStore()
     uniffiCallbackInitStateListener()
     uniffiCallbackInitSubscriptionListener()
     uniffiCallbackInitTokenProvider()

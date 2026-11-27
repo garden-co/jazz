@@ -11,7 +11,7 @@ use jazz_app_support::jazz::tools::{
     DurabilityTier, JazzClient, JazzTransaction, ReadTier, Schema, SubscriptionStreamItem,
     TableSchema, Value,
 };
-use jazz_app_support::{AppFiles, AppId, Backend, Config, Jazz, Storage};
+use jazz_app_support::{AccountId, AppFiles, AppId, Backend, Config, Jazz, Storage};
 use serde_json::Value as Json;
 
 use crate::JazzError;
@@ -213,7 +213,7 @@ struct Uploads(HashMap<u64, Upload>);
 struct Upload {
     upload: jazz_app_support::jazz::tools::StreamingUpload,
     kind: jazz_app_support::jazz::db::StreamingMutationKind,
-    id: Option<jazz_app_support::ObjectId>,
+    id: jazz_app_support::ObjectId,
     table: TableSchema,
     name: String,
 }
@@ -334,18 +334,37 @@ impl Delivery {
     }
 }
 
+/// Chooses the error contract even if opening fails while parsing the config.
+pub(crate) fn open_contract(config: &str) -> u64 {
+    serde_json::from_str::<Json>(config)
+        .ok()
+        .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        .unwrap_or(1)
+}
+
 impl Core {
+    #[cfg(test)]
     pub fn open(config_json: &str) -> Result<Self> {
-        Self::open_with_tokens(config_json, None)
+        Self::open_with(config_json, None, None)
     }
 
-    /// [`Self::open`] for an end user signing in with the app's bearer
-    /// (`"auth": { "bearer": true }`): `tokens` gives it.
+    #[cfg(test)]
     pub fn open_with_tokens(
         config_json: &str,
         tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
     ) -> Result<Self> {
-        let (files, config, app_text) = config(config_json, tokens)?;
+        Self::open_with(config_json, tokens, None)
+    }
+
+    /// Opens an app that may declare end-to-end
+    /// encryption: `store` is the device's private store (`"environment"` in
+    /// the config names the deployment's environment, default `dev`).
+    pub fn open_with(
+        config_json: &str,
+        tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
+        store: Option<jazz_app_support::EncryptionConfig>,
+    ) -> Result<Self> {
+        let (files, config, app_text) = config(config_json, tokens, store)?;
         let contract = convert::parse(config_json, "the config")?
             .get("contract")
             .and_then(Json::as_u64)
@@ -356,6 +375,9 @@ impl Core {
         let relations = convert::Relations::read(&app_text)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
+        // A device's schema as the app sees it: encrypted columns have their
+        // plaintext types.
+        let schema = jazz.plain_schema(schema);
         Ok(Self::with(
             jazz,
             Arc::new(schema),
@@ -751,22 +773,14 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let (id, values, committed) =
-                client.insert_with_id(&name, id.map(|id| *id.uuid()), cells)?;
+            let row_id = id.unwrap_or_else(jazz_app_support::ObjectId::new);
+            let (id, values, committed) = jazz_app_support::with_key_wait(&client, || {
+                client.insert_with_id(&name, *row_id.uuid(), cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
-            let fields = table
-                .columns
-                .columns
-                .iter()
-                .zip(values)
-                .map(
-                    |(column, value)| jazz_app_support::jazz::tools::QueryResultField {
-                        name: column.name.as_str().to_owned(),
-                        value,
-                    },
-                )
-                .collect();
+            let fields = jazz_app_support::inserted_fields(&client, &name, values)?;
             Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())
@@ -794,7 +808,11 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
+            let cells: std::collections::HashMap<_, _> = cells.into_iter().collect();
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.upsert(&name, *id.uuid(), cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             // Read before the wait, as insert answers with what it wrote: by
             // the time the server accepts it, someone may have deleted or
@@ -833,7 +851,10 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.restore(&name, id, cells)?;
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.restore(&name, id, cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
             read_back(&client, &table, &name, id).await
@@ -856,7 +877,10 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.update(&name, id, cells)?;
+            let committed = jazz_app_support::with_key_wait(&client, || {
+                client.update(&name, id, cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -895,7 +919,7 @@ impl Core {
             let edits = whole_pages(&client, &name, id, edits).await?;
             let committed = client
                 .update_with_edits(&name, id, cells, edits)
-                .map_err(|error| match error {
+                .map_err(|error| match error.into_original() {
                     // As jazz-app-support reports an edit of a row this client
                     // cannot see.
                     jazz_app_support::jazz::tools::JazzError::Write(message)
@@ -919,7 +943,8 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.delete(&name, id)?;
+            let committed =
+                jazz_app_support::with_key_wait(&client, || client.delete(&name, id)).await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -1170,8 +1195,10 @@ impl Core {
         let open = self.open.clone();
         self.wait(self.open_jazz()?.with_client(move |client| async move {
             open.check()?;
-            let upload =
-                client.begin_streaming_upload(&name, cells.into_iter().collect(), &column)?;
+            let (id, upload) = client
+                .begin_streaming_upload_for(kind, &name, id, cells.into_iter().collect(), &column)
+                .await?;
+            open.check()?;
             clean_up_before_stop();
             UPLOADS.with(|u| {
                 u.borrow_mut().0.insert(
@@ -1230,7 +1257,7 @@ impl Core {
                     jazz_app_support::Error::Config(format!("upload {upload} is not open"))
                 })?;
             let (id, committed) = client
-                .finish_streaming_upload(entry.upload, entry.kind, entry.id)
+                .finish_streaming_upload(entry.upload, entry.kind, Some(entry.id))
                 .await?;
             settle(&client, committed, tier).await?;
             read_back(&client, &entry.table, &entry.name, id).await
@@ -1375,6 +1402,83 @@ impl Core {
         Ok(jazz
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
+    }
+
+    pub fn member_add(
+        &self,
+        table: &str,
+        id: &str,
+        account: &str,
+        tier: Option<DurabilityTier>,
+    ) -> Result<String> {
+        self.reachable(tier)?;
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let account = AccountId(*convert::parse_id(account, "the account id")?.uuid());
+        let durable;
+        let jazz = match tier {
+            Some(tier) => {
+                durable = jazz.durable(tier);
+                &durable
+            }
+            None => &jazz,
+        };
+        let row = self.wait_answer(jazz.add_member_by_name(table, id, account))?;
+        Ok(serde_json::json!(row).to_string())
+    }
+
+    pub fn member_list(&self, table: &str, id: &str) -> Result<String> {
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let rows = self.wait(jazz.list_members_by_name(table, id))?;
+        Ok(serde_json::json!(rows).to_string())
+    }
+
+    pub fn member_remove(&self, table: &str, id: &str, account: &str) -> Result<u64> {
+        let jazz = self.open_jazz()?;
+        let id = convert::parse_id(id, "the space id")?;
+        let account = AccountId(*convert::parse_id(account, "the account id")?.uuid());
+        let count = self.wait_answer(jazz.remove_member_by_name(table, id, account))?;
+        Ok(count as u64)
+    }
+
+    /// One end-to-end encryption operation by name, with JSON arguments and result.
+    pub fn encryption_call(&self, op: &str, args: &str) -> Result<String> {
+        let args = if args.trim().is_empty() {
+            Json::Object(Default::default())
+        } else {
+            convert::parse(args, "the arguments")?
+        };
+        let encryption = self.open_jazz()?.encryption();
+        let result = match op {
+            "waitUntilReady" => {
+                let timeout = match args.get("timeoutMs") {
+                    None => 30_000,
+                    Some(given) => given.as_u64().ok_or_else(|| {
+                        refused("timeoutMs must be a non-negative whole number of milliseconds")
+                    })?,
+                };
+                Json::from(block_on(
+                    encryption.ready(std::time::Duration::from_millis(timeout)),
+                )?)
+            }
+            "state" => block_on(encryption.state())?,
+            "reports" => {
+                let reports = block_on(encryption.take_reports())?;
+                let reports = reports
+                    .iter()
+                    .map(|report| convert::parse(report, "the encryption report"))
+                    .collect::<Result<Vec<_>>>()?;
+                Json::from(reports)
+            }
+            _ => match block_on(encryption.call(op, args)) {
+                // Whatever closing cut short reports (the store's callback
+                // shut, say).
+                Err(_) if self.open.is_closed() => return Err(FfiError::Closed),
+                called => called?,
+            },
+        };
+        Ok(result.to_string())
     }
 
     /// The connection's status as JSON (`{ "link": … }`).
@@ -1569,11 +1673,17 @@ impl Core {
     /// waiting calls end `Closed` at once, and what it began is cleaned up.
     ///
     /// Returns once no host callback runs (but the caller's own).
+    ///
+    /// From the client's own thread (inside the private store's callback)
+    /// it waits for nothing: see [`Self::close_on_client_thread`].
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
         // Before `closed` is set: an open of the store right after this
         // close must wait for it, not be refused.
         if !self.derived {
             self.jazz.begin_stopping();
+        }
+        if self.jazz.on_client_thread() {
+            return self.close_on_client_thread(timeout);
         }
         if !self.open.closed.close() {
             return Ok(());
@@ -1583,21 +1693,10 @@ impl Core {
             // transactions roll back and its uploads abort. Its ids are read
             // on the client's thread, after any begin that came before.
             let open = self.open.clone();
-            let _ = block_on(self.jazz.with_client(move |client| async move {
-                let owned: Vec<u64> = open.owned().drain().collect();
-                for id in owned {
-                    if let Some((transaction, _)) =
-                        TRANSACTIONS.with(|t| t.borrow_mut().0.remove(&id))
-                    {
-                        let _ = transaction.rollback();
-                    }
-                    let upload = UPLOADS.with(|u| u.borrow_mut().0.remove(&id));
-                    if let Some(entry) = upload {
-                        let _ = client.abort_streaming_upload(entry.upload).await;
-                    }
-                }
-                Ok(())
-            }));
+            let _ = block_on(
+                self.jazz
+                    .with_client(move |client| release_owned(open, client)),
+            );
             self.end_subscriptions();
             self.close_gates();
             return Ok(());
@@ -1620,6 +1719,54 @@ impl Core {
         self.close_gates();
         result?;
         Ok(())
+    }
+
+    /// [`Self::close_within`] called on the client's own thread, inside a
+    /// callback it makes (the private store's): everything closing waits
+    /// for runs on that thread, after the callback returns, so it must not
+    /// wait here, nor clean up under the operation that called the store.
+    /// The handle is closed when this returns (later calls fail `Closed`, no
+    /// new host callback starts); the clean-up and the stop are sent to the
+    /// client, which runs them once the callback returns. A timeout is not
+    /// waited for: nothing drains. The writes it asked for that are lost
+    /// fail it `Unsynced { pending }` at once, as a close that waited would
+    /// once its timeout ran out.
+    fn close_on_client_thread(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        use futures_util::FutureExt as _;
+        if !self.open.closed.close() {
+            return Ok(());
+        }
+        // Counted before the stop: a close that waited counts them as it ends.
+        let lost = if self.derived {
+            None
+        } else {
+            timeout.and_then(|timeout| self.jazz.unsynced_here(timeout))
+        };
+        for gate in self.gates() {
+            gate.shut();
+        }
+        // Each is sent on its first poll; its answer isn't waited for.
+        if self.derived {
+            let open = self.open.clone();
+            let _ = self
+                .jazz
+                .with_client(move |client| release_owned(open, client))
+                .now_or_never();
+        } else {
+            let _ = self
+                .jazz
+                .with_client(|client| async move {
+                    clean_up_open(client).await;
+                    Ok(())
+                })
+                .now_or_never();
+            let _ = self.jazz.shutdown().now_or_never();
+        }
+        self.end_subscriptions();
+        match lost {
+            Some(pending) => Err(jazz_app_support::Error::Unsynced { pending }.into()),
+            None => Ok(()),
+        }
     }
 
     /// Each open watch's last call: `None`, the app closed.
@@ -1647,6 +1794,22 @@ pub(crate) fn clean_up(jazz: &Jazz) {
         clean_up_open(client).await;
         Ok(())
     }));
+}
+
+/// What a derived handle (`open`) began, rolled back and aborted on the
+/// client's thread as it closes: the client it shares goes on.
+async fn release_owned(open: Open, client: JazzClient) -> jazz_app_support::Result<()> {
+    let owned: Vec<u64> = open.owned().drain().collect();
+    for id in owned {
+        if let Some((transaction, _)) = TRANSACTIONS.with(|t| t.borrow_mut().0.remove(&id)) {
+            let _ = transaction.rollback();
+        }
+        let upload = UPLOADS.with(|u| u.borrow_mut().0.remove(&id));
+        if let Some(entry) = upload {
+            let _ = client.abort_streaming_upload(entry.upload).await;
+        }
+    }
+    Ok(())
 }
 
 /// [`clean_up`], on the client's thread.
@@ -2066,6 +2229,7 @@ pub(crate) fn generate_device_key() -> Result<String> {
 fn config(
     config_json: &str,
     tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
+    store: Option<jazz_app_support::EncryptionConfig>,
 ) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
@@ -2081,6 +2245,8 @@ fn config(
     let mut session = None;
     let mut auth = None;
     let mut insecure = false;
+    let mut environment = None;
+    let mut add_creator_as_member = true;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -2100,6 +2266,12 @@ fn config(
             "storage" => storage = Some(text()?),
             "backendSecret" => backend_secret = Some(text()?),
             "adminSecret" => admin_secret = Some(text()?),
+            "environment" => environment = Some(text()?),
+            "addCreatorAsMember" => {
+                add_creator_as_member = value
+                    .as_bool()
+                    .ok_or_else(|| refused("config.addCreatorAsMember must be true or false"))?;
+            }
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
             // An end user over plain http:// to a host other than
@@ -2265,6 +2437,12 @@ fn config(
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
     }
+    if let Some(mut encryption) = store {
+        if let Some(environment) = environment {
+            encryption = encryption.environment(environment);
+        }
+        result = result.encryption(encryption.add_creator_as_member(add_creator_as_member));
+    }
     let files = AppFiles::new(
         app.clone().into_bytes(),
         permissions.map(String::into_bytes),
@@ -2361,6 +2539,33 @@ mod tests {
                 .with_client(|_| async { Ok(UPLOADS.with(|u| u.borrow().0.len())) }),
         )
         .unwrap()
+    }
+
+    /// Alice's backend must refuse a plain-column insert upload into an
+    /// encrypted table when its required siblings are missing, before she
+    /// can send bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_encrypted_table_refuses_an_incomplete_upload_at_begin() {
+        let server = jazz_server::JazzServer::start().await.unwrap();
+        let config = serde_json::json!({
+            "app": include_str!("../../jazz-app/tests/fixtures/encrypted/jazz.app.json"),
+            "permissions": include_str!("../../jazz-app/tests/fixtures/encrypted/jazz.permissions.json"),
+            "appId": server.app_id().to_string(),
+            "serverUrl": server.base_url(),
+            "backendSecret": server.backend_secret(),
+            "adminSecret": server.admin_secret(),
+            "session": { "subject": "alice" },
+        });
+        let alice = Core::open(&config.to_string()).expect("open the encrypted backend");
+        let error = alice
+            .upload_begin("tasks", "label", "insert", None, None)
+            .expect_err("refuse before the upload can accept bytes");
+        assert!(
+            matches!(error, FfiError::Refused(ref reason) if reason.contains("missing required field")),
+            "{error:?}"
+        );
+        assert_eq!(open_uploads(&alice), 0);
+        alice.close().unwrap();
     }
 
     /// Holds the client's thread until the returned sender is used.

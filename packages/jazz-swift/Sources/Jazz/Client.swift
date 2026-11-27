@@ -4,9 +4,9 @@ import JazzFFI
 /// Why a Jazz call failed.
 public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     /// Refused: validation, permissions, or not supported yet.
-    case refused(String)
+    case refused(String, encryptionCode: String? = nil)
     /// Storage or network.
-    case io(String)
+    case io(String, encryptionCode: String? = nil)
     /// The client was closed.
     case closed
     /// A row or delta didn't decode into the bindings' types (stale bindings?).
@@ -34,8 +34,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .refused(let message): return "refused: \(message)"
-        case .io(let message): return "io: \(message)"
+        case .refused(let message, _): return "refused: \(message)"
+        case .io(let message, _): return "io: \(message)"
         case .closed: return "closed"
         case .decoding(let message): return "decoding: \(message)"
         case .permissionDenied(let message): return "permission denied: \(message)"
@@ -65,6 +65,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         switch error {
         case .Refused(let message): return JazzError.refused(message)
         case .Io(let message): return JazzError.io(message)
+        case .Encryption(let code, let reason, let io):
+            return io ? JazzError.io(reason, encryptionCode: code) : JazzError.refused(reason, encryptionCode: code)
         case .Closed: return JazzError.closed
         case .Permission(let message): return JazzError.permissionDenied(message)
         case .NotSupported(let message): return JazzError.notSupported(message)
@@ -99,6 +101,9 @@ public struct Config: Sendable {
     public var dataDir: String?
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
+    /// Where this device keeps its encryption keys, for an app that declares
+    /// end-to-end encryption (an app that does is refused without it).
+    public var encryption: EncryptionConfig?
 
     /// Swift apps are clients (`.client`, `.local`); the app's backend runs
     /// in TypeScript (`createJazz`).
@@ -164,6 +169,12 @@ public struct Config: Sendable {
         case .bearer?: object["auth"] = .object(["bearer": .bool(true)])
         case nil: break
         }
+        if let encryption {
+            object["environment"] = .string(encryption.environment)
+            if !encryption.addCreatorAsMember {
+                object["addCreatorAsMember"] = .bool(false)
+            }
+        }
         return try Coding.json(JSONValue.object(object))
     }
 }
@@ -212,7 +223,15 @@ public final class Client: Sendable {
     {
         let json = try config.json(app: app)
         let handle: JazzHandle
-        if case .bearer(let tokens)? = config.auth {
+        if let encryption = config.encryption {
+            let store = StoreBridge(encryption.store)
+            var provider: Tokens?
+            if case .bearer(let tokens)? = config.auth { provider = Tokens(tokens) }
+            let tokens = provider
+            handle = try await run {
+                try JazzHandle.openWithStore(configJson: json, store: store, tokens: tokens)
+            }
+        } else if case .bearer(let tokens)? = config.auth {
             let provider = Tokens(tokens)
             handle = try await run { try JazzHandle.openWithTokens(configJson: json, tokens: provider) }
         } else {

@@ -63,19 +63,13 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    jazz::db::block_on(Db::open(DbConfig {
+    jazz::db::block_on(Db::open(DbConfig::new(
         schema,
-        identity: DbIdentity {
+        DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
-        id_source: None,
-        chunk_store: None,
-        host_chunk_io: false,
-        clock: None,
-        migrations: Default::default(),
-        system_node: None,
-    }))
+    )))
     .expect("open db")
 }
 

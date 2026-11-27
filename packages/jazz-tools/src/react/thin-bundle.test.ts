@@ -12,13 +12,27 @@ const ENGINE = [
   "src/runtime/default-create-db.ts",
 ];
 
+// The key-holding encryption modules: the thin client holds no keys, so none
+// of them may be in its first load (only the guard and its error, which are small).
+const KEYED = [
+  "src/encryption/build.ts",
+  "src/encryption/browser-store.ts",
+  "src/encryption/browser-host.ts",
+  "src/encryption/private-store.ts",
+];
+
 const src = resolve(__dirname, "..");
 
 async function bundle(entry: string): Promise<{ initial: Set<string>; all: Set<string> }> {
   const outdir = await mkdtemp(join(tmpdir(), "jazz-thin-bundle-"));
   try {
     const result = await build({
-      stdin: { contents: entry, resolveDir: src, sourcefile: "app.tsx", loader: "tsx" },
+      stdin: {
+        contents: entry,
+        resolveDir: src,
+        sourcefile: "app.tsx",
+        loader: "tsx",
+      },
       bundle: true,
       splitting: true,
       format: "esm",
@@ -69,6 +83,18 @@ describe("jazz-tools/react on the thin client", () => {
     `);
     expect(initial.has("src/thin/thin-runtime.ts")).toBe(true);
     expect(ENGINE.filter((module) => initial.has(module))).toEqual([]);
+    expect(KEYED.filter((module) => initial.has(module))).toEqual([]);
+    expect(initial.has("src/thin/encrypted-guard.ts")).toBe(true);
+    expect(initial.has("src/runtime/encryption-needs-local-first.ts")).toBe(true);
+  }, 60_000);
+
+  it("fails if a key-holding module is imported from the thin entry", async () => {
+    const { initial } = await bundle(`
+      import { JazzProvider } from "./react/index.ts";
+      import { memoryPrivateStore } from "./encryption/private-store.ts";
+      console.log(JazzProvider, memoryPrivateStore);
+    `);
+    expect(KEYED.filter((module) => initial.has(module))).not.toEqual([]);
   }, 60_000);
 
   it("loads the local-first client as its own chunk from the client prop", async () => {

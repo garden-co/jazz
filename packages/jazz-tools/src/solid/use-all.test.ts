@@ -1,4 +1,4 @@
-import { createRoot, createSignal } from "solid-js";
+import { createEffect, createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
 
@@ -46,6 +46,7 @@ vi.mock("../subscription-store-internal.js", () => ({
 }));
 
 import { useAll } from "./use-all.js";
+import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
 
 function makeQuery(marker = "todos") {
   return { _build: () => `{"table":"${marker}"}`, _table: marker } as any;
@@ -323,6 +324,67 @@ describe("solid/useAll", () => {
       expect(result.data).toBeUndefined();
       expect(result.isLoading).toBe(false);
       expect(result.error).toBe(syncFailure);
+    } finally {
+      dispose?.();
+    }
+  });
+
+  it("SD-ALL-10: exposes the rows each delivery leaves out undecrypted, reactively", async () => {
+    type Todo = { id: string; title: string };
+    const pending = (id: string): UnreadableRow => ({
+      table: "todos",
+      id,
+      column: "title",
+      code: "key-pending",
+    });
+    const first = { id: "1", title: "first" };
+    // Stands in for the orchestrator: the entry's data carries the list.
+    const entry: { state: any; subscribe: (callbacks: any) => () => void } = {
+      state: { status: "fulfilled", data: withUnreadable([first], [pending("2")]), error: null },
+      subscribe: (callbacks: any) => {
+        listener = callbacks;
+        return vi.fn();
+      },
+    };
+    let listener: any;
+    mocks.getCacheEntry.mockReturnValue(entry as any);
+    const deliver = (all: Todo[]) => {
+      entry.state = { status: "fulfilled", data: all, error: null };
+      listener.onDelta({ all, delta: [] });
+    };
+
+    let dispose!: () => void;
+    let result!: ReturnType<typeof useAll<Todo>>;
+    const seen: string[][] = [];
+
+    try {
+      createRoot((rootDispose) => {
+        dispose = rootDispose;
+        result = useAll(() => ({ query: makeQuery() }));
+        createEffect(() => seen.push(result.unreadable.map((row) => row.id)));
+        return undefined;
+      });
+      await flushMicrotasks();
+
+      expect(result.unreadable).toEqual([pending("2")]);
+
+      // A delivery that changes only the list.
+      deliver(withUnreadable([first], [pending("2"), pending("3")]));
+      expect(result.unreadable).toEqual([pending("2"), pending("3")]);
+
+      // The key arrives: the row joins the result and leaves the list.
+      deliver(withUnreadable([first, { id: "2", title: "second" }], [pending("3")]));
+      expect(result.data).toEqual([first, { id: "2", title: "second" }]);
+      expect(result.unreadable).toEqual([pending("3")]);
+
+      deliver([first, { id: "2", title: "second" }]);
+      expect(result.unreadable).toEqual([]);
+
+      deliver(withUnreadable([first], [pending("4")]));
+      listener.onReset();
+      expect(result.unreadable).toEqual([]);
+
+      expect(seen).toEqual([["2"], ["2", "3"], ["3"], [], ["4"], []]);
     } finally {
       dispose?.();
     }

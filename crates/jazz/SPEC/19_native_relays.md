@@ -507,6 +507,33 @@ pending operations and uploads. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.
+Subscription event ordinal 4 is UnreadableDelta: reset bool, settled bool, tier
+string, delta byte vector, unreadable_json string (`binding_host::unreadable_json`,
+the rows the result leaves out undecrypted). The relay sends it instead of event 0
+when the core tells the list (an opening, a reset, a change), and event 0 when
+the list is unchanged or a reset leaves no row out. Its bytes are pinned by `unreadable_delta_event_has_pinned_bytes`
+and decoded by the same bytes in jazz-rn.
+ABI 6 assigns request 41 and response 32 to PendingUploadRows. ABI 7 appends
+the encryption commands in the order EncryptionOpen, TakeStoreRequests,
+ReplyStore, EncryptionCall and TakeEncryptionReports (requests 42–46).
+Their responses are EncryptionOpen, StoreRequests, StoreReply,
+EncryptionResult and EncryptionReports (33–37). The private pre-release
+encryption tags moved to preserve the published ABI 6 bytes. The ABI 7
+wrapper and native library ship together. Their byte fixtures include
+`encrypted_foreground_postcard_bytes`.
+
+Response 38 is ReportedRows: rows byte vector, unreadable_json string. A
+one-shot `All` reads through the reporting read and answers it (directly or
+from `Poll`) when the read left rows out undecrypted; a read that left none out
+answers response 2, Rows, as before. Its bytes are pinned by
+`reported_rows_answer_has_pinned_bytes`, and the Rust response corpus carries
+it and event 4 to the TypeScript decoder.
+
+The unreleased ABI 7 also appends response 39, KeyRefusal, for operations
+that need an encrypted space's key or root. Its five postcard strings are
+the core error code, reason name, display text, scope ID and space identifier,
+in that order. The JavaScript decoder exposes the last two as `error.space`.
+All preceding response ordinals retain their encodings.
 
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:

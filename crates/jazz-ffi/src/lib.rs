@@ -20,10 +20,12 @@ mod error;
 mod gate;
 mod relational;
 mod session;
+mod store;
 
 use std::sync::Arc;
 
 pub use error::JazzError;
+pub use store::{PrivateStore, PrivateStoreError, ScopeDocument, StoredDocument};
 
 uniffi::setup_scaffolding!("jazz_ffi");
 
@@ -108,6 +110,27 @@ impl CallControl {
     }
 }
 
+impl JazzHandle {
+    fn open_host(
+        config: &str,
+        tokens: Option<Arc<dyn TokenProvider>>,
+        store: Option<jazz_app_support::EncryptionConfig>,
+    ) -> Result<Arc<Self>> {
+        let host = tokens.map(|tokens| {
+            let host = core::HostTokens(Arc::new(move |reason: &str| {
+                tokens
+                    .token(reason.to_owned())
+                    .map_err(|error| error.to_string())
+            }));
+            let host: Arc<dyn jazz_app_support::TokenProvider> = Arc::new(host);
+            host
+        });
+        let core = core::Core::open_with(config, host, store)
+            .map_err(|error| JazzError::from(error).for_contract(core::open_contract(config)))?;
+        Ok(Self::new(core))
+    }
+}
+
 #[uniffi::export]
 impl JazzHandle {
     /// Opens an app from its config JSON: `{ "app", "appId"?, "serverUrl"?,
@@ -116,13 +139,7 @@ impl JazzHandle {
     /// backend clients open with [`Self::open_with_tokens`].
     #[uniffi::constructor]
     pub fn open(config_json: String) -> Result<Arc<Self>> {
-        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
-            .ok()
-            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
-            .unwrap_or(1);
-        let core = core::Core::open(&config_json)
-            .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Self::new(core))
+        Self::open_host(&config_json, None, None)
     }
 
     /// Opens an app as an end user who signs in with the app's bearer
@@ -132,18 +149,60 @@ impl JazzHandle {
         config_json: String,
         tokens: Arc<dyn TokenProvider>,
     ) -> Result<Arc<Self>> {
-        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
-            .ok()
-            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
-            .unwrap_or(1);
-        let host = core::HostTokens(Arc::new(move |reason: &str| {
-            tokens
-                .token(reason.to_owned())
-                .map_err(|error| error.to_string())
-        }));
-        let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
-            .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Self::new(core))
+        Self::open_host(&config_json, Some(tokens), None)
+    }
+
+    /// Opens an app that declares end-to-end encryption as an end user:
+    /// `store` is this device's private store, which the app supplies (the
+    /// config's `"environment"` names the deployment's environment, default
+    /// `dev`). `tokens` is for `"auth": { "bearer": true }`, as in
+    /// [`Self::open_with_tokens`].
+    #[uniffi::constructor]
+    pub fn open_with_store(
+        config_json: String,
+        store: Arc<dyn PrivateStore>,
+        tokens: Option<Arc<dyn TokenProvider>>,
+    ) -> Result<Arc<Self>> {
+        Self::open_host(&config_json, tokens, Some(store::config(store)))
+    }
+
+    /// One end-to-end encryption operation by name, with JSON arguments and
+    /// result. See the crate README for the operation names.
+    pub fn encryption_call(&self, op: String, args_json: String) -> Result<String> {
+        self.core()
+            .surface(self.core().encryption_call(&op, &args_json))
+    }
+
+    /// Admits an account to the space. Returns the membership row as JSON,
+    /// with the same durability options as an insert. If the account is
+    /// already a member, as this client has synced, returns that member's
+    /// existing row and writes nothing. Two concurrent calls for the same
+    /// account can both write a row.
+    pub fn member_add(
+        &self,
+        table: String,
+        id: String,
+        account_id: String,
+        tier: Option<String>,
+    ) -> Result<String> {
+        self.core().surface(self.core().ensure_open())?;
+        let tier = self
+            .core()
+            .surface(tier.as_deref().map(core::write_tier).transpose())?;
+        self.core()
+            .surface(self.core().member_add(&table, &id, &account_id, tier))
+    }
+
+    /// The visible membership rows of the space, as a JSON array.
+    pub fn member_list(&self, table: String, id: String) -> Result<String> {
+        self.core().surface(self.core().member_list(&table, &id))
+    }
+
+    /// Deletes the account's visible memberships. Returns the number the
+    /// authority accepted in a serializable transaction.
+    pub fn member_remove(&self, table: String, id: String, account_id: String) -> Result<u64> {
+        self.core()
+            .surface(self.core().member_remove(&table, &id, &account_id))
     }
 
     /// The end user's session as JSON: `{"status": "signedIn", "user":

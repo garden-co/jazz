@@ -27,3 +27,27 @@ export function createJazzClient(input: JazzClientConfig): Promise<BackendClient
   installNodeEngine();
   return createJazzClientOnEngine(input);
 }
+
+export {
+  keyless,
+  type EncryptedColumnName,
+  type KeylessApp,
+  type KeylessRow,
+  type KeylessTypes,
+} from "../encryption/keyless-types.js";
+export {
+  memoryPrivateStore,
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+  EncryptionError,
+  EncryptionNotDeclaredError,
+  EncryptionStoreRequiredError,
+  unreadableRows,
+} from "../encryption/index.js";
+export type {
+  Encryption,
+  EncryptionReport,
+  UnreadableRow,
+  PrivateStore,
+  StoredDocument,
+} from "../encryption/index.js";

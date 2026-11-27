@@ -661,6 +661,27 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// The name the most recently admitted version that stores the table
+    /// `stored` gives it.
+    pub(crate) fn logical_table(&self, stored: &str) -> Option<&str> {
+        self.in_order().into_iter().rev().find_map(|(_, names)| {
+            names
+                .tables
+                .iter()
+                .find(|(_, (table, _))| table == stored)
+                .map(|(logical, _)| logical.as_str())
+        })
+    }
+
+    /// The stored table the most recently admitted version that names
+    /// `logical` stores it as.
+    pub(crate) fn stored_table_of(&self, logical: &str) -> Option<&str> {
+        self.in_order()
+            .into_iter()
+            .rev()
+            .find_map(|(_, names)| names.tables.get(logical).map(|(stored, _)| stored.as_str()))
+    }
+
     /// How many versions are named.
     pub(crate) fn len(&self) -> usize {
         self.versions.len()
@@ -1203,6 +1224,47 @@ impl Names {
         // version this store admitted, as every store picks it (see
         // `migration_path`); else the base.
         into.sort_by_key(|lens| lens.source);
+        // Older versions address these rows and columns by name. Only
+        // Jazz's declared optional additions can change a carried table.
+        for lens in &into {
+            if let Some(table) = lens.table_lenses().iter().find(|table| {
+                if !jazz_model::schema::is_system_table(&table.source_table)
+                    && !jazz_model::schema::is_system_table(&table.target_table)
+                {
+                    return false;
+                }
+                table.source_table != table.target_table
+                    || table.ops.iter().any(|op| {
+                        let LensOp::AddColumn {
+                            column,
+                            default: Value::Nullable(None),
+                        } = op
+                        else {
+                            return true;
+                        };
+                        let name = &table.target_table;
+                        let descriptor = schema
+                            .public_schema()
+                            .get(&name.as_str().into())
+                            .and_then(|t| t.columns.column(column));
+                        let already_present = self
+                            .get(&lens.source)
+                            .and_then(|names| names.tables.get(name))
+                            .is_some_and(|(_, columns)| columns.contains_key(column));
+                        already_present
+                            || !jazz_model::schema::system_table_column_additions().any(
+                                |(_, table, addition)| {
+                                    name == table && descriptor == Some(&addition)
+                                },
+                            )
+                    })
+            }) {
+                return Err(schema_error(format!(
+                    "a lens changes `{}` (to `{}`), but Jazz's system tables are carried between versions unchanged",
+                    table.source_table, table.target_table
+                )));
+            }
+        }
         self.lenses_agree(schema, &into)?;
         let lens = into
             .iter()

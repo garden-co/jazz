@@ -12,6 +12,7 @@ import type {
 } from "../drivers/types.js";
 import { applySubscriptionDelta, SubscriptionManager } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
+import { unreadableRows } from "../encryption/unreadable.js";
 
 interface TestItem {
   id: string;
@@ -792,6 +793,69 @@ describe("SubscriptionManager", () => {
       { id: otherId, title: "other", children: [] },
       { id: rootId, title: "readded", children: [{ id: childId, name: "child" }] },
     ]);
+  });
+
+  it("keeps the unreadable rows a delta names with every result until another names new ones", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+    const left = (n: number) => ({
+      table: "items",
+      id: id(n),
+      column: "name",
+      code: "key-pending",
+    });
+    const opening = manager.handleDelta(
+      emptyRuntimeDelta({
+        reset: true,
+        added: [runtimeAddedRecord(id(1), 0, "one", 1)],
+        unreadable: [left(9)],
+      }),
+      transform,
+    );
+    expect(unreadableRows(opening.all!)).toEqual([left(9)]);
+    // A delta that does not name the list leaves it as it was.
+    const added = manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRecord(id(2), 1, "two", 2)] }),
+      transform,
+    );
+    expect(added.all).toHaveLength(2);
+    expect(unreadableRows(added.all!)).toEqual([left(9)]);
+    expect(unreadableRows(manager.all())).toEqual([left(9)]);
+    // A delta that changes no row can still change the list.
+    const listOnly = manager.handleDelta(
+      emptyRuntimeDelta({ unreadable: [left(9), left(8)] }),
+      transform,
+    );
+    expect(listOnly.all).toHaveLength(2);
+    expect(unreadableRows(listOnly.all!).map((row) => row.id)).toEqual([id(9), id(8)]);
+    // A failed delta keeps the list it found.
+    expect(() =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          added: [{ ...runtimeAddedRecord(id(3), 2, "bad", 3), occurrenceKey: new Uint8Array(3) }],
+          unreadable: [],
+        }),
+        transform,
+      ),
+    ).toThrow();
+    expect(unreadableRows(manager.all())).toHaveLength(2);
+    // The key arrived: the row joins the result and the list empties.
+    const arrived = manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRecord(id(9), 2, "nine", 9)], unreadable: [] }),
+      transform,
+    );
+    expect(arrived.all).toHaveLength(3);
+    expect(unreadableRows(arrived.all!)).toEqual([]);
+    // A reset from a runtime that never names any leaves none.
+    manager.handleDelta(emptyRuntimeDelta({ unreadable: [left(7)] }), transform);
+    const reset = manager.handleDelta(
+      emptyRuntimeDelta({ reset: true, added: [runtimeAddedRecord(id(1), 0, "one", 1)] }),
+      transform,
+    );
+    expect(unreadableRows(reset.all!)).toEqual([]);
+    manager.handleDelta(emptyRuntimeDelta({ unreadable: [left(7)] }), transform);
+    manager.clear();
+    expect(unreadableRows(manager.all())).toEqual([]);
   });
 
   it("rolls back a failed reset or bulk frame to the exact prior state", () => {

@@ -262,6 +262,16 @@ pub struct Ctx<'a> {
     /// rows keeps it rather than listing every row the policy grants.
     lift_row_keys: bool,
     next_alias: usize,
+    /// The namespace for table identities under the governing policy schema.
+    namespace: Option<[u8; 16]>,
+    /// How many table identities this compile could not bind. A `NOT`
+    /// whose operand counted one is false: an unknown identity grants
+    /// nothing, whichever way it is compared.
+    unknown_identities: usize,
+    /// Compiling a table's policy for an `InheritsFrom`: one inside it is
+    /// refused rather than followed (it could recurse without end). A
+    /// deployment refuses such a policy first (`check_deployable_policies`).
+    in_inherits_from: bool,
 }
 
 /// A frozen snapshot: every version at or before position `seq`, plus the
@@ -282,7 +292,15 @@ pub struct Cut {
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
+    /// A write check's unit's fresh inserts, by stored table: the rows
+    /// [`PolicyExpr::InsertedByThisTransaction`] holds for. Empty outside a
+    /// write check.
+    pub inserted: std::sync::Arc<InsertedRows>,
 }
+
+/// A unit's fresh inserts, by stored table: each row by its id and branch
+/// key, so a row with the same id on another branch is not one of them.
+pub type InsertedRows = BTreeMap<String, BTreeSet<([u8; 16], Vec<u8>)>>;
 
 /// The versions at a write check's `own` that its policy sees (SPEC 7);
 /// every other row the unit wrote reads as committed.
@@ -399,7 +417,15 @@ impl<'a> Ctx<'a> {
             overlay_tables: BTreeSet::new(),
             lift_row_keys: false,
             next_alias: 0,
+            namespace: None,
+            in_inherits_from: false,
+            unknown_identities: 0,
         }
+    }
+
+    pub fn with_namespace(mut self, namespace: Option<[u8; 16]>) -> Self {
+        self.namespace = namespace;
+        self
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -1531,7 +1557,14 @@ impl<'a> Ctx<'a> {
             return Ok(());
         };
         match &query.flat_join {
-            None => check_operators(table, &query.filters, &query.order_by)?,
+            None => {
+                let source_order = query.order_by.iter().filter(|order| {
+                    !query.aggregate.as_ref().is_some_and(|aggregate| {
+                        aggregate.aggregates.iter().any(|a| a.alias == order.column)
+                    })
+                });
+                check_operators_by(&|column| table.column(column), &query.filters, source_order)?;
+            }
             Some(flat) => {
                 let mut sources: Vec<(&str, &'a Table)> = vec![(
                     flat.root_alias.as_deref().unwrap_or(query.table.as_str()),
@@ -2113,6 +2146,12 @@ impl<'a> Ctx<'a> {
                 self.present(value)
             }
             Operand::Literal(value) => self.value_term(value),
+            // Only Jazz's lowering of policies makes one; a query naming
+            // one (an application's or a peer's) is refused.
+            Operand::TableIdentity(_) => Err(query_error(
+                "a table identity is not supported in a query: only a policy's \
+                 `table_id('…')` names one",
+            )),
         }
     }
 
@@ -2342,7 +2381,22 @@ impl<'a> Ctx<'a> {
                 let value = session.resolve(path);
                 self.present(value)
             }
+            PolicyValue::TableIdentity { table } => self.table_identity(table),
         }
+    }
+
+    /// Table `name`'s catalogue identity, a `uuid`, or no value while this
+    /// store does not know it (counted in `unknown_identities`). It reads
+    /// no rows, so the table is no dependency.
+    fn table_identity(&mut self, name: &str) -> Result<Term, Error> {
+        let stored = &self.schema.table(name)?.stored;
+        let identity = self
+            .namespace
+            .map(|namespace| Value::Uuid(crate::names::identity(namespace, stored, None)));
+        if identity.is_none() {
+            self.unknown_identities += 1;
+        }
+        self.present(identity)
     }
 
     fn policy_expr(
@@ -2374,7 +2428,18 @@ impl<'a> Ctx<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 or(&parts)
             }
-            PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
+            PolicyExpr::Not(inner) => {
+                let unknown = self.unknown_identities;
+                let inner = recurse(self, inner)?;
+                if self.unknown_identities > unknown {
+                    // Its operand compares with an identity this store does
+                    // not know: false, not the negation of a comparison
+                    // that held for no row.
+                    "0".to_owned()
+                } else {
+                    format!("(NOT COALESCE({inner}, 0))")
+                }
+            }
             PolicyExpr::Cmp {
                 column,
                 op,
@@ -2608,7 +2673,113 @@ impl<'a> Ctx<'a> {
                     ],
                 )
             }
+            PolicyExpr::InheritsFrom {
+                operation,
+                table_column,
+                id_column,
+                tables,
+            } => self.inherits_from(
+                table,
+                alias,
+                *operation,
+                table_column,
+                id_column,
+                tables,
+                session,
+            )?,
+            // The unit's fresh inserts into the `Exists`'s table, each on
+            // its own branch: a row read through the cut is one of them only
+            // once it is grounded, so the node never grants on a row that is
+            // not yet evidence.
+            PolicyExpr::InsertedByThisTransaction => {
+                match (outer, self.cut.as_ref().map(|cut| cut.inserted.clone())) {
+                    (Some(_), Some(inserted)) => match inserted.get(&table.stored) {
+                        Some(rows) if !rows.is_empty() => {
+                            let rows = if rows.len() > BOUND_LIST_MAX {
+                                let pairs: Vec<serde_json::Value> = rows
+                                    .iter()
+                                    .map(|(id, key)| serde_json::json!([hex(id), hex(key)]))
+                                    .collect();
+                                let array = self.bind(Sql::Text(
+                                    serde_json::Value::Array(pairs).to_string().into_bytes(),
+                                ));
+                                format!(
+                                    "SELECT unhex(json_extract(value, '$[0]')), \
+                                     unhex(json_extract(value, '$[1]')) FROM json_each({array})"
+                                )
+                            } else {
+                                let pairs = rows
+                                    .iter()
+                                    .map(|(id, key)| {
+                                        let id = self.bind(Sql::Blob(id.to_vec()));
+                                        let key = self.bind(Sql::Blob(key.clone()));
+                                        format!("({id}, {key})")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("VALUES {pairs}")
+                            };
+                            format!("(({alias}.id, {alias}._branch) IN ({rows}))")
+                        }
+                        _ => "0".to_owned(),
+                    },
+                    _ => "0".to_owned(),
+                }
+            }
         })
+    }
+
+    /// [`PolicyExpr::InheritsFrom`] on the row at `alias` of `table`: for
+    /// some candidate `T`, `table_column` is `T`'s identity and the live
+    /// row of `T` whose id is `id_column` passes `T`'s `operation` policy,
+    /// compiled as a direct check of that row (full depth). `Update` is
+    /// both clauses, as a save that changes nothing: `USING` and
+    /// (`WITH CHECK`, or `USING` without one).
+    #[allow(clippy::too_many_arguments)]
+    fn inherits_from(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        operation: Operation,
+        table_column: &str,
+        id_column: &str,
+        tables: &[String],
+        session: &Session,
+    ) -> Result<String, Error> {
+        if self.in_inherits_from {
+            return Err(unsupported(
+                "an `InheritsFrom` policy inside a table policy an `InheritsFrom` reads",
+            ));
+        }
+        let mut arms = Vec::with_capacity(tables.len());
+        for name in tables {
+            let target = self.table(name)?;
+            let left = self.column_term(table, alias, table_column)?;
+            let right = self.table_identity(name)?;
+            let named = self.cmp(CmpOp::Eq, left, right)?;
+            let p = self.alias("p");
+            self.in_inherits_from = true;
+            let compiled = target
+                .inherited_clauses(operation)
+                .map(|clause| match clause {
+                    None => Ok("0".to_owned()),
+                    Some(policy) => {
+                        self.policy_expr(policy, target, &p, None, session, DEFAULT_INHERITS_DEPTH)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>();
+            self.in_inherits_from = false;
+            let mut conds = vec![
+                self.join_key((target, &p, "id"), (table, alias, id_column))?,
+                format!("({p}._state & {STATE_DELETED}) = 0"),
+            ];
+            conds.extend(compiled?);
+            arms.push(and(&[
+                named,
+                semi_join(format!("{} AS {p}", self.source(target)?), conds),
+            ]));
+        }
+        Ok(or(&arms))
     }
 
     /// A row's ancestors through its own reference `via`, up to `bound`
@@ -3421,10 +3592,10 @@ fn check_operators(
 
 /// [`check_operators`], with `lookup` finding the column a name in the
 /// query refers to (a flat join's names reach several tables).
-fn check_operators_by<'t>(
+fn check_operators_by<'t, 'o>(
     lookup: &dyn Fn(&str) -> Option<&'t crate::values::Column>,
     filters: &[Predicate],
-    order_by: &[crate::query::OrderBy],
+    order_by: impl IntoIterator<Item = &'o crate::query::OrderBy>,
 ) -> Result<(), Error> {
     // `None`: the column supports everything; `Some(kind)`: it is one of
     // the restricted kinds.
@@ -4468,6 +4639,148 @@ fn json_value(json: &serde_json::Value) -> Result<Value, Error> {
     })
 }
 
+/// `target`'s `operation` policy split as a parent chain: when `table`
+/// inherits from its own rows through the scalar reference `via` and that
+/// policy is `base OR (guards AND INHERITS(operation, via))`, the other
+/// disjuncts, the guards a row meets to take the hop, and the hop's own
+/// depth bound. None when any of them inherits further: that case unrolls
+/// level by level.
+fn recursive_base<'p>(
+    table: &Table,
+    target: &'p Table,
+    operation: Operation,
+    via: &str,
+) -> Option<ParentChain<'p>> {
+    let array = |ty: &ValueType| match ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Array(_)),
+        ty => matches!(ty, ValueType::Array(_)),
+    };
+    if target.stored != table.stored || target.column(via).is_none_or(|c| array(&c.ty)) {
+        return None;
+    }
+    let PolicyExpr::Or(parts) = target.policy(operation)? else {
+        return None;
+    };
+    let is_hop = |part: &PolicyExpr| {
+        matches!(part, PolicyExpr::Inherits { operation: op, via_column, .. }
+            if *op == operation && via_column == via)
+    };
+    let hop = |part: &'p PolicyExpr| -> Option<(Option<usize>, Vec<&'p PolicyExpr>)> {
+        let conds: Vec<&PolicyExpr> = match part {
+            PolicyExpr::And(conds) => conds.iter().collect(),
+            part => vec![part],
+        };
+        let mut hops = conds.iter().filter(|c| is_hop(c));
+        let Some(PolicyExpr::Inherits { max_depth, .. }) = hops.next() else {
+            return None;
+        };
+        if hops.next().is_some() {
+            return None;
+        }
+        let guards = conds.into_iter().filter(|c| !is_hop(c)).collect();
+        Some((*max_depth, guards))
+    };
+    let mut hops = parts.iter().filter_map(|part| hop(part).map(|h| (part, h)));
+    let (hop_part, (depth, guards)) = hops.next()?;
+    if hops.next().is_some() {
+        return None;
+    }
+    let base: Vec<&PolicyExpr> = parts
+        .iter()
+        .filter(|part| !std::ptr::eq(*part, hop_part))
+        .collect();
+    base.iter()
+        .chain(&guards)
+        .all(|part| !inherits(part))
+        .then_some(ParentChain {
+            base,
+            guards,
+            depth,
+        })
+}
+
+struct ParentChain<'p> {
+    base: Vec<&'p PolicyExpr>,
+    guards: Vec<&'p PolicyExpr>,
+    depth: Option<usize>,
+}
+
+fn inherits(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
+        PolicyExpr::Not(inner) => inherits(inner),
+        PolicyExpr::Exists { condition, .. } => inherits(condition),
+        _ => false,
+    }
+}
+
+/// The part each of `compiled`'s projected columns is read in: a partial
+/// selection names a large-capable column of the root table of a plain row
+/// query, read in a part its kind has.
+fn partial_projection(
+    schema: &Schema,
+    table: &str,
+    partial: &[crate::query::PartialSelect],
+    compiled: &Compiled,
+) -> Result<Vec<Option<crate::query::Part>>, Error> {
+    use crate::query::Part;
+    use jazz_types::large_values::LargeValueKind as Kind;
+    if compiled.aggregate || compiled.union || compiled.joined > 0 {
+        return Err(unsupported(
+            "partial large-value selections in aggregate, union or joined queries",
+        ));
+    }
+    let table = schema.table(table)?;
+    let mut out = vec![None; compiled.projection.len()];
+    for selected in partial {
+        let column = table
+            .column(&selected.column)
+            .filter(|column| crate::large::large_capable(column))
+            .ok_or_else(|| {
+                query_error(format!(
+                    "partial selection of {:?} needs a text, bytes or JSON column",
+                    selected.column
+                ))
+            })?;
+        let kind = crate::large::kind(column);
+        let fits = matches!(
+            (&selected.part, kind),
+            (Part::Bytes { .. }, Kind::Bytes)
+                | (Part::TextUtf16 { .. } | Part::TextUtf8 { .. }, Kind::String)
+                | (Part::JsonPointer(_), Kind::Json)
+        );
+        if !fits {
+            return Err(query_error(format!(
+                "partial selection of {:?} does not fit its column's kind",
+                selected.column
+            )));
+        }
+        if let Part::Bytes { from, to } | Part::TextUtf16 { from, to } | Part::TextUtf8 { from, to } =
+            &selected.part
+            && from > to
+        {
+            return Err(query_error(format!(
+                "partial selection of {:?} ends before it starts",
+                selected.column
+            )));
+        }
+        // A compilation that projects no such column (one reading only the
+        // rows' ids) reads none of it.
+        let Some(index) = compiled
+            .projection
+            .iter()
+            .position(|(name, ..)| *name == column.name)
+        else {
+            continue;
+        };
+        out[index] = Some(selected.part.clone());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{outer_key_only, plain_exists, semi_join};
@@ -4634,144 +4947,4 @@ mod tests {
             assert_eq!(plain_exists(sql), None, "{sql}");
         }
     }
-}
-
-/// `target`'s `operation` policy split as a parent chain: when `table`
-/// inherits from its own rows through the scalar reference `via` and that
-/// policy is `base OR (guards AND INHERITS(operation, via))`, the other
-/// disjuncts, the guards a row meets to take the hop, and the hop's own
-/// depth bound. None when any of them inherits further: that case unrolls
-/// level by level.
-fn recursive_base<'p>(
-    table: &Table,
-    target: &'p Table,
-    operation: Operation,
-    via: &str,
-) -> Option<ParentChain<'p>> {
-    let array = |ty: &ValueType| match ty {
-        ValueType::Nullable(inner) => matches!(**inner, ValueType::Array(_)),
-        ty => matches!(ty, ValueType::Array(_)),
-    };
-    if target.stored != table.stored || target.column(via).is_none_or(|c| array(&c.ty)) {
-        return None;
-    }
-    let PolicyExpr::Or(parts) = target.policy(operation)? else {
-        return None;
-    };
-    let is_hop = |part: &PolicyExpr| {
-        matches!(part, PolicyExpr::Inherits { operation: op, via_column, .. }
-            if *op == operation && via_column == via)
-    };
-    let hop = |part: &'p PolicyExpr| -> Option<(Option<usize>, Vec<&'p PolicyExpr>)> {
-        let conds: Vec<&PolicyExpr> = match part {
-            PolicyExpr::And(conds) => conds.iter().collect(),
-            part => vec![part],
-        };
-        let mut hops = conds.iter().filter(|c| is_hop(c));
-        let Some(PolicyExpr::Inherits { max_depth, .. }) = hops.next() else {
-            return None;
-        };
-        if hops.next().is_some() {
-            return None;
-        }
-        let guards = conds.into_iter().filter(|c| !is_hop(c)).collect();
-        Some((*max_depth, guards))
-    };
-    let mut hops = parts.iter().filter_map(|part| hop(part).map(|h| (part, h)));
-    let (hop_part, (depth, guards)) = hops.next()?;
-    if hops.next().is_some() {
-        return None;
-    }
-    let base: Vec<&PolicyExpr> = parts
-        .iter()
-        .filter(|part| !std::ptr::eq(*part, hop_part))
-        .collect();
-    base.iter()
-        .chain(&guards)
-        .all(|part| !inherits(part))
-        .then_some(ParentChain {
-            base,
-            guards,
-            depth,
-        })
-}
-
-struct ParentChain<'p> {
-    base: Vec<&'p PolicyExpr>,
-    guards: Vec<&'p PolicyExpr>,
-    depth: Option<usize>,
-}
-
-fn inherits(policy: &PolicyExpr) -> bool {
-    match policy {
-        PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
-        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
-        PolicyExpr::Not(inner) => inherits(inner),
-        PolicyExpr::Exists { condition, .. } => inherits(condition),
-        _ => false,
-    }
-}
-
-/// The part each of `compiled`'s projected columns is read in: a partial
-/// selection names a large-capable column of the root table of a plain row
-/// query, read in a part its kind has.
-fn partial_projection(
-    schema: &Schema,
-    table: &str,
-    partial: &[crate::query::PartialSelect],
-    compiled: &Compiled,
-) -> Result<Vec<Option<crate::query::Part>>, Error> {
-    use crate::query::Part;
-    use jazz_types::large_values::LargeValueKind as Kind;
-    if compiled.aggregate || compiled.union || compiled.joined > 0 {
-        return Err(unsupported(
-            "partial large-value selections in aggregate, union or joined queries",
-        ));
-    }
-    let table = schema.table(table)?;
-    let mut out = vec![None; compiled.projection.len()];
-    for selected in partial {
-        let column = table
-            .column(&selected.column)
-            .filter(|column| crate::large::large_capable(column))
-            .ok_or_else(|| {
-                query_error(format!(
-                    "partial selection of {:?} needs a text, bytes or JSON column",
-                    selected.column
-                ))
-            })?;
-        let kind = crate::large::kind(column);
-        let fits = matches!(
-            (&selected.part, kind),
-            (Part::Bytes { .. }, Kind::Bytes)
-                | (Part::TextUtf16 { .. } | Part::TextUtf8 { .. }, Kind::String)
-                | (Part::JsonPointer(_), Kind::Json)
-        );
-        if !fits {
-            return Err(query_error(format!(
-                "partial selection of {:?} does not fit its column's kind",
-                selected.column
-            )));
-        }
-        if let Part::Bytes { from, to } | Part::TextUtf16 { from, to } | Part::TextUtf8 { from, to } =
-            &selected.part
-            && from > to
-        {
-            return Err(query_error(format!(
-                "partial selection of {:?} ends before it starts",
-                selected.column
-            )));
-        }
-        // A compilation that projects no such column (one reading only the
-        // rows' ids) reads none of it.
-        let Some(index) = compiled
-            .projection
-            .iter()
-            .position(|(name, ..)| *name == column.name)
-        else {
-            continue;
-        };
-        out[index] = Some(selected.part.clone());
-    }
-    Ok(out)
 }

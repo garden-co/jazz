@@ -6,3 +6,4 @@
 .jazz-correctness-test-artifacts.json
 /durable-object/pkg/
 /backend/pkg/
+/backend/unstripped/

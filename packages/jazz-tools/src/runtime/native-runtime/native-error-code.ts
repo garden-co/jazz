@@ -58,10 +58,9 @@ export function nativeCoreErrorCode(error: unknown): NativeCoreErrorCode | undef
 /**
  * The stable reason a core Jazz error carries across the native boundary,
  * finer than its code: the Rust `Reason::as_str` name, set as `error.reason`
- * by WASM, by NAPI promise rejections and by React Native. A NAPI synchronous
- * throw carries only its code, since napi-rs creates it from a code and a
- * message alone; that includes a pollable NAPI read or `waitForPendingWrites`
- * whose `poll()` throws.
+ * by WASM, by NAPI promise rejections and by React Native. Synchronous
+ * NAPI key refusals also carry their reason and space. Other synchronous
+ * NAPI exceptions carry their core code.
  */
 export type NativeCoreErrorReason =
   | "authorization_denied"
@@ -76,7 +75,12 @@ export type NativeCoreErrorReason =
   | "predecessor_rejected"
   | "schema_version_not_deployed"
   | "identity_mismatch"
-  | "schema_version_unsupported";
+  | "schema_version_unsupported"
+  // End-to-end encryption (builds with the feature): a write, query or strict
+  // read needs the key of an encrypted space this device does not hold yet, or
+  // writes to a space that has no valid root.
+  | "key-pending"
+  | "space-pending";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -93,6 +97,8 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "schema_version_not_deployed",
   "identity_mismatch",
   "schema_version_unsupported",
+  "key-pending",
+  "space-pending",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

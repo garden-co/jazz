@@ -405,7 +405,7 @@ pub(super) async fn publish_bundle_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     body: Result<
-        Json<crate::server::deployment::DeployRequest>,
+        Json<crate::server::deployment::DeployBody>,
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
@@ -423,7 +423,7 @@ pub(super) async fn publish_bundle_handler(
             return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
         }
     };
-    match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
+    match tokio::spawn(crate::server::deployment::deploy_body(state, request)).await {
         Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(Err(error)) => (error.status, Json(error.body)).into_response(),
         Err(error) => (

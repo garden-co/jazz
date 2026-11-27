@@ -82,7 +82,9 @@ function jsonColumn(): JsonBuilder<JsonValue>;
 function jsonColumn<Schema extends StandardJSONSchemaV1<unknown, unknown>>(
   schema: Schema,
 ): JsonBuilder<StandardJSONSchemaV1.InferOutput<Schema>>;
-function jsonColumn(schema: JsonSchema): JsonBuilder<JsonValue>;
+function jsonColumn<Schema extends JsonSchema>(
+  schema: Schema & Unencrypted<Schema>,
+): JsonBuilder<JsonValue>;
 function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
   return new JsonBuilder(schema);
 }
@@ -91,7 +93,7 @@ function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
 // Column Builder (for schema context)
 // ============================================================================
 
-interface ColumnBuilder {
+export interface ColumnBuilder {
   optional(): this;
   default(value: unknown): this;
   merge(strategy: ColumnMergeStrategyName): this;
@@ -100,8 +102,49 @@ interface ColumnBuilder {
   _sqlType: SqlType;
   _references: string | undefined;
   _transform?: ColumnTransform;
+  _encryption?: ColumnEncryption;
+  readonly _element?: ColumnBuilder;
   _allowExternalProvenanceName?: true;
 }
+
+/** How a column is encrypted: `.encrypted({ equality })`. */
+export interface ColumnEncryption {
+  /** Whether rows can be found by this column's value, through equality tokens. */
+  readonly equality: boolean;
+}
+
+export function hasEncryptionDeclaration(
+  builder: Pick<ColumnBuilder, "_element" | "_encryption" | "_sqlType" | "_transform"> | undefined,
+  seen = new Set<object>(),
+): boolean {
+  if (!builder || seen.has(builder)) return false;
+  seen.add(builder);
+  if (builder._encryption || hasEncryptionDeclaration(builder._transform?.view, seen)) return true;
+  if (builder._element) return hasEncryptionDeclaration(builder._element, seen);
+  const type = builder._sqlType;
+  return (
+    typeof type === "object" &&
+    type.kind === "JSON" &&
+    hasEncryptionDeclarationInJsonSchema(type.schema, seen)
+  );
+}
+
+export function hasEncryptionDeclarationInJsonSchema(
+  schema: unknown,
+  seen = new Set<object>(),
+): boolean {
+  if (!schema || typeof schema !== "object" || seen.has(schema)) return false;
+  if (isTypedColumnBuilder(schema)) return hasEncryptionDeclaration(schema, seen);
+  seen.add(schema);
+  return Object.values(schema).some((value) => hasEncryptionDeclarationInJsonSchema(value, seen));
+}
+
+/** A column declared `.encrypted()`: `Column` carrying its encryption declaration. */
+export type EncryptedColumn<Column> = Column & { readonly _encryption: ColumnEncryption };
+
+type Unencrypted<T> = T extends AnyTypedColumnBuilder & { readonly _encryption: ColumnEncryption }
+  ? never
+  : T;
 
 type MergeStrategyColumnType = {
   counter: "INTEGER" | "BIGINT";
@@ -164,14 +207,25 @@ export type TypedColumnBuilder<
    * implements the transform (in TS, `jazz.computed.ts`). Permissions see
    * the stored value.
    */
-  transform<const Name extends string>(
+  transform<const Name extends string, View extends AnyTypedColumnBuilder = AnyTypedColumnBuilder>(
     name: Name,
-    view: AnyTypedColumnBuilder,
+    view: View & Unencrypted<View>,
   ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
    * Make the column nullable
    */
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Init>;
+  /**
+   * Encrypt the column's values on the device, under the key of the row's
+   * space (the table's `space` option). The server stores ciphertext and
+   * cannot read, filter or sort by the value; code reads and writes the
+   * plaintext type. With `equality: true`, rows can also be found by an
+   * exact value, through tokens that reveal which rows share a value.
+   * An encrypted column takes no merge strategy and no transform.
+   */
+  encrypted(options?: {
+    equality?: boolean;
+  }): EncryptedColumn<ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>>;
   /**
    * The column holds ids of `table`'s rows, for a reference no forward
    * relation names (a forward relation's column references its table
@@ -235,7 +289,7 @@ export interface ComputedColumn<Value = unknown, From extends string = string> {
 
 /** `s.computed(type, from)`: a field of the row computed in code from `from`'s stored columns. */
 export function computed<const T extends AnyTypedColumnBuilder, const From extends string>(
-  type: T,
+  type: T & Unencrypted<T>,
   from: readonly From[],
 ): ComputedColumn<
   ColumnBuilderOptional<T> extends true ? ColumnBuilderValue<T> | null : ColumnBuilderValue<T>,
@@ -494,6 +548,22 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryption?: ColumnEncryption;
+
+  encrypted(options: { equality?: boolean } = {}): this {
+    if (typeof options !== "object" || options === null || Array.isArray(options))
+      throw new Error(".encrypted(options) takes { equality?: boolean }.");
+    for (const key of Object.keys(options))
+      if (key !== "equality")
+        throw new Error(
+          `.encrypted(options): unknown option "${key}"; it takes { equality?: boolean }.`,
+        );
+    if (options.equality !== undefined && typeof options.equality !== "boolean")
+      throw new Error(".encrypted({ equality }) takes true or false.");
+    this._encryption = { equality: options.equality === true };
+    return this;
+  }
+
   private _referencesTable: string | undefined;
 
   references(table: string): this {
@@ -602,7 +672,7 @@ type ArrayElementValue<TElement extends ArrayElementSource> = TSTypeFromSqlType<
   ArrayElementSqlType<TElement>
 >;
 
-function isTypedColumnBuilder(value: ArrayElementSource): value is AnyTypedColumnBuilder {
+function isTypedColumnBuilder(value: unknown): value is AnyTypedColumnBuilder {
   return typeof value === "object" && value !== null && "_build" in value && "_sqlType" in value;
 }
 
@@ -661,15 +731,20 @@ class AddBuilder {
     return { _type: "add", sqlType: "UUID", default: opts.default };
   }
 
-  json<const TDefault extends JsonValue | null>(opts: {
+  json<
+    const TDefault extends JsonValue | null,
+    Schema extends JsonSchemaSource = JsonSchemaSource,
+  >(opts: {
     default: TDefault;
-    schema?: JsonSchemaSource;
+    schema?: Schema & Unencrypted<Schema>;
   }): AddOp<JsonSqlType, TDefault> {
+    const schema = opts.schema && normalizeJsonSchema(opts.schema);
     return {
       _type: "add",
-      sqlType: opts.schema
-        ? { kind: "JSON", schema: normalizeJsonSchema(opts.schema) }
-        : { kind: "JSON" },
+      sqlType: schema ? { kind: "JSON", schema } : { kind: "JSON" },
+      ...(hasEncryptionDeclarationInJsonSchema(schema)
+        ? { _containsEncryptionDeclaration: true }
+        : {}),
       default: opts.default,
     };
   }
@@ -693,17 +768,20 @@ class AddBuilder {
     TElement extends ArrayElementSource,
     const TDefault extends ArrayElementValue<TElement>[] | null,
   >(opts: {
-    of: TElement;
+    of: TElement & Unencrypted<TElement>;
     default: TDefault;
   }): AddOp<{ kind: "ARRAY"; element: ArrayElementSqlType<TElement> }, TDefault> {
+    const element = opts.of;
+    const builder = isTypedColumnBuilder(element) ? element : undefined;
     return {
       _type: "add",
       sqlType: {
         kind: "ARRAY",
-        element: (isTypedColumnBuilder(opts.of)
-          ? opts.of._sqlType
-          : opts.of) as ArrayElementSqlType<TElement>,
+        element: (builder ? builder._sqlType : element) as ArrayElementSqlType<TElement>,
       },
+      ...(builder && hasEncryptionDeclaration(builder)
+        ? { _containsEncryptionDeclaration: true }
+        : {}),
       default: opts.default,
     };
   }
@@ -770,15 +848,20 @@ class DropBuilder {
     return { _type: "drop", sqlType: "UUID", backwardsDefault: opts.backwardsDefault };
   }
 
-  json<const TBackwardsDefault extends JsonValue | null>(opts: {
+  json<
+    const TBackwardsDefault extends JsonValue | null,
+    Schema extends JsonSchemaSource = JsonSchemaSource,
+  >(opts: {
     backwardsDefault: TBackwardsDefault;
-    schema?: JsonSchemaSource;
+    schema?: Schema & Unencrypted<Schema>;
   }): DropOp<JsonSqlType, TBackwardsDefault> {
+    const schema = opts.schema && normalizeJsonSchema(opts.schema);
     return {
       _type: "drop",
-      sqlType: opts.schema
-        ? { kind: "JSON", schema: normalizeJsonSchema(opts.schema) }
-        : { kind: "JSON" },
+      sqlType: schema ? { kind: "JSON", schema } : { kind: "JSON" },
+      ...(hasEncryptionDeclarationInJsonSchema(schema)
+        ? { _containsEncryptionDeclaration: true }
+        : {}),
       backwardsDefault: opts.backwardsDefault,
     };
   }
@@ -802,17 +885,20 @@ class DropBuilder {
     TElement extends ArrayElementSource,
     const TBackwardsDefault extends ArrayElementValue<TElement>[] | null,
   >(opts: {
-    of: TElement;
+    of: TElement & Unencrypted<TElement>;
     backwardsDefault: TBackwardsDefault;
   }): DropOp<{ kind: "ARRAY"; element: ArrayElementSqlType<TElement> }, TBackwardsDefault> {
+    const element = opts.of;
+    const builder = isTypedColumnBuilder(element) ? element : undefined;
     return {
       _type: "drop",
       sqlType: {
         kind: "ARRAY",
-        element: (isTypedColumnBuilder(opts.of)
-          ? opts.of._sqlType
-          : opts.of) as ArrayElementSqlType<TElement>,
+        element: (builder ? builder._sqlType : element) as ArrayElementSqlType<TElement>,
       },
+      ...(builder && hasEncryptionDeclaration(builder)
+        ? { _containsEncryptionDeclaration: true }
+        : {}),
       backwardsDefault: opts.backwardsDefault,
     };
   }
@@ -836,7 +922,7 @@ export const schemaColumns = {
     <Schema extends StandardJSONSchemaV1<unknown, unknown>>(
       schema: Schema,
     ): JsonColumn<StandardJSONSchemaV1.InferOutput<Schema>>;
-    (schema: JsonSchema): JsonColumn;
+    <Schema extends JsonSchema>(schema: Schema & Unencrypted<Schema>): JsonColumn;
   },
   enum: ((...input: unknown[]) => {
     if (input.length === 1 && typeof input[0] === "object" && input[0] !== null) {
@@ -848,7 +934,7 @@ export const schemaColumns = {
   ) => EnumColumn<Variants>,
   rel,
   reverse,
-  array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
+  array: <Builder extends AnyTypedColumnBuilder>(element: Builder & Unencrypted<Builder>) =>
     new ArrayBuilder(element as unknown as ColumnBuilder) as unknown as ArrayColumn<
       ColumnBuilderSqlType<Builder>,
       false,
