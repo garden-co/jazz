@@ -13,3 +13,6 @@ pub mod guest;
 pub mod handshake;
 pub mod session;
 pub mod websocket_codec;
+
+#[cfg(test)]
+mod core_deploy_tests;

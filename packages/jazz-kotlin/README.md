@@ -36,3 +36,7 @@ CI builds it (the `kotlin-android` partition) and runs it: an app of the AAR, mi
 opens, writes, reads and syncs on an x86-64 emulator (`dev/scripts/test-kotlin-android-emulator.sh`,
 which needs `/dev/kvm`), in full-suite runs and, on the AAR that ships, in release candidates.
 No physical device or arm64 is tested.
+
+## Encryption
+
+An app that declares end-to-end encryption opens with a private store your app supplies; see [Encryption in Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/native.mdx).

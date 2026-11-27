@@ -137,7 +137,7 @@ fn reopen(db: Db, path: &Path, config: DbConfig) -> Db {
     drop(db);
     let db = block_on(Db::open_at(config, path, FileOptions::default())).unwrap();
     if authority {
-        jazz::db::block_on(db.set_authority());
+        jazz::db::block_on(db.set_authority()).unwrap();
     }
     db
 }
@@ -470,7 +470,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    jazz::db::block_on(server.set_authority());
+    jazz::db::block_on(server.set_authority()).unwrap();
     let fresh = block_on(Db::open(
         bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
     ))
@@ -1591,6 +1591,39 @@ fn upsert(db: &Db, n: u8, title: &str) {
         jazz::db::UpsertOptions::default(),
     ))
     .unwrap();
+}
+
+/// Alice gives a plain row a non-default rank. Bob upserts only its title
+/// without holding the row, and the authority preserves her rank.
+#[test]
+fn a_partial_upsert_from_a_second_replica_preserves_an_omitted_plain_column() {
+    let server = server(v1(), vec![]);
+    let alice = block_on(Db::open(bare_config(v1(), 1, user(1)))).unwrap();
+    let bob = block_on(Db::open(bare_config(v1(), 2, user(2)))).unwrap();
+    let (client, peer) = pipe();
+    let _alice_link = block_on(alice.connect_upstream(client));
+    server.accept_subscriber(peer, user(1)).unwrap();
+    let (client, peer) = pipe();
+    let _bob_link = block_on(bob.connect_upstream(client));
+    server.accept_subscriber(peer, user(2)).unwrap();
+    block_on(alice.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".into(), text("draft")),
+            ("rank".into(), Value::I64(17)),
+        ]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&alice, &bob]);
+    assert!(read_query(&bob, Query::from("todos"), "rank", local()).is_empty());
+    upsert(&bob, 1, "edited");
+    pump(&server, &[&alice, &bob]);
+    assert_eq!(read(&server, "todos", "title"), texts(&["edited"]));
+    assert_eq!(read(&server, "todos", "rank"), [Value::I64(17)]);
 }
 
 /// An upsert that creates its row gives the columns it leaves out its

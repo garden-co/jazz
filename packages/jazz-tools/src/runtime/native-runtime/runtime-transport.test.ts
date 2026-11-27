@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { unreadableRows } from "../../encryption/unreadable.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
@@ -26,6 +27,7 @@ import {
   isCoreTickFailedError,
 } from "../core-tick-failed-error.js";
 import {
+  createOpenTransactionId,
   JazzClient,
   PersistedWriteRejectedError,
   type TxId,
@@ -61,6 +63,295 @@ function deferred<T>() {
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
+  });
+
+  it.each(["browser", "node"])(
+    "parks a pending %s read until the core has work, without a busy loop",
+    async (host) => {
+      let answered = false;
+      const poll = vi.fn<() => Uint8Array | null>(() => (answered ? Uint8Array.of(0, 0) : null));
+      let nativeWake!: (urgency: string) => void;
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (urgency: string) => void) => {
+            nativeWake = callback;
+          },
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
+        // Ten idle seconds, over many host turns: the read sleeps between
+        // fallback polls instead of polling on every turn.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        const idlePolls = poll.mock.calls.length;
+        expect(idlePolls).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // Native work wakes the read on the tick that follows, with no timer.
+        answered = true;
+        nativeWake("immediate");
+        for (let turn = 0; turn < 5 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
+  // How a binding hands the host a tick its core asked for: wasm calls the
+  // scheduler during the call that asked; napi's threadsafe function calls
+  // it on a later turn, coalescing the requests made before it into one
+  // callback, and counts every request (`tickRequests`).
+  const tickDeliveries = {
+    synchronous: (deliver: () => void) => deliver(),
+    "on a microtask": (deliver: () => void) => queueMicrotask(deliver),
+    "on a later host turn": (deliver: () => void) => setImmediate(deliver),
+  };
+
+  it.each(
+    (["browser", "node"] as const).flatMap((host) =>
+      (Object.keys(tickDeliveries) as (keyof typeof tickDeliveries)[]).map(
+        (delivery) => [host, delivery] as const,
+      ),
+    ),
+  )(
+    "does not wake a pending %s read for the tick its own poll asks for, delivered %s",
+    async (host, delivery) => {
+      let nativeWake!: (urgency: string) => void;
+      let requested = false;
+      let requests = 0;
+      const requestTick = () => {
+        requests += 1;
+        if (requested) return;
+        requested = true;
+        tickDeliveries[delivery](() => {
+          requested = false;
+          nativeWake("immediate");
+        });
+      };
+      let answered = false;
+      // Like a read that still owes requests: every poll asks for a tick.
+      const poll = vi.fn<() => Uint8Array | null>(() => {
+        if (answered) return Uint8Array.of(0, 0);
+        requestTick();
+        return null;
+      });
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (urgency: string) => void) => {
+            nativeWake = callback;
+          },
+          ...(delivery === "synchronous" ? {} : { tickRequests: () => requests }),
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
+        // Host turns still run, and the read only polls on its fallback timer.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        expect(poll.mock.calls.length).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // Work the read didn't ask for still wakes it, with no timer.
+        answered = true;
+        requestTick();
+        for (let turn = 0; turn < 10 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
+  it.each(["browser", "node"])(
+    "does not wake a pending %s read for its own deadline until it passes",
+    async (host) => {
+      let nativeWake!: (first: Error | null, urgency: string) => void;
+      const deadlineAt = 14_000;
+      let answered = false;
+      let requests = 0;
+      // A remote read re-announces its coverage deadline on every poll, and
+      // asks for the tick that sends what it owes. napi delivers both on a
+      // later turn, as its threadsafe function does, and counts the tick.
+      const poll = vi.fn<() => Uint8Array | null>(() => {
+        if (answered) return Uint8Array.of(0, 0);
+        const left = Math.max(0, deadlineAt - Date.now());
+        requests += 1;
+        setImmediate(() => {
+          nativeWake(null, `after:${left}`);
+          nativeWake(null, "immediate");
+        });
+        return null;
+      });
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          all: () => ({ poll, cancel: () => undefined }),
+          tick: () => undefined,
+          setTickScheduler: (callback: (first: Error | null, urgency: string) => void) => {
+            nativeWake = callback;
+          },
+          tickRequests: () => requests,
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      if (host === "browser") vi.stubGlobal("location", new URL("https://example.test"));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+      vi.setSystemTime(0);
+      const hostTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const query = JSON.stringify({
+          table: "todos",
+          array_subqueries: [
+            { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+          ],
+        });
+        let rows: unknown;
+        const read = runtime.query(query, null, "local-first").then((result) => {
+          rows = result;
+        });
+        // Ten seconds before the deadline: fallback polls only.
+        for (let step = 0; step < 100; step += 1) {
+          await vi.advanceTimersByTimeAsync(100);
+          for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        }
+        expect(poll.mock.calls.length).toBeLessThanOrEqual(10_000 / 50 + 20);
+
+        // The deadline passing is news: the read is polled at once, without
+        // waiting out its fallback timer.
+        await vi.advanceTimersByTimeAsync(deadlineAt - 1 - Date.now());
+        for (let turn = 0; turn < 20; turn += 1) await hostTurn();
+        answered = true;
+        await vi.advanceTimersByTimeAsync(1);
+        for (let turn = 0; turn < 10 && rows === undefined; turn += 1) await hostTurn();
+        expect(rows).toEqual([]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        await runtime.close();
+      }
+    },
+  );
+
+  it("ends a parked pending read as soon as the runtime closes", async () => {
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        all: () => ({ poll: () => null, cancel: () => undefined }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const query = JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+        ],
+      });
+      const read = runtime.query(query, null, "local-first");
+      void read.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const closing = runtime.close();
+      await expect(read).rejects.toThrow("cancelled by runtime shutdown");
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps unreadable rows from a native transaction relation snapshot", async () => {
+    const omission = { table: "todos", id: "missing", column: "title", code: "key-pending" };
+    const all = vi.fn((..._args: unknown[]) => ({
+      poll: () => new Uint8Array([0, 0]), // Empty relation snapshot: root count and row batches.
+      cancel: () => undefined,
+      unreadable: () => JSON.stringify([omission]),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ all, tick: () => undefined }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const openTransactionId = runtime.beginTransaction("mergeable", createOpenTransactionId());
+      const query = JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          { column_name: "related", table: "todos", inner_column: "id", outer_column: "id" },
+        ],
+      });
+      const rows = await runtime.query(
+        query,
+        null,
+        "local-first",
+        JSON.stringify({ transaction_id: openTransactionId }),
+      );
+      expect(rows).toEqual([]);
+      expect(all.mock.calls[0]?.[2]).toBe(openTransactionId);
+      expect(unreadableRows(rows as unknown[])).toEqual([omission]);
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
@@ -625,17 +916,21 @@ describe("NativeRuntimeAdapter server transport", () => {
     await waitForServerPumpTimer();
     expect(transports).toHaveLength(1);
 
-    // The server delivers a frame, and the socket drops before the debounced
-    // pump routes it into the first connection's transport.
+    // The carrier reports the close after its message handler settles. Hold
+    // this pump request so the frame is still queued when the close reaches the runtime.
+    const schedule = vi
+      .spyOn(runtime as unknown as { scheduleServerPump(): void }, "scheduleServerPump")
+      .mockImplementationOnce(() => {});
     const staleFrame = Uint8Array.from([7, 7, 7]);
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([staleFrame]));
-    await waitForFakeWebSocketNegotiation();
+    await Promise.resolve();
+    expect(schedule).toHaveBeenCalledOnce();
+    schedule.mockRestore();
     expect(transports[0]!.received).toEqual([]);
     sockets[0]!.emitServerClose();
 
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
     await runtime.waitForUpstreamServerConnection();
-    await waitForServerPumpTimer();
-    expect(sockets).toHaveLength(2);
     expect(transports).toHaveLength(2);
     expect(transports[0]!.closed).toBe(true);
     // The frame belongs to the dropped connection's channel state; the
@@ -644,6 +939,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transports[1]!.received).toEqual([]);
     expect(terminal).not.toHaveBeenCalled();
     await runtime.close();
+  });
+
+  it("pumps the first frame after a data frame and retry-later error retire the previous link", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const previousTransport = new FakeTransport([]);
+    const successorTransport = new FakeTransport([]);
+    const transports = [previousTransport, successorTransport];
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transports.shift()!, tick: () => undefined }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const retry = new PostcardWriter();
+      retry.u64(1); // WireFrame::Error
+      retry.u64(6); // NotReady
+      retry.u64(3); // Later
+      retry.string("account registry unavailable");
+      const stale = Uint8Array.of(2, 10);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([stale, retry.finish()]));
+
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await runtime.waitForUpstreamServerConnection();
+      expect(previousTransport.closed).toBe(true);
+      expect(previousTransport.received).toEqual([]);
+      const fresh = Uint8Array.of(2, 11);
+      sockets[1]!.emitMessage(encodeWebSocketFrameBatch([fresh]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(successorTransport.received).toEqual([fresh]);
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("drops outbound frames a dropped connection produced instead of sending them on its reconnect", async () => {
@@ -3943,6 +4281,76 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.receivedBatches).toEqual([[first, second]]);
     expect(transport.received).toEqual([first, second]);
     expect(transport.tickCount).toBe(1);
+  });
+
+  it("pumps websocket messages on separate host turns promptly and in order", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transport, tick: () => undefined }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const batches = [[Uint8Array.of(2, 10)], [Uint8Array.of(2, 11)], [Uint8Array.of(2, 12)]];
+      const ticks = transport.tickCount;
+      for (const [index, batch] of batches.entries()) {
+        sockets[0]!.emitMessage(encodeWebSocketFrameBatch(batch));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(transport.receivedBatches).toEqual(batches.slice(0, index + 1));
+        expect(transport.tickCount).toBe(ticks + index + 1);
+      }
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("drives incoming server work promptly and stops ticking when idle", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ connectUpstream: () => transport, tick: () => transport.tick() }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const incoming = Uint8Array.of(2, 10);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([incoming]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect.soft(transport.received).toEqual([incoming]);
+
+      const ticks = transport.tickCount;
+      await vi.advanceTimersByTimeAsync(64);
+      expect(transport.tickCount).toBe(ticks);
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
   });
 
   it("runs another server pass when work is scheduled during an active pass", async () => {

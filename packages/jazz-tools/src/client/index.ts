@@ -2,8 +2,13 @@ export type { JazzClient } from "../web/create-jazz-client.js";
 export type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 export { getSubscriptionStore } from "../subscription-store-internal.js";
 export type { CacheEntryHandle, UseAllState } from "../subscription-store-internal.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 
 export * from "../accounts/exports.js";
+export {
+  EncryptionNeedsLocalFirstError,
+  type EncryptionNeedsLocalFirstReason,
+} from "../runtime/encryption-needs-local-first.js";
 
 export { accountRegistryUrl } from "../accounts/context.js";
 

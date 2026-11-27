@@ -96,6 +96,8 @@ export type {
   RefColumn,
   ArrayColumn,
   ColumnAlias,
+  EncryptedColumn,
+  ColumnEncryption,
 } from "./dsl.js";
 export type {
   OldValue,

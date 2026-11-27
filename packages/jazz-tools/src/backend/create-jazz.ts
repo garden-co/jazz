@@ -1,3 +1,4 @@
+import { hasSystemTables } from "../encryption/table-names.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import { BACKEND_SIGNING_KEY_ROUTE, backendSigningKeys } from "./signing-key.js";
@@ -7,6 +8,7 @@ import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { JazzCoreSocketEvent } from "jazz-napi";
+import { declaresEncryption, keylessBackend } from "../encryption/node-host.js";
 import { backendNative, inProcessCore } from "./backend-native.js";
 import {
   BINDING_ORIGIN,
@@ -70,7 +72,7 @@ import {
   openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
-import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { DEFAULT_ENVIRONMENT, type BackendSchemaInput } from "./create-jazz-context.js";
 import { openThinSessionClient } from "./thin-session-client.js";
 import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
 import {
@@ -1827,6 +1829,7 @@ interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
  * declare to its core.
  */
 async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise<OpenedJazz> {
+  await compiledApp(initial);
   const store = opening.kind === "durableObjects" ? await durableObjectCore(opening) : opening;
   let options = initial;
   let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
@@ -1848,16 +1851,19 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
   // A vercel() core says which it opened itself.
   if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store, opening.kind));
   const appId = core.appId;
+  // The environment the backend's own session opens the app in; the
+  // clients serving thin sessions' transactions build their keyless hooks
+  // for the same one.
+  const environment = DEFAULT_ENVIRONMENT;
   const issuer = BACKEND_USER_ISSUER;
   // An in-memory store's agent tokens last as long as its data: this process.
   const memoryTokenSecret = newTokenSecret();
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
-    await compiledPermissions(next);
     return applyBundle(core.serverUrl, {
       ...next,
-      loaded: compiled.get(next)!,
+      loaded: await compiledApp(next),
       appId,
       adminSecret: core.adminSecret,
       quiet: testHarnessOptions.has(next),
@@ -1872,8 +1878,9 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     pin = published ?? (await publish(next));
     const session = await openJazzSession({
       appId,
+      env: environment,
       app: next.app,
-      permissions: await compiledPermissions(next),
+      permissions: compiledPermissionsOf(next),
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
@@ -2594,6 +2601,9 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       trusted: link.trusted,
       webSocket,
       migrations: shippedMigrations(resolveSchemaSource(options.app)),
+      // An app that declares encryption: the client holds no keys, as the
+      // backend's own does, and refuses encrypted writes itself.
+      keyless: keylessBackend(options.app, appId, environment),
     });
     thinClients += 1;
     let closed = false;
@@ -4234,7 +4244,7 @@ const testHarnessOptions = new WeakSet<CreateJazzOptions>();
 /** What the Rust loader made of each options' bindings and permissions file, once checked. */
 const compiled = new WeakMap<CreateJazzOptions, LoadedBackendApp>();
 
-/** The checked permissions of options {@link compiledPermissions} has loaded. */
+/** The checked permissions of options {@link compiledApp} has loaded. */
 function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsMap {
   const loaded = compiled.get(options);
   if (!loaded) throw new Error("createJazz: the app's permissions are not loaded yet");
@@ -4249,9 +4259,9 @@ function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsM
  * app's schema. A deployed backend without jazz.app.json in reach checks
  * only the permissions.
  */
-async function compiledPermissions(options: CreateJazzOptions): Promise<CompiledPermissionsMap> {
+async function compiledApp(options: CreateJazzOptions): Promise<LoadedBackendApp> {
   const cached = compiled.get(options);
-  if (cached) return cached.permissions;
+  if (cached) return cached;
   const bound = boundAppOf(options.app);
   // Jazz's loader through a static jazz-napi import, so bundlers and file
   // tracers (Next.js, Vercel) ship the addon with the backend.
@@ -4275,9 +4285,26 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`createJazz: ${message}`, { cause: error });
   }
+  // Like the Rust runtime, check the current schema's system tables. They
+  // also carry forward into versions that remove their encryption declarations.
+  const current = bound.schema.schemas.find(
+    ({ hash }) => hash.toLowerCase() === loaded.current,
+  )?.schema;
+  const tables = isRecord(current) ? current.tables : undefined;
+  const hasEncryptionTables = isRecord(tables) && hasSystemTables(tables);
+  if (
+    hasEncryptionTables &&
+    (!declaresEncryption(options.app) ||
+      typeof (backendNative().Db as { openMemoryAsBackendKeyless?: unknown })
+        .openMemoryAsBackendKeyless !== "function")
+  ) {
+    throw new Error(
+      "createJazz: this backend cannot open the encrypted app with keyless hooks; rebuild the Jazz native artifact",
+    );
+  }
   for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);
   compiled.set(options, loaded);
-  return loaded.permissions;
+  return loaded;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

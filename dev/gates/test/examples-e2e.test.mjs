@@ -97,6 +97,12 @@ test("the workflow matrix lists exactly the registered variants", () => {
   );
 });
 
+test("the encrypted BandChat app is registered for production browser tests", () => {
+  const bandChat = VARIANTS.find((variant) => variant.name === "band-chat-hono-encrypted");
+  assert.equal(bandChat?.dir, "examples/band-chat/apps/react-hono-betterauth-e2ee");
+  assert.equal(bandChat.publicPrefix, "VITE_");
+});
+
 test("every variant is a standalone project the gate can build, start and drive", () => {
   for (const variant of VARIANTS) {
     const dir = path.join(root, variant.dir);

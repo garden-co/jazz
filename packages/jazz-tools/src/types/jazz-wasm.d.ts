@@ -44,6 +44,22 @@ declare module "jazz-wasm" {
     cancel(): void;
     setWake(callback: () => void): void;
   };
+  /** The end-to-end encryption runtime of an app, over the page's private store. */
+  export class EncryptionRuntime {
+    static fromBindings(
+      bindings: string,
+      appId: string,
+      environment: string,
+      accountId: string,
+      deviceAccountSecret?: string | null,
+    ): EncryptionRuntime;
+    setAddCreatorAsMember(enabled: boolean): void;
+    ready(): Promise<string>;
+    setStoreWake(callback: ((wake: string) => void) | null): void;
+    takeStoreRequests(): string[];
+    replyStore(id: string, ok: boolean, payload: string): boolean;
+  }
+
   export class PendingNativeRead {
     poll(): Uint8Array | null;
     cancel(): void;
@@ -97,6 +113,7 @@ declare module "jazz-wasm" {
   export type InsertOptions = WriteOptions & {
     rowId?: Uint8Array;
     branch?: unknown;
+    addCreatorAsMember?: boolean;
   };
 
   export type UpdateOptions = WriteOptions & {
@@ -142,6 +159,33 @@ declare module "jazz-wasm" {
       claimedAuthor: string,
       database: string,
     ): Promise<WasmDb>;
+    /**
+     * Host-only relay open for an app that declares encryption: the worker holds and relays
+     * sealed rows with keyless hooks built from the app's compiled bindings, and holds no keys.
+     */
+    static openBrowserKeyless(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      database: string,
+      bindings: string,
+      appId: string,
+      environment: string,
+      proof?: { token: string; claimedAuthor: string; appId: string } | null,
+    ): Promise<WasmDb>;
+    /** An encrypted app's in-memory database with its runtime installed. */
+    static openMemoryEncrypted(
+      schema: Uint8Array,
+      config: Uint8Array,
+      runtime: EncryptionRuntime,
+      proof?: { token: string; claimedAuthor: string } | null,
+    ): WasmDb;
+    encryptionCall(op: string, args?: unknown): Promise<string>;
+    takeEncryptionReports(): string[];
+    encryptionState(): string;
+    encryptionUseSpace(table: string, id: string, open: boolean): void;
+    encryptionSpaces(): string;
+    encryptionSetOnline(online: boolean): void;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
       windowMs: number,
@@ -159,6 +203,8 @@ declare module "jazz-wasm" {
       updatedAtMs?: number,
       head?: unknown,
       base?: unknown,
+      transaction?: string,
+      addCreatorAsMember?: boolean,
     ): StreamingMutation;
     /** Delete a durable browser store; no database may have it open. */
     static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;

@@ -39,6 +39,12 @@ export interface ThinSessionClientOptions {
    * transactions as a store opened without the app's migrations.
    */
   migrations?: ClientMigrations;
+  /**
+   * An app that declares encryption: the replica opens with keyless hooks,
+   * as the backend's own does (encrypted writes refused, encrypted cells
+   * unreadable, plain data normal), still as the session.
+   */
+  keyless?: { bindings: string; appId: string; environment: string };
 }
 
 export function openThinSessionClient(options: ThinSessionClientOptions): ThinTransactionClient {
@@ -63,6 +69,7 @@ export function openThinSessionClient(options: ThinSessionClientOptions): ThinTr
     {
       webSocket: options.webSocket,
       migrations: options.migrations,
+      keyless: options.keyless,
       ...(options.trusted
         ? { backendMode: true, readAuthorizationHost: "trusted-serving" as const }
         : { selfSignedClientProof: guestProof(parsed.auth?.jwt_token, author) }),

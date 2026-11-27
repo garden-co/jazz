@@ -406,7 +406,7 @@ fn file_server(path: &std::path::Path) -> Db {
         jazz::db::FileOptions::default(),
     ))
     .expect("open file server");
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 

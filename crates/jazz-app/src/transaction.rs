@@ -4,16 +4,20 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use jazz::tools::public_schema::E2eeDeclarations;
 use jazz::tools::{JazzClient, ObjectId, OpenTransactionId, ReadTier};
 
 use futures_util::FutureExt as _;
 
+use crate::AccountId;
 use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::include::Row;
+use crate::members::{NewSpaceMember, SpaceMember, member_rows, require_space};
 use crate::query::Query;
-use crate::table::{Implementations, Insert, Table, Update};
+use crate::table::{Implementations, Insert, Table, Updatable, Update};
 
 /// A transaction in progress, handed to [`Jazz::transaction`]'s closure.
 ///
@@ -27,6 +31,7 @@ pub struct Transaction {
     id: OpenTransactionId,
     wrote: Rc<Cell<bool>>,
     implementations: Implementations,
+    declarations: Option<Arc<E2eeDeclarations>>,
 }
 
 impl Transaction {
@@ -58,6 +63,30 @@ impl Transaction {
         Ok(row)
     }
 
+    /// Stages an admission alongside the transaction's other writes. If the
+    /// account is already a member, as the transaction sees the space (its
+    /// own staged writes included), returns that member's existing row and
+    /// stages nothing. Like [`Jazz::add_member`], it only sees memberships
+    /// this client has synced. Calls in one transaction run one after another
+    /// on the client, even when joined (`join!`), so adding the same account
+    /// twice in a transaction stages one row.
+    pub async fn add_member<T: Table>(
+        &self,
+        id: ObjectId,
+        account: AccountId,
+    ) -> Result<SpaceMember> {
+        require_space(self.declarations.as_deref(), T::NAME)?;
+        let scope_id = self.client.table_identity(T::NAME).await?;
+        if let Some(existing) = self.one(member_rows(scope_id, id, account)).await? {
+            return Ok(existing);
+        }
+        self.insert(NewSpaceMember {
+            scope_id,
+            identifier: id,
+            account,
+        })
+    }
+
     pub fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
         let cells = update.into_cells(&self.implementations)?;
         self.client.update(<U::Row as Table>::NAME, id, cells)?;
@@ -67,7 +96,10 @@ impl Transaction {
 
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -82,7 +114,7 @@ impl Transaction {
     }
 
     /// Brings back a deleted row, as [`Jazz::restore`].
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
         self.read_back(id).await
@@ -90,7 +122,10 @@ impl Transaction {
 
     /// Brings back a deleted row with `new`'s values, as
     /// [`Jazz::restore_with`].
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.implementations)?;
         self.client.restore(
             <N::Row as Table>::NAME,
@@ -112,7 +147,11 @@ impl Transaction {
 
     /// Every row `query` matches, as the transaction sees them.
     pub async fn all<T: Row>(&self, query: Query<T>) -> Result<Vec<T>> {
-        let opts = crate::handle::read_opts(&query, ReadTier::LocalFirst);
+        self.all_with(query, ReadTier::LocalFirst).await
+    }
+
+    pub(crate) async fn all_with<T: Row>(&self, query: Query<T>, tier: ReadTier) -> Result<Vec<T>> {
+        let opts = crate::handle::read_opts(&query, tier);
         let rows = self
             .client
             .query_with_opts(query.into_untyped()?, opts)
@@ -155,7 +194,7 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
-        self.run_transaction(true, body).await
+        self.run_transaction(true, false, body).await
     }
 
     /// Runs `body` in a serializable transaction, as TS's
@@ -169,16 +208,35 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
-        self.run_transaction(false, body).await
+        self.run_transaction(false, false, body).await
     }
 
-    async fn run_transaction<F, Fut, R>(&self, mergeable: bool, body: F) -> Result<R>
+    /// Commit a serializable transaction even when the only work is validating its reads.
+    pub(crate) async fn serializable_transaction_validating_reads<F, Fut, R>(
+        &self,
+        body: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(Transaction) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Send + 'static,
+    {
+        self.run_transaction(false, true, body).await
+    }
+
+    async fn run_transaction<F, Fut, R>(
+        &self,
+        mergeable: bool,
+        commit_read_only: bool,
+        body: F,
+    ) -> Result<R>
     where
         F: FnOnce(Transaction) -> Fut + Send + 'static,
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
         let implementations = self.info.implementations.clone();
+        let declarations = self.info.declarations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let open = if mergeable {
@@ -191,6 +249,7 @@ impl Jazz {
                 id: open.transaction_id(),
                 wrote: Rc::new(Cell::new(false)),
                 implementations,
+                declarations,
             };
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
@@ -205,8 +264,12 @@ impl Jazz {
                     )))
                 });
             match outcome {
-                Ok(result) if wrote.get() => {
-                    let committed = scoped.commit_transaction(id)?;
+                Ok(result) if wrote.get() || commit_read_only => {
+                    let committed = if commit_read_only {
+                        scoped.commit_transaction_validating_reads(id)?
+                    } else {
+                        scoped.commit_transaction(id)?
+                    };
                     settle.settle(&client, Some(committed)).await?;
                     Ok(result)
                 }
@@ -284,6 +347,7 @@ impl Jazz {
     async fn open_transaction(&self, mergeable: bool) -> Result<OpenTransaction> {
         let settle = self.settler()?;
         let implementations = self.info.implementations.clone();
+        let declarations = self.info.declarations.clone();
         let key = self
             .with_client(move |client| async move {
                 let open = if mergeable {
@@ -296,6 +360,7 @@ impl Jazz {
                     id: open.transaction_id(),
                     wrote: Rc::new(Cell::new(false)),
                     implementations,
+                    declarations,
                 };
                 Ok(OPEN.with(|open| {
                     let mut open = open.borrow_mut();
@@ -349,12 +414,27 @@ impl OpenTransaction {
         self.on(move |tx| async move { tx.insert(new) }).await
     }
 
+    /// Stages an admission alongside the transaction's other writes, as
+    /// [`Transaction::add_member`]: an existing member's row is returned,
+    /// and joined adds of the same account in this transaction share one row.
+    pub async fn add_member<T: Table>(
+        &self,
+        id: ObjectId,
+        account: AccountId,
+    ) -> Result<SpaceMember> {
+        self.on(move |tx| async move { tx.add_member::<T>(id, account).await })
+            .await
+    }
+
     pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
         self.on(move |tx| async move { tx.update(id, update) })
             .await
     }
 
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         self.on(move |tx| async move { tx.upsert(id, new).await })
             .await
     }
@@ -363,7 +443,7 @@ impl OpenTransaction {
         self.on(move |tx| async move { tx.delete::<T>(id) }).await
     }
 
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.on(move |tx| async move { tx.restore::<T>(id).await })
             .await
     }
@@ -371,7 +451,10 @@ impl OpenTransaction {
     /// Brings back a deleted row with `new`'s values. A restore replaces
     /// the whole row, so it takes the full insert, as TS's
     /// `restore(table, id, data)` does.
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         self.on(move |tx| async move {
             let cells = new.into_cells(&tx.implementations)?;
             tx.client.restore(
@@ -386,7 +469,7 @@ impl OpenTransaction {
     }
 
     /// [`Jazz::edit_text`] staged in the transaction.
-    pub async fn edit_text<T: Table, V: crate::TextColumn>(
+    pub async fn edit_text<T: Updatable, V: crate::TextColumn>(
         &self,
         id: ObjectId,
         column: crate::Column<T, V>,
@@ -400,7 +483,7 @@ impl OpenTransaction {
 
     /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
     /// bytes on a text column).
-    pub async fn splice<T: Table, V: crate::LargeColumn>(
+    pub async fn splice<T: Updatable, V: crate::LargeColumn>(
         &self,
         id: ObjectId,
         column: crate::Column<T, V>,

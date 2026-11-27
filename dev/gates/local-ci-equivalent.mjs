@@ -214,6 +214,13 @@ const typescriptPartitions = Object.freeze({
       "--target",
       "wasm32-unknown-unknown",
     ]),
+    // The WASM module and Node binding this partition produced link no
+    // lattice or SHA-3 code (the SLH-DSA dependency carries SHAKE variants
+    // that no build may use).
+    command("no lattice or SHA-3 symbols", "node", [
+      "dev/gates/check-no-lattice-sha3-symbols.mjs",
+      "--correctness-artifacts",
+    ]),
   ]),
 });
 
@@ -262,6 +269,12 @@ export const ciPartitions = Object.freeze({
     command("changesets release plan", "node", ["dev/gates/changesets.mjs"]),
     command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
     command("actions pinned to commit SHAs", "node", ["dev/gates/actions-pinned.mjs"]),
+    // Only clients seal and open encrypted cells: the server never builds
+    // with the client's encryption hooks.
+    command("server excludes e2ee-client", "node", [
+      "dev/gates/server-excludes-e2ee-client.mjs",
+      "--self-test",
+    ]),
     // The exhaustive target-class compile lives here rather than in front of
     // the TypeScript artifact build: it gates the same push, but no longer
     // delays the longest job's native artifacts by a serial workspace check.
@@ -357,6 +370,40 @@ export const ciPartitions = Object.freeze({
       "--tests",
       "--features",
       RUST_CI_FEATURES,
+    ]),
+    command("jazz-napi encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec cargo test -p jazz-napi --lib --features rn-test-bridge",
+    ]),
+    command("jazz-wasm encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec dev/ci/wasm-pack-test.sh --node crates/jazz-wasm",
+    ]),
+    // The SLH-DSA key-generation vectors on wasm32 under Node, as the
+    // browser and Durable Object builds run them. wasm-pack would build every
+    // jazz-e2ee test target, and the libsodium cross-checks don't build for
+    // wasm32, so cargo runs just these targets under wasm-bindgen's runner.
+    command("jazz-e2ee SLH-DSA vectors on wasm32", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec dev/ci/wasm-cargo-test.sh -p jazz-e2ee --lib --test slh_dsa",
+    ]),
+    // Run jazz-core's integration tests without the client encryption hooks,
+    // which the workspace run above unifies on through its binding crates.
+    command("jazz-core integration tests without e2ee-client", "node", [
+      "dev/gates/run-rust-tests.mjs",
+      "--require-nextest",
+      "--timeout-seconds",
+      "600",
+      "--nextest-profile",
+      "jazz-ci",
+      "--",
+      "-p",
+      "jazz-core",
+      "--test",
+      "integration",
+      "--no-default-features",
+      "--features",
+      "jazz-core/testing",
     ]),
     // jazz-ffi's C ABI test and UniFFI generation (dev/gates/jazz-ffi.sh) run
     // in the jazz-ffi-bindings partition, whose jazz-ffi-compile-bindings.sh
@@ -496,6 +543,10 @@ export const ciPartitions = Object.freeze({
     command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
       "dev/gates/jazz-swift.sh",
     ]),
+    // The native libraries link no lattice or SHA-3 code: jazz-ffi's (which
+    // jazz-kotlin and the Swift package load, built above) and the React
+    // Native relay linked as an app links it.
+    command("no lattice or SHA-3 native symbols", "bash", ["dev/gates/native-crypto-symbols.sh"]),
   ]),
   // Every crate release-publish.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.

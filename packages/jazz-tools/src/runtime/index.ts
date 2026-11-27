@@ -6,6 +6,7 @@ export {
   type PermissionAdvice,
   PersistedWriteRejectedError,
   WriteWaitTimeoutError,
+  StreamingPublicationTimeoutError,
   EmptyTransactionError,
   type WriteWaitOptions,
   type DurabilityTier,

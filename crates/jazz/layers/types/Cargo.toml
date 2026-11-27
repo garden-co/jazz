@@ -29,9 +29,14 @@ internment = { version = "0.8.6", features = ["serde"] }
 smallvec = { version = "1.11", features = ["serde", "const_generics"] }
 sha2 = "0.10"
 base64 = "0.22"
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 getrandom = "0.3"
 
+# Standalone users of the identity types also build for the browser.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+uuid = { version = "1.18.1", features = ["js"] }
 
 [dev-dependencies]
 futures = "0.3"

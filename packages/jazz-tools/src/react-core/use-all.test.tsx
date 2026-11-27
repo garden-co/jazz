@@ -9,9 +9,22 @@ import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzClientProvider } from "./provider.js";
 import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
+import { unreadableRows, withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
 
 type Todo = { id: string; title: string };
-type NoQueryResult = { data: undefined; isLoading: false; error: null; db: Db };
+type NoQueryResult = {
+  data: undefined;
+  isLoading: false;
+  error: null;
+  db: Db;
+  unreadable: readonly UnreadableRow[];
+};
+const keyPending = (id: string): UnreadableRow => ({
+  table: "todos",
+  id,
+  column: "title",
+  code: "key-pending",
+});
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
   return {
@@ -105,7 +118,13 @@ describe("react-core/useAll", () => {
     );
 
     expect(container.textContent).toBe("idle");
-    expect(result).toEqual({ data: undefined, isLoading: false, error: null, db: client.db });
+    expect(result).toEqual({
+      data: undefined,
+      isLoading: false,
+      error: null,
+      db: client.db,
+      unreadable: [],
+    });
     expect(subscribeCalls).toHaveLength(0);
   });
 
@@ -173,6 +192,93 @@ describe("react-core/useAll", () => {
     expect(container.textContent).toBe("1");
     expect(result!.data).toEqual([{ id: "1", title: "first" }]);
     expect(result!.db).toBe(client.db);
+  });
+
+  it("reports the rows each delivery leaves out undecrypted", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-unreadable");
+    const seen: UseAllResult<Todo>[] = [];
+
+    function Probe() {
+      seen.push(useAll(makeQuery()));
+      return null;
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    expect(seen.at(-1)!.unreadable).toEqual([]);
+
+    const rows = [{ id: "1", title: "first" }];
+    act(() => subscribeCalls[0]!.callback(delta(withUnreadable([...rows], [keyPending("2")]))));
+    expect(seen.at(-1)!.data).toEqual(rows);
+    expect(seen.at(-1)!.unreadable).toEqual([keyPending("2")]);
+    expect(unreadableRows(seen.at(-1)!.data!)).toEqual([keyPending("2")]);
+
+    // A delivery that changes only the list still updates it.
+    act(() =>
+      subscribeCalls[0]!.callback(
+        delta(withUnreadable([...rows], [keyPending("2"), keyPending("3")])),
+      ),
+    );
+    expect(seen.at(-1)!.unreadable).toEqual([keyPending("2"), keyPending("3")]);
+
+    // The key arrives: the row joins the result and leaves the list.
+    act(() =>
+      subscribeCalls[0]!.callback(
+        delta(withUnreadable([...rows, { id: "2", title: "second" }], [keyPending("3")])),
+      ),
+    );
+    expect(seen.at(-1)!.data).toEqual([...rows, { id: "2", title: "second" }]);
+    expect(seen.at(-1)!.unreadable).toEqual([keyPending("3")]);
+
+    act(() => subscribeCalls[0]!.callback(delta([...rows])));
+    expect(seen.at(-1)!.unreadable).toEqual([]);
+    expect(unreadableRows(seen.at(-1)!.data!)).toEqual([]);
+  });
+
+  it("useAllSuspense reports the rows its result leaves out undecrypted", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-suspense-unreadable");
+    let result: ReturnType<typeof useAllSuspense<Todo>> | undefined;
+    let showSuspense!: (show: boolean) => void;
+
+    function Warm() {
+      useAll(makeQuery());
+      return null;
+    }
+
+    function List() {
+      result = useAllSuspense(makeQuery());
+      return <span>{result.data.length}</span>;
+    }
+
+    function Root() {
+      const [show, setShow] = useState(false);
+      showSuspense = setShow;
+      return (
+        <>
+          <Warm />
+          <Suspense fallback={<span>loading</span>}>{show ? <List /> : null}</Suspense>
+        </>
+      );
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Root />
+      </JazzClientProvider>,
+    );
+
+    const first = { id: "1", title: "first" };
+    act(() => subscribeCalls[0]!.callback(delta(withUnreadable([first], [keyPending("2")]))));
+    act(() => showSuspense(true));
+    expect(result!.unreadable).toEqual([keyPending("2")]);
+    expect(unreadableRows(result!.data)).toEqual([keyPending("2")]);
+
+    act(() => subscribeCalls[0]!.callback(delta([first])));
+    expect(result!.unreadable).toEqual([]);
   });
 
   it("keeps result object identity stable while the state is unchanged", () => {

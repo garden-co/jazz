@@ -477,6 +477,30 @@ describe("JazzSession lifecycle", () => {
     consumer.release();
     await app.close();
   });
+  it("refuses session.db while a device link is pending", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await tick();
+    await app.createDeviceAccount();
+    const consumer = attachJazzSessionConsumer(app);
+    const linking = app.linkDeviceAccount();
+    try {
+      await tick();
+      expect(app.getSnapshot()).toMatchObject({
+        status: "transitioning",
+        pending: "linkDeviceAccount",
+      });
+      expect(() => app.db).toThrow(
+        'session.db: there is no Db while the session is transitioning: wait for status "ready"',
+      );
+      expect(f.events).not.toContain("link");
+    } finally {
+      consumer.release();
+      await linking;
+      await app.close();
+    }
+  });
+
   it("repeats failed manual linking but only reopens after successful linking", async () => {
     const f = await setup();
     const app = ownJazzSession({}, async () => f.session);

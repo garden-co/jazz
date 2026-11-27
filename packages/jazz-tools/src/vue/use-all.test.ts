@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { effectScope, nextTick, ref } from "vue";
+import { effectScope, nextTick, ref, watchEffect } from "vue";
 
 const mocks = vi.hoisted(() => {
   const unsubscribe = vi.fn();
@@ -43,6 +43,14 @@ vi.mock("../subscription-store-internal.js", () => ({
 }));
 
 import { useAll, useAllSuspense } from "./use-all.js";
+import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
+
+const pending = (id: string): UnreadableRow => ({
+  table: "todos",
+  id,
+  column: "title",
+  code: "key-pending",
+});
 
 function makeQuery(marker = "todos") {
   return { _build: () => `{"table":"${marker}"}`, _table: marker } as any;
@@ -355,6 +363,72 @@ describe("vue/useAll", () => {
     expect(result.db).toBe(mocks.db);
     expect("isLoading" in result).toBe(false);
 
+    scope.stop();
+  });
+
+  it("exposes the rows each delivery leaves out undecrypted, reactively", async () => {
+    type Todo = { id: string; title: string };
+    const first = { id: "1", title: "first" };
+    let listener: any;
+    // Stands in for the orchestrator: the entry's data carries the list.
+    const entry: { state: any; subscribe: (callbacks: any) => () => void } = {
+      state: { status: "fulfilled", data: withUnreadable([first], [pending("2")]), error: null },
+      subscribe: (callbacks: any) => {
+        listener = callbacks;
+        return vi.fn();
+      },
+    };
+    mocks.getCacheEntry.mockReturnValue(entry as any);
+    const deliver = (all: Todo[]) => {
+      entry.state = { status: "fulfilled", data: all, error: null };
+      listener.onDelta({ all, delta: [] });
+    };
+
+    const scope = effectScope();
+    const seen: string[][] = [];
+    const result = scope.run(() => {
+      const result = useAll<Todo>(makeQuery());
+      watchEffect(() => seen.push(result.unreadable.value.map((row) => row.id)), {
+        flush: "sync",
+      });
+      return result;
+    })!;
+
+    expect(result.unreadable.value).toEqual([pending("2")]);
+
+    // A delivery that changes only the list.
+    deliver(withUnreadable([first], [pending("2"), pending("3")]));
+    expect(result.unreadable.value).toEqual([pending("2"), pending("3")]);
+
+    // The key arrives: the row joins the result and leaves the list.
+    deliver(withUnreadable([first, { id: "2", title: "second" }], [pending("3")]));
+    expect(result.data.value).toEqual([first, { id: "2", title: "second" }]);
+    expect(result.unreadable.value).toEqual([pending("3")]);
+
+    deliver([first, { id: "2", title: "second" }]);
+    expect(result.unreadable.value).toEqual([]);
+
+    deliver(withUnreadable([first], [pending("4")]));
+    listener.onReset();
+    expect(result.unreadable.value).toEqual([]);
+
+    expect(seen).toEqual([["2"], ["2", "3"], ["3"], [], ["4"], []]);
+    scope.stop();
+  });
+
+  it("useAllSuspense exposes the rows its result leaves out undecrypted", async () => {
+    const alice = { id: "1", title: "Alice" };
+    const data = withUnreadable([alice], [pending("2")]);
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data },
+      promise: Promise.resolve(data),
+      subscribe: mocks.subscribe,
+    } as any);
+
+    const scope = effectScope();
+    const result = await scope.run(() => useAllSuspense(makeQuery()))!;
+
+    expect(result.unreadable.value).toEqual([pending("2")]);
     scope.stop();
   });
 });

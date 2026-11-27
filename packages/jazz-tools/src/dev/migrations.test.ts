@@ -18,7 +18,8 @@ import {
   snapshotToVersion,
   type ModuleLoader,
 } from "./migrations.js";
-import { loadAppFiles } from "./codegen-napi.js";
+import { createAppMigration, generateApp } from "./project.js";
+import { loadAppFiles, validateBindings } from "./codegen-napi.js";
 import type { ReadableTable } from "../schema-dsl/readable-app.js";
 import { readableSchema } from "../schema-dsl/define-schema.js";
 
@@ -57,6 +58,26 @@ async function fixtureMigrations(withFromSnapshot: boolean): Promise<string> {
     );
   return dir;
 }
+
+it("validateBindings refuses a migration that changes an encrypted column's default", async () => {
+  const notes = (columns: Record<string, string>, titleDefault: string) => ({
+    columns: { title: "bytes", ...columns },
+    encryption: {
+      space: "id",
+      scope: "notes",
+      columns: { title: { type: "string", default: titleDefault } },
+    },
+  });
+  const file = {
+    $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+    tables: { notes: notes({ done: "boolean" }, "untitled") },
+    history: { v1: { tables: { notes: notes({}, "draft") } } },
+    migrations: [{ from: "v1", migrate: { notes: { done: { add: "boolean", default: false } } } }],
+  };
+  await expect(validateBindings(JSON.stringify(file), null)).rejects.toThrow(
+    "notes.title: the encrypted column's default changes",
+  );
+});
 
 describe("snapshots", () => {
   it("round-trips a .64 snapshot through the readable form with the same hash", async () => {
@@ -176,7 +197,7 @@ describe("loadMigrationHistory", () => {
       expect(loaded.migrations).toEqual(main.migrations);
       expect(Object.keys(loaded.history)).toEqual(Object.keys(main.history));
       // The same version: Rust loads the app and finds the same hashes.
-      const app = JSON.stringify({ format: 1, tables, ...loaded });
+      const app = JSON.stringify({ format: 1, ...loaded });
       const files = (await loadAppFiles(
         JSON.stringify({
           format: 1,
@@ -280,5 +301,147 @@ describe("createMigration", () => {
       }),
       '{"format":1,"tables":{}}',
     );
+  });
+});
+
+describe("schema.ts encrypted enums", () => {
+  async function encryptedEnumApp() {
+    const cwd = await tempDir();
+    await writeFile(join(cwd, "package.json"), '{"type":"module"}');
+    const appFile = join(cwd, "jazz.app.json");
+    const writeSchema = (
+      variants: string[],
+      indexes: string[],
+      column = "status",
+      table = "notes",
+    ) =>
+      writeFile(
+        join(cwd, "schema.ts"),
+        `import { schema as s } from "jazz-tools";
+export const schema = s.defineSchema({
+  ${table}: s.table({
+    title: s.string(),
+    rank: s.int(),
+    ${column}: s.enum(${variants.map((variant) => JSON.stringify(variant)).join(", ")}).optional().default("draft").encrypted(),
+  }, {}, { space: "id" }).indexOnly(${JSON.stringify(indexes)}),
+});
+const { definePermissions, isMember } = schema;
+export const permissions = definePermissions({
+  ${table}: { read: (note) => isMember("${table}", note.id) },
+});`,
+      );
+    await writeSchema(["draft"], ["title"]);
+    await generateApp({ cwd });
+    return { cwd, appFile, writeSchema };
+  }
+
+  it("pins the original type across index changes and repeated generation", async () => {
+    const { cwd, appFile, writeSchema } = await encryptedEnumApp();
+    for (const [variants, indexes] of [
+      [["draft", "sent"], ["rank"]],
+      [
+        ["draft", "sent", "archived"],
+        ["title", "rank"],
+      ],
+    ] as const) {
+      await writeSchema([...variants], [...indexes]);
+      await expect(createAppMigration({ cwd, name: "append-status" })).resolves.toMatchObject({
+        changed: true,
+        todos: [],
+      });
+      await generateApp({ cwd });
+      const first = await readFile(appFile, "utf8");
+      expect(JSON.parse(first).tables.notes.encryption.columns.status).toEqual({
+        type: { enum: variants, optional: true },
+        sealedType: { enum: ["draft"], optional: true },
+        default: "draft",
+      });
+      await expect(generateApp({ cwd })).resolves.toMatchObject({ wroteFiles: false });
+      expect(await readFile(appFile, "utf8")).toBe(first);
+    }
+  });
+
+  it("keeps the original sealed enum type when a migration renames a widened column", async () => {
+    const { cwd, appFile, writeSchema } = await encryptedEnumApp();
+    const variants = ["draft", "sent"];
+    await writeSchema(variants, ["rank"]);
+    await createAppMigration({ cwd, name: "append-status" });
+    await generateApp({ cwd });
+
+    await writeSchema(variants, ["rank"], "phase");
+    const rename = await createAppMigration({ cwd, name: "rename-status" });
+    expect(rename.todos).toHaveLength(1);
+    const stubPath = rename.file!;
+    const stub = await readFile(stubPath, "utf8");
+    await writeFile(stubPath, stub.replace(rename.todos![0]!, 'phase: m.renameFrom("status"),'));
+
+    await generateApp({ cwd });
+    expect(
+      JSON.parse(await readFile(appFile, "utf8")).tables.notes.encryption.columns.phase,
+    ).toEqual({
+      type: { enum: variants, optional: true },
+      sealedType: { enum: ["draft"], optional: true },
+      default: "draft",
+    });
+    await expect(generateApp({ cwd })).resolves.toMatchObject({ wroteFiles: false });
+
+    await writeSchema([...variants, "archived"], ["title", "rank"], "phase");
+    await createAppMigration({ cwd, name: "append-phase" });
+    await generateApp({ cwd });
+    expect(
+      JSON.parse(await readFile(appFile, "utf8")).tables.notes.encryption.columns.phase.sealedType,
+    ).toEqual({ enum: ["draft"], optional: true });
+  });
+
+  it.each(["status", "phase"])(
+    "keeps the original sealed enum type when a migration renames the table and uses column %s",
+    async (column) => {
+      const { cwd, appFile, writeSchema } = await encryptedEnumApp();
+      const variants = ["draft", "sent"];
+      await writeSchema(variants, ["rank"]);
+      await createAppMigration({ cwd, name: "append-status" });
+      await generateApp({ cwd });
+
+      await writeSchema(variants, ["rank"], column, "memos");
+      const rename = await createAppMigration({ cwd, name: "rename-notes" });
+      const stubPath = rename.file!;
+      const stub = await readFile(stubPath, "utf8");
+      if (column === "phase") {
+        // The stub only detects exact table renames. Declare both renames.
+        await writeFile(
+          stubPath,
+          stub.replace(
+            /  createTables: \{[^}]*\},\n  dropTables: \{[^}]*\},/,
+            '  renameTables: { memos: m.renameTableFrom("notes") },\n' +
+              '  migrate: { memos: { phase: m.renameFrom("status") } },',
+          ),
+        );
+      }
+      expect(await readFile(stubPath, "utf8")).toContain('memos: m.renameTableFrom("notes")');
+
+      await generateApp({ cwd });
+      expect(
+        JSON.parse(await readFile(appFile, "utf8")).tables.memos.encryption.columns[column],
+      ).toEqual({
+        type: { enum: variants, optional: true },
+        sealedType: { enum: ["draft"], optional: true },
+        default: "draft",
+      });
+      await expect(generateApp({ cwd })).resolves.toMatchObject({ wroteFiles: false });
+    },
+  );
+
+  it("names the column and the required schema change when appending variants alone", async () => {
+    const { cwd, writeSchema } = await encryptedEnumApp();
+    await writeSchema(["draft", "sent"], ["title"]);
+    for (const run of [
+      () => createAppMigration({ cwd, name: "append-status" }),
+      () => generateApp({ cwd }),
+    ]) {
+      await expect(run()).rejects.toThrow(
+        "notes.status: adding variants to an encrypted enum leaves the schema version unchanged. " +
+          "Make a schema change that creates a new version, such as adding an index, and run jazz-tools migrations create again.",
+      );
+    }
   });
 });

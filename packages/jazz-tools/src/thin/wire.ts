@@ -129,6 +129,26 @@ function json(value: unknown): Uint8Array {
   );
 }
 
+declare const admitted: unique symbol;
+
+/**
+ * A request the thin client's encrypted-column guard admitted
+ * (`thin/encrypted-guard.ts`), the only place one is made: it holds no
+ * plaintext of an end-to-end encrypted column. The thin runtime sends only
+ * these, through {@link encodeAdmittedThinRequest}.
+ */
+export type ThinRequest = ThinOp & { readonly [admitted]: true };
+
+/** {@link encodeThinRequest} for a request the guard admitted. */
+export function encodeAdmittedThinRequest(id: number, request: ThinRequest): Uint8Array {
+  return encodeThinRequest(id, request);
+}
+
+/**
+ * Encode any thin request, for fixtures and relays that carry requests
+ * already made. The thin runtime sends through
+ * {@link encodeAdmittedThinRequest} instead.
+ */
 export function encodeThinRequest(id: number, op: ThinOp): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(WIRE_FRAME_THIN_REQUEST);

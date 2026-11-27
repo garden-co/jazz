@@ -10,5 +10,7 @@ sizeTunedBuild({
   features: "backend",
   outDir: join(root, "backend/pkg"),
   outName: "jazz_wasm_backend",
+  // For the symbol check (dev/gates/check-no-lattice-sha3-symbols.mjs).
+  unstrippedDir: join(root, "backend/unstripped"),
   wasmOptLevel: wasmOptLevelFromArgs(),
 });

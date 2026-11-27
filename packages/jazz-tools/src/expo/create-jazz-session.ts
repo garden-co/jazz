@@ -86,6 +86,7 @@ const NATIVE_SESSION_OPTIONS = {
   bearer: true,
   nativeRelay: true,
   profile: true,
+  encryption: true,
 } as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
 
 /**

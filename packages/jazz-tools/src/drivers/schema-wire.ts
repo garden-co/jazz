@@ -54,11 +54,18 @@ function sortSchemaTables(schema: WasmSchema): WasmSchema {
  * Serialize the developer-authored schema AST for Rust compilation, with the
  * migrations the app ships if it attaches them.
  */
-export function serializeSchemaSource(schema: WasmSchema, migrations?: ClientMigrations): string {
+export function serializeSchemaSource(
+  schema: WasmSchema,
+  migrations?: ClientMigrations,
+  encryptionBindings?: string,
+  addCreatorAsMember?: boolean,
+): string {
   return JSON.stringify(
     {
       tables: sortSchemaTables(schema),
       ...(migrations ? { migrations } : {}),
+      ...(encryptionBindings === undefined ? {} : { encryptionBindings }),
+      ...(addCreatorAsMember === false ? { addCreatorAsMember } : {}),
     },
     runtimeSchemaJsonReplacer,
   );

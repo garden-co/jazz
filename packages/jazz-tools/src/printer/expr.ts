@@ -31,6 +31,7 @@ export type Operand =
   | { kind: "number"; raw: string }
   | { kind: "bool"; value: boolean }
   | { kind: "typed"; value: Typed }
+  | { kind: "tableId"; table: string }
   | { kind: "null" }
   | { kind: "session"; path: string[] }
   | { kind: "param"; name: string };
@@ -391,6 +392,7 @@ class Parser {
       if (word === "allowedTo" && this.isTok(".", 1)) return this.allowed();
       if (
         !["this", "session", "null", "outer"].includes(word) &&
+        word !== "table_id" &&
         !TYPED.has(word) &&
         this.isTok("(", 1)
       ) {
@@ -536,6 +538,12 @@ class Parser {
     if (!tok) this.fail("expected a column or a value");
     if (tok.t === "ident" && TYPED.has(tok.v) && tok.v !== "json" && this.isTok("(", 1)) {
       return { kind: "typed", value: this.typedLiteral() };
+    }
+    if (this.isCallOf("table_id")) {
+      this.at += 2;
+      const table = this.stringArg();
+      this.expect(")", "`)`");
+      return { kind: "tableId", table };
     }
     this.at++;
     switch (tok.t) {

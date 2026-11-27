@@ -198,6 +198,17 @@ free, so nothing may run beside them. To close with calls in flight:
 From inside a token callback do step 1 only and the rest later from
 another thread: waiting there deadlocks.
 
+The private store's callback (or UniFFI `PrivateStore`) runs on the
+client's own thread, which every other call waits for: from inside it, call
+nothing on the handle but `"close"` (UniFFI `shutdown`). There it waits for
+nothing and returns at once: the handle is closed, its calls fail `Closed`,
+no store or token callback starts after this one, and the client stops once
+the callback returns. It ignores a `timeoutMs` (UniFFI `shutdown_within`):
+nothing drains, so the writes it asks for and loses (memory storage,
+unsent) fail it `Unsynced { pending }` at once, mapped as any close's
+(`"unsynced"` in C, `Io` without contract 2). Free the handle later, from
+another thread.
+
 ## Lifecycle (as TS's)
 
 - `begin_mergeable()` / `txBegin {"serializable": false}`: a mergeable
@@ -418,3 +429,91 @@ reads and writes the stored values.
 
 Writes are local-first, as in jazz-app-support. A write that the server's permissions
 refuse is not refused by the call. It just never syncs.
+
+## End-to-end encryption
+
+An app that declares encrypted columns opens with a private store the host supplies: `JazzHandle.open_with_store`
+(UniFFI) or `jazz_open_encrypted` (C ABI) take a callback that answers the store's requests. UniFFI
+uses typed methods, with unsigned 64-bit revisions and incarnations and byte buffers. The config's
+`"environment"` names the deployment's environment (default `dev`). Opening such an app any other way is
+refused, naming the option. A device's schema has the plaintext types of its encrypted columns, so rows go
+in and out as ordinary JSON; writes of a space whose key the device does not hold yet wait for it
+(ten seconds at most). The store is called on the client's thread, one request at a time.
+
+The required UniFFI `load_all(scope, incarnation)` reads a single snapshot at startup. The host
+checks the scope marker in the same transaction as the document read and returns
+`PrivateStoreError::Wiped` if the scope is absent or its incarnation differs. An intact scope with
+no documents returns an empty sequence. Each document carries the name, bytes and revision from
+that snapshot. Jazz authenticates the records and uses the revisions for later saves.
+
+The UniFFI scope snapshot v1 result is a sequence of `ScopeDocument` records in field order
+`doc` (UTF-8), `bytes` (raw byte sequence), `revision` (unsigned 64-bit). The sequence, string
+and byte lengths are 32-bit big-endian and the revision is 64-bit big-endian. This adds a required
+method to the prerelease UniFFI callback interface. Regenerate the bindings with the matching
+library and update Swift and Kotlin stores together. The on-disk private-store formats are unchanged.
+
+A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Numbers that may exceed 2^53 use decimal text.
+
+| `op`        | Fields                                                    | Answer (JSON)                        |
+| ----------- | --------------------------------------------------------- | ------------------------------------ |
+| `openScope` | `scope`                                                   | the incarnation, as text             |
+| `load`      | `scope`, `doc`                                            | `{ "bytes", "revision" }`, or `null` |
+| `save`      | `scope`, `incarnation`, `doc`, `bytes`, `expected`/`null` | the new revision, as text            |
+| `list`      | `scope`                                                   | the document names                   |
+| `delete`    | `scope`                                                   | `null`                               |
+| `protect`   | `secret`                                                  | the protected blob, base64           |
+| `unprotect` | `blob`                                                    | the secret, base64                   |
+
+The C callback can opt into the existing `loadAllV1` encoding. When the `openScope` request
+includes `"loadAll":"v1"`, a host that supports it answers with
+`{"incarnation":"…","loadAll":"v1"}`. Jazz then sends `loadAllV1` with `scope` and `incarnation`.
+Return a JSON array of `{"doc":"…","bytes":"…","revision":"…"}` objects, or answer
+`wiped` for a missing or changed scope. Hosts that answer `openScope` with the incarnation
+as text continue to receive single-document requests.
+
+An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
+(the scope is not of that incarnation) or a message.
+
+Use `encryption_call(op, args_json)` for the runtime operations below. In C, pass `"encryptionCall"` to
+`jazz_call` with `{"op", "args"?}`.
+
+| Operations                                                                                | Purpose                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `waitUntilReady`, `state`, `reports`                                                      | Wait for account startup, inspect the loop, or drain pending reports as JSON objects. `waitUntilReady` takes an optional non-negative integer `timeoutMs` (default 30,000). |
+| `ready`, `resetAccount`                                                                   | Verify the account on demand, or reset it when the app enables account reset.                                                                                               |
+| `deviceId`, `devices`                                                                     | Read this device or list the account's devices.                                                                                                                             |
+| `challenge`, `answer`, `approvalCode`, `approve`                                          | Approve a device after comparing codes.                                                                                                                                     |
+| `remove`, `requestRemoval`, `completeRemovals`                                            | Remove a device or process removal requests.                                                                                                                                |
+| `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList` | Manage recovery. Register and restore accept a 24-word `phrase` or a 64-character hexadecimal `secret`.                                                                     |
+| `keysDeliver`, `keysRotate`, `keysRecoverRotation`                                        | Deliver keys or rotate a space's key.                                                                                                                                       |
+| `spaceRow`                                                                                | Resolve the address of a space. Pass its `table` and row `id`, then use the returned `scopeId` and `identifier` in the member row.                                          |
+| `prepareSpace`, `retryWithCurrentKey`                                                     | Prepare a space for a write or retry the write with the current key.                                                                                                        |
+| `retryWrite`                                                                              | Wait for the refused write’s space. Returns `"retry"`, `"last"` (one attempt with the current key), or `"stop"`.                                                            |
+
+`keysRotate` returns `{"delivered": number}` with the number of deliveries in the
+transaction that commits the new key, up to 100. The runtime delivers the key to the
+remaining members in the background. A failure in this pass produces a `delivery-failed`
+report with the space and reason.
+
+An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
+encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.
+
+### Space membership
+
+Pass the name of the table declared as the encryption scope and the space row's ID.
+Use `member_add(table, id, account_id, tier)`, `member_list(table, id)` and
+`member_remove(table, id, account_id)` on the UniFFI handle. In C, use these
+`jazz_call` methods:
+
+| Method         | Arguments                                 | Result                 |
+| -------------- | ----------------------------------------- | ---------------------- |
+| `memberAdd`    | `{ "table", "id", "accountId", "tier"? }` | Member row             |
+| `memberList`   | `{ "table", "id" }`                       | Visible member rows    |
+| `memberRemove` | `{ "table", "id", "accountId" }`          | Number of rows removed |
+
+A member row contains `id`, `scopeId`, `identifier` (the space row ID) and `accountId`.
+Add settles like an insert, with optional `local` or `global` durability. Adding an account that
+is already a member returns its existing row and writes nothing. Remove deletes
+the account's visible rows for the space in a serializable transaction and waits for
+the authority to accept it. A count of zero means there were no matching rows visible
+to the caller.

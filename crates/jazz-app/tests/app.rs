@@ -747,6 +747,41 @@ async fn shutdown_with_open_mergeable_transaction() {
     jazz.shutdown().await.unwrap();
 }
 
+/// A client opened without encryption configured refuses an app that declares
+/// encryption before it can write any encrypted columns.
+///
+/// ```text
+/// app files declare encryption ──open (no hooks)──► ✗ refused
+/// ```
+#[tokio::test]
+async fn a_client_refuses_an_app_that_declares_encryption() {
+    let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects": { "columns": { "name": "bytes" },
+                "encryption": { "space": "id", "scope": "projects", "columns": { "name": "string" } } }
+        } }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "projects": { "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)" } } }"#;
+    for files in [
+        AppFiles::new(app.as_bytes().to_vec(), None),
+        AppFiles::new(
+            app.as_bytes().to_vec(),
+            Some(permissions.as_bytes().to_vec()),
+        ),
+    ] {
+        let opened = Jazz::open(files, Config::new(AppId::random())).await;
+        match opened {
+            Err(Error::App(message)) => {
+                assert!(
+                    message.contains("declares end-to-end encryption"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
+
 /// Shutdown doesn't wait for a blocking task the client's runtime still
 /// runs (a host name lookup, say, which no timeout ends), and still lets go
 /// of a persistent store: it reopens at once.

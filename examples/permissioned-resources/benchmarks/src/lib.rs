@@ -1135,24 +1135,24 @@ fn run_cold_via_relay(
     let start = Instant::now();
     let author = config.client_author(seeded);
     let dir = tempfile::tempdir().expect("create relay directory");
-    let relay = NativeRelay::spawn(RelayOpenConfig {
-        supported_abi: NativeRelayAbiRange {
+    let relay = NativeRelay::spawn(RelayOpenConfig::new(
+        NativeRelayAbiRange {
             minimum: NATIVE_RELAY_ABI_V1,
             maximum: NATIVE_RELAY_ABI_V1,
         },
-        scope: RelayScope {
+        RelayScope {
             app_namespace: "permissioned-resources".to_owned(),
             storage_namespace: "benchmark".to_owned(),
             auth_scope: Some("benchmark-reader".to_owned()),
         },
-        sqlite_path: dir.path().join("relay.sqlite"),
-        schema: schema.clone(),
-        migrations: Default::default(),
-        identity: DbIdentity {
+        dir.path().join("relay.sqlite"),
+        schema.clone(),
+        Default::default(),
+        DbIdentity {
             node: node(2),
             author,
         },
-    })
+    ))
     .expect("open relay");
     let wire = relay.wire().expect("relay upstream");
     let pending = Rc::new(RefCell::new(VecDeque::new()));

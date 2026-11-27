@@ -36,8 +36,8 @@ use crate::db::{
     InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
     RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
     StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    UnreadableRow, UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter,
+    WriteHandle, WriteIdentity, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -251,6 +251,14 @@ fn insert_options_as<O: HostObject>(
         identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
+        add_creator_as_member: options
+            .get("addCreatorAsMember")?
+            .map(|value| {
+                O::boolean(&value).ok_or_else(|| {
+                    HostError::Argument("addCreatorAsMember must be a boolean".into())
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -544,7 +552,8 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
                 began
             }
         };
-        if now.saturating_duration_since(began) >= self.budget * REMOTE_READ_COVERAGE_CAP {
+        let cap = began + self.budget * REMOTE_READ_COVERAGE_CAP;
+        if now >= cap {
             return true;
         }
         // Fates arrive in commit order: once as many have come as were
@@ -557,7 +566,11 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
                 now
             }
         };
-        now.saturating_duration_since(since) >= self.budget
+        if now.saturating_duration_since(since) >= self.budget {
+            return true;
+        }
+        self.db.wake_at((since + self.budget).min(cap));
+        false
     }
 }
 
@@ -674,10 +687,49 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
     }
 }
 
+/// Why a client may not open an app whose schema holds Jazz's system tables
+/// (it declares end-to-end encryption) without encryption hooks: it would
+/// write plaintext into the ciphertext columns, and the types generated
+/// code gives those columns would hide that.
+pub const ENCRYPTED_APP_REFUSAL: &str = "this client can't open an app that declares end-to-end \
+    encryption yet: it has no encryption hooks, so it would store plaintext in the encrypted \
+    columns. Deploy the app with `deploy` or the HTTP deploy route, and open it with a client \
+    that has encryption";
+
+/// Refuse to open `config`'s schema if it holds Jazz's system tables, which
+/// only an encrypted app's schema does (a version that declares no
+/// encryption keeps the tables once an earlier one added them), unless the
+/// configuration installs encryption hooks built from an encrypted app's
+/// declarations ([`DbConfig::with_e2ee`], [`crate::e2ee::E2eeHooks::built_from_encrypted_app`]). A
+/// build without the `e2ee-client` feature has no hooks to install and
+/// always refuses.
+pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
+    if !config
+        .schema
+        .tables()
+        .iter()
+        .any(|table| jazz_model::schema::is_system_table(&table.name))
+    {
+        return Ok(());
+    }
+    #[cfg(feature = "e2ee-client")]
+    if config
+        .e2ee
+        .as_ref()
+        .is_some_and(|hooks| hooks.built_from_encrypted_app())
+    {
+        return Ok(());
+    }
+    Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL))
+}
+
 /// Open an in-memory database. `history_complete` needs nothing: every
-/// SQLite store keeps full history.
+/// SQLite store keeps full history. A schema with Jazz's system tables is
+/// refused unless the configuration has encryption hooks
+/// ([`refuse_encrypted_app`]).
 #[cfg(feature = "sqlite")]
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
+    refuse_encrypted_app(&db_config)?;
     Db::open(db_config).await
 }
 
@@ -688,6 +740,7 @@ pub async fn open_file(
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
+    refuse_encrypted_app(&db_config)?;
     Db::open_at(db_config, path, options).await
 }
 
@@ -767,6 +820,8 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Asks the host to tick after this many milliseconds.
+    pub schedule_tick_after: RefCell<Option<Box<dyn Fn(u64)>>>,
     /// Told of an upload the authority refused that no wait claimed yet,
     /// whether it was a serializable transaction, and the write's claim
     /// if it has one: a wait the caller makes before the host delivers the
@@ -956,9 +1011,26 @@ impl Binding {
             db.become_replica().await;
         }
         db.track_upstream_rejections();
+        let hooks = Rc::<Hooks>::default();
+        let wakes = Rc::downgrade(&hooks);
+        db.set_wake_hook(Box::new(move |at| {
+            let Some(hooks) = wakes.upgrade() else {
+                return;
+            };
+            if let Some(at) = at {
+                if let Some(schedule) = hooks.schedule_tick_after.borrow().as_ref() {
+                    let delay = at.saturating_duration_since(web_time::Instant::now());
+                    let ms =
+                        u64::try_from(delay.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX);
+                    schedule(ms);
+                }
+            } else {
+                hooks.schedule_tick();
+            }
+        }));
         Self {
             db: Rc::new(db),
-            hooks: Rc::default(),
+            hooks,
             node: identity.node,
             author: identity.author,
             trusted_backend,
@@ -1467,6 +1539,19 @@ impl Binding {
 
     // ---- reads ----
 
+    /// The catalogue identity of table `table` (see
+    /// [`crate::db::Db::table_identity`]) as lowercase hyphenated UUID
+    /// text, which generated code writes into a member row's `scopeId`.
+    /// Fails with code `NotObserved` until the authority's catalogue with
+    /// this schema version is mirrored, and with an argument error for a
+    /// table the schema doesn't have.
+    pub fn table_identity(&self, table: &str) -> HostResult<String> {
+        match block_on(self.db.table_identity(table))? {
+            Some(identity) => Ok(identity.0.to_string()),
+            None => Err(HostError::Argument(format!("no table {table}"))),
+        }
+    }
+
     /// The row as stored, deleted or not: the write-merge bridge's exact
     /// local state. Not a query; write authorization stays at the mutation.
     pub fn local_current_row(&self, table: &str, row: &[u8]) -> HostResult<Vec<u8>> {
@@ -1478,7 +1563,8 @@ impl Binding {
         let prepared = self.db.prepare_query(&query)?;
         let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
         opts.read_view.include_deleted = true;
-        let rows = block_on(self.db.all(&prepared, opts))?;
+        // The row a mutation is built on: strict (protocol §4.4).
+        let rows = block_on(self.db.all_strict(&prepared, opts))?;
         Ok(crate::binding_codec::encode_rows(&rows)?)
     }
 
@@ -1492,6 +1578,21 @@ impl Binding {
         author: Option<&[u8]>,
         claims: Option<serde_json::Value>,
     ) -> HostResult<HostFuture<Vec<u8>>> {
+        let read = self.all_reporting(query, opts, open_transaction_id, author, claims)?;
+        Ok(Box::pin(async move { Ok(read.await?.0) }))
+    }
+
+    /// [`Binding::all`], with the rows the read left out because the
+    /// client's encryption hooks could not open them
+    /// ([`Db::all_serialized_query_reporting`]).
+    pub fn all_reporting<O: HostObject>(
+        &self,
+        query: Vec<u8>,
+        opts: &O,
+        open_transaction_id: Option<&str>,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<(Vec<u8>, Vec<UnreadableRow>)>> {
         let opts = read_opts(opts)?;
         let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         // A transaction bound to a session reads as it.
@@ -1525,8 +1626,9 @@ impl Binding {
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
             let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
-            let mut read =
-                std::pin::pin!(db.all_serialized_query(&query, opts, open_tx, admission, coverage));
+            let mut read = std::pin::pin!(
+                db.all_serialized_query_reporting(&query, opts, open_tx, admission, coverage)
+            );
             // A row whose large values are missing records their chunks for
             // the next send, and a serializable read asks its next remote
             // read from here once the last one is answered; ask for the tick
@@ -1539,12 +1641,14 @@ impl Binding {
                 poll
             })
             .await?;
-            Ok(match result {
+            let (result, unreadable) = result;
+            let bytes = match result {
                 SerializedReadResult::Rows(rows) => crate::binding_codec::encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => {
                     crate::binding_codec::encode_relation_snapshot(&snapshot)
                 }
-            }?)
+            }?;
+            Ok((bytes, unreadable))
         })))
     }
 
@@ -1923,7 +2027,7 @@ impl Binding {
             (None, None) => WriteIdentity::Database,
         };
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
+        let mut cells = decode_cells(cells)?;
         let mutation = match mutation.unwrap_or("insert") {
             "insert" => StreamingMutationKind::Insert,
             "update" => StreamingMutationKind::Update,
@@ -1946,9 +2050,22 @@ impl Binding {
             Some(id) => self.staged_identity(id, identity)?,
             None => identity,
         };
-        let upload = self
-            .db
-            .begin_streaming_value_upload(&table, &cells, &column)?;
+        let target = match &head {
+            Some(head) => crate::options::WriteTarget::BranchView {
+                head: head.clone(),
+                base: base.clone(),
+            },
+            None => crate::options::WriteTarget::Root,
+        };
+        // In a transaction, the row's space is the one the transaction sees.
+        let upload = match transaction {
+            Some(id) => block_on(self.db.tx_ref(id).begin_streaming_value_upload_for(
+                mutation, &table, row, &mut cells, &column, &target,
+            ))?,
+            None => block_on(self.db.begin_streaming_value_upload_for(
+                mutation, &table, row, &mut cells, &column, &target,
+            ))?,
+        };
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),
@@ -2091,6 +2208,11 @@ pub enum EventChunk {
         settled: bool,
         /// The durability tier, as `Debug`-spelled.
         tier: String,
+        /// The rows the result leaves out because the encryption hooks
+        /// could not open them, as [`unreadable_json`] spells them, when
+        /// the reader is told them (an opening, a reset, or a change):
+        /// they replace the list told before.
+        unreadable: Option<String>,
     },
     /// `{ type: "closed" }`.
     Closed,
@@ -2106,6 +2228,39 @@ pub enum EventChunk {
     },
 }
 
+/// Rows a read or a subscription left out because the encryption hooks
+/// could not open them, as the JSON array of `{ table, id, column, code }`
+/// a host hands to JavaScript.
+pub fn unreadable_json(rows: &[UnreadableRow]) -> String {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                serde_json::json!({
+                    "table": row.table,
+                    "id": row.id.0.to_string(),
+                    "column": row.column,
+                    "code": row.code,
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
+/// Keep omitted rows with their read until JavaScript asks for them.
+pub fn reporting_read(
+    future: HostFuture<(Vec<u8>, Vec<UnreadableRow>)>,
+    unreadable: Rc<RefCell<Option<String>>>,
+) -> HostFuture<Vec<u8>> {
+    Box::pin(async move {
+        let (bytes, rows) = future.await?;
+        if !rows.is_empty() {
+            *unreadable.borrow_mut() = Some(unreadable_json(&rows));
+        }
+        Ok(bytes)
+    })
+}
+
 /// Encode one subscription event.
 pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
     Ok(match event {
@@ -2117,6 +2272,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             settled,
             tier,
             coalesced,
+            unreadable,
             ..
         } => EventChunk::Delta {
             delta: crate::binding_codec::encode_subscription_delta(&added, &updated, &removed)?,
@@ -2124,6 +2280,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             coalesced,
             settled,
             tier: format!("{tier:?}"),
+            unreadable: unreadable.map(|rows| unreadable_json(&rows)),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
         SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {
@@ -2247,6 +2404,14 @@ impl StreamingMutation {
             state.base,
         ));
         state.binding.staged(id, staged)
+    }
+
+    /// Set a streamed insert's `addCreatorAsMember` before it finishes
+    /// (`Some(false)`: create the space without its creator's membership).
+    pub fn set_add_creator_as_member(&mut self, add: Option<bool>) -> HostResult<()> {
+        let state = self.state.as_mut().ok_or_else(closed)?;
+        state.upload.set_add_creator_as_member(add);
+        Ok(())
     }
 
     /// Drop the upload; `false` when already closed.

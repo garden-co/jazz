@@ -3,6 +3,9 @@ import { limitQueryToOne, type Db } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
 import { getJazzContext, type JazzContext } from "./context.svelte.js";
 import { toError } from "../runtime/util.js";
+import { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
+
+const NO_UNREADABLE: readonly UnreadableRow[] = Object.freeze([]);
 
 type MaybeGetter<T> = T | (() => T);
 
@@ -13,6 +16,8 @@ function resolve<T>(value: MaybeGetter<T>): T {
 /**
  * Reactive query subscription. Instantiate in a component script block,
  * access results via `.current` and the {@link Db} handle for writes via `.db`.
+ * `.unreadable` lists the rows the result leaves out because this device could
+ * not decrypt them.
  *
  * @param query - the database query, or a getter for a dynamic query
  *   (e.g. `() => filter ? app.todos.where({ title: { contains: filter } }) : undefined`).
@@ -40,6 +45,11 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
   current: Result | undefined = $state();
   isLoading: boolean = $state(true);
   error: Error | null = $state(null);
+  /**
+   * The rows the result leaves out because this device could not decrypt
+   * them (empty when nothing was left out). Current with every delivery.
+   */
+  unreadable: readonly UnreadableRow[] = $state.raw(NO_UNREADABLE);
   readonly #ctx: JazzContext;
 
   /**
@@ -65,6 +75,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
       const resolvedQuery = resolve(query);
       if (!resolvedQuery) {
         this.current = undefined;
+        this.unreadable = NO_UNREADABLE;
         this.isLoading = false;
         this.error = null;
         return;
@@ -87,6 +98,12 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
       try {
         const key = store.makeQueryKey(subscriptionQuery, resolvedOptions);
         const entry = store.getCacheEntry<T>(key);
+        // The cache entry's array carries the list of rows its result leaves out.
+        const syncUnreadable = () => {
+          this.unreadable =
+            entry.state.status === "fulfilled" ? unreadableRows(entry.state.data) : NO_UNREADABLE;
+        };
+        syncUnreadable();
 
         // Apply initial state from cache
         if (entry.state.status === "fulfilled") {
@@ -100,11 +117,13 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
 
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
+            this.unreadable = unreadableRows(data);
             this.current = (mode === "one" ? (data[0] ?? null) : [...data]) as Result;
             this.isLoading = false;
             this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
+            syncUnreadable();
             if (mode === "one") {
               const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
               if (!delta.all) applyDelta(rows, delta);
@@ -114,12 +133,14 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
             }
           },
           onError: (error: unknown) => {
+            this.unreadable = NO_UNREADABLE;
             this.error = toError(error);
             this.current = undefined;
             this.isLoading = false;
           },
           onReset: () => {
             this.current = undefined;
+            this.unreadable = NO_UNREADABLE;
             this.error = null;
             this.isLoading = true;
           },

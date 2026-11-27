@@ -1,4 +1,6 @@
 /** `jazz.app.json` tables → `.64` builders (`s.table(…)`) for `s.defineSchema({…})`. */
+import { appendsEnumVariants } from "../encryption/sealed-enum.js";
+import { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import type { AppJson, ColumnJson, ColumnObject, TableJson } from "./app-json.js";
 import { jsLiteral, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
@@ -25,11 +27,23 @@ export function printTables(
 }
 
 export function printTable(table: TableJson, options: TablesPrintOptions): string {
-  const columns = Object.entries(table.columns).map(([name, column]) => {
-    const comment =
-      typeof column === "object" && column.$comment ? lineComment(column.$comment) : "";
-    return `${comment}${propKey(name)}: ${printColumn(column, { ...options, path: `${options.path}.columns.${name}` })},`;
-  });
+  const encryption = options.relations === false ? undefined : table.encryption;
+  const encryptedColumns = encryption?.columns ?? {};
+  const equality = new Set(encryption?.equality);
+  const tokenColumns = new Set([...equality].map((name) => `${EQUALITY_PREFIX}${name}`));
+  if (encryption) refuseUnprintedEncryption(encryption, options);
+  const columns = Object.entries(table.columns)
+    .filter(([name]) => !tokenColumns.has(name))
+    .map(([name, stored]) => {
+      const plaintext = Object.hasOwn(encryptedColumns, name) ? encryptedColumns[name] : undefined;
+      const column = plaintext ?? stored;
+      const comment =
+        typeof stored === "object" && stored.$comment ? lineComment(stored.$comment) : "";
+      const builder = printColumn(column, { ...options, path: `${options.path}.columns.${name}` });
+      const encryptionOptions = equality.has(name) ? "{ equality: true }" : "";
+      const suffix = plaintext ? `.encrypted(${encryptionOptions})` : "";
+      return `${comment}${propKey(name)}: ${builder}${suffix},`;
+    });
   const fields: string[] = [];
   if (options.relations !== false) {
     for (const [name, rel] of Object.entries(table.relations ?? {})) {
@@ -55,9 +69,28 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
     : columns.some((c) => c.includes("//"))
       ? `{\n${columns.join("\n")}\n}`
       : `{ ${columns.join(" ").replace(/,$/, "")} }`;
-  let text = fields.length
-    ? `s.table(${columnsText}, {\n${fields.join("\n")}\n})`
-    : `s.table(${columnsText})`;
+  let space: string | undefined;
+  if (encryption) {
+    space =
+      encryption.space === "id"
+        ? "id"
+        : Object.entries(table.relations ?? {}).find(
+            ([, rel]) =>
+              "rel" in rel && rel.rel === encryption.scope && rel.column === encryption.space,
+          )?.[0];
+    if (space === undefined) {
+      options.unsupported.push({
+        path: `${options.path}.encryption.space`,
+        text: encryption.space,
+        reason: `the space column needs a forward relation to ${encryption.scope}`,
+      });
+    }
+  }
+  const fieldsText = fields.length ? `{\n${fields.join("\n")}\n}` : "{}";
+  const args = [columnsText];
+  if (fields.length || space !== undefined) args.push(fieldsText);
+  if (space !== undefined) args.push(`{ space: ${JSON.stringify(space)} }`);
+  let text = `s.table(${args.join(", ")})`;
   const singles = (table.indexes ?? []).filter((i): i is string => typeof i === "string");
   if (singles.length) text += `.indexOnly(${JSON.stringify(singles)})`;
   for (const composite of (table.indexes ?? []).filter((i): i is string[] => Array.isArray(i))) {
@@ -68,6 +101,69 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
   }
   if (table.history) text += `.history(${JSON.stringify(table.history)})`;
   return text;
+}
+
+/** What an encryption entry holds that `s.table` and `.encrypted()` can print. */
+const PRINTED_ENTRY_KEYS = new Set(["space", "scope", "columns", "equality"]);
+/** Fields represented by the column builder or kept in its snapshot sidecar. */
+const PRINTED_COLUMN_KEYS = new Set([
+  "type",
+  "enum",
+  "json",
+  "array",
+  "optional",
+  "default",
+  "sealedType",
+  "$comment",
+]);
+
+/**
+ * Whether a column's `sealedType` is the pin `jazz-tools generate` keeps in
+ * the snapshot sidecar: an enum whose variants the declared enum extends,
+ * with the same nullability. Any other pin would be dropped on regeneration.
+ */
+function isEnumPin(column: Record<string, unknown>): boolean {
+  const sealed = column.sealedType;
+  const declared = column.type ?? column;
+  if (typeof sealed !== "object" || sealed === null) return false;
+  if (typeof declared !== "object" || declared === null) return false;
+  return appendsEnumVariants(sealed, declared);
+}
+
+/** Report what a table's encryption entry holds that the TS DSL can't declare yet. */
+function refuseUnprintedEncryption(
+  encryption: NonNullable<TableJson["encryption"]>,
+  options: TablesPrintOptions,
+): void {
+  const at = `${options.path}.encryption`;
+  for (const [key, value] of Object.entries(encryption)) {
+    if (PRINTED_ENTRY_KEYS.has(key)) continue;
+    options.unsupported.push({
+      path: `${at}.${key}`,
+      text: JSON.stringify(value),
+      reason: `Unknown encryption key ${key}. Expected space, scope, columns or equality.`,
+    });
+  }
+  for (const [name, column] of Object.entries(encryption.columns)) {
+    if (typeof column !== "object") continue;
+    for (const field of Object.keys(column)) {
+      if (field === "sealedType" && !isEnumPin(column as Record<string, unknown>)) {
+        options.unsupported.push({
+          path: `${at}.columns.${name}.${field}`,
+          text: JSON.stringify((column as Record<string, unknown>)[field]),
+          reason:
+            "Printing sealedType is supported only for an encrypted enum whose declared type appends variants to it; `jazz-tools generate` would not keep any other pin",
+        });
+        continue;
+      }
+      if (PRINTED_COLUMN_KEYS.has(field)) continue;
+      options.unsupported.push({
+        path: `${at}.columns.${name}.${field}`,
+        text: JSON.stringify((column as Record<string, unknown>)[field]),
+        reason: `Unknown encrypted column field ${field}. Expected a type declaration, sealedType or default.`,
+      });
+    }
+  }
 }
 
 const SCALARS = new Set([

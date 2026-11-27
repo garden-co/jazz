@@ -1,8 +1,19 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as prettier from "prettier";
 import { describe, expect, it } from "vitest";
+import { generateApp } from "../dev/project.js";
+import { readablePermissions } from "../permissions/dsl.js";
+import * as s from "../schema-builders.js";
+import { readableSchema } from "../schema-dsl/define-schema.js";
+import {
+  permissions as encryptedPermissions,
+  schema as encryptedSchema,
+} from "./__fixtures__/encrypted-permissions.js";
 import type { AppJson, PermissionsJson } from "./app-json.js";
+import { printTs } from "./cli.js";
 import { parseExpr } from "./expr.js";
 import { formatTs, layout, printPermissions, printSchemaTs } from "./index.js";
 import { printMigrations } from "./migrations.js";
@@ -160,6 +171,136 @@ describe("the permissions printer", () => {
     expect(out.constantsUsed.sort()).toEqual(["ANNOUNCEMENTS", "editors"]);
   });
 
+  it("round-trips isMember against the encrypted schema", () => {
+    const original = readablePermissions(encryptedPermissions)!;
+    const out = print(
+      JSON.parse(JSON.stringify({ format: 1, ...readableSchema(encryptedSchema)! })),
+      original.tables as PermissionsJson["tables"],
+    );
+    expect(out.unsupported).toEqual([]);
+    expect(out.code).toContain('isMember("rooms", room.id)');
+    expect(out.code).toContain('isMember("rooms", message.roomId)');
+    const printed: unknown = new Function(
+      "schema",
+      out.code.replace("export const permissions", "const permissions") + "\nreturn permissions;",
+    )(encryptedSchema);
+    expect(readablePermissions(printed)).toEqual(original);
+  });
+
+  it("round-trips isMember from a plain table to a space defined by another table", () => {
+    const room = { rel: "rooms", column: "roomId" };
+    const original = app({
+      canvases: { columns: { roomId: "uuid" }, relations: { room } },
+      messages: {
+        columns: { roomId: "uuid", text: "bytes", __e2ee_eq_text: "bytes" },
+        relations: { room },
+        encryption: {
+          scope: "rooms",
+          space: "roomId",
+          columns: { text: "string?" },
+          equality: ["text"],
+        },
+      },
+      rooms: { columns: { name: "string" } },
+    });
+    const permissions: PermissionsJson = {
+      format: 1,
+      tables: {
+        canvases: {
+          read: "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+        },
+        messages: {},
+        rooms: {},
+      },
+    };
+
+    const out = printSchemaTs(original, permissions);
+    expect(out.unsupported).toEqual([]);
+    expect(out.files["schema.ts"]).toContain('isMember("rooms", canvas.roomId)');
+    const printed: { schema: unknown; permissions: unknown } = new Function(
+      "s",
+      out.files["schema.ts"]!.replace(/^import .*$/m, "").replaceAll("export const", "const") +
+        "\nreturn { schema, permissions };",
+    )(s);
+    expect(readablePermissions(printed.permissions)?.tables).toEqual(permissions.tables);
+    expect({ format: 1, ...readableSchema(printed.schema) }).toEqual(original);
+  });
+
+  // Deploy recognises the members rule with its conditions in any order
+  // (protocol R13), so the printer does too: each order prints isMember,
+  // which compiles back to the order isMember emits.
+  const MEMBER_CONDITIONS = [
+    "scopeId = table_id('rooms')",
+    "identifier = this.roomId",
+    "accountId = session.user",
+  ];
+  const orders = (items: string[]): string[][] =>
+    items.length <= 1
+      ? [items]
+      : items.flatMap((item, i) =>
+          orders(items.filter((_, j) => j !== i)).map((rest) => [item, ...rest]),
+        );
+  it.each(orders(MEMBER_CONDITIONS).map((order) => [order.join(", ")]))(
+    "prints isMember for the members rule as exists __e2ee_members(%s)",
+    (conditions) => {
+      const room = { rel: "rooms", column: "roomId" };
+      const original = app({
+        canvases: { columns: { roomId: "uuid" }, relations: { room } },
+        rooms: {
+          columns: { name: "bytes" },
+          encryption: { scope: "rooms", space: "id", columns: { name: "string" } },
+        },
+      });
+      const read = (body: string) => `exists __e2ee_members(${body})`;
+      const out = printSchemaTs(original, {
+        format: 1,
+        tables: { canvases: { read: read(conditions) }, rooms: {} },
+      });
+      expect(out.unsupported).toEqual([]);
+      expect(out.files["schema.ts"]).toContain('isMember("rooms", canvas.roomId)');
+      const printed: { permissions: unknown } = new Function(
+        "s",
+        out.files["schema.ts"]!.replace(/^import .*$/m, "").replaceAll("export const", "const") +
+          "\nreturn { schema, permissions };",
+      )(s);
+      expect(readablePermissions(printed.permissions)?.tables).toEqual({
+        canvases: { read: read(MEMBER_CONDITIONS.join(", ")) },
+        rooms: {},
+      });
+    },
+  );
+
+  it.each([
+    [
+      "a repeated column",
+      "scopeId = table_id('rooms'), identifier = this.roomId, scopeId = table_id('rooms')",
+    ],
+    ["another column", "scopeId = table_id('rooms'), identifier = this.roomId, id = session.user"],
+  ])("doesn't print isMember for three conditions with %s", (_, conditions) => {
+    const out = print(todos, {
+      todos: { read: `exists __e2ee_members(${conditions})` },
+    });
+    expect(out.unsupported).toEqual([
+      {
+        path: "tables.todos.read",
+        text: `exists __e2ee_members(${conditions})`,
+        reason: "Printing table_id outside isMember is not supported yet",
+      },
+    ]);
+  });
+
+  it("reports table_id outside the members rule by JSON path", () => {
+    const comparison = "ownerId = table_id('users')";
+    const nearMiss =
+      "exists __e2ee_members(scopeId = table_id('todos'), identifier = this.id, accountId = session.user, id = this.id)";
+    const out = print(todos, { todos: { read: comparison, insert: nearMiss } });
+    const reason = "Printing table_id outside isMember is not supported yet";
+    expect(out.unsupported).toEqual([
+      { path: "tables.todos.read", text: comparison, reason },
+      { path: "tables.todos.insert", text: nearMiss, reason },
+    ]);
+  });
+
   it("prints the relation IR", () => {
     const out = print(todos, {
       todos: {
@@ -255,6 +396,123 @@ describe("the schema printer", () => {
     );
     expect(schema).toContain('.indexOnly(["owner"])');
     expect(schema).toContain('.history("latest")');
+  });
+
+  it("reports sealedType, app-wide settings and unknown encryption fields", () => {
+    const rooms = { columns: { name: "bytes", nameText: "string?" } };
+    const encryption = {
+      space: "id",
+      scope: "rooms",
+      columns: { name: { type: "string", sealedType: "string", from: "nameText" } },
+      backfill: ["name"],
+    };
+    const out = printSchemaTs(
+      {
+        ...app({ rooms: { ...rooms, encryption } as AppJson["tables"][string] }),
+        encryption: { mechanisms: {} },
+      } as AppJson,
+      { format: 1, tables: { rooms: {} } },
+    );
+    expect(out.unsupported).toEqual([
+      {
+        path: "tables.rooms.encryption.backfill",
+        text: '["name"]',
+        reason: "Unknown encryption key backfill. Expected space, scope, columns or equality.",
+      },
+      {
+        path: "tables.rooms.encryption.columns.name.sealedType",
+        text: '"string"',
+        reason:
+          "Printing sealedType is supported only for an encrypted enum whose declared type appends variants to it; `jazz-tools generate` would not keep any other pin",
+      },
+      {
+        path: "tables.rooms.encryption.columns.name.from",
+        text: '"nameText"',
+        reason:
+          "Unknown encrypted column field from. Expected a type declaration, sealedType or default.",
+      },
+      {
+        path: "encryption.mechanisms",
+        text: "{}",
+        reason: "Printing this app-wide encryption setting is not supported yet",
+      },
+    ]);
+  });
+
+  it("reports every sealedType that isn't an appended-enum pin", () => {
+    const pinned = (status: Record<string, unknown>) =>
+      printSchemaTs(
+        app({
+          rooms: {
+            columns: { status: "bytes" },
+            encryption: { space: "id", scope: "rooms", columns: { status } },
+          } as AppJson["tables"][string],
+        }),
+        { format: 1, tables: { rooms: {} } },
+      ).unsupported.map((entry) => entry.path);
+    const refused = ["tables.rooms.encryption.columns.status.sealedType"];
+    const enumOf = (...variants: string[]) => ({ enum: variants });
+
+    expect(pinned({ type: enumOf("draft", "sent"), sealedType: enumOf("draft") })).toEqual([]);
+    expect(
+      pinned({
+        type: { ...enumOf("draft", "sent"), optional: true },
+        sealedType: { ...enumOf("draft"), optional: true },
+      }),
+    ).toEqual([]);
+    // An enum declared without a `type` wrapper.
+    expect(pinned({ ...enumOf("draft", "sent"), sealedType: enumOf("draft") })).toEqual([]);
+
+    expect(pinned({ type: enumOf("draft"), sealedType: enumOf("draft") })).toEqual(refused);
+    expect(pinned({ type: enumOf("draft"), sealedType: enumOf("draft", "sent") })).toEqual(refused);
+    expect(pinned({ type: enumOf("sent", "draft"), sealedType: enumOf("draft") })).toEqual(refused);
+    expect(
+      pinned({ type: { ...enumOf("draft", "sent"), optional: true }, sealedType: enumOf("draft") }),
+    ).toEqual(refused);
+    expect(pinned({ type: "string", sealedType: enumOf("draft") })).toEqual(refused);
+    expect(pinned({ type: enumOf("draft", "sent"), sealedType: "string" })).toEqual(refused);
+  });
+
+  it("prints a pinned encrypted enum without history and generates the same pin", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-print-enum-"));
+    const path = join(dir, "jazz.app.json");
+    const status = { type: { enum: ["draft", "sent"] }, sealedType: { enum: ["draft"] } };
+    try {
+      await writeFile(
+        path,
+        JSON.stringify(
+          app({
+            rooms: {
+              columns: { status: "bytes" },
+              encryption: { space: "id", scope: "rooms", columns: { status } },
+            },
+          }),
+        ),
+      );
+      await writeFile(
+        join(dir, "jazz.permissions.json"),
+        JSON.stringify({
+          format: 1,
+          tables: {
+            rooms: {
+              read: "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)",
+            },
+          },
+        }),
+      );
+      const files = await printTs({ dir });
+      expect(files).toContain("schema.ts");
+      const sidecar = files.find((name) => name.endsWith(".encryption.json"));
+      expect(sidecar).toBeDefined();
+      expect(read(join(dir, sidecar!)).tables.rooms.columns.status).toEqual(status);
+      expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
+        's.enum("draft", "sent").encrypted()',
+      );
+      await generateApp({ cwd: dir, force: true });
+      expect(read(path).tables.rooms.encryption.columns.status).toEqual(status);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
   });
 
   it("prints a migration stub per migration and a snapshot per version", async () => {

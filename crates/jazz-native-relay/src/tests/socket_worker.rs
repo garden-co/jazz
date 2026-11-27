@@ -423,6 +423,8 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
         account_session::AccountSessionOwner {
             runtime_token: DIRECT_FOREGROUND_RUNTIME_TOKEN,
             app_id: "expired-bearer".to_owned(),
+            environment: "test".to_owned(),
+            device_account_secret: None,
         },
     );
     host.promote_account_scope_snapshot(admitted, &bearer(2), BTreeMap::new())
@@ -507,6 +509,8 @@ fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
         account_session::AccountSessionOwner {
             runtime_token: DIRECT_FOREGROUND_RUNTIME_TOKEN,
             app_id: "refused-twice".to_owned(),
+            environment: "test".to_owned(),
+            device_account_secret: None,
         },
     );
     host.promote_account_scope_snapshot(admitted, &bearer(2), BTreeMap::new())

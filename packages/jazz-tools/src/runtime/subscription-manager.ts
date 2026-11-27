@@ -14,6 +14,8 @@ import type {
   WasmRow,
 } from "../drivers/types.js";
 import { isValidUtf8 } from "./util.js";
+import { cloneRowData } from "./structural-values.js";
+import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -135,6 +137,7 @@ type SubscriptionManagerTransaction<T> = {
   orderedIds: string[];
   orderedIdIndex: JournaledMap<string, number>;
   deferredTerminalOperations: RuntimeTerminalOperation[];
+  unreadable: readonly UnreadableRow[];
 };
 
 /**
@@ -371,6 +374,12 @@ export class SubscriptionManager<T extends { id: string }> {
   private deferredTerminalOperations: RuntimeTerminalOperation[] = [];
   /** Rollback state while `handleDelta` is applying a delta. */
   private transaction: SubscriptionManagerTransaction<T> | null = null;
+  /**
+   * The rows the result leaves out because this device could not decrypt
+   * them, as the runtime last said: every result `all()` returns carries
+   * them (see `unreadableRows`).
+   */
+  private unreadable: readonly UnreadableRow[] = [];
 
   /** `orderedIds`, copied first if a rollback may still need the original. */
   private writableOrderedIds(): string[] {
@@ -502,6 +511,10 @@ export class SubscriptionManager<T extends { id: string }> {
         this.clearRows();
         this.deferredTerminalOperations = [];
       }
+      // A delta names the unreadable rows when they changed; a reset
+      // restates them (none from a runtime without encryption).
+      if (delta.unreadable !== undefined) this.unreadable = delta.unreadable;
+      else if (reset) this.unreadable = [];
       // Validate and register each occurrence once, keeping its public result
       // key and exact ordered-root address for the rest of this frame.
       const registerOccurrence = (sidecar: Uint8Array) => {
@@ -617,6 +630,7 @@ export class SubscriptionManager<T extends { id: string }> {
       orderedIdIndex: this.orderedIdIndex,
       // Never mutated in place: readyTerminalOperations replaces the array.
       deferredTerminalOperations: this.deferredTerminalOperations,
+      unreadable: this.unreadable,
     };
     this.currentResults.beginJournal();
     this.terminalRows.beginJournal();
@@ -650,6 +664,7 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIds = transaction.orderedIds;
     this.orderedIdIndex = transaction.orderedIdIndex;
     this.deferredTerminalOperations = transaction.deferredTerminalOperations;
+    this.unreadable = transaction.unreadable;
   }
 
   /** Preserve a child splice that raced ahead of its root hydration. */
@@ -704,7 +719,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Insert.row.id !== id) {
           throw new Error("terminal insert row key does not match its edit key");
         }
-        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Insert.row) };
+        const value: Value = { type: "Row", value: cloneRowData(edit.Insert.row) };
         setTerminalChildAddress(value, key);
         removeTerminalValue(values, key);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
@@ -716,7 +731,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Update.row.id !== id) {
           throw new Error("terminal update row key does not match its edit key");
         }
-        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Update.row) };
+        const value: Value = { type: "Row", value: cloneRowData(edit.Update.row) };
         setTerminalChildAddress(value, key);
         values[index] = value;
       } else if ("Remove" in edit) {
@@ -753,7 +768,7 @@ export class SubscriptionManager<T extends { id: string }> {
     if (!retained) throw new Error(`terminal child edit addressed missing root ${rootId}`);
     if (writableRoots.has(rootId)) return retained;
 
-    const writable = cloneTerminalRow(retained);
+    const writable = cloneRowData(retained);
     this.terminalRows.set(rootId, writable);
     writableRoots.add(rootId);
     return writable;
@@ -903,10 +918,7 @@ export class SubscriptionManager<T extends { id: string }> {
     );
     this.orderedIdIndex = new JournaledMap();
     this.reindexOrderedIds();
-    const all = this.orderedIds
-      .map((id) => this.currentResults.get(id))
-      .filter((item): item is T => item !== undefined);
-    return { delta, reset: true as const, all };
+    return { delta, reset: true as const, all: this.all() };
   }
 
   private applyBulkTypedDelta(delta: RowDelta<T>[]): void {
@@ -949,6 +961,7 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.clearRows();
+    this.unreadable = [];
   }
 
   private clearRows(): void {
@@ -960,10 +973,14 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIdIndex = new JournaledMap();
   }
 
+  /** The current result; `unreadableRows` on it gives the rows it leaves out. */
   all(): T[] {
-    return this.orderedIds
-      .map((id) => this.currentResults.get(id))
-      .filter((item): item is T => item !== undefined);
+    return withUnreadable(
+      this.orderedIds
+        .map((id) => this.currentResults.get(id))
+        .filter((item): item is T => item !== undefined),
+      this.unreadable,
+    );
   }
 
   /**
@@ -1179,48 +1196,6 @@ function terminalValueIndex(values: Value[], key: string): number {
     }
   }
   return values.findIndex((value) => (value as OccurrenceValue)[terminalChildOccurrence] === key);
-}
-
-function cloneTerminalRow(row: WasmRow): WasmRow {
-  return cloneTerminalGraph(row, new WeakMap<object, unknown>());
-}
-
-/** Clone the positional tree while preserving hidden named-value maps and aliases. */
-function cloneTerminalGraph<T>(value: T, seen: WeakMap<object, unknown>): T {
-  if (typeof value !== "object" || value === null) return value;
-  const existing = seen.get(value);
-  if (existing !== undefined) return existing as T;
-  if (value instanceof Uint8Array) {
-    const clone = value.slice();
-    seen.set(value, clone);
-    return clone as T;
-  }
-  if (value instanceof Map) {
-    const clone = new Map<unknown, unknown>();
-    seen.set(value, clone);
-    for (const [key, entry] of value) {
-      clone.set(cloneTerminalGraph(key, seen), cloneTerminalGraph(entry, seen));
-    }
-    return clone as T;
-  }
-  if (Array.isArray(value)) {
-    const clone: unknown[] = [];
-    seen.set(value, clone);
-    for (const entry of value) clone.push(cloneTerminalGraph(entry, seen));
-    return clone as T;
-  }
-
-  const clone = Object.create(Object.getPrototypeOf(value)) as object;
-  seen.set(value, clone);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor) continue;
-    if ("value" in descriptor) {
-      descriptor.value = cloneTerminalGraph(descriptor.value, seen);
-    }
-    Object.defineProperty(clone, key, descriptor);
-  }
-  return clone as T;
 }
 
 function removeTerminalValue(values: Value[], id: string): boolean {

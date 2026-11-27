@@ -21,6 +21,12 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 ## The Worker
 
+Choose the store according to where your core runs. Use `durableObjects()` for a core in a
+Cloudflare Durable Object, as in the example below. Use `remote({ url, appId, secret })` for a
+separately hosted native Jazz core. Both serve apps with encrypted columns: a Durable Object core
+keeps their encryption declarations as a native core does, and the Worker backend relays
+encrypted data without holding encryption keys. See [Encryption limits](/docs/e2ee/limits).
+
 ```ts title="src/worker.ts"
 import { Hono } from "hono";
 import { createJazz, durableObjects } from "jazz-tools/backend";
@@ -97,6 +103,5 @@ store: durableObjects({ binding: env.JAZZ, lifecycle: "hibernate" }),
 
 - **Transactions run in your backend**, as with every core: the core never holds one open between
   calls.
-- **In a Worker, only `durableObjects()` stores** run: `sqlite()` and `memory()` run their core in
-  the backend's process, which a Worker can't. The Inspector's query explanations aren't available
-  there yet.
+- **Embedded stores require a native backend.** `sqlite()` and `memory()` run the core in the
+  backend's process. The Inspector's query explanations are unavailable in a Worker.

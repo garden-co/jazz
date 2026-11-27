@@ -17,8 +17,21 @@
     "$comment": {
       "type": "string"
     },
+    "systemTablesVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "The version of Jazz’s system tables for this schema when it carries them. Omitted for version 1."
+    },
     "tables": {
-      "$ref": "#/$defs/tables",
+      "allOf": [
+        {
+          "$ref": "#/$defs/tables"
+        },
+        {
+          "$ref": "#/$defs/currentTables"
+        }
+      ],
       "description": "The current schema."
     },
     "history": {
@@ -29,6 +42,9 @@
         "additionalProperties": false,
         "required": ["tables"],
         "properties": {
+          "systemTablesVersion": {
+            "$ref": "#/properties/systemTablesVersion"
+          },
           "tables": {
             "$ref": "#/$defs/tables"
           },
@@ -66,6 +82,23 @@
           }
         },
         "description": "e.g. { \"stored\": \"timestamp\", \"view\": \"string\" }"
+      }
+    },
+    "encryption": {
+      "type": "object",
+      "description": "App-wide end-to-end encryption settings, outside the schema hash.",
+      "additionalProperties": false,
+      "properties": {
+        "allowAccountReset": {
+          "type": "boolean",
+          "description": "Whether an account may be reset. Off by default."
+        },
+        "mechanisms": {
+          "description": "The mechanism selection and allow-list. The client runtime requires an object when this setting is present. See configure in crates/jazz-e2ee-client/src/mechanisms.rs."
+        },
+        "$comment": {
+          "type": "string"
+        }
       }
     }
   },
@@ -201,8 +234,348 @@
             },
             "description": "e.g. { \"type\": { \"enum\": [\"low\", \"high\"] }, \"from\": [\"score\"] }"
           }
+        },
+        "encryption": {
+          "$ref": "#/$defs/encryption"
         }
       }
+    },
+    "encryption": {
+      "type": "object",
+      "description": "The table's encrypted columns and the space they are encrypted in, e.g. { \"space\": \"projectId\", \"scope\": \"projects\", \"columns\": { \"title\": \"string\" }, \"equality\": [\"title\"] }. Each encrypted column is stored as required bytes, and each equality column's tokens in a required bytes column __e2ee_eq_<column>.",
+      "additionalProperties": false,
+      "required": ["space", "scope", "columns"],
+      "properties": {
+        "space": {
+          "type": "string",
+          "description": "The column holding the space row's id: `id` for a table whose rows are their own spaces, else a uuid column referencing `scope`."
+        },
+        "scope": {
+          "type": "string",
+          "description": "The space table."
+        },
+        "columns": {
+          "type": "object",
+          "description": "The encrypted columns and the plaintext types code reads and writes. A column may declare a `default`, e.g. { \"type\": \"string\", \"default\": \"untitled\" }: what a cell never written reads as, such as on rows older than the column. A default is stored and deployed in plain text, visible to the server, so it must not be secret.",
+          "additionalProperties": {
+            "$ref": "#/$defs/encryptedColumn"
+          }
+        },
+        "equality": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Encrypted columns an equality filter may test. Declared when the table is created."
+        },
+        "$comment": {
+          "type": "string"
+        }
+      }
+    },
+    "encryptedColumn": {
+      "description": "An encrypted column: a type string; a type object with `optional` and `default`; or `{ \"type\": …, \"sealedType\": …, \"default\": … }`, which pins the type its cells were sealed under when an encrypted enum appends variants.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+            },
+            "enum": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "default": {
+              "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedPlainType"
+            },
+            "sealedType": {
+              "$ref": "#/$defs/encryptedPlainType"
+            },
+            "default": {
+              "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "anyOf": [
+            {
+              "required": ["sealedType"]
+            },
+            {
+              "properties": {
+                "type": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "encryptedPlainType": {
+      "description": "The declared or sealed type of an encrypted column: a type string, or a type object with `optional` and nothing else.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
+        }
+      ]
+    },
+    "encryptedTypeVariant": {
+      "oneOf": [
+        { "required": ["type"] },
+        { "required": ["enum"] },
+        { "required": ["json"] },
+        { "required": ["array"] }
+      ]
+    },
+    "encryptedTypeExpression": {
+      "description": "A type nested in `type` or `array`: a type string, or an object with exactly one of `type`, `enum`, `json`, `array`, and nothing else but `$comment`.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
+        }
+      ]
+    },
+    "enumCases": {
+      "description": "An enum whose cases carry fields: each case's fields, by name. Only a `history` version may hold one, so that a migration can drop it.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/enumCaseField"
+        }
+      }
+    },
+    "enumCaseField": {
+      "description": "A field of an enum case, as the reader takes it: a type string, or an object with exactly one of `type` (a type string, `?` allowed, or a nested type), `enum`, `json` and `array`, and a column's options.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "default": {},
+            "merge": {
+              "enum": ["counter", "g-set", "text", "markdown", "html"]
+            },
+            "references": {
+              "type": "string"
+            },
+            "transform": {
+              "type": "string"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [{ "$ref": "#/$defs/encryptedTypeVariant" }]
+        }
+      ]
+    },
+    "currentTables": {
+      "description": "What the current `tables` may not hold, though a `history` version may: an enum whose cases carry fields, and, in an encrypted column, a JSON schema with a number that isn't an integer.",
+      "type": "object",
+      "additionalProperties": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "$ref": "#/$defs/currentColumnType"
+            }
+          },
+          "encryption": {
+            "properties": {
+              "columns": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/currentEncryptedType"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "currentColumnType": {
+      "properties": {
+        "enum": {
+          "type": "array"
+        },
+        "array": {
+          "$ref": "#/$defs/currentColumnType"
+        }
+      }
+    },
+    "currentEncryptedType": {
+      "properties": {
+        "enum": {
+          "type": "array"
+        },
+        "json": {
+          "$ref": "#/$defs/integerNumbersOnly"
+        },
+        "type": {
+          "$ref": "#/$defs/currentEncryptedType"
+        },
+        "sealedType": {
+          "$ref": "#/$defs/currentEncryptedType"
+        },
+        "array": {
+          "$ref": "#/$defs/currentEncryptedType"
+        }
+      }
+    },
+    "integerNumbersOnly": {
+      "description": "A JSON value whose numbers are all integers a client can encode: from -9223372036854775808 (the smallest 64-bit signed integer) to 18446744073709551615 (the largest 64-bit unsigned one).",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 18446744073709551615
+        },
+        {
+          "type": ["string", "boolean", "null"]
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/integerNumbersOnly"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/integerNumbersOnly"
+          }
+        }
+      ]
     },
     "column": {
       "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",
@@ -219,10 +592,17 @@
               "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
@@ -262,10 +642,17 @@
               "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {

@@ -93,6 +93,21 @@ pub enum Error {
     )]
     BundleMismatch { own: String, served: String },
 
+    /// Opening an app with end-to-end encryption through [`crate::JazzSession`].
+    #[error(
+        "opening an app with end-to-end encryption is not supported in JazzSession yet. \
+         Use Jazz::open with Config::encryption and a private store."
+    )]
+    EncryptedSessionUnsupported,
+
+    /// An end-to-end encryption call failed. `code` is the runtime's
+    /// (`approval-answered`, `no-challenge`, `approval-code-mismatch`,
+    /// `device-no-longer-active`, `unsupported`, `store`, `closed`,
+    /// `database`, ...), or `keyless` / `not-declared` for an app or
+    /// backend that has no keys to use.
+    #[error("encryption ({code}): {message}")]
+    Encryption { code: String, message: String },
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
@@ -135,7 +150,7 @@ pub enum Error {
 
 impl From<JazzError> for Error {
     fn from(error: JazzError) -> Self {
-        match error {
+        match error.into_original() {
             JazzError::WriteRejected { code, reason, .. } => Error::WriteRejected { code, reason },
             error => Error::Jazz(error),
         }
