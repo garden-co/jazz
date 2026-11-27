@@ -542,27 +542,31 @@ impl CoreHost for NoRegistryHost {
 
 /// A core that serves an encrypting app without the account registry its
 /// checks read is refused, as native refuses it: at open (a host whose
-/// install left no registry), and at deploy (a core opened without one).
-/// An app without encryption does not need it.
+/// install left no registry, on a store a deployment published), and at
+/// deploy (a core opened without one). An app without encryption does not
+/// need it.
 #[test]
 fn an_encrypting_app_is_not_served_without_the_account_registry() {
-    // At open: the deploy opens the core, and the install left no registry.
-    let mut host = Host::new(Box::new(NoRegistryHost(FileHost::new())));
-    let error = host
-        .deploy(&loaded(APP).deployment_body(false))
-        .unwrap_err();
-    assert_eq!(error.0, 500, "{error:?}");
-    assert!(
-        error.1["error"]
-            .as_str()
-            .unwrap()
-            .contains("account registry"),
-        "{error:?}"
-    );
-    assert!(host.core.is_none(), "no core is kept without its registry");
-    // Without encryption such a host deploys.
-    let mut host = Host::new(Box::new(NoRegistryHost(FileHost::new())));
-    host.deploy(&plain().deployment_body(false)).unwrap();
+    // At open: a host opens its core on the store its deployment published
+    // (a first deployment installs the registry with its transaction), and
+    // the install left no registry.
+    let reopened = |app: &LoadedApp| {
+        let mut host = Host::new(Box::new(NoRegistryHost(FileHost::new())));
+        host.deploy(&app.deployment_body(false)).unwrap();
+        assert!(host.core.take().unwrap().has_account_registry());
+        let mut core = ServerCore::open(
+            JazzSchema::new(app.current_schema()).unwrap(),
+            host.host.store().unwrap(),
+            true,
+            Some(APP_NAME.to_owned()),
+        )
+        .unwrap();
+        super::deployment::install_registry(host.host.as_ref(), &mut core).map(|()| core)
+    };
+    let error = reopened(&loaded(APP)).err().expect("refused");
+    assert!(error.contains("account registry"), "{error}");
+    // Without encryption such a host serves.
+    reopened(&plain()).unwrap();
 
     // At deploy: a core opened for no app has no registry to install.
     let files = FileHost::new();
@@ -601,6 +605,71 @@ fn an_encrypting_app_is_not_served_without_the_account_registry() {
         None,
         "nothing was kept"
     );
+}
+
+/// Make the account registry's tables fail to open on `host`'s store (or
+/// mend it): a `_jazz_host_account_links` without the column the registry
+/// indexes, which `CREATE TABLE IF NOT EXISTS` keeps and its index refuses.
+fn break_registry(host: &dyn CoreHost, broken: bool) {
+    let sql = if broken {
+        "CREATE TABLE _jazz_host_account_links (nonce BLOB PRIMARY KEY)"
+    } else {
+        "DROP TABLE _jazz_host_account_links"
+    };
+    block_on(host.store().unwrap().host_sql(&mut async |conn: &Storage| {
+        conn.execute_batch(sql)
+            .await
+            .map_err(accounts::storage_error)
+    }))
+    .unwrap();
+}
+
+/// A first deployment whose account registry cannot be opened leaves the
+/// store as it was: no catalogue, no declarations and no core, with an
+/// error naming the registry. Mended, the same deployment publishes, opens
+/// the core and installs its registry.
+///
+/// ```text
+/// registry tables refuse ──► deploy ✗ (500) ── store unchanged, no core
+/// mended ──────────────────► deploy ✓ changed ── core with its registry
+/// ```
+#[test]
+fn a_first_deploy_whose_registry_fails_to_open_commits_nothing() {
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        let app = loaded(APP);
+        break_registry(host.host.as_ref(), true);
+
+        let (status, error) = host
+            .deploy(&app.deployment_body(false))
+            .expect_err("the registry cannot be opened");
+        assert_eq!(status, 500, "{name}: {error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("account registry"),
+            "{name}: {error}"
+        );
+        assert!(host.core.is_none(), "{name}: no core without its registry");
+        let rows = block_on(host.host.store().unwrap().catalogue()).unwrap();
+        assert!(
+            rows.schemas.is_empty() && rows.head().is_none(),
+            "{name}: the deployment was not published"
+        );
+        assert_eq!(host.kept(&app.current_hash()), None, "{name}: nothing kept");
+
+        break_registry(host.host.as_ref(), false);
+        let response = host
+            .deploy(&app.deployment_body(false))
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(response["changed"], true, "{name}: {response}");
+        assert!(
+            host.core.as_ref().unwrap().has_account_registry(),
+            "{name}: the retry installs the registry"
+        );
+        assert!(host.kept(&app.current_hash()).is_some(), "{name}");
+    }
 }
 
 /// The deployed body's v1 schema (as JSON), its hash, and a body for a second

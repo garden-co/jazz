@@ -101,8 +101,11 @@ impl ServerCore {
     /// Initialize and publish a first deployment in the real store's scope,
     /// keeping `kept` (the first-time encryption declarations, checked as
     /// [`Self::apply_catalogue_keeping`] checks them) in the same
-    /// transaction. No core is returned until initialization and catalogue
-    /// admission commit.
+    /// transaction. For a core opened for an app, the account registry's
+    /// tables are made in that transaction too (a host whose registry lives
+    /// in this store, as a Durable Object's does), and the registry is
+    /// installed on the core. No core is returned until initialization,
+    /// catalogue admission and the registry's tables commit, together.
     pub fn open_deployment(
         schema: JazzSchema,
         file: StoreFile,
@@ -111,7 +114,10 @@ impl ServerCore {
         change: CatalogueChange,
         kept: crate::portable::deployment::KeptValues,
     ) -> Result<Self, CatalogueApplyError> {
-        Self::open_on(schema, file, true, app, chunk_store, Some((change, kept)))
+        let mut core = Self::open_on(schema, file, true, app, chunk_store, Some((change, kept)))?;
+        // Its tables committed with the deployment; false for no app.
+        core.install_account_registry();
+        Ok(core)
     }
 
     fn open_on(
@@ -122,13 +128,20 @@ impl ServerCore {
         chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
         initial: Option<(CatalogueChange, crate::portable::deployment::KeptValues)>,
     ) -> Result<Self, CatalogueApplyError> {
+        let registry_tables = initial.is_some() && app.is_some();
         Ok(Self {
-            owner: Owner::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
-                match chunk_store {
+            owner: Owner::open_on(
+                schema,
+                file,
+                any_stored_catalogue,
+                app,
+                initial,
+                registry_tables,
+                |config| match chunk_store {
                     Some(store) => config.with_chunk_store(store).with_host_chunk_io(),
                     None => config,
-                }
-            })?,
+                },
+            )?,
             next_session: 1,
             edges: HashMap::new(),
             thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
