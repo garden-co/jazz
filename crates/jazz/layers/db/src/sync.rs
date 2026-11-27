@@ -10737,9 +10737,10 @@ impl Db {
                 }
             }
         };
-        // A current answer lists its result's rows: cached rows the
-        // replica's settled view of it holds and the answer lacks lost their
-        // listing (INV-SYNC-14), though no subscription saw them leave.
+        // An answer lists its result's rows (as of `at`, for a pinned
+        // read): cached rows the replica's settled view of it holds and the
+        // answer lacks lost their listing (INV-SYNC-14), though no
+        // subscription saw them leave.
         let Some((through, _listed)) = answer else {
             return Ok(None);
         };
@@ -11724,13 +11725,17 @@ impl Db {
                             let mut once = false;
                             if let Some(read) = client.reads.get_mut(&id) {
                                 let (listed, save_after) = match &mut read.lifetime {
-                                    ReadLifetime::Once { historical } => {
+                                    // A one-shot answer lists its result, as
+                                    // of its `at` too: a pinned read's
+                                    // listing judges the cached rows as of
+                                    // that position, so a row that left the
+                                    // result by then leaves the replica,
+                                    // though nothing else would say so
+                                    // (jazz#6399). Versions past it are not
+                                    // its to judge (`evict_unanswered`).
+                                    ReadLifetime::Once { .. } => {
                                         once = true;
-                                        (
-                                            (!*historical)
-                                                .then(|| members.clone().unwrap_or_default()),
-                                            global,
-                                        )
+                                        (Some(members.clone().unwrap_or_default()), global)
                                     }
                                     ReadLifetime::Live(live) => {
                                         // Answered, it is no longer refused: a
@@ -12900,10 +12905,9 @@ impl Store {
                         binding,
                         include_deleted,
                         view,
-                        span: ReadSpan::Once { at },
+                        span: ReadSpan::Once { .. },
                         ..
                     } = &fetch.ask
-                        && at.is_none()
                     {
                         answers.push((
                             (**query).clone(),
@@ -13922,8 +13926,9 @@ impl Db {
         // are served from this store first, in the order they came.
         self.inner.without_overlay().relayed_refusals(index);
         let (relayed, answers) = self.inner.without_overlay().relayed_fetches_ready(index);
-        // The upstream's answers list their results' rows: cached rows
-        // they left out are not served as the reader's (INV-SYNC-14).
+        // The upstream's answers list their results' rows (as of `at`, for
+        // a pinned read): cached rows they left out are not served as the
+        // reader's (INV-SYNC-14).
         for (query, binding, include_deleted, view, listed, through) in answers {
             self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)
                 .await?;
