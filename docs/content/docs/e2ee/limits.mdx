@@ -30,7 +30,13 @@ has the full list and the reasons.
   columns soon.
 - Jazz doesn't encrypt a plain column that already holds data. To encrypt existing data, copy it
   into a new table that declares the encrypted columns. Clients write the copies, because only
-  they hold the keys.
+  they hold the keys. Before the final copy and check, stop every writer of the old table and of
+  columns that reference it, including sessions pinned to older bundles and backend jobs. See
+  [encrypting existing data](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_SCHEMA_CHANGES.md#5-encrypting-existing-data)
+  in the spec.
+- Appending variants to an encrypted enum needs a new schema version. Make a schema change that
+  creates a new version, such as adding an index, then run `jazz-tools migrations create`. It keeps
+  the original sealed type, so existing values stay readable.
 - `equality` can't be added to a table that already exists. Copy the column into a new table
   that declares it.
 - The deploy restricts schema changes to encrypted tables and names the column it refuses.
