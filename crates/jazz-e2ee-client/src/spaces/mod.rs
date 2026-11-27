@@ -34,9 +34,9 @@ use crate::error::ClientError;
 use crate::hooks::code;
 use crate::state::{Missing, Report, SettleBackoff, Shared, db_address};
 
-pub(crate) use delivery::BackgroundSpace;
 pub use delivery::MEMBER_LIMIT;
 use delivery::Rotation;
+pub(crate) use delivery::{BackgroundSpace, retry_delay};
 pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
 
 /// Reads that keep meeting concurrent writes give up after this many
@@ -1226,6 +1226,36 @@ impl E2eeClient {
             return Ok(false);
         }
         self.settle_missing(db, missing).await
+    }
+
+    /// Whether a read that left rows out is due to be settled: online, and
+    /// its space not waiting out a back-off after failed settles. A read in
+    /// back-off holds back nothing (see [`E2eeClient::settle_reads`]).
+    pub(crate) fn reads_due(&self) -> bool {
+        if !self.shared.keys.borrow().online {
+            return false;
+        }
+        let now = self.shared.now();
+        let backoff = self.shared.settle_backoff.borrow();
+        self.shared.missing.borrow().iter().any(|entry| {
+            backoff
+                .get(&entry.space)
+                .is_none_or(|backoff| now >= backoff.retry_at)
+        })
+    }
+
+    /// When a read in back-off is next due to be settled, if after now: the
+    /// runtime wakes then instead of polling.
+    pub(crate) fn next_settle_retry(&self) -> Option<web_time::Instant> {
+        let now = self.shared.now();
+        let backoff = self.shared.settle_backoff.borrow();
+        self.shared
+            .missing
+            .borrow()
+            .iter()
+            .filter_map(|entry| backoff.get(&entry.space).map(|backoff| backoff.retry_at))
+            .filter(|at| *at > now)
+            .min()
     }
 
     /// Keep rotation marks private while preparing. Grant the host its

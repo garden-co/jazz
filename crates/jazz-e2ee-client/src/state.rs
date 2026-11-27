@@ -712,6 +712,13 @@ pub(crate) struct MemberWatch {
     /// Tests: the next sync fails before it serves anything.
     #[cfg(any(test, feature = "testing"))]
     pub fail_next_sync: bool,
+    /// Tests: how many of the next listings of the background pass's
+    /// spaces fail.
+    #[cfg(any(test, feature = "testing"))]
+    pub fail_background_lists: u32,
+    /// Tests: the background pass's steps wait forever.
+    #[cfg(any(test, feature = "testing"))]
+    pub hold_background: bool,
     /// Tests: how many of the next full acquisitions fail.
     #[cfg(any(test, feature = "testing"))]
     pub fail_acquisitions: u32,

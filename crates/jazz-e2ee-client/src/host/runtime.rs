@@ -296,8 +296,14 @@ pub struct Encryption {
     /// background pass again, since one that ran offline served nothing.
     first_online: Cell<bool>,
     /// Whether this session has been online: told so, or its start ran
-    /// online. Only a connection that comes back after that is a reconnect.
+    /// online before any notice. Only a connection that comes back after
+    /// that is a reconnect.
     been_online: Cell<bool>,
+    /// Whether the host has told the connection's state yet.
+    told: Cell<bool>,
+    /// Whether the start ran before any notice, taking the client's
+    /// default, online, for the connection's state.
+    started_untold: Cell<bool>,
     /// Whether the connection went away after the session had been online.
     went_offline: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
@@ -560,6 +566,8 @@ impl Encryption {
             reconnected: Cell::new(false),
             first_online: Cell::new(false),
             been_online: Cell::new(false),
+            told: Cell::new(false),
+            started_untold: Cell::new(false),
             went_offline: Cell::new(false),
             status: Cell::new(None),
             readable: Cell::new(false),
@@ -671,14 +679,20 @@ impl Encryption {
     /// reports its link as it opens, before it connects) is not a
     /// reconnect: the loop runs the session's background pass instead. A
     /// reconnect after it is kept, however the notices are batched.
+    ///
+    /// A start that ran before any notice took the connection for up, and
+    /// its passes may have run without the server: the first notice that it
+    /// is online is then a reconnect too.
     pub fn set_online(&self, online: bool) {
         self.client.set_online(online);
+        let first_notice = !self.told.replace(true);
         if online {
-            if !self.been_online.replace(true) {
-                self.first_online.set(true);
-            } else if self.went_offline.replace(false) {
+            if self.went_offline.replace(false) || (first_notice && self.started_untold.get()) {
                 self.reconnected.set(true);
+            } else if !self.been_online.get() {
+                self.first_online.set(true);
             }
+            self.been_online.set(true);
         } else if self.been_online.get() {
             self.went_offline.set(true);
         }
@@ -1434,7 +1448,10 @@ async fn main_loop(this: Rc<Encryption>) {
     // the first connection; then one space per turn, after the turn's
     // read-blocking work.
     let mut background_due = false;
-    let mut background: Option<VecDeque<crate::spaces::BackgroundSpace>> = None;
+    // A failed listing of the background pass's spaces: tried again after
+    // a wait, failures in a row and when.
+    let mut background_retry: Option<(u32, web_time::Instant)> = None;
+    let mut background: Option<BackgroundQueue> = None;
     let mut approval: Option<(String, _)> = None;
     let mut noticed = false;
     let mut retry_challenge_at = None;
@@ -1463,7 +1480,13 @@ async fn main_loop(this: Rc<Encryption>) {
         }
         if this.first_online.replace(false) {
             verify = true;
-            background_due = true;
+            // The steps that failed for want of the server are due now.
+            if let Some(queue) = background.as_mut() {
+                queue.connected();
+            }
+        }
+        if reconnect && let Some(queue) = background.as_mut() {
+            queue.connected();
         }
         if retry_at.is_some_and(|at| web_time::Instant::now() >= at) {
             retry_at = None;
@@ -1743,7 +1766,8 @@ async fn main_loop(this: Rc<Encryption>) {
                     let _ = reply.send(outcome);
                 }
                 if std::mem::take(&mut start) {
-                    if client.shared.keys.borrow().online {
+                    if !this.told.get() && client.shared.keys.borrow().online {
+                        this.started_untold.set(true);
                         this.been_online.set(true);
                     }
                     background_due = true;
@@ -1766,36 +1790,81 @@ async fn main_loop(this: Rc<Encryption>) {
                         Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
                     }
                 }
-                if std::mem::take(&mut background_due) {
+                // The pass counts as started only once its spaces are
+                // listed: a failed listing is tried again after a wait.
+                if background_due
+                    && background_retry.is_none_or(|(_, at)| client.shared.now() >= at)
+                {
                     match client.background_spaces(&db).await {
                         Ok(spaces) => {
-                            client.shared.member_watch.borrow_mut().failure_round_held = true;
-                            background = Some(spaces.into());
+                            background = Some(BackgroundQueue::new(spaces));
+                            background_due = false;
+                            background_retry = None;
                         }
-                        Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
+                        Err(error) => {
+                            *this.last_error.borrow_mut() = Some(describe(error));
+                            let failures = background_retry.map_or(1, |(failures, _)| failures + 1);
+                            background_retry = Some((
+                                failures,
+                                client.shared.now() + crate::spaces::retry_delay(failures),
+                            ));
+                        }
                     }
                 }
-                // One space per turn, and none while a read waits: the next
-                // turn settles reads and serves the spaces they wait for
-                // first.
-                let blocked = !client.shared.missing.borrow().is_empty()
+                // One due space per turn, and none while a read is due: the
+                // next turn settles reads and serves the spaces they wait for
+                // first. A read waiting out a back-off holds nothing back.
+                let blocked = client.reads_due()
                     || !this.uses.borrow().is_empty()
                     || !this.commands.borrow().is_empty();
-                if !blocked && let Some(queue) = background.as_mut() {
+                let now = client.shared.now();
+                if !blocked
+                    && let Some(queue) = background.as_mut()
+                    && let Some(step) = queue.next_due(now)
+                {
                     this.stage.set("background pass");
-                    if let Some(step) = queue.pop_front()
-                        && let Err(error) = Box::pin(client.background_step(&db, &step)).await
-                    {
-                        client.tell_delivery_failed(&step.space, &error);
-                    }
-                    if queue.is_empty() {
-                        background = None;
-                        client.shared.member_watch.borrow_mut().failure_round_held = false;
+                    // The step is never awaited ahead of a read: when one
+                    // is due, or the app queued work, the step is dropped
+                    // and put back, and the next turn serves the read.
+                    let outcome = {
+                        let mut running = Box::pin(client.background_step(&db, &step.space));
+                        std::future::poll_fn(|context| {
+                            if let Poll::Ready(outcome) = running.as_mut().poll(context) {
+                                return Poll::Ready(Some(outcome));
+                            }
+                            if client.reads_due()
+                                || !this.uses.borrow().is_empty()
+                                || !this.commands.borrow().is_empty()
+                            {
+                                return Poll::Ready(None);
+                            }
+                            Poll::Pending
+                        })
+                        .await
+                    };
+                    match outcome {
+                        // A step that served its space is done.
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => {
+                            client.tell_delivery_failed(&step.space.space, &error);
+                            let online = client.shared.keys.borrow().online;
+                            queue.failed(step, client.shared.now(), online);
+                        }
+                        None => queue.put_back(step),
                     }
                 }
+                if background.as_ref().is_some_and(BackgroundQueue::is_empty) {
+                    background = None;
+                }
+                client.shared.member_watch.borrow_mut().failure_round_held = background
+                    .as_ref()
+                    .is_some_and(BackgroundQueue::first_round);
             }
         }
-        this.stage.set(if background.is_some() {
+        let background_now = background
+            .as_ref()
+            .is_some_and(|queue| queue.due(client.shared.now()));
+        this.stage.set(if background_now {
             "background pass"
         } else {
             "idle"
@@ -1810,6 +1879,17 @@ async fn main_loop(this: Rc<Encryption>) {
                 .chain(retry_challenge_at)
                 .chain(recheck_at)
                 .chain(client.next_rotation_retry())
+                .chain(client.next_settle_retry())
+                .chain(
+                    background
+                        .as_ref()
+                        .and_then(|queue| queue.next_retry(client.shared.now())),
+                )
+                .chain(
+                    background_retry
+                        .map(|(_, at)| at)
+                        .filter(|at| *at > client.shared.now()),
+                )
                 .min(),
         );
         drop(turn);
@@ -1818,7 +1898,7 @@ async fn main_loop(this: Rc<Encryption>) {
         // iteration only if it can take work left in the queues.
         if this.reconnected.get()
             || this.first_online.get()
-            || background.is_some()
+            || background_now
             || !this.commands.borrow().is_empty()
             || (this.status.get() == Some(AccountStatus::Active)
                 && spaces.is_some()
@@ -1827,6 +1907,103 @@ async fn main_loop(this: Rc<Encryption>) {
             (this.wake)();
         }
         yield_now().await;
+    }
+}
+
+/// The session's background pass (protocol §3.4): the spaces not yet
+/// served. A space is done only once its step succeeds; a step that failed
+/// waits for the server (it failed offline) or for its retry time, and
+/// holds back no other space.
+struct BackgroundQueue {
+    steps: VecDeque<BackgroundStep>,
+}
+
+struct BackgroundStep {
+    space: crate::spaces::BackgroundSpace,
+    /// Whether the step ran once: the first sweep is one round of
+    /// `delivery-failed` reports.
+    tried: bool,
+    /// Failed attempts in a row while online.
+    failures: u32,
+    retry_at: Option<web_time::Instant>,
+    /// It failed offline: it waits for the connection.
+    waits_online: bool,
+}
+
+impl BackgroundQueue {
+    fn new(spaces: Vec<crate::spaces::BackgroundSpace>) -> Self {
+        Self {
+            steps: spaces
+                .into_iter()
+                .map(|space| BackgroundStep {
+                    space,
+                    tried: false,
+                    failures: 0,
+                    retry_at: None,
+                    waits_online: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn is_due(step: &BackgroundStep, now: web_time::Instant) -> bool {
+        !step.waits_online && step.retry_at.is_none_or(|at| now >= at)
+    }
+
+    fn due(&self, now: web_time::Instant) -> bool {
+        self.steps.iter().any(|step| Self::is_due(step, now))
+    }
+
+    /// Takes the first step due at `now`.
+    fn next_due(&mut self, now: web_time::Instant) -> Option<BackgroundStep> {
+        let at = self.steps.iter().position(|step| Self::is_due(step, now))?;
+        self.steps.remove(at)
+    }
+
+    /// Puts back a step that failed: offline, until the connection comes
+    /// back; online, until its retry time, later after each failure.
+    fn failed(&mut self, mut step: BackgroundStep, now: web_time::Instant, online: bool) {
+        step.tried = true;
+        if online {
+            step.failures += 1;
+            step.retry_at = Some(now + crate::spaces::retry_delay(step.failures));
+        } else {
+            step.waits_online = true;
+        }
+        self.steps.push_back(step);
+    }
+
+    /// Puts back a step that was stopped for a read: due again at once.
+    fn put_back(&mut self, step: BackgroundStep) {
+        self.steps.push_front(step);
+    }
+
+    /// The connection came (back): every step left is due.
+    fn connected(&mut self) {
+        for step in &mut self.steps {
+            step.waits_online = false;
+            step.retry_at = None;
+        }
+    }
+
+    /// The first sweep still runs: some step has not run yet.
+    fn first_round(&self) -> bool {
+        self.steps.iter().any(|step| !step.tried)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// When the next step waiting for its retry time is due, if after
+    /// `now`: one due already runs on the next turn.
+    fn next_retry(&self, now: web_time::Instant) -> Option<web_time::Instant> {
+        self.steps
+            .iter()
+            .filter(|step| !step.waits_online)
+            .filter_map(|step| step.retry_at)
+            .filter(|at| *at > now)
+            .min()
     }
 }
 

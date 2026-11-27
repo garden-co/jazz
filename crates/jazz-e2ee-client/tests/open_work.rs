@@ -809,3 +809,406 @@ fn the_first_connection_after_an_open_is_not_a_reconnect() {
         session.close();
     });
 }
+
+/// Contract: a read whose space's key cannot be obtained, waiting out its
+/// back-off, does not hold back the background pass: in the same session
+/// another space's pass still serves the member who lacks its key.
+///
+/// ```text
+/// bob ──reads X: every acquisition fails──► X in back-off, its read kept
+///     ──background pass──► carol served in S2
+/// ```
+#[test]
+fn a_read_in_back_off_does_not_hold_back_the_background_pass() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = Returning::new(dir.path(), account(0xc0), 3);
+        carol.open(&server).close();
+        let adder = alice.open_quiet(&server);
+        let stuck = adder.space_of(&server, &[alice.id(), bob.id()]);
+        adder.add_member(&server, spaces[1], &carol.id());
+        adder.close();
+
+        let session = bob.open_quiet(&server);
+        session.client.fail_acquisitions_for_test(u32::MAX);
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(stuck)))),
+        );
+        // The read's failure is the runtime's last error: run it turn by
+        // turn instead of until it is idle and without error.
+        let work = session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        let stuck = session.address(stuck);
+        assert!(
+            work.iter()
+                .any(|entry| *entry == ("acquire", stuck.clone())),
+            "the read's acquisition was tried"
+        );
+        session.close();
+    });
+}
+
+/// Alice rotates S1 while Bob's app is closed; Bob's store syncs the
+/// delivery before his runtime starts, so only his background pass acquires
+/// it. Bob's quiet session, with the delivery stored.
+fn bob_with_a_stored_delivery(
+    server: &Db,
+    dir: &Path,
+) -> (
+    Returning,
+    Returning,
+    Vec<uuid::Uuid>,
+    Opened,
+    jazz::db::SubscriptionStream,
+) {
+    let (alice, bob, spaces) = bob_holding(server, dir, 3);
+    let session = alice.open(server);
+    let rotated = session.address(spaces[0]);
+    drive(
+        server,
+        &[&session.db],
+        session.client.rotate(&session.db, &rotated),
+    )
+    .unwrap();
+    session.write_note(server, spaces[0]);
+    session.settle(server);
+    session.close();
+    let session = bob.open_quiet(server);
+    let deliveries = session.follow(
+        server,
+        Query::from(DELIVERIES).filter(eq(
+            col("recipientAccountId"),
+            lit(Value::Uuid(bob.id().parse().unwrap())),
+        )),
+    );
+    (alice, bob, spaces, session, deliveries)
+}
+
+/// Contract: a background step that failed is retried in the same session
+/// after its wait, with no read asking: one failed acquisition of a stored
+/// delivery, and the key is still acquired.
+///
+/// ```text
+/// bob ──background step S1: acquire ✗──► wait ──► acquire ✓
+/// ```
+#[test]
+fn a_failed_background_step_is_retried_in_the_session() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        session.client.fail_acquisitions_for_test(1);
+        let acquisitions = |work: &[(&'static str, SpaceAddress)]| {
+            work.iter()
+                .filter(|entry| **entry == ("acquire", rotated.clone()))
+                .count()
+        };
+        let mut work = session.drive_until(&server, |work| acquisitions(work) == 1);
+        // The step waits for its retry time: the runtime is idle meanwhile.
+        for _ in 0..200 {
+            session.runtime.drive();
+            work.extend(session.work());
+            block_on(session.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(acquisitions(&work), 1);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
+        let address = jazz_e2ee::protocol::records::space::SpaceAddress::new(
+            &rotated.scope_id,
+            &rotated.identifier,
+        )
+        .unwrap();
+        let versions = || {
+            session.client.with_held(|held| {
+                held.roots_of(&address)
+                    .iter()
+                    .map(|root| root.held().count())
+                    .sum::<usize>()
+            })
+        };
+        assert_eq!(versions(), 1);
+        let more = session.drive_until(&server, |_| versions() == 2);
+        assert_eq!(
+            acquisitions(&more),
+            1,
+            "acquired by the retry, with no read"
+        );
+        session.close();
+    });
+}
+
+/// Contract: a session that starts with the link down, whose host's first
+/// notice is that it is online, still serves the member who lacks a key in
+/// that session: the background steps that failed while the server was out
+/// of reach run again at that notice.
+///
+/// ```text
+/// alice ──adds carol to S2, dies
+/// bob   ──starts, link down: background steps fail
+///       ──link up, first notice "online"──► carol served
+/// ```
+#[test]
+fn a_session_that_starts_unconnected_serves_at_its_first_online_notice() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = Returning::new(dir.path(), account(0xc0), 3);
+        carol.open(&server).close();
+        let adder = alice.open_quiet(&server);
+        adder.add_member(&server, spaces[1], &carol.id());
+        adder.close();
+
+        let session = bob.open_quiet(&server);
+        assert!(session.db.detach_connection(&session._link));
+        let target = session.address(spaces[1]);
+        session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("background", target.clone()))
+        });
+        for _ in 0..200 {
+            session.runtime.drive();
+            block_on(session.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 0);
+
+        let (_link, _) = link_as(&session.db, &server, bob.who);
+        session.runtime.set_online(true);
+        session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        session.close();
+    });
+}
+
+/// Contract: a background step is never awaited ahead of a read: while a
+/// step waits forever on the server, a read of another space whose delivery
+/// is stored is settled at once.
+///
+/// ```text
+/// bob ──background step (never answers)
+///     ──app reads S1 (its new key only stored as a delivery)──► acquired
+/// ```
+#[test]
+fn a_slow_background_step_does_not_delay_a_read() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        session.client.hold_background_steps_for_test(true);
+        session.drive_until(&server, |work| {
+            work.iter().any(|(kind, _)| *kind == "background")
+        });
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(spaces[0])))),
+        );
+        session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("acquire", rotated.clone()))
+        });
+        session.close();
+    });
+}
+
+/// Alice adds Carol to `space` and her app dies before it delivers.
+fn carol_added_by_a_dead_adder(
+    server: &Db,
+    dir: &Path,
+    alice: &Returning,
+    space: uuid::Uuid,
+) -> Returning {
+    let carol = Returning::new(dir, account(0xc0), 3);
+    carol.open(server).close();
+    let adder = alice.open_quiet(server);
+    adder.add_member(server, space, &carol.id());
+    adder.close();
+    assert_eq!(deliveries_to(server, space, &carol.id()), 0);
+    carol
+}
+
+/// Contract: the background pass counts as started only once its spaces
+/// are listed: a listing that failed is tried again after its wait, in the
+/// same session.
+///
+/// ```text
+/// bob ──start: listing ✗──► wait ──► listing ✓ ──► carol served
+/// ```
+#[test]
+fn a_failed_listing_of_the_background_pass_is_retried() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        let session = bob.open_quiet(&server);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.fail_background_lists_for_test(1);
+        for _ in 0..300 {
+            session.runtime.drive();
+            block_on(session.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 0);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
+        session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        session.close();
+    });
+}
+
+/// Contract: the first connection runs the background steps that failed
+/// for want of it: a host that reports the link down as the app opens and
+/// up once connected still serves Carol in that session.
+///
+/// ```text
+/// bob ──"offline", start: steps fail offline──► "online": steps run ──► carol served
+/// ```
+#[test]
+fn the_first_connection_runs_the_steps_that_waited_for_it() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        let session = bob.open_quiet(&server);
+        session.runtime.set_online(false);
+        session.settle(&server);
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 0);
+        session.runtime.set_online(true);
+        session.settle(&server);
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 1);
+        let (blocking, _) = split(session.work());
+        assert!(
+            blocking.iter().all(|(kind, _)| *kind != "pass"),
+            "no reconnect pass: {blocking:?}"
+        );
+        session.close();
+    });
+}
+
+/// Contract: no background step runs while a read is due: a read whose
+/// first settle failed is due again at the next turn, and no step starts
+/// in between.
+///
+/// ```text
+/// bob ──reads S1: acquire ✗ (due again)──► next turn: acquire ✓ ──► steps
+/// ```
+#[test]
+fn no_background_step_runs_while_a_read_is_due() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        session.client.fail_acquisitions_for_test(1);
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(spaces[0])))),
+        );
+        let acquire = ("acquire", rotated.clone());
+        let work = session.drive_until(&server, |work| {
+            work.iter().filter(|entry| **entry == acquire).count() == 2
+        });
+        let first = work.iter().position(|entry| *entry == acquire).unwrap();
+        let second = work.iter().rposition(|entry| *entry == acquire).unwrap();
+        assert!(
+            work[first..second]
+                .iter()
+                .all(|(kind, _)| *kind != "background"),
+            "{work:?}"
+        );
+        session.close();
+    });
+}
+
+/// Contract: a background step whose acquisition failed still runs its
+/// pass with the keys already held: Carol is served before any retry.
+///
+/// ```text
+/// bob ──background step S1: acquire ✗, pass with the held key──► carol served
+/// ```
+#[test]
+fn a_failed_acquisition_does_not_stop_the_steps_pass() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[0]);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.fail_acquisitions_for_test(1);
+        session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[0], &carol.id()) > 0
+        });
+        session.close();
+    });
+}
+
+/// Contract: the background pass also covers a space the device holds no
+/// key of yet when a delivery to its account is stored: it acquires it with
+/// no read.
+///
+/// ```text
+/// alice ──new space Z, delivered to bob──► bob's store syncs it
+/// bob   ──background step Z: acquire
+/// ```
+#[test]
+fn a_stored_delivery_of_an_unheld_space_is_acquired_in_the_background() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, _spaces) = bob_holding(&server, dir.path(), 3);
+        let holder = alice.open_quiet(&server);
+        let unheld = holder.space_of(&server, &[alice.id(), bob.id()]);
+        drive(
+            &server,
+            &[&holder.db],
+            holder.client.deliver_keys(&holder.db),
+        )
+        .unwrap();
+        pump(&server, &holder.db);
+        holder.close();
+        assert_eq!(deliveries_to(&server, unheld, &bob.id()), 1);
+
+        let session = bob.open_quiet(&server);
+        let target = session.address(unheld);
+        let _deliveries = session.follow(
+            &server,
+            Query::from(DELIVERIES).filter(eq(
+                col("recipientAccountId"),
+                lit(Value::Uuid(bob.id().parse().unwrap())),
+            )),
+        );
+        let work = session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("acquire", target.clone()))
+        });
+        let at = work
+            .iter()
+            .position(|entry| *entry == ("acquire", target.clone()))
+            .unwrap();
+        assert_eq!(work[at - 1], ("background", target.clone()), "{work:?}");
+        session.close();
+    });
+}

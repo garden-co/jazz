@@ -2111,16 +2111,25 @@ applications and users never handle deliveries.
   device's store when its watches open are not changes: an open acquires
   only what arrives or changes after them, and a space a read waits for (a
   report waiting for its key, or a read that left rows out) is served
-  before the other spaces. Once per session, when the app starts and again
-  at its first connection if it started offline (the first connection is
-  not a reconnect), a background pass steps over every held space and every
-  space a stored delivery to the account names, one space at a time and
-  never ahead of a read: it acquires the space when a stored delivery is of
-  a version the device does not hold, then runs the pass over it (with the
-  rest of this device's last rotation of it). So a member whose adder
-  stopped before delivering, one invited before signing up, a delivery that
-  reached the store before the watch opened and a pass cut short are all
-  served by the next session of any holder. (A pass that skipped a space nothing had changed in, and a catch-up
+  before the other spaces. Once per session, from the start, a background
+  pass steps over every held space and every space a stored delivery to the
+  account names, one space at a time: it acquires the space when a stored
+  delivery is of a version the device does not hold, then runs the pass over
+  it (with the rest of this device's last rotation of it), even when that
+  acquisition failed. A step never runs ahead of a read that is due: one
+  that is running is stopped and put back. A space is done only once its
+  step succeeds: a step that failed offline waits for the connection, one
+  that failed online is tried again after 2 s, doubling to 32 s, and
+  neither holds back the other spaces; a listing of the spaces that failed
+  is tried again the same way. The first connection of a session that
+  started offline is not a reconnect: the steps waiting for it run. A
+  connection that comes back after the session was online is a reconnect,
+  and so is the first notice that the app is online when the session
+  started before any notice, since its passes may have run without the
+  server. So a member whose adder stopped before delivering, one invited
+  before signing up, a delivery that reached the store before the watch
+  opened and a pass cut short are all served by the next session of any
+  holder. (A pass that skipped a space nothing had changed in, and a catch-up
   that widened the watch first, were measured at a saving of under half of a
   pass and are not part of the design.)
 - **Receiving.** A member's devices watch deliveries addressed to their

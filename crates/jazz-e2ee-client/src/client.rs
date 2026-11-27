@@ -734,6 +734,22 @@ impl E2eeClient {
             .collect()
     }
 
+    /// Makes the next `count` listings of the background pass's spaces
+    /// fail, as a failed read of the local store would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_background_lists_for_test(&self, count: u32) {
+        self.shared.member_watch.borrow_mut().fail_background_lists = count;
+    }
+
+    /// Makes the steps of the session's background pass wait forever, as
+    /// one held up by a slow server would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn hold_background_steps_for_test(&self, hold: bool) {
+        self.shared.member_watch.borrow_mut().hold_background = hold;
+    }
+
     /// Makes the next `count` full acquisitions of a space fail, as a
     /// failed read of the space would.
     #[doc(hidden)]

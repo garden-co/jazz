@@ -418,6 +418,14 @@ impl E2eeClient {
         &self,
         db: &Db,
     ) -> Result<Vec<BackgroundSpace>, ClientError> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            let mut watch = self.shared.member_watch.borrow_mut();
+            if watch.fail_background_lists > 0 {
+                watch.fail_background_lists -= 1;
+                return Err(crate::StoreError::Failed("listing failed for the test".into()).into());
+            }
+        }
         let account = crate::account::rows::account_id_cell(&self.shared.account_id)?;
         let query = jazz::query::Query::from(crate::account::rows::SPACE_DELIVERIES).filter(
             jazz::query::eq(
@@ -489,6 +497,10 @@ impl E2eeClient {
             .borrow_mut()
             .work
             .push(("background", space.clone()));
+        #[cfg(any(test, feature = "testing"))]
+        if self.shared.member_watch.borrow().hold_background {
+            std::future::pending::<()>().await;
+        }
         let mut held = step.held;
         let mut acquired = Ok(());
         if step.newer {
