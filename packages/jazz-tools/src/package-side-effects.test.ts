@@ -97,6 +97,16 @@ const REVIEWED_CALLS = new Set([
   // The authoring DSL builds its helpers (comparison helpers, typed
   // literals, migration builders) as values it exports.
   "dsl.ts: AddBuilder",
+  // Effect values are descriptions: building a Schema (its AST), a Layer or
+  // an `Effect.gen` runs nothing until a runtime provides or runs it. The
+  // session-state Schema and the `JazzSession.jazz` Layer are values the
+  // module exports.
+  "effect-ui/session.ts: Schema.Union",
+  "effect-ui/session.ts: Schema.TaggedStruct",
+  "effect-ui/session.ts: Schema.Literals",
+  "effect-ui/session.ts: Schema.optionalKey",
+  "effect-ui/session.ts: Layer.effect",
+  "effect-ui/session.ts: Effect.gen",
   "dsl.ts: DropBuilder",
   "permissions/dsl.ts: comparison",
   "permissions/dsl.ts: TYPED",
