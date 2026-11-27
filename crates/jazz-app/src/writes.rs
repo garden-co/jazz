@@ -24,24 +24,96 @@ impl Settler {
         client: &JazzClient,
         written: Option<TransactionId>,
     ) -> Result<()> {
+        if written.is_some() {
+            note_committed();
+        }
         match (self.durability, written) {
             (Some(tier), Some(written)) => {
                 // This wait handles the write's refusal: it isn't also a
-                // mutation error.
+                // mutation error, unless its caller stops waiting first.
                 crate::lifecycle::claim(written);
-                let waited = client.wait_for_transaction(written, tier).await;
-                // Only a refusal is the reporter's to drop: a wait that
-                // ended otherwise (the driver stopped, the write unknown)
-                // handled nothing, so a later refusal is a mutation error.
-                if !waited
+                let waited = client.observe_transaction(written, tier).await;
+                if waited
                     .as_ref()
                     .is_err_and(|error| error.is_transaction_rejection())
                 {
+                    // Whether it was handled is known once the reply is
+                    // sent: see `Heard`.
+                    Heard::later(client, written);
+                } else {
+                    // A wait that ended otherwise (the driver stopped, the
+                    // write unknown) handled nothing, so a refusal is a
+                    // mutation error.
                     crate::lifecycle::unclaim(written);
                 }
                 Ok(waited?)
             }
             _ => Ok(()),
+        }
+    }
+}
+
+tokio::task_local! {
+    static REFUSALS: Heard;
+}
+
+/// The refusals a job's durable waits reported, settled once its reply is
+/// sent: a caller that heard them handled them, while one that stopped
+/// waiting (its call dropped, as `tokio::time::timeout` drops it) loses no
+/// bookkeeping. Its refusals go to `mutation_errors()` and stay for the
+/// next `wait_for_sync()`, as a plain write's do.
+#[derive(Clone, Default)]
+pub(crate) struct Heard(std::rc::Rc<CallState>);
+
+#[derive(Default)]
+pub(crate) struct CallState {
+    refusals: std::cell::RefCell<Vec<(JazzClient, TransactionId)>>,
+    /// The call committed a write locally.
+    committed: std::cell::Cell<bool>,
+}
+
+/// The call running now committed a write locally: cut short, it is
+/// `StillQueued`. For writes not made through [`Settler`] (the bindings'
+/// own). Not public API.
+#[doc(hidden)]
+pub fn note_committed() {
+    let _ = REFUSALS.try_with(|heard| heard.0.committed.set(true));
+}
+
+impl Heard {
+    /// Runs `job` with its refusals collected here.
+    pub(crate) async fn collect<T>(&self, job: impl std::future::Future<Output = T>) -> T {
+        REFUSALS.scope(self.clone(), job).await
+    }
+
+    /// `written`'s refusal is decided by whether the reply reaches its
+    /// caller; outside a job, it is heard at once.
+    fn later(client: &JazzClient, written: TransactionId) {
+        let kept = REFUSALS.try_with(|heard| {
+            heard
+                .0
+                .refusals
+                .borrow_mut()
+                .push((client.clone(), written));
+        });
+        if kept.is_err() {
+            crate::lifecycle::heard(client, written);
+        }
+    }
+
+    /// Whether the call committed a write locally.
+    pub(crate) fn committed(&self) -> bool {
+        self.0.committed.get()
+    }
+
+    /// The job's reply was sent: `heard` if its caller was still there.
+    pub(crate) fn replied(&self, heard: bool) {
+        for (client, written) in self.0.refusals.borrow_mut().drain(..) {
+            if heard {
+                crate::lifecycle::heard(&client, written);
+            } else {
+                crate::lifecycle::unclaim(written);
+            }
         }
     }
 }

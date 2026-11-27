@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Kotlin Android partition: a build check of jazz-kotlin-android, the AAR
+# The Kotlin Android partition: a build check of jazz-kotlin's Android target, the AAR
 # with jazz-ffi cross-compiled for arm64-v8a, armeabi-v7a and x86_64. Running
 # it is dev/scripts/test-kotlin-android-emulator.sh's. Fetches a JDK, Gradle, the Android SDK packages
 # and the NDK into ~/.cache/jazz-kotlin, each pinned and checked against its
@@ -40,7 +40,9 @@ rust_targets=(aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
 # Download $1 to $2 and check it has sha256 $3.
 fetch() {
-  curl -fsSL --retry 3 -o "$2.part" "$1"
+  # Retried like dev/scripts/kotlin-toolchain.sh: plain --retry skips a transient
+  # HTTP/2 reset (curl 92), which failed a release build's SDK/NDK download.
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$2.part" "$1"
   echo "$3  $2.part" | sha256sum -c --quiet -
   mv "$2.part" "$2"
 }
@@ -73,7 +75,7 @@ grep -qx "Pkg.Revision = $ndk_revision" "$sdk/ndk/$ndk_revision/source.propertie
 export ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
 
 abspath() { mkdir -p "$1" && (cd "$1" && pwd); }
-props=(-PcargoProfile="${CARGO_PROFILE:-dev}")
+props=(-PandroidCargoProfile="${CARGO_PROFILE:-dev}")
 [ -n "${KOTLIN_ANDROID_ABIS:-}" ] && props+=(-PandroidAbis="$KOTLIN_ANDROID_ABIS")
 if [ -n "${KOTLIN_ANDROID_JNI_LIBS:-}" ]; then
   [ -d "$KOTLIN_ANDROID_JNI_LIBS" ] || { echo "no $KOTLIN_ANDROID_JNI_LIBS" >&2; exit 1; }
@@ -81,7 +83,7 @@ if [ -n "${KOTLIN_ANDROID_JNI_LIBS:-}" ]; then
 fi
 if [ -n "${KOTLIN_ANDROID_BINDINGS:-}" ]; then
   [ -d "$KOTLIN_ANDROID_BINDINGS" ] || { echo "no $KOTLIN_ANDROID_BINDINGS" >&2; exit 1; }
-  props+=(-PuniffiBindings="$(abspath "$KOTLIN_ANDROID_BINDINGS")")
+  props+=(-PandroidUniffiBindings="$(abspath "$KOTLIN_ANDROID_BINDINGS")")
 fi
 
 # Rust and cargo-ndk only when this build compiles jazz-ffi or its bindings.
@@ -93,19 +95,19 @@ if [ -z "${KOTLIN_ANDROID_JNI_LIBS:-}" ] || [ -z "${KOTLIN_ANDROID_BINDINGS:-}" 
   export PATH="$cache/cargo/bin:$PATH"
 fi
 
-build=packages/jazz-kotlin-android/build
+build=packages/jazz-kotlin/build
 if [ -n "${KOTLIN_ANDROID_JNI_OUT:-}" ]; then
   abi="${KOTLIN_ANDROID_ABIS:?KOTLIN_ANDROID_JNI_OUT builds one ABI: set KOTLIN_ANDROID_ABIS}"
   case "$abi" in arm64-v8a | armeabi-v7a | x86_64) ;; *) echo "one ABI of arm64-v8a, armeabi-v7a, x86_64, got '$abi'" >&2; exit 1 ;; esac
   out="$(abspath "$KOTLIN_ANDROID_JNI_OUT")"
   # The bindings come from the arm64-v8a library, as the AAR's do.
   tasks=(cargoNdkFfi)
-  [ "$abi" = arm64-v8a ] && tasks+=(generateUniffi)
-  gradle --no-daemon --console=plain -p packages/jazz-kotlin-android "${props[@]}" "${tasks[@]}"
+  [ "$abi" = arm64-v8a ] && tasks+=(generateUniffiAndroid)
+  gradle --no-daemon --console=plain -p packages/jazz-kotlin "${props[@]}" "${tasks[@]}"
   [ -s "$build/jniLibs/$abi/libjazz_ffi.so" ] || { echo "cargo-ndk wrote no $abi/libjazz_ffi.so" >&2; exit 1; }
   rm -rf "$out/jniLibs" "$out/uniffi"
   cp -R "$build/jniLibs" "$out/jniLibs"
-  [ "$abi" = arm64-v8a ] && cp -R "$build/generated/uniffi" "$out/uniffi"
+  [ "$abi" = arm64-v8a ] && cp -R "$build/generated/uniffi/android" "$out/uniffi"
   ls -lR "$out"
   exit 0
 fi
@@ -113,11 +115,11 @@ fi
 # KOTLIN_ANDROID_TASKS: more tasks to run with the build (dev/scripts/publish-kotlin.sh's
 # publishToMavenLocal, publishToMavenCentral).
 read -ra extra_tasks <<<"${KOTLIN_ANDROID_TASKS:-}"
-gradle --no-daemon --console=plain -p packages/jazz-kotlin-android \
+gradle --no-daemon --console=plain -p packages/jazz-kotlin \
   "${props[@]}" assembleRelease "${extra_tasks[@]}"
 
 # The AAR must carry jazz-ffi for every ABI, and the library's classes.
-aar=$build/outputs/aar/jazz-kotlin-android-release.aar
+aar=$build/outputs/aar/jazz-kotlin-release.aar
 listing=$(unzip -l "$aar")
 IFS=, read -ra expected_abis <<<"${KOTLIN_ANDROID_ABIS:-arm64-v8a,armeabi-v7a,x86_64}"
 for abi in "${expected_abis[@]}"; do

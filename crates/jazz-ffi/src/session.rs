@@ -35,6 +35,8 @@ pub(crate) struct SessionCore {
     watches: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
     /// A C host's token callback: closing waits for it, and so does free.
     gates: Mutex<Vec<Arc<dyn HostGate>>>,
+    /// A C host's call controls (`callBegin`), by id.
+    controls: Mutex<std::collections::HashMap<u64, jazz_app_support::CallControl>>,
 }
 
 impl SessionCore {
@@ -58,15 +60,49 @@ impl SessionCore {
             )),
             watches: Mutex::new(Vec::new()),
             gates: Mutex::new(Vec::new()),
+            controls: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
-    fn open_session(&self) -> Result<&JazzSession> {
+    fn open_session(&self) -> Result<JazzSession> {
         if self.closed.is_closed() {
             Err(FfiError::Closed)
         } else {
-            Ok(&self.session)
+            // The call's control, if it was made with one.
+            Ok(match crate::core::current_control() {
+                Some(control) => self.session.controlled(control),
+                None => self.session.clone(),
+            })
         }
+    }
+
+    /// A C host's call control (`callBegin`), as a handle's.
+    pub(crate) fn call_begin(&self, timeout: Option<std::time::Duration>) -> Result<u64> {
+        self.open_session()?;
+        let id = self
+            .next_tx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.controls()
+            .insert(id, jazz_app_support::CallControl::new(timeout));
+        Ok(id)
+    }
+
+    pub(crate) fn control(&self, id: u64) -> Result<jazz_app_support::CallControl> {
+        self.controls()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| refused(format!("call {id} is not begun (or ended)")))
+    }
+
+    pub(crate) fn call_end(&self, id: u64) {
+        self.controls().remove(&id);
+    }
+
+    fn controls(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, jazz_app_support::CallControl>>
+    {
+        self.controls.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The snapshot as JSON: `{"status", "user"?, "clientEpoch", "error"?:
@@ -80,7 +116,7 @@ impl SessionCore {
     pub fn jazz(&self) -> Result<Core> {
         let session = self.open_session()?;
         // Closed meanwhile, the handle is too: they share the state.
-        self.unless_closed(self.handle(session))
+        self.unless_closed(self.handle(&session))
     }
 
     /// A result of work in flight when the session closed: its failure,
@@ -135,7 +171,7 @@ impl SessionCore {
             return Ok(Json::Null);
         }
         let session = self.open_session()?;
-        self.unless_closed(Self::operate(session, method, args))
+        self.unless_closed(Self::operate(&session, method, args))
     }
 
     fn operate(session: &JazzSession, method: &str, args: &Json) -> Result<Json> {

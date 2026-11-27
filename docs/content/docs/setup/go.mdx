@@ -11,9 +11,13 @@ and permissions: `npx jazz-tools generate` writes its typed bindings from them.
 The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, needs no cgo; its only dependency
 is purego. It uses `context` for every call and channels for subscriptions.
 
-<Callout type="warn" title="Known issue: a bearer user can't open offline">
-  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
-  while your backend is unreachable, even with a persistent store.
+<Callout title="Opening offline with a bearer">
+  An app signed in with a JWT bearer token opens its persistent store when your backend can't be
+  reached, if that user signed in on this device before. Until your backend signs them in again as
+  the same account, the client makes no request and uploads nothing; their writes queue locally. If
+  the backend names another account or refuses the token, the client stops and the session reads
+  signed out; writes made offline stay in that account's store for its next sign-in. An opaque
+  token, or a user who never signed in on this device, still needs the backend to open.
 </Callout>
 
 ## Install
@@ -113,8 +117,17 @@ Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused
 `*jazz.Error` for the details.
 
 A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
-returns at once, but the call still runs to its end, so a write may still apply. Before the process
-exits, call `db.Close()`.
+returns at once, but the call keeps running until it ends or the app closes, so a write may still
+apply. Nothing is left open by a cancel: a transaction or streaming upload that ctx ends before its
+commit or finish is rolled back, and a cancelled `jazz.Open` returns once the app it was opening is
+closed again, so the next `Open` of that store works.
+
+Before the process exits, call `db.Close()`, or `db.Shutdown(ctx)` to first give queued writes until
+ctx's deadline to reach the server. Either ends calls still waiting for the server with
+`jazz.ErrClosed` (what they sent may still apply), then gives sync up to 2 seconds to end. Closing
+also cancels your token provider's `ctx` and waits for the provider to return, so make it honour
+that `ctx`. `Close` blocks until the app is closed (run it in a goroutine not to wait), except from
+inside your token provider, where it returns at once and the app closes once the provider returns.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
 for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan

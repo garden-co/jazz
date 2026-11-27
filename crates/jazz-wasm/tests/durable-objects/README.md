@@ -7,6 +7,9 @@ through Miniflare: no Cloudflare account, nothing deployed.
 crates/jazz-wasm/tests/durable-objects/run.sh
 ```
 
+CI runs it in every merge group: the `wasm-durable-object` partition of
+`dev/gates/local-ci-equivalent.mjs` (the `test-wasm-durable-object` job).
+
 It builds jazz-wasm with the test-only `durable-object-tests` feature into
 `./pkg` and runs `smoke.test.mjs`: a Durable Object writes a short and a
 300 KiB note, reads them back, restarts (a new workerd over the same

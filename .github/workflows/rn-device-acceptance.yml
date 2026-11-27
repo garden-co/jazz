@@ -122,7 +122,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -176,7 +176,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          # A network read: retried when the API answers empty or fails (RC 45316950784 got "unexpected end of
+          # JSON input" once). The comparison below isn't.
+          producer_sha=
+          for attempt in 1 2 3 4; do
+            producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha 2>/dev/null || true)"
+            [[ "$producer_sha" =~ ^[0-9a-f]{40}$ ]] && break
+            [[ $attempt -lt 4 ]] && { echo "::warning::reading run ${ARTIFACTS_RUN_ID}'s head_sha failed (attempt ${attempt}); retrying"; sleep $((attempt * 5)); }
+          done
+          [[ "$producer_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::couldn't read run ${ARTIFACTS_RUN_ID}'s head_sha from the GitHub API (4 attempts)"; exit 1; }
           [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
           prebuilt="${RUNNER_TEMP}/prebuilt"
           cp -R "$prebuilt/jazz-rn-relay-ios/." crates/jazz-rn/
@@ -299,7 +307,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -348,7 +356,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          # A network read: retried when the API answers empty or fails (RC 45316950784 got "unexpected end of
+          # JSON input" once). The comparison below isn't.
+          producer_sha=
+          for attempt in 1 2 3 4; do
+            producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha 2>/dev/null || true)"
+            [[ "$producer_sha" =~ ^[0-9a-f]{40}$ ]] && break
+            [[ $attempt -lt 4 ]] && { echo "::warning::reading run ${ARTIFACTS_RUN_ID}'s head_sha failed (attempt ${attempt}); retrying"; sleep $((attempt * 5)); }
+          done
+          [[ "$producer_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::couldn't read run ${ARTIFACTS_RUN_ID}'s head_sha from the GitHub API (4 attempts)"; exit 1; }
           [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
           prebuilt="${RUNNER_TEMP}/prebuilt"
           cp -R "$prebuilt/jazz-rn-relay-android/." crates/jazz-rn/

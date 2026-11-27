@@ -4,8 +4,13 @@ import type { DurableObject } from "cloudflare:workers";
 export interface JazzCoreEnv {
   /** The Durable Object namespace of `JazzCore` (SQLite-backed). */
   JAZZ: DurableObjectNamespace;
-  /** Admits the app's backend; at least 32 characters, stable across deployments. */
-  JAZZ_CORE_SECRET: string;
+  /**
+   * Admits the app's backend; at least 32 characters, stable across
+   * deployments. Optional for a backend in the same Worker: without it the
+   * object makes one on its first start and hands it out only over its
+   * binding (`coreCredential`).
+   */
+  JAZZ_CORE_SECRET?: string;
   /** A public schema's JSON, served until one is published (optional). */
   JAZZ_SCHEMA?: string;
   /**
@@ -19,7 +24,14 @@ export interface JazzCoreEnv {
 }
 
 /** The Durable Object class holding an app's Jazz core. */
-export declare const JazzCore: typeof DurableObject<JazzCoreEnv>;
+export declare const JazzCore: {
+  new (
+    ...args: ConstructorParameters<typeof DurableObject<JazzCoreEnv>>
+  ): DurableObject<JazzCoreEnv> & {
+    /** The secret that admits the app's backend: an RPC method, so only the object's binding reaches it. */
+    coreCredential(): string;
+  };
+};
 
 /** `JazzCore`, for callers that prefer a factory. */
 export declare function createJazzCore(): typeof JazzCore;

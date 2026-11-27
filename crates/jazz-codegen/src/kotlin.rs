@@ -56,16 +56,20 @@ pub const RUNTIME: &str = "jazz-kotlin";
 /// The Android runtime (which brings [`RUNTIME`] with it).
 pub const ANDROID_RUNTIME: &str = "jazz-kotlin-android";
 
+/// The JVM runtime's own coordinate (Kotlin Multiplatform's JVM variant of
+/// [`RUNTIME`]), which Maven builds depend on directly.
+pub const JVM_RUNTIME: &str = "jazz-kotlin-jvm";
+
 /// Whether `build` (a `build.gradle.kts`, or a Groovy `build.gradle`) is a
-/// Kotlin Jazz app's: it depends on the `jazz-kotlin` or `jazz-kotlin-android`
-/// runtime, by coordinate or as a release's jar or AAR.
+/// Kotlin Jazz app's: it depends on the `jazz-kotlin`, `jazz-kotlin-jvm` or
+/// `jazz-kotlin-android` runtime, by coordinate or as a release's jar or AAR.
 pub fn is_app_build(build: &str) -> bool {
     build
         .lines()
         .map(|line| line.split("//").next().unwrap_or(""))
         .any(|line| {
             // `"tools.jazz:jazz-kotlin"`, `'tools.jazz:jazz-kotlin:<version>'`, …
-            [RUNTIME, ANDROID_RUNTIME].iter().any(|runtime| {
+            [RUNTIME, JVM_RUNTIME, ANDROID_RUNTIME].iter().any(|runtime| {
                 ['"', '\'', ':']
                     .iter()
                     .any(|end| line.contains(&format!(":{runtime}{end}")))
@@ -1092,6 +1096,10 @@ mod tests {
         ));
         assert!(is_app_build(
             "implementation(files(\"libs/jazz-kotlin-android-2.0.0-alpha.66.aar\"))"
+        ));
+        // The JVM variant's own coordinate (Maven, no module metadata).
+        assert!(is_app_build(
+            "implementation(\"tools.jazz:jazz-kotlin-jvm:2.0.0-beta.2\")"
         ));
         // The Android runtime's coordinate.
         assert!(is_app_build(

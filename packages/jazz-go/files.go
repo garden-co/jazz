@@ -15,7 +15,7 @@ const StreamChunk = 256 << 10
 // InsertStreaming inserts row into table with its bytes column streamed
 // from r, a chunk at a time, so a large file is never held in memory
 // whole. The row appears whole once the upload finishes; if reading r
-// fails, nothing is written.
+// fails, or ctx ends before r is read to its end, nothing is written.
 func InsertStreaming[N, R any](ctx context.Context, q Querier, table string, row N, column string, r io.Reader, opts ...WriteOption) (R, error) {
 	var out R
 	encoded, err := encode(q, row)
@@ -55,7 +55,15 @@ func upload(ctx context.Context, q Querier, begin map[string]any, r io.Reader, o
 	var begun struct {
 		Upload string `json:"upload"`
 	}
-	if err := q.call(ctx, "uploadBegin", begin, &begun); err != nil {
+	abortLate := func(text string, err error) {
+		var late struct {
+			Upload string `json:"upload"`
+		}
+		if err == nil && json.Unmarshal([]byte(text), &late) == nil && late.Upload != "" {
+			_ = q.call(context.Background(), "uploadAbort", map[string]any{"upload": late.Upload}, nil)
+		}
+	}
+	if err := callOr(ctx, q, "uploadBegin", begin, &begun, abortLate); err != nil {
 		return nil, err
 	}
 	abort := func() {
@@ -78,6 +86,11 @@ func upload(ctx context.Context, q Querier, begin map[string]any, r io.Reader, o
 			abort()
 			return nil, err
 		}
+	}
+	// Nothing is written if ctx ends before the stream is complete.
+	if err := ctx.Err(); err != nil {
+		abort()
+		return nil, err
 	}
 	var raw json.RawMessage
 	err := q.call(ctx, "uploadFinish", withOptions(map[string]any{"upload": begun.Upload}, opts), &raw)
@@ -201,3 +214,12 @@ func (r *pageReader) Read(p []byte) (int, error) {
 }
 
 func (r *pageReader) Close() error { return nil }
+
+// callOr is q's call, handing a result ctx's end returned from to
+// abandoned (see DB.callOr).
+func callOr(ctx context.Context, q Querier, method string, args map[string]any, out any, abandoned func(string, error)) error {
+	if db, ok := q.(*DB); ok {
+		return db.callOr(ctx, method, args, out, abandoned)
+	}
+	return q.call(ctx, method, args, out)
+}

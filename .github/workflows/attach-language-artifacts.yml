@@ -21,7 +21,10 @@ name: Attach language artifacts
 # add assets of their own and leave these unchanged.
 # and once: jazz-ffi-bindings.tar.gz (swift/, kotlin/),
 # jazz-kotlin-<version>.jar (every platform's library inside, for JNA),
-# jazz-kotlin-android-<version>.aar, libjazz_ffi-source.txt (the commit they
+# jazz-kotlin-android-<version>.aar, with maven and once jazz-kotlin is Kotlin
+# Multiplatform jazz-kotlin-maven-<version>.zip (a local Maven repository:
+# tools/jazz/{jazz-kotlin,jazz-kotlin-jvm,jazz-kotlin-android}/<version>/,
+# dev/scripts/pack-kotlin-maven-zip.sh), libjazz_ffi-source.txt (the commit they
 # were built from), and SHA256SUMS-languages over all of them. Not
 # SHA256SUMS: that name is the release's server binaries' ("Publish
 # jazz-tools alpha"), and both upload with --clobber. A real run also attests
@@ -534,11 +537,36 @@ jobs:
           path: ~/.m2/repository/tools/jazz
           if-no-files-found: error
 
+      # The GitHub release file jazz-kotlin-maven-<version>.zip: the same
+      # tree, zipped reproducibly, once jazz-kotlin is Kotlin Multiplatform
+      # (the root jazz-kotlin, jazz-kotlin-jvm, jazz-kotlin-android). The pack
+      # job checksums it into SHA256SUMS-languages.
+      - name: Zip the Kotlin Multiplatform repository
+        run: |
+          set -euo pipefail
+          mkdir -p maven-zip
+          if ! grep -q 'kotlin("multiplatform")' packages/jazz-kotlin/build.gradle.kts 2>/dev/null; then
+            echo "::notice::jazz-kotlin isn't Kotlin Multiplatform at this ref: no jazz-kotlin-maven zip."
+            exit 0
+          fi
+          zip="maven-zip/jazz-kotlin-maven-${VERSION}.zip"
+          bash dev/scripts/pack-kotlin-maven-zip.sh ~/.m2/repository "${VERSION}" "${zip}"
+          bash dev/scripts/check-kotlin-maven-zip.sh "${zip}" "${VERSION}"
+          unzip -l "${zip}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-kotlin-maven-zip
+          path: maven-zip/*
+          if-no-files-found: ignore
+
   # Read-only: packs the assets reproducibly and checksums them, for the
   # attach job (a real run) or as the dry run's result.
   pack:
     name: Pack and checksum
-    needs: [build, kotlin]
+    needs: [build, kotlin, maven]
+    # maven runs only with inputs.maven.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.kotlin.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.maven.result) }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -553,6 +581,12 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: jazz-kotlin-dist
+          merge-multiple: true
+          path: built
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-kotlin-maven-zip
           merge-multiple: true
           path: built
 
@@ -577,7 +611,7 @@ jobs:
           done
           pack built/jazz-ffi-bindings dist/jazz-ffi-bindings.tar.gz
           shopt -s nullglob
-          kotlin=(built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar)
+          kotlin=(built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar built/jazz-kotlin-maven-*.zip)
           if [ "${#kotlin[@]}" -gt 0 ]; then
             cp "${kotlin[@]}" dist/
           fi

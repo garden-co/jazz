@@ -8,7 +8,8 @@ name: Release artifacts
 #                      NPM-SHA256SUMS, rn-packages.json
 #   release-languages  libjazz_ffi-<platform>.tar.gz, jazz-ffi-bindings.tar.gz,
 #                      jazz-kotlin-<v>.jar, jazz-kotlin-android-<v>.aar,
-#                      libjazz_ffi-source.txt, SHA256SUMS-languages
+#                      libjazz_ffi-source.txt, SHA256SUMS-languages, and once
+#                      jazz-kotlin is Kotlin Multiplatform jazz-kotlin-maven-<v>.zip
 #   release-maven      the tools/jazz tree of a local Maven repository, signed
 #                      with a throwaway key (publish re-signs it)
 #   release-swift      JazzFFI.xcframework.zip, JazzFFI.xcframework.zip.checksum
@@ -160,6 +161,42 @@ jobs:
       # give the same checksum.
       reproduce: ${{ needs.resolve.outputs.release == 'true' }}
 
+  # A plain Vercel Function importing createJazz from jazz-tools/backend,
+  # traced from the uploaded release-npm tarballs as Vercel traces it, must
+  # stay under budget (Vercel refuses 250 MB; beta.3 traced to 414 MB).
+  # A test beside the manifest, not a build step: it fails the run (and so
+  # the RC's artifacts-complete) without delaying the manifest.
+  backend-function-size:
+    name: Budget a jazz-tools/backend function (linux-x64)
+    needs: [resolve, packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          sparse-checkout: |
+            dev/artifacts
+            .nvmrc
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          # npm installs fresh; nothing restores a cache off a trusted ref.
+          package-manager-cache: ${{ env.JAZZ_TRUSTED_CACHE == 'true' }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 8
+        with:
+          name: release-npm
+          path: release-npm
+      - name: Budget a jazz-tools/backend function (linux-x64)
+        run: node dev/artifacts/verify-backend-function-size.mjs release-npm "${VERSION}"
+
   # Collects the release-* artifacts, writes manifest.json and, for release
   # runs, attests every file's build provenance.
   manifest:
@@ -179,30 +216,32 @@ jobs:
       TREE: ${{ needs.resolve.outputs.tree }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # One step: download-artifact fetches several artifacts in parallel
+      # (one after another, these took 130 s once the artifacts doubled).
+      # Cut off and retried if stalled (8.7 min for 61 MB once, run 45312273989).
+      - id: dl
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        continue-on-error: true
+        timeout-minutes: 5
         with:
-          name: language-artifacts
-          path: out/release-languages
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+          pattern: "{language-artifacts,JazzFFI.xcframework,jazz-swift-mirror,release-server,release-npm,jazz-kotlin-maven}"
+          path: out
+      - if: steps.dl.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 8
         with:
-          name: JazzFFI.xcframework
-          path: out/release-swift
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-swift-mirror
-          path: out/release-swift-mirror
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-server
-          path: out/release-server
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-npm
-          path: out/release-npm
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-kotlin-maven
-          path: out/release-maven
+          pattern: "{language-artifacts,JazzFFI.xcframework,jazz-swift-mirror,release-server,release-npm,jazz-kotlin-maven}"
+          path: out
+      - name: Name the directories as the manifest lists them
+        run: |
+          set -euo pipefail
+          cd out
+          mv language-artifacts release-languages
+          mv JazzFFI.xcframework release-swift
+          mv jazz-swift-mirror release-swift-mirror
+          mv jazz-kotlin-maven release-maven
+          test -d release-server && test -d release-npm
+          ls
 
       - name: Check and write manifest.json
         run: |
@@ -216,7 +255,15 @@ jobs:
           test -s "release-languages/jazz-kotlin-${VERSION}.jar"
           test -s "release-languages/jazz-kotlin-android-${VERSION}.aar"
           # Two Gradle runs build these: what the GitHub release serves must be what the Maven tree publishes.
-          cmp "release-languages/jazz-kotlin-${VERSION}.jar" "release-maven/jazz-kotlin/${VERSION}/jazz-kotlin-${VERSION}.jar"
+          # Kotlin Multiplatform publishes the JVM jar as jazz-kotlin-jvm (the root jazz-kotlin is metadata).
+          jvm=jazz-kotlin
+          [ -d "release-maven/jazz-kotlin-jvm/${VERSION}" ] && jvm=jazz-kotlin-jvm
+          cmp "release-languages/jazz-kotlin-${VERSION}.jar" "release-maven/${jvm}/${VERSION}/${jvm}-${VERSION}.jar"
+          # With Kotlin Multiplatform, the release also ships the repository zip.
+          if [ "${jvm}" = jazz-kotlin-jvm ]; then
+            grep -q " jazz-kotlin-maven-${VERSION}.zip\$" release-languages/SHA256SUMS-languages ||
+              { echo "::error::jazz-kotlin is Kotlin Multiplatform but release-languages has no jazz-kotlin-maven-${VERSION}.zip"; exit 1; }
+          fi
           cmp "release-languages/jazz-kotlin-android-${VERSION}.aar" "release-maven/jazz-kotlin-android/${VERSION}/jazz-kotlin-android-${VERSION}.aar"
           (cd release-swift && echo "$(cat JazzFFI.xcframework.zip.checksum)  JazzFFI.xcframework.zip" | sha256sum -c -)
           grep -q "releases/download/v${VERSION}/JazzFFI.xcframework.zip" release-swift-mirror/Package.swift

@@ -425,17 +425,15 @@ impl Number {
                 }
             }
             NumberState::ExponentSign => self.exponent_negative = byte == b'-',
-            NumberState::ExponentDigits => {
-                if !self.exponent_overflow {
-                    if let Some(next) = self
-                        .exponent
-                        .checked_mul(10)
-                        .and_then(|value| value.checked_add(i32::from(byte - b'0')))
-                    {
-                        self.exponent = next;
-                    } else {
-                        self.exponent_overflow = true;
-                    }
+            NumberState::ExponentDigits if !self.exponent_overflow => {
+                if let Some(next) = self
+                    .exponent
+                    .checked_mul(10)
+                    .and_then(|value| value.checked_add(i32::from(byte - b'0')))
+                {
+                    self.exponent = next;
+                } else {
+                    self.exponent_overflow = true;
                 }
             }
             _ => {}

@@ -50,8 +50,17 @@ gradle --version | grep -q '^Gradle 8\.14\.3$' || { gradle --version >&2; echo "
 # The bindings are generated from this platform's build of the same sources.
 jvm=(-PcargoProfile=release -PnativeLibs="$natives")
 [ -n "${KOTLIN_JVM_BINDINGS:-}" ] && jvm+=(-PuniffiBindings="$(cd "$KOTLIN_JVM_BINDINGS" && pwd)")
-gradle --no-daemon --console=plain -p packages/jazz-kotlin "${jvm[@]}" clean jar
-cp "packages/jazz-kotlin/build/libs/jazz-kotlin-$version.jar" "$out/"
+# Kotlin Multiplatform (jvm and android targets in packages/jazz-kotlin) builds
+# the JVM jar as jazz-kotlin-jvm; the release file keeps its name.
+kmp=false
+grep -q 'kotlin("multiplatform")' packages/jazz-kotlin/build.gradle.kts && kmp=true
+if [ "$kmp" = true ]; then
+  gradle --no-daemon --console=plain -p packages/jazz-kotlin "${jvm[@]}" -PjazzAndroid=skip clean jvmJar
+  cp "packages/jazz-kotlin/build/libs/jazz-kotlin-jvm-$version.jar" "$out/jazz-kotlin-$version.jar"
+else
+  gradle --no-daemon --console=plain -p packages/jazz-kotlin "${jvm[@]}" clean jar
+  cp "packages/jazz-kotlin/build/libs/jazz-kotlin-$version.jar" "$out/"
+fi
 
 # The jar must hold every platform's library.
 for dir in "$natives"/*/; do
@@ -64,8 +73,9 @@ done
 
 if [ "$android" = "--android" ]; then
   CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
-  cp packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar \
-    "$out/jazz-kotlin-android-$version.aar"
+  aar=packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar
+  [ "$kmp" = true ] && aar=packages/jazz-kotlin/build/outputs/aar/jazz-kotlin-release.aar
+  cp "$aar" "$out/jazz-kotlin-android-$version.aar"
 fi
 
 (cd "$out" && sha256sum jazz-kotlin* > SHA256SUMS && cat SHA256SUMS)

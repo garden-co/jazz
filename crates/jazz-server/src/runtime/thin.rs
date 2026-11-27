@@ -300,7 +300,7 @@ fn hex_node(hex: &str) -> Option<[u8; 16]> {
     }
     let digit = |d: u8| (d as char).to_digit(16).map(|v| v as u8);
     let mut node = [0u8; 16];
-    for (byte, pair) in node.iter_mut().zip(digits.chunks_exact(2)) {
+    for (byte, pair) in node.iter_mut().zip(digits.as_chunks::<2>().0) {
         *byte = digit(pair[0])? << 4 | digit(pair[1])?;
     }
     Some(node)
@@ -549,10 +549,7 @@ impl Owner {
             .map(|(session, _)| *session)
             .collect();
         for session in waiting {
-            loop {
-                let Some(thin) = self.thin.get_mut(&session) else {
-                    break;
-                };
+            while let Some(thin) = self.thin.get_mut(&session) {
                 let Some(Parked {
                     request, _ingress, ..
                 }) = thin.parked.pop_front()

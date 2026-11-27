@@ -576,6 +576,153 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Ends the calls made through [`JazzHandle::controlled`] views: cancelled,
+ * or once `timeout_ms` passed since it was made. A binding makes one per
+ * suspending call and cancels it when its coroutine or task is cancelled.
+ * A call it ends fails `Interrupted`, with `queued` when the call
+ * committed a write locally (which may still apply); a call made once it
+ * ended does nothing.
+ */
+public protocol CallControlProtocol: AnyObject, Sendable {
+    
+    /**
+     * Ends its calls' waits now.
+     */
+    func cancel() 
+    
+}
+/**
+ * Ends the calls made through [`JazzHandle::controlled`] views: cancelled,
+ * or once `timeout_ms` passed since it was made. A binding makes one per
+ * suspending call and cancels it when its coroutine or task is cancelled.
+ * A call it ends fails `Interrupted`, with `queued` when the call
+ * committed a write locally (which may still apply); a call made once it
+ * ended does nothing.
+ */
+open class CallControl: CallControlProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_jazz_ffi_fn_clone_callcontrol(self.handle, $0) }
+    }
+public convenience init(timeoutMs: UInt64?) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_constructor_callcontrol_new(
+        FfiConverterOptionUInt64.lower(timeoutMs),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_jazz_ffi_fn_free_callcontrol(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Ends its calls' waits now.
+     */
+open func cancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_callcontrol_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCallControl: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = CallControl
+
+    public static func lift(_ handle: UInt64) throws -> CallControl {
+        return CallControl(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: CallControl) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CallControl {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: CallControl, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCallControl_lift(_ handle: UInt64) throws -> CallControl {
+    return try FfiConverterTypeCallControl.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCallControl_lower(_ value: CallControl) -> UInt64 {
+    return FfiConverterTypeCallControl.lower(value)
+}
+
+
+
+
+
+
+/**
  * An open Jazz app. Every method blocks until done and is safe to call
  * from any thread; wrap them in the language's async.
  */
@@ -640,6 +787,13 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * read and delete, `{"row"}` for insert, `{"id", "row"?}` for update.
      */
     func can(table: String, op: String, argsJson: String) throws  -> Bool?
+    
+    /**
+     * A view on the same app whose calls obey `control`: transactions and
+     * uploads begun on either work on both. Freeing it frees only the
+     * view; closing it closes the app, as this handle's close does.
+     */
+    func controlled(control: CallControl)  -> JazzHandle
     
     func delete(table: String, id: String) throws 
     
@@ -771,8 +925,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * waiting on the server or the network, at once (local work already
      * started finishes). On a `for_user` or session handle it closes that
      * handle only. Safe beside any other call. It has no hard time limit
-     * (work under way, the store closing, a host name lookup in progress),
-     * so don't call it on a UI thread. It doesn't wait for the token
+     * (work under way, the store closing), so don't call it on a UI
+     * thread. It doesn't wait for the token
      * provider: one already asked may still run after it returns. Named
      * `shutdown`, not `close`, which would clash with Kotlin's
      * `AutoCloseable.close`.
@@ -1103,6 +1257,21 @@ open func can(table: String, op: String, argsJson: String)throws  -> Bool?  {
 })
 }
     
+    /**
+     * A view on the same app whose calls obey `control`: transactions and
+     * uploads begun on either work on both. Freeing it frees only the
+     * view; closing it closes the app, as this handle's close does.
+     */
+open func controlled(control: CallControl) -> JazzHandle  {
+    return try!  FfiConverterTypeJazzHandle_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_controlled(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCallControl_lower(control),uniffiCallStatus
+    )
+})
+}
+    
 open func delete(table: String, id: String)throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
     uniffi_jazz_ffi_fn_method_jazzhandle_delete(
@@ -1404,8 +1573,8 @@ open func sessionState()throws  -> String?  {
      * waiting on the server or the network, at once (local work already
      * started finishes). On a `for_user` or session handle it closes that
      * handle only. Safe beside any other call. It has no hard time limit
-     * (work under way, the store closing, a host name lookup in progress),
-     * so don't call it on a UI thread. It doesn't wait for the token
+     * (work under way, the store closing), so don't call it on a UI
+     * thread. It doesn't wait for the token
      * provider: one already asked may still run after it returns. Named
      * `shutdown`, not `close`, which would clash with Kotlin's
      * `AutoCloseable.close`.
@@ -2164,6 +2333,16 @@ public func FfiConverterTypePrivateStore_lower(_ value: PrivateStore) -> UInt64 
  */
 public protocol SessionProtocol: AnyObject, Sendable {
     
+    /**
+     * A view on the same session whose operations (refresh, sign-in,
+     * link, signOut, retry) obey `control`: cut short, they fail
+     * `Interrupted` (never `queued`; what they sent may still apply) and
+     * the snapshot reports the failure. Freeing it frees only the view;
+     * closing it closes the session. Handles it hands out (`jazz`) are
+     * not controlled: make their calls through their own `controlled`.
+     */
+    func controlled(control: CallControl)  -> Session
+    
     func createDeviceAccount() throws 
     
     /**
@@ -2301,6 +2480,24 @@ public static func `open`(configJson: String, tokens: TokenProvider?)throws  -> 
 }
     
 
+    
+    /**
+     * A view on the same session whose operations (refresh, sign-in,
+     * link, signOut, retry) obey `control`: cut short, they fail
+     * `Interrupted` (never `queued`; what they sent may still apply) and
+     * the snapshot reports the failure. Freeing it frees only the view;
+     * closing it closes the session. Handles it hands out (`jazz`) are
+     * not controlled: make their calls through their own `controlled`.
+     */
+open func controlled(control: CallControl) -> Session  {
+    return try!  FfiConverterTypeSession_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_session_controlled(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCallControl_lower(control),uniffiCallStatus
+    )
+})
+}
     
 open func createDeviceAccount()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -4031,6 +4228,15 @@ enum JazzError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case BundleMismatch(own: String, served: String, reason: String
     )
     /**
+     * Contract 2, only for a call made with a `CallControl`: it was cut
+     * short, by `interruption` (`"cancelled"` or `"timeout"`). `queued`
+     * when it committed a write locally, which may still apply: its
+     * refusal, if one comes, reaches mutation errors and the next
+     * waitForSync. Not queued, it did nothing the host must account for.
+     */
+    case Interrupted(interruption: String, queued: Bool, reason: String
+    )
+    /**
      * Contract 2: encryption refused the operation (`code` names the
      * refusal), or hit an I/O failure (`io`). Last, so the variants before
      * it keep their indexes.
@@ -4102,7 +4308,12 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             served: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 12: return .Encryption(
+        case 12: return .Interrupted(
+            interruption: try FfiConverterString.read(from: &buf), 
+            queued: try FfiConverterBool.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 13: return .Encryption(
             code: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf), 
             io: try FfiConverterBool.read(from: &buf)
@@ -4178,8 +4389,15 @@ public struct FfiConverterTypeJazzError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Encryption(code,reason,io):
+        case let .Interrupted(interruption,queued,reason):
             writeInt(&buf, Int32(12))
+            FfiConverterString.write(interruption, into: &buf)
+            FfiConverterBool.write(queued, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Encryption(code,reason,io):
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(code, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             FfiConverterBool.write(io, into: &buf)
@@ -4489,6 +4707,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_func_generate_device_key() != 27994) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_jazz_ffi_checksum_method_callcontrol_cancel() != 40454) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_account() != 39766) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4514,6 +4735,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_can() != 65067) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_controlled() != 16376) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete() != 60927) {
@@ -4576,7 +4800,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 35355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 11280) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 31795) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 12304) {
@@ -4616,6 +4840,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_sync() != 26183) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_session_controlled() != 4363) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_session_create_device_account() != 32378) {
@@ -4736,6 +4963,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_privatestore_load_all() != 33044) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_constructor_callcontrol_new() != 41143) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_constructor_jazzhandle_open() != 17356) {

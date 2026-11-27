@@ -56,7 +56,9 @@ impl SnapshotRef {
         let global_base = GlobalTime(u64::from_le_bytes(bytes[16..24].try_into().unwrap()));
         let local_base = TxTime(u64::from_le_bytes(bytes[24..32].try_into().unwrap()));
         let dots = bytes[HEADER_BYTES..]
-            .chunks_exact(DOT_BYTES)
+            .as_chunks::<DOT_BYTES>()
+            .0
+            .iter()
             .map(|dot| TxId {
                 time: TxTime(u64::from_le_bytes(dot[..8].try_into().unwrap())),
                 node: NodeUuid::from_bytes(dot[8..].try_into().unwrap()),

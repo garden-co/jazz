@@ -21,7 +21,7 @@ func (db *DB) Reconnect(ctx context.Context) error {
 // accepted yet are lost. It is refused (ErrRefused) while another open
 // app holds the same DataDir.
 func (db *DB) DeleteClientStorage(ctx context.Context) error {
-	if err := db.call(ctx, "deleteClientStorage", map[string]any{}, nil); err != nil {
+	if err := db.callOr(ctx, "deleteClientStorage", map[string]any{}, nil, db.closeAfter); err != nil {
 		return err
 	}
 	db.settleStreams()
@@ -50,4 +50,13 @@ func (db *DB) OnMutationError(ctx context.Context) (<-chan MutationError, error)
 		}
 		return m, false
 	})
+}
+
+// closeAfter frees the DB once a call that closes it (signOut,
+// deleteClientStorage), which ctx's end returned from, has done so.
+func (db *DB) closeAfter(_ string, err error) {
+	if err == nil {
+		db.settleStreams()
+		_ = db.Close()
+	}
 }

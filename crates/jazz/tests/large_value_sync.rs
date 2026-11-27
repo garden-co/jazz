@@ -13,8 +13,8 @@ use std::rc::Rc;
 use jazz::db::{
     AccessProof, Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, Outcome,
     ReadOpts, ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage,
-    Transport, TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp,
-    WirePull, WireTarget, WireWrite, block_on, encode_frames,
+    Transport, TransportError, UpsertOptions, WireBase, WireChunk, WireDelta, WireError, WireKind,
+    WireOp, WirePull, WireTarget, WireWrite, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -747,6 +747,95 @@ fn edits_cross_the_wire_as_their_own_bytes() {
             local_cell(db, "docs", 1, "body").unwrap(),
             Some(Value::String(expected.clone()))
         );
+    }
+}
+
+/// A node whose `stamps` table defaults `body` and `blob` to values above
+/// the inline threshold.
+fn open_with_large_defaults(node: u8, author: AuthorSubject) -> Db {
+    let stamps = TableSchemaBuilder::new("stamps")
+        .column("title", ColumnType::Text)
+        .column_with_default(
+            "body",
+            ColumnType::Text,
+            jazz::tools::Value::Text(text(11, LARGE)),
+        )
+        .column_with_default(
+            "blob",
+            ColumnType::Bytea,
+            jazz::tools::Value::Bytea(text(12, LARGE).into_bytes()),
+        )
+        .policies(allow_all_policies());
+    let schema = SchemaBuilder::new().table(stamps).build();
+    let config = DbConfig::new(
+        compile_schema(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    );
+    block_on(Db::open(config)).unwrap()
+}
+
+/// A large default a row-creating write fills in travels as a written
+/// large value does: chunked, its nodes pushed ahead, so each commit that
+/// creates a row stays small instead of carrying the whole default
+/// (jazz#6329). Alice creates rows by insert and by upsert, naming only
+/// `title`; the server and Bob, subscribed, read the full defaults.
+///
+/// ```
+/// alice ──push (default's nodes)──► server
+///       ──commit (reference)──────► server ──rows──► bob
+/// ```
+#[test]
+fn large_defaults_travel_chunked_not_inside_every_created_row() {
+    let server = open_with_large_defaults(0, AuthorSubject::SYSTEM);
+    let alice = open_with_large_defaults(1, user(1));
+    let bob = open_with_large_defaults(2, user(2));
+    let (alice_up, _) = connect_spied(&server, &alice, user(1));
+    let _bob_log = connect(&server, &bob, user(2));
+    let _bob_stream = subscribe(&bob, Query::from("stamps"));
+    for n in 1..=3 {
+        insert(
+            &alice,
+            "stamps",
+            n,
+            vec![("title", Value::String(format!("stamp {n}")))],
+        );
+        pump(&server, &[&alice, &bob]);
+    }
+    block_on(alice.upsert(
+        "stamps",
+        row(4),
+        BTreeMap::from([("title".to_owned(), Value::String("stamp 4".to_owned()))]),
+        UpsertOptions::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&alice, &bob]);
+    let wire = alice_up.borrow();
+    let commits: Vec<_> = wire.iter().filter(|(kind, ..)| *kind == "commit").collect();
+    assert_eq!(commits.len(), 4, "{wire:?}");
+    assert!(
+        commits.iter().all(|(_, size, _)| *size < 16 * 1024),
+        "each commit names its defaults by reference: {wire:?}"
+    );
+    assert!(
+        wire.iter().any(|(kind, ..)| *kind == "push"),
+        "the defaults' nodes go up as chunks: {wire:?}"
+    );
+    for (name, db) in [("server", &server), ("alice", &alice), ("bob", &bob)] {
+        for n in 1..=4 {
+            assert_eq!(
+                local_cell(db, "stamps", n, "body").unwrap(),
+                Some(Value::String(text(11, LARGE))),
+                "{name}: row {n}"
+            );
+            assert_eq!(
+                local_cell(db, "stamps", n, "blob").unwrap(),
+                Some(Value::Bytes(text(12, LARGE).into_bytes())),
+                "{name}: row {n}"
+            );
+        }
     }
 }
 

@@ -104,8 +104,12 @@ const (
 
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
+	// mu guards handle and closed, and admitting calls. It is never held
+	// across a call into Jazz: only closing ends some of those.
 	mu       sync.RWMutex
 	handle   uintptr
+	calls    sync.WaitGroup // the calls in flight
+	closed   chan struct{}  // made as closing begins, closed as it ends
 	app      any
 	provider uint64 // the TokenProvider's id, if any
 	store    uint64 // the private store's id, if any
@@ -174,6 +178,10 @@ func (db *DB) computed() any { return db.app }
 
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
+//
+// When ctx ends first, Open cancels the TokenProvider's ctx and returns
+// ctx.Err() once the app it was opening is closed again, so its store is
+// free for the next Open.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err := cfg.checkTransport(); err != nil {
 		return nil, err
@@ -221,14 +229,18 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 		store    uint64
 	}
 	done := make(chan opened, 1)
+	var id uint64
+	t, withTokens := cfg.Auth.(tokenAuth)
+	if withTokens {
+		id = nextProvider.Add(1)
+	}
+	var store PrivateStore
+	if cfg.Encryption != nil {
+		store = cfg.Encryption.Store
+	}
 	go func() {
-		var store PrivateStore
-		if cfg.Encryption != nil {
-			store = cfg.Encryption.Store
-		}
-		auth, _ := cfg.Auth.(tokenAuth)
-		h, provider, storeID, err := openNative(string(config), auth.provider, store)
-		done <- opened{h: h, err: err, provider: provider, store: storeID}
+		h, storeID, err := openNative(string(config), id, t.provider, store)
+		done <- opened{h: h, err: err, provider: id, store: storeID}
 	}()
 	select {
 	case o := <-done:
@@ -237,26 +249,29 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 		}
 		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider, store: o.store}, nil
 	case <-ctx.Done():
-		go func() {
-			if o := <-done; o.h != 0 {
-				ffi.close(o.h)
-				releaseCallbacks(o.provider, o.store)
-			}
-		}()
+		// Stop asking the provider, and close what the open still gives
+		// before answering, so the store is free again when Open returns.
+		cancelFetches(id)
+		o := <-done
+		if o.h != 0 {
+			ffi.close(o.h)
+		}
+		releaseCallbacks(id, o.store)
 		return nil, ctx.Err()
 	}
 }
 
-// openNative registers callbacks before opening and releases them if open fails.
-func openNative(config string, tokens TokenProvider, store PrivateStore) (uintptr, uint64, uint64, error) {
+// openNative registers callbacks before opening and releases them if open
+// fails: the token provider under id (when tokens is set), the private store
+// under an id of its own, which it returns.
+func openNative(config string, id uint64, tokens TokenProvider, store PrivateStore) (uintptr, uint64, error) {
 	if store != nil && ffi.openEncrypted == nil {
-		return 0, 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
+		return 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
 	}
-	var provider, storeID uint64
+	var storeID uint64
 	var tokenCB uintptr
 	if tokens != nil {
-		provider = nextProvider.Add(1)
-		providers.Store(provider, tokens)
+		providers.Store(id, tokens)
 		tokenCB = ffi.tokenCallback
 	}
 	var h, cerr uintptr
@@ -265,46 +280,59 @@ func openNative(config string, tokens TokenProvider, store PrivateStore) (uintpt
 	case store != nil:
 		storeID = nextStore.Add(1)
 		stores.Store(storeID, store)
-		h = ffi.openEncrypted(input, tokenCB, uintptr(provider), ffi.storeCallback, uintptr(storeID), &cerr)
+		h = ffi.openEncrypted(input, tokenCB, uintptr(id), ffi.storeCallback, uintptr(storeID), &cerr)
 	case tokens != nil:
-		h = ffi.openUser(input, tokenCB, uintptr(provider), &cerr)
+		h = ffi.openUser(input, tokenCB, uintptr(id), &cerr)
 	default:
 		h = ffi.open(input, &cerr)
 	}
 	if err := takeError(cerr); err != nil || h == 0 {
-		releaseCallbacks(provider, storeID)
+		releaseCallbacks(id, storeID)
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "open failed"}
 		}
-		return 0, 0, 0, err
+		return 0, 0, err
 	}
-	return h, provider, storeID, nil
+	return h, storeID, nil
 }
 
-// Close closes the app; later calls return ErrClosed.
+// Close closes the app without waiting for its writes to reach the server
+// (Shutdown does). Calls waiting for the server end with ErrClosed (or with
+// the answer they already had, a refusal say), though what they sent may
+// still apply, and later calls return ErrClosed. Close returns once the app
+// is closed: work already running locally finishes first, and sync gets up
+// to 2 seconds to end. An error says what failed as it closed: the DB is
+// closed and freed all the same.
+//
+// Close cancels the TokenProvider's ctx and waits for the provider to
+// return. A provider may call Close itself, but mustn't wait for a Close
+// made on another goroutine. Called from the provider, Close returns at
+// once and the app is closed and freed once the provider has returned.
+//
+// Close blocks until the app is closed: run it in a goroutine not to wait.
 func (db *DB) Close() error {
-	db.endStreams()
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.handle != 0 {
-		ffi.close(db.handle)
-		db.handle = 0
-		releaseCallbacks(db.provider, db.store)
-	}
-	return nil
+	return db.closeAndFree(0,
+		func(h uintptr) error { return callClose(ffi.call, h, "{}") },
+		ffi.close)
 }
 
 // releaseCallbacks runs after native close so both callbacks remain valid until it returns.
 func releaseCallbacks(provider, store uint64) {
-	providers.Delete(provider)
+	releaseProvider(provider)
 	stores.Delete(store)
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
-// result is dropped, but the call itself runs to its end: a write may
-// still apply.
+// result is dropped, but the call itself runs until it ends or the DB
+// closes: a write may still apply.
 func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
+	return db.callOr(ctx, method, args, out, nil)
+}
+
+// callOr is call, with abandoned, if any, given the result of a call
+// that ctx's end returned from: to undo or finish what it began.
+func (db *DB) callOr(ctx context.Context, method string, args map[string]any, out any, abandoned func(text string, err error)) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -318,14 +346,14 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 	}
 	done := make(chan result, 1)
 	go func() {
-		db.mu.RLock()
-		defer db.mu.RUnlock()
-		if db.handle == 0 {
-			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
+		h, release, err := db.acquire(nil)
+		if err != nil {
+			done <- result{err: err}
 			return
 		}
+		defer release()
 		var cerr uintptr
-		res := ffi.call(db.handle, cstr(method), cstr(string(argsJSON)), &cerr)
+		res := ffi.call(h, cstr(method), cstr(string(argsJSON)), &cerr)
 		var r result
 		r.text, _ = takeString(res)
 		r.err = takeError(cerr)
@@ -341,6 +369,12 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 		}
 		return json.Unmarshal([]byte(r.text), out)
 	case <-ctx.Done():
+		if abandoned != nil {
+			go func() {
+				r := <-done
+				abandoned(r.text, r.err)
+			}()
+		}
 		return ctx.Err()
 	}
 }

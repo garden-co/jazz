@@ -2140,35 +2140,16 @@ impl Db {
             .await.map_err(storage)?;
         // The commit seq resumes after the newest version the store
         // numbered as the authority (a replica's own counter resumes in
-        // `load_client`).
-        let mut seq = 0u64;
-        for table in physical.tables.keys() {
-            for name in [table.clone(), format!("{table}__h")] {
-                let max: Option<i64> = conn
-                    .cached_row(
-                        &format!(
-                            "SELECT MAX(_clock) FROM {} WHERE _clock >= 0 AND _clock < ?1",
-                            quote(&name)
-                        ),
-                        [sync::band_start(sync::PENDING)],
-                        |r| r.get(0),
-                    )
-                    .await
-                    .map_err(storage)?;
-                seq = seq.max(max.unwrap_or(0) as u64);
-            }
-        }
-        // An accepted upload that wrote no rows still took a seq: its
-        // dedupe entry records it.
-        let settled: Option<i64> = conn
-            .cached_row(
-                "SELECT MAX(t) FROM _jazz_transactions WHERE t < ?1",
-                [sync::band_start(sync::PENDING)],
-                |r| r.get(0),
-            )
-            .await
-            .map_err(storage)?;
-        seq = seq.max(settled.unwrap_or(0) as u64);
+        // `load_client`), read from its `_jazz_meta` row: only tables the
+        // row does not cover yet are scanned (`commit_seq`, jazz#6367).
+        let recovered = crate::commit_seq::recover(
+            &conn,
+            physical.tables.keys(),
+            crate::commit_seq::Cover::Read,
+        )
+        .await?;
+        let seq = recovered.seq;
+        let seq_uncovered = !recovered.scanned.is_empty();
         let version = config.schema.version_id();
         admitted.retain(|(id, _)| *id != version);
         admitted.push((version, config.schema.clone()));
@@ -2186,6 +2167,9 @@ impl Db {
 
                 #[cfg(any(test, feature = "testing"))]
                 composite_scans: Default::default(),
+                #[cfg(any(test, feature = "testing"))]
+                seq_scans: RefCell::new(recovered.scanned),
+                seq_uncovered: Cell::new(seq_uncovered),
                 accepted: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
                 overlay_replays: Default::default(),
@@ -4339,6 +4323,7 @@ impl Db {
                     inner.own_order.borrow_mut().remove(&seq);
                 }
             };
+            inner.cover_commit_seq().await?;
             let applied = conn
                 .db_scope("w", async || {
                     let (handle, ops) = apply(inner, seq, origin).await?;
@@ -5107,6 +5092,46 @@ impl Store {
         written
     }
 
+    /// Give every table the commit seq row does not cover yet its
+    /// triggers, and raise the row past what they hold (see
+    /// `commit_seq`), in a scope of its own. The scopes of the store's own
+    /// writes (`w`, `commit_batch`) and of the authority's accepted
+    /// uploads call this first; it does nothing once the store is covered.
+    /// Neither an open nor a replica's sync tick calls it: a store that is
+    /// opened, read and ticked but never written keeps its file. Missing a
+    /// write path only costs a scan at the next open, never a wrong seq:
+    /// an uncovered table is always scanned.
+    pub(crate) async fn cover_commit_seq(&self) -> Result<(), Error> {
+        if !self.seq_uncovered.get() {
+            return Ok(());
+        }
+        let conn = self.conn.clone();
+        conn.db_scope("jazz_seq_cover", async || self.cover_commit_seq_now().await)
+            .await
+    }
+
+    /// [`Store::cover_commit_seq`] inside the caller's write transaction.
+    /// It scans again rather than trust the open's scan: what was written
+    /// since is covered too. The in-memory seq is left alone: it already
+    /// counts every seq this store handed out, and a replica's counter is
+    /// its own (`load_client`).
+    async fn cover_commit_seq_now(&self) -> Result<(), Error> {
+        let recovered = crate::commit_seq::recover(
+            &self.conn,
+            self.physical().tables.keys(),
+            crate::commit_seq::Cover::Write,
+        )
+        .await?;
+        #[cfg(any(test, feature = "testing"))]
+        self.seq_scans.borrow_mut().extend(recovered.scanned);
+        #[cfg(not(any(test, feature = "testing")))]
+        let _ = recovered;
+        // A scope that rolls back takes the triggers with it; the next
+        // open finds those tables uncovered and scans them again.
+        self.seq_uncovered.set(false);
+        Ok(())
+    }
+
     async fn write_admission_steps(
         &self,
         target: &Schema,
@@ -5131,6 +5156,8 @@ impl Store {
         }
         let ddl = Rc::make_mut(&mut *self.physical.borrow_mut()).union(target)?;
         execute_script(&self.conn, &ddl).await?;
+        // New tables join the commit seq row before anything writes to them.
+        self.cover_commit_seq_now().await?;
         // A new copy holds its source's values, in every row version.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -5492,10 +5519,11 @@ impl Store {
             created.extend(dropped.clone());
             created
         };
-        let created = match op {
+        let mut created = match op {
             StagedOp::Insert(_, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => created(cells),
             _ => BTreeMap::new(),
         };
+        self.chunk_large_defaults(table, &mut created).await?;
         let mut stored = op.clone();
         match &mut stored {
             StagedOp::Insert(_, cells, _) => cells.extend(created),
@@ -5508,6 +5536,51 @@ impl Store {
             _ => {}
         }
         Ok(stored)
+    }
+
+    /// Chunk the defaults a creation write fills in above their column's
+    /// inline threshold, as [`Self::chunk_large_cells`] chunks the values a
+    /// write gives: each travels as a reference to its tree, whose nodes are
+    /// stored here and marked unpushed, so they go up as chunks ahead of the
+    /// op rather than whole inside it with every row created (jazz#6329).
+    /// Storing is idempotent: the row's own cell (see [`Self::bind_cell`])
+    /// usually stored the same tree already. A store that uploads nothing
+    /// (not a replica) and a latest-only table (which holds inline values
+    /// only, and refuses a value this large) keep the default as it is.
+    /// `created` is keyed by stored column; dropped columns' backwards
+    /// defaults, stored as the lens gave them, are left as they are.
+    async fn chunk_large_defaults(
+        &self,
+        table: &Table,
+        created: &mut BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        if self.client().is_none() || self.latest_only(&table.stored) {
+            return Ok(());
+        }
+        for column in &table.columns {
+            if !crate::large::large_capable(column) {
+                continue;
+            }
+            let Some(mut value) = created.get_mut(&column.stored) else {
+                continue;
+            };
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            let logical = match &*value {
+                Value::String(text) => text.as_bytes(),
+                Value::Bytes(bytes) => bytes.as_slice(),
+                _ => continue,
+            };
+            if logical.len() <= crate::large::inline_max(column) {
+                continue;
+            }
+            let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
+                .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
+            crate::large::store(&self.conn, &self.chunks, &prepared, true).await?;
+            *value = Value::Large(Box::new(prepared.value_ref));
+        }
+        Ok(())
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy
@@ -11255,6 +11328,14 @@ struct Store {
     /// `Db::composite_scans_for_test`).
     #[cfg(any(test, feature = "testing"))]
     composite_scans: Cell<usize>,
+    /// The tables commit seq recovery scanned since the store opened (see
+    /// `Db::seq_scans_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    seq_scans: RefCell<Vec<String>>,
+    /// Whether some table may lack the commit seq row's triggers: the open
+    /// scanned it, and the next write scope covers it
+    /// ([`Store::cover_commit_seq`]).
+    seq_uncovered: Cell<bool>,
     /// Subscribers accepted so far (each one's generation).
     accepted: Cell<u64>,
     /// Staged writes replayed into a transaction overlay so far: what tests
@@ -12662,6 +12743,7 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
+            inner.cover_commit_seq().await?;
             inner.start_unit_heads();
             let applied = conn
                 .db_scope("commit_batch", async || {
@@ -13245,10 +13327,20 @@ impl Db {
             ..
         }) = self.inner.batches.borrow_mut().get_mut(&id)
         {
+            // Only a read that succeeded pins its cut: one that failed or
+            // was cancelled after its fetch leaves the next read a fresh one.
             // Even a LocalOnly read observes this cut. Later remote coverage
             // must not move a snapshot whose results have already escaped.
-            *pinned_snapshot = snapshot;
-            *pinned = true;
+            // Only the head of the batch's read queue starts unpinned (a
+            // ledger read starts ahead of its turn only at a pinned cut), so
+            // one that found the batch unpinned is the only read that can
+            // pin it, and one that found it pinned read at the pinned cut.
+            if *pinned {
+                debug_assert_eq!(*pinned_snapshot, snapshot, "a read moved a pinned cut");
+            } else {
+                *pinned_snapshot = snapshot;
+                *pinned = true;
+            }
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,

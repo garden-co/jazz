@@ -1,5 +1,15 @@
 # jazz-napi
 
+## 2.0.0-beta.4
+
+### Patch Changes
+
+- a898ebb: A Vercel Function using `jazz-tools/backend` fits Vercel's 250 MB limit again: `jazz-napi` no longer bundles every platform's binary; npm installs only yours. If it's missing (optional dependencies omitted, or `node_modules` created on another platform), the error names the `@garden-co/jazz-napi-<platform>` package to install.
+
+## 2.0.0-beta.3
+
+## 2.0.0-beta.2
+
 ## 2.0.0-beta.1
 
 ## 2.0.0-beta.0

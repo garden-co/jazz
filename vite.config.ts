@@ -21,7 +21,8 @@ export default defineConfig({
     "{*.rs,Cargo.toml}": () => "cargo clippy --workspace -- -D warnings",
     "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}": "vp fmt --no-error-on-unmatched-pattern",
     "*.{ts,tsx,js,jsx}": "vp lint --fix --no-error-on-unmatched-pattern",
-    "examples/docs/**": () => "pnpm turbo run build --filter=./examples/docs/* --only",
+    "examples/docs/**": () =>
+      "pnpm exec vp run --cache --ignore-depends-on --filter=./examples/docs/* build",
     "docs/**": () => "pnpm --filter docs types:check",
   },
   lint: {
