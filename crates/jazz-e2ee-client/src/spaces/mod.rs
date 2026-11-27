@@ -852,7 +852,9 @@ impl E2eeClient {
             let mut watch = self.shared.member_watch.borrow_mut();
             if watch.fail_acquisitions > 0 {
                 watch.fail_acquisitions -= 1;
-                return Err(crate::StoreError::Failed("acquisition failed for the test".into()).into());
+                return Err(
+                    crate::StoreError::Failed("acquisition failed for the test".into()).into(),
+                );
             }
         }
         // A creation of this device that is neither accepted nor refused

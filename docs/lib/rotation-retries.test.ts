@@ -6,10 +6,7 @@ import { expect, test } from "vitest";
 // on the guide lives here, not in the crate, so the crate's tests build from
 // its published package, which has no `docs/`.
 const guide = new URL("../content/docs/e2ee/sharing-and-keys.mdx", import.meta.url);
-const delivery = new URL(
-  "../../crates/jazz-e2ee-client/src/spaces/delivery.rs",
-  import.meta.url,
-);
+const delivery = new URL("../../crates/jazz-e2ee-client/src/spaces/delivery.rs", import.meta.url);
 
 const collapse = (text: string) => text.split(/\s+/).filter(Boolean).join(" ");
 
@@ -25,5 +22,7 @@ test("the guide's rotation retry schedule matches the client's", async () => {
   expect(text).toContain(
     "it tries again after 2 seconds, then 4, 8, 16 and 32, and gives up after 6 failed attempts in a row",
   );
-  expect(text).toContain("Failures while offline aren't counted, and wait 2 seconds like a first failure.");
+  expect(text).toContain(
+    "Failures while offline aren't counted, and wait 2 seconds like a first failure.",
+  );
 });

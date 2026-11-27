@@ -569,7 +569,10 @@ fn a_rotation_whose_acquisition_keeps_failing_retries_then_gives_up() {
         );
     }
     // The sixth failure gave up: nothing pending, and no retry to wake for.
-    assert_eq!(alice.client.pending_rotation_for_test(&address).unwrap(), None);
+    assert_eq!(
+        alice.client.pending_rotation_for_test(&address).unwrap(),
+        None
+    );
     assert_eq!(alice.client.next_rotation_retry_for_test(), None);
     alice
         .client
