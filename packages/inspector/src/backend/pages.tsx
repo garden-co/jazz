@@ -265,6 +265,17 @@ function ExplainRows({ query, as }: { query: InspectQuery; as: InspectAs }) {
     const text = answer?.clauses[index]?.text;
     return text ? `${index}: ${text}` : `clause ${index}`;
   };
+  /** One row's parents through its inherited clauses, as text. */
+  const throughParents = (row: InspectExplainAnswer["rows"][number]) =>
+    Object.entries(row.via ?? {}).map(([index, parent]) => {
+      const inherited = answer?.inherited?.[Number(index)];
+      if (!inherited) return "";
+      if (parent.id === null) return `${inherited.column} points nowhere`;
+      const why = parent.allowed
+        ? (parent.by ?? []).map((at) => inherited.clauses[at]?.text ?? `clause ${at}`).join("; ")
+        : "no clause holds";
+      return `${inherited.table} ${parent.id}: ${parent.allowed ? "readable" : "not readable"} (${why})`;
+    });
   return (
     <section aria-label="Explain">
       <button type="button" onClick={run} disabled={loading}>
@@ -301,6 +312,13 @@ function ExplainRows({ query, as }: { query: InspectQuery; as: InspectAs }) {
                       : answer.clauses.length
                         ? "no clause holds"
                         : "no read policy"}
+                    {throughParents(row)
+                      .filter(Boolean)
+                      .map((line) => (
+                        <div key={line} className={styles.note}>
+                          ↳ {line}
+                        </div>
+                      ))}
                   </td>
                 </tr>
               ))}
