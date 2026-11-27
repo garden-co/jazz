@@ -175,8 +175,9 @@ function SignOutButton() {
 }
 ```
 
-Jazz also asks your backend when the app starts, when the page regains focus and when another tab
-signs in or out.
+Jazz also asks your backend when the app starts, when the page regains focus or moves to another
+URL, and when another tab signs in or out or sees someone else signed in (see
+[Signing out in every tab](/docs/setup/auth/backend#signing-out-in-every-tab)).
 
 Without a framework, call `refresh()` on the session:
 

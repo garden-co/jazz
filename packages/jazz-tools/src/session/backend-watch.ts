@@ -17,6 +17,20 @@ export interface BackendWatchEvents {
   /** Whether the page or app is in the foreground now (its cookies are fresh). */
   isVisible?(): boolean;
   /**
+   * Call `check` when the page moved to another URL without loading anew (a
+   * client-side route change, a server action that redirects): the app's
+   * auth may have changed with it, as when its sign-out redirects.
+   */
+  onNavigate?(check: () => void): () => void;
+  /**
+   * Note who the backend named (null: no one) as the last answer any tab of
+   * this browser got. True when it differs from the one noted before, so the
+   * other tabs are told to ask too (`crossTab.post`): a sign-out the app made
+   * by redirecting reaches them although this tab's account didn't change
+   * (with `clearOnSignOut` the page after the redirect opens signed out).
+   */
+  noteAnswer?(answer: AccountIdentity | null): boolean | Promise<boolean>;
+  /**
    * Run `probe` so that the windows of one browser ask the backend one at a
    * time, never at once. Several windows asking at once (on focus after a
    * laptop wakes) each carry the session cookie, and auth middleware on the
@@ -78,7 +92,9 @@ export interface BackendWatch {
 
 /**
  * Keep a session in step with the app's backend: ask it who is signed in on
- * start, when the page regains focus and when another tab signs in or out.
+ * start, when the page regains focus or navigates within itself, and when
+ * another tab signs in or out or got another answer than the last one (a
+ * sign-out the app made by redirecting, see `noteAnswer`).
  *
  * - A different user signs in. Switching from one backend user to another
  *   signs the first out, so their client closes as on sign-out, in one
@@ -287,11 +303,25 @@ export function watchBackendUser<Client>(
     try {
       const answer = await probe();
       clearNotFound();
+      tellOthersIfChanged(answer);
       return answer;
     } catch (cause) {
       if (cause instanceof AccountAuthError && cause.status === 404) notFoundAnswer(cause);
       return { failed: cause };
     }
+  }
+  /** Another answer than the last one any tab got: the other tabs ask too. */
+  function tellOthersIfChanged(answer: BackendUser | null) {
+    if (!events.noteAnswer || !events.crossTab) return;
+    const who = answer && { issuer: answer.issuer, subject: answer.subject };
+    void Promise.resolve()
+      .then(() => events.noteAnswer!(who))
+      .then(
+        (changed) => {
+          if (changed && !stopped) events.crossTab!.post();
+        },
+        () => {},
+      );
   }
   /**
    * A 404 may pass (a deploy swapping routes, a CDN or protection page):
@@ -602,6 +632,7 @@ export function watchBackendUser<Client>(
     events.crossTab?.post();
   });
   const stopFocus = events.onFocus(() => check());
+  const stopNavigate = events.onNavigate?.(() => check());
   const stopCrossTab = events.crossTab?.listen(() => check());
   // Ask on start, once the host has finished setting up.
   const start = setTimeout(() => check(), 0);
@@ -638,6 +669,7 @@ export function watchBackendUser<Client>(
       resetRefusal();
       unsubscribe();
       stopFocus();
+      stopNavigate?.();
       stopCrossTab?.();
     },
   };
@@ -736,11 +768,97 @@ export function browserBackendWatchEvents(
         document.removeEventListener("visibilitychange", onVisible);
       };
     },
+    onNavigate: browserNavigations,
     crossTab,
-    isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
+    isVisible,
+    noteAnswer: crossTab
+      ? (answer) => noteBrowserAnswer(`${channelName}:answer`, answer)
+      : undefined,
     singleFlight: browserSingleFlight(refreshLock),
   };
 }
+
+const isVisible = () => typeof document === "undefined" || document.visibilityState === "visible";
+
+/**
+ * The shortest time between two checks a page's navigations start. A page
+ * that navigates more often gets one more check once this has passed since
+ * the last (a trailing one), so a sign-out right after another navigation is
+ * still seen within it.
+ */
+export const NAVIGATION_CHECK_MS = 10_000;
+
+/**
+ * Same-document navigations to another URL, through the Navigation API
+ * (`currententrychange` fires for `history.pushState` and `replaceState` as
+ * well as for back and forward). Where the browser has no Navigation API,
+ * nothing is watched: focus and other tabs still trigger checks.
+ */
+function browserNavigations(check: () => void): () => void {
+  const navigation = (globalThis as { navigation?: EventTarget }).navigation;
+  if (!navigation || typeof location === "undefined") return () => {};
+  // Only another URL counts: a replaceState that keeps it (routers store
+  // scroll positions this way) or a hash change doesn't move the app's auth.
+  const where = () => location.href.split("#")[0];
+  let at = where();
+  let lastCheck = -Infinity;
+  let trailing: ReturnType<typeof setTimeout> | undefined;
+  const run = () => {
+    lastCheck = Date.now();
+    check();
+  };
+  const onChange = () => {
+    const now = where();
+    if (now === at) return;
+    at = now;
+    if (trailing) return;
+    const wait = lastCheck + NAVIGATION_CHECK_MS - Date.now();
+    if (wait <= 0) return run();
+    trailing = setTimeout(() => {
+      trailing = undefined;
+      run();
+    }, wait);
+  };
+  navigation.addEventListener("currententrychange", onChange);
+  return () => {
+    navigation.removeEventListener("currententrychange", onChange);
+    if (trailing) clearTimeout(trailing);
+  };
+}
+
+/**
+ * {@link BackendWatchEvents.noteAnswer} for a browser: the last answer is a
+ * localStorage entry every tab shares. It holds a SHA-256 of the user's
+ * issuer and subject, never the subject itself (a shared device keeps no
+ * trace of who used it), or "none". Only a visible page notes its answer: a
+ * background tab's cookie may be stale, and its answer flipping the entry
+ * would set the tabs asking one another. The first answer a browser notes
+ * tells no one: there was nothing to differ from.
+ */
+async function noteBrowserAnswer(key: string, answer: AccountIdentity | null): Promise<boolean> {
+  if (!isVisible()) return false;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return false;
+  const value = answer
+    ? `user:${hex(await subtle.digest("SHA-256", new TextEncoder().encode(`${answer.issuer}\0${answer.subject}`)))}`
+    : "none";
+  try {
+    // Reading it may throw too (a blocked origin, Node without a storage file).
+    const storage = globalThis.localStorage;
+    if (!storage) return false;
+    const before = storage.getItem(key);
+    if (before === value) return false;
+    storage.setItem(key, value);
+    return before !== null;
+  } catch {
+    // Storage refused (a private window's quota, a blocked origin): the
+    // other tabs follow on focus, as before.
+    return false;
+  }
+}
+
+const hex = (bytes: ArrayBuffer) =>
+  Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**
  * The longest one window holds the turn: a window whose request hangs (its
