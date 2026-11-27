@@ -2117,9 +2117,9 @@ applications and users never handle deliveries.
   delivery is of a version the device does not hold, then runs the pass over
   it (with the rest of this device's last rotation of it), even when that
   acquisition failed. A step never holds the runtime: a read that is due,
-  an app call waiting for its turn, a connection notice or another step's
-  retry coming due stops a running step and puts it back behind the
-  others, and a step whose runs, from its first, last past 60 s has
+  an app call waiting for its turn or a connection notice stops a running
+  step and puts it back behind the others; background work never stops
+  background work. A step whose runs, from its first, last past 15 s has
   failed. A space
   is done only once its step succeeds: a step that failed offline waits for
   the connection, one that failed online is tried again after 2 s, doubling

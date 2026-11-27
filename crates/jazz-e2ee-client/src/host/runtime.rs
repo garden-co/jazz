@@ -1857,13 +1857,13 @@ async fn main_loop(this: Rc<Encryption>) {
                                 return Poll::Ready(StepOutcome::Done(outcome));
                             }
                             let now = client.shared.now();
-                            // A retry that came due pre-empts this step too.
+                            // Background work never pre-empts background
+                            // work: a stalled step ends at its bound.
                             if client.reads_due()
                                 || !this.uses.borrow().is_empty()
                                 || !this.commands.borrow().is_empty()
                                 || this.notices.get() != notices
                                 || this.gate.waiting.get()
-                                || queue.retry_due(now)
                             {
                                 return Poll::Ready(StepOutcome::Interrupted);
                             }
@@ -1903,7 +1903,7 @@ async fn main_loop(this: Rc<Encryption>) {
                         StepOutcome::TimedOut => {
                             let error = ClientError::Database(jazz::db::Error::new(
                                 ErrorCode::NotObserved,
-                                "the background pass over this space ran past its 60 s bound",
+                                "the background pass over this space ran past its 15 s bound",
                             ));
                             let reason = error.to_string();
                             if step.told.as_ref() != Some(&reason) {
@@ -1979,9 +1979,12 @@ fn pending_deadline(
         .min()
 }
 
-/// The longest a background step may run before it counts as failed and
-/// waits for its retry.
-const BACKGROUND_STEP_LIMIT: Duration = Duration::from_secs(60);
+/// The longest a background step may run, over all its runs, before it
+/// counts as failed and waits for its retry behind the others. A step is a
+/// few authority round trips (11 to 19 ms each measured on loopback), so
+/// this is about a thousand times a healthy one even on a slow link, and
+/// one stalled space delays the next due one by at most this.
+const BACKGROUND_STEP_LIMIT: Duration = Duration::from_secs(15);
 
 /// How a background step's run ended.
 enum StepOutcome {
@@ -2065,13 +2068,6 @@ impl BackgroundQueue {
     /// a step stopped again and again holds none of them back.
     fn put_back(&mut self, step: BackgroundStep) {
         self.steps.push_back(step);
-    }
-
-    /// Whether a step waiting for its retry time has reached it.
-    fn retry_due(&self, now: web_time::Instant) -> bool {
-        self.steps
-            .iter()
-            .any(|step| !step.waits_online && step.retry_at.is_some_and(|at| now >= at))
     }
 
     /// The connection came (back): every step left is due, in a new round

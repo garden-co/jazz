@@ -743,6 +743,28 @@ impl E2eeClient {
             space.map(crate::state::unchecked_address);
     }
 
+    /// Queues `rows` rows of `table` in `space` left out for want of
+    /// version `epoch_id`, as reads would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn queue_missing_for_test(
+        &self,
+        table: &str,
+        space: &jazz::e2ee::SpaceAddress,
+        epoch_id: &str,
+        rows: usize,
+    ) {
+        for _ in 0..rows {
+            self.shared.missing(crate::state::Missing {
+                table: table.to_owned(),
+                id: jazz::ids::RowUuid(uuid::Uuid::new_v4()),
+                column: "body".to_owned(),
+                space: crate::state::unchecked_address(space),
+                epoch_id: epoch_id.to_owned(),
+            });
+        }
+    }
+
     /// Makes the next `count` listings of the background pass's spaces
     /// fail, as a failed read of the local store would.
     #[doc(hidden)]
@@ -757,6 +779,31 @@ impl E2eeClient {
     #[cfg(any(test, feature = "testing"))]
     pub fn hold_background_steps_for_test(&self, hold: bool) {
         self.shared.member_watch.borrow_mut().hold_background = hold;
+    }
+
+    /// Leaves the rest of a rotation of `space` pending, its retry due
+    /// `after` from now: what a failed batch leaves.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn rotation_retry_in_for_test(
+        &self,
+        space: &jazz::e2ee::SpaceAddress,
+        after: std::time::Duration,
+    ) -> Result<(), ClientError> {
+        let now = self.shared.now();
+        self.shared
+            .member_watch
+            .borrow_mut()
+            .pending_deliveries
+            .insert(
+                crate::spaces::protocol_address(space)?,
+                crate::state::PendingRotation {
+                    accounts: vec![uuid::Uuid::new_v4().to_string()],
+                    failures: 1,
+                    retry_at: Some(now + after),
+                },
+            );
+        Ok(())
     }
 
     /// Makes the next `count` full acquisitions of a space fail, as a

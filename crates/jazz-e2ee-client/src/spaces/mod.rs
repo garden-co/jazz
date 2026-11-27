@@ -1243,18 +1243,30 @@ impl E2eeClient {
     /// fetch runs nothing is told, so a first read of a space whose key
     /// arrives is not reported (protocol §4.2).
     fn report_missing(&self, entries: &[Missing]) {
-        let reports: Vec<Report> = {
+        // One report per table, space and version, not per row: a
+        // settlement of thousands of rows must not push other reports (an
+        // eviction's) out of the bounded queue before they are delivered.
+        let reports: BTreeSet<(String, SpaceAddress, String)> = {
             let keys = self.shared.keys.borrow();
             entries
                 .iter()
                 .filter(|entry| !keys.held.holds(&entry.space, &entry.epoch_id))
-                .map(|entry| Report::MissingKey {
-                    table: entry.table.clone(),
-                    space: db_address(&entry.space),
-                    epoch_id: entry.epoch_id.clone(),
+                .map(|entry| {
+                    (
+                        entry.table.clone(),
+                        entry.space.clone(),
+                        entry.epoch_id.clone(),
+                    )
                 })
                 .collect()
         };
+        let reports = reports
+            .into_iter()
+            .map(|(table, space, epoch_id)| Report::MissingKey {
+                table,
+                space: db_address(&space),
+                epoch_id,
+            });
         for report in reports {
             self.shared.report(report);
         }

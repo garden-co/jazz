@@ -1474,16 +1474,17 @@ impl Opened {
     }
 }
 
-/// Contract: a background retry that comes due while another space's step
-/// is stalled pre-empts it, and the runtime keeps a deadline for both: the
-/// retry runs, and the stalled space completes once its server answers.
+/// Contract: background work never pre-empts background work: a retry that
+/// comes due while another space's step is stalled waits for that step's
+/// bound, and the runtime keeps a deadline for both; the retry then runs,
+/// and the stalled space completes once its server answers.
 ///
 /// ```text
 /// bob ──step S1 ✗ (retry in 2 s) ──► step S2 stalls
-///     ──2 s later: S1 again (S2 put back) ──► S2 answers ──► carol served
+///     ──3 s: S1 waits ──► 16 s: S2 timed out, S1 again ──► S2 answers ──► carol served
 /// ```
 #[test]
-fn a_due_retry_pre_empts_a_stalled_step() {
+fn a_stalled_step_ends_at_its_bound_and_a_due_retry_runs() {
     within(|| {
         let server = secure_authority_with(&EncryptionSettings::default(), None);
         let dir = tempfile::tempdir().unwrap();
@@ -1528,10 +1529,85 @@ fn a_due_retry_pre_empts_a_stalled_step() {
         session
             .client
             .advance_settle_clock(std::time::Duration::from_secs(3));
+        assert_eq!(
+            acquisitions(&session.turn(&server, 200)),
+            0,
+            "no pre-emption"
+        );
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(13));
         session.drive_until(&server, |work| acquisitions(work) == 1);
         session.client.hold_background_step_of_for_test(None);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
         session.drive_until(&server, |_| {
             deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        session.close();
+    });
+}
+
+/// Contract: two background retries that come due together both complete:
+/// neither pre-empts the other.
+///
+/// ```text
+/// bob ──steps S1, S2: acquire ✗ ✗ ──► 3 s ──► S1 ✓, S2 ✓
+/// ```
+#[test]
+fn two_due_retries_both_complete() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let session = alice.open(&server);
+        for space in &spaces[..2] {
+            let address = session.address(*space);
+            drive(
+                &server,
+                &[&session.db],
+                session.client.rotate(&session.db, &address),
+            )
+            .unwrap();
+        }
+        session.settle(&server);
+        session.close();
+        let session = bob.open_quiet(&server);
+        let _deliveries = session.follow(
+            &server,
+            Query::from(DELIVERIES).filter(eq(
+                col("recipientAccountId"),
+                lit(Value::Uuid(bob.id().parse().unwrap())),
+            )),
+        );
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.fail_acquisitions_for_test(2);
+        let versions = |space: uuid::Uuid| {
+            let address = session.address(space);
+            let address = jazz_e2ee::protocol::records::space::SpaceAddress::new(
+                &address.scope_id,
+                &address.identifier,
+            )
+            .unwrap();
+            session.client.with_held(|held| {
+                held.roots_of(&address)
+                    .iter()
+                    .map(|root| root.held().count())
+                    .sum::<usize>()
+            })
+        };
+        session.drive_until(&server, |work| {
+            work.iter().filter(|(kind, _)| *kind == "acquire").count() == 2
+        });
+        session.turn(&server, 200);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
+        session.drive_until(&server, |_| {
+            versions(spaces[0]) == 2 && versions(spaces[1]) == 2
         });
         session.close();
     });
@@ -1597,7 +1673,7 @@ fn delivery_failures(
 /// out again.
 ///
 /// ```text
-/// bob ──step S1 stalls ──► 61 s: timed out (told) ──► retry stalls ──► 61 s: timed out
+/// bob ──step S1 stalls ──► 16 s: timed out (told) ──► retry stalls ──► 16 s: timed out
 /// ```
 #[test]
 fn a_step_past_its_bound_is_told_failed_once() {
@@ -1622,7 +1698,7 @@ fn a_step_past_its_bound_is_told_failed_once() {
             session.turn(&server, 50);
             session
                 .client
-                .advance_settle_clock(std::time::Duration::from_secs(61));
+                .advance_settle_clock(std::time::Duration::from_secs(16));
             session.turn(&server, 50);
             // Past the retry's wait.
             session
@@ -1631,7 +1707,7 @@ fn a_step_past_its_bound_is_told_failed_once() {
         }
         let reasons = delivery_failures(&heard, &slow);
         assert_eq!(reasons.len(), 1, "{reasons:?}");
-        assert!(reasons[0].contains("60 s"), "{reasons:?}");
+        assert!(reasons[0].contains("15 s"), "{reasons:?}");
         session.close();
     });
 }
@@ -1640,7 +1716,7 @@ fn a_step_past_its_bound_is_told_failed_once() {
 /// put back does not renew it.
 ///
 /// ```text
-/// bob ──step S1 stalls ──► (20 s, deviceId) ×4 ──► timed out at 80 s
+/// bob ──step S1 stalls ──► (5 s, deviceId) ×4 ──► timed out at 20 s
 /// ```
 #[test]
 fn stopping_a_step_does_not_renew_its_bound() {
@@ -1662,12 +1738,171 @@ fn stopping_a_step_does_not_renew_its_bound() {
         for _ in 0..4 {
             session
                 .client
-                .advance_settle_clock(std::time::Duration::from_secs(20));
+                .advance_settle_clock(std::time::Duration::from_secs(5));
             let _ = session.device_id(&server);
             session.turn(&server, 50);
         }
         let reasons = delivery_failures(&heard, &slow);
         assert_eq!(reasons.len(), 1, "{reasons:?}");
+        session.close();
+    });
+}
+
+/// Contract: at the queue's real limit (10,000 rows left out), the report
+/// of an entry the full queue evicts reaches the listeners even when a
+/// settlement of thousands of rows follows it.
+///
+/// ```text
+/// bob ──Y: 1 row, X: 10,000 rows queued (Y evicted, reported)
+///     ──settle X offline ──► listeners hear Y and X
+/// ```
+#[test]
+fn an_evicted_missing_key_is_reported_at_the_queue_limit() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, _spaces) = bob_holding(&server, dir.path(), 1);
+        let holder = alice.open_quiet(&server);
+        let keyless = holder.space_of(&server, &[alice.id(), bob.id()]);
+        holder.close();
+        let session = bob.open_quiet(&server);
+        let heard = observe_reports(&session.client);
+        let x = session.address(keyless);
+        let y = SpaceAddress {
+            scope_id: x.scope_id.clone(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let epoch = uuid::Uuid::new_v4().to_string();
+        session
+            .client
+            .queue_missing_for_test("notes", &y, &epoch, 1);
+        session
+            .client
+            .queue_missing_for_test("notes", &x, &epoch, jazz_e2ee_client::MAX_REPORTS);
+        // Settled offline: no fetch runs, so nothing is delivered before the
+        // settlement's own reports.
+        session.client.set_online(false);
+        let _ = drive(
+            &server,
+            &[&session.db],
+            session.client.settle_reads(&session.db),
+        );
+        let missing: BTreeSet<_> = heard
+            .borrow()
+            .iter()
+            .filter_map(|report| match report {
+                jazz_e2ee_client::Report::MissingKey { space, .. } => Some(space.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(missing.contains(&y), "the evicted space's report was lost");
+        assert!(missing.contains(&x));
+        session.close();
+    });
+}
+
+/// Contract: as above, online, when the settlement's fetch fails.
+///
+/// ```text
+/// bob ──Y: 1 row, X: 10,000 rows queued (Y evicted, reported)
+///     ──settle X, its fetch fails ──► listeners hear Y and X
+/// ```
+#[test]
+fn an_evicted_missing_key_is_reported_when_the_settling_fetch_fails() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, _spaces) = bob_holding(&server, dir.path(), 1);
+        let holder = alice.open_quiet(&server);
+        let keyless = holder.space_of(&server, &[alice.id(), bob.id()]);
+        holder.close();
+        let session = bob.open_quiet(&server);
+        let heard = observe_reports(&session.client);
+        let x = session.address(keyless);
+        let y = SpaceAddress {
+            scope_id: x.scope_id.clone(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let epoch = uuid::Uuid::new_v4().to_string();
+        session
+            .client
+            .queue_missing_for_test("notes", &y, &epoch, 1);
+        session
+            .client
+            .queue_missing_for_test("notes", &x, &epoch, jazz_e2ee_client::MAX_REPORTS);
+        // The fetch fails at once: nothing is delivered before the
+        // settlement's own reports.
+        session.client.fail_acquisitions_for_test(1);
+        let _ = drive(
+            &server,
+            &[&session.db],
+            session.client.settle_reads(&session.db),
+        );
+        let missing: BTreeSet<_> = heard
+            .borrow()
+            .iter()
+            .filter_map(|report| match report {
+                jazz_e2ee_client::Report::MissingKey { space, .. } => Some(space.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(missing.contains(&y), "the evicted space's report was lost");
+        assert!(missing.contains(&x));
+        session.close();
+    });
+}
+
+/// Contract: every wake of a running step republishes the earliest deadline
+/// of all pending work, the step's own bound included: once another
+/// space's rotation alarm has fired, the host still has the step's bound.
+///
+/// ```text
+/// bob ──rotation rest of S3 due in 2 s; step S1 stalls
+///     ──the 2 s alarm fires ──► the host is told the step's bound (~13 s)
+/// ```
+#[test]
+fn every_wake_republishes_the_next_deadline() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let session = bob.open_quiet(&server);
+        let told = Rc::new(std::cell::RefCell::new(Vec::new()));
+        session.bridge.set_store_wake(Some(Box::new({
+            let told = told.clone();
+            move |wake| {
+                if let StoreWake::Deadline(delay) = wake {
+                    told.borrow_mut().push(delay);
+                }
+            }
+        })));
+        let slow = session.address(spaces[0]);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.hold_background_step_of_for_test(Some(&slow));
+        session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("background", slow.clone()))
+        });
+        session
+            .client
+            .rotation_retry_in_for_test(
+                &session.address(spaces[2]),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        session.turn(&server, 20);
+        // The rotation's alarm fires.
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(3));
+        session.turn(&server, 20);
+        let last = told.borrow().last().copied().flatten();
+        assert!(
+            last.is_some_and(|delay| delay >= std::time::Duration::from_secs(5)),
+            "the host was told {last:?}, not the step's bound"
+        );
         session.close();
     });
 }
