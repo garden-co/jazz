@@ -342,7 +342,7 @@ fn check_unchanged(hash: &str, before: &Entries, after: &Entries) -> Result<(), 
         "{}: the encryption declarations of version {}, which your committed bindings were \
          generated from, can't change, and its stored columns are the same: {} changed. \
          Restore the declaration as that version shipped it. To change an encrypted column's \
-         type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
+         type, copy the data into a new encrypted table (docs/e2ee/limits#queries-and-schema)",
         jazz::tools::deployment::artifact::APP_FILE,
         &hash[..12],
         changed.join(", ")

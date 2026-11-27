@@ -1206,6 +1206,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "e2ee-docs"
+version = "0.1.0"
+dependencies = [
+ "jazz-app-support",
+ "jazz-e2ee-client",
+ "serde_json",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

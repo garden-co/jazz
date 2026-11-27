@@ -1,108 +1,105 @@
 ---
 title: Devices and Recovery
-description: "Approve a second device, remove one, and recover an account when every device is gone."
+description: "Approve a new device, remove one, and recover an account when every device is gone."
 languageTabs: backend
 ---
 
-An account's devices share its keys. The first device founds the account; every other device is
-approved by one that is already trusted, or recovers the account from its recovery secret.
+Each device has its own keys, and an account's devices share the account's keys. A browser
+profile, an app install and a Node process with its own private store are each one device.
 
-## Device accounts recover by themselves
+`await db.encryption.ready()` returns the device's status:
 
-For a [device account](/docs/setup/auth) the recovery secret **is** the account's secret: restoring the
-account (its 24-word phrase, passkey or exported key) restores access to encrypted data. There is
-nothing extra to show or ask:
+- `"active"`: the device belongs to the account and can open every space key sent to the
+  account. A key the account hasn't been sent yet, such as for a space it has just joined, still
+  has to arrive first. See [When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
+- `"awaiting-approval"`: the device is new and needs approval or recovery.
+- `"reenrolled"`: the device was removed from the account and has signed up again as a new one.
 
-- the first time encryption is used on the account, the device registers the recovery credential
-  derived from the account secret;
-- a device that signs in with the restored account secret recovers by itself;
-  `db.encryption.ready()` returns `"active"` without another device.
+The first device to use encryption on an account becomes active by itself. What a later device
+needs depends on the kind of account.
 
-The account secret **is** the account. Whoever holds it controls the account, encryption included.
-Removing a device does not lock out anyone who still has the secret: that device finds it has been
-removed, enrols again as a new device and recovers by itself at its next start, then receives later
-keys. Retiring the recovery credential does not help either, because the holder can still act as the
-account. For example, they can add an account they control to the spaces the account may change. If the
-secret may have leaked, the only remedy is a new account.
+## Device accounts
 
-An account your own sign-in manages is different: its recovery secret is separate, so you can retire the
-recovery credential and register a new secret.
+For a [device account](/docs/setup/auth/device-accounts), the account secret is also the recovery secret. The
+secret is the account's 24-word phrase, passkey or exported key. A device that signs in with it
+becomes active by itself, so there is nothing to set up. The calls below that create or restore
+a recovery key throw on a device account.
 
-The account secret stays where the device account keeps it, as before. On Node and in the browser,
-encryption reads it from the session for each call and keeps no copy of its own. A native client (Rust,
-Swift, Kotlin, Go, React Native and Expo) holds it in memory while it registers or restores recovery at
-start, and drops it once that finishes or fails, or when the client closes.
+Whoever holds the secret controls the account, including its encrypted data. Removing a device
+doesn't lock out someone who has the secret, because the device signs up again at its next start.
+If the secret may have leaked, move to a new account.
 
 ## Approve a device
 
-For an account your own sign-in manages, a new device starts `"awaiting-approval"`: it publishes a
-request and waits. On a trusted device, list the waiting devices and challenge one; the new device
-answers and both show the same six-digit code. Confirm they match, and approve:
+On an account your own sign-in manages, a new device starts as `"awaiting-approval"`. An active
+device approves it. Both devices show a six-digit code, and the user confirms that the codes
+match.
 
-```ts
-// On the new device: told when it is challenged, then answers and shows the code.
-db.encryption.onChallenge(async () => {
-  const code = await db.encryption.devices.answer();
-  show(code);
-});
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-approve-device-ts
+</include>
 
-// On a trusted device:
-const waiting = (await db.encryption.devices.list()).filter((d) => d.status === "waiting");
-const session = await db.encryption.devices.challenge(waiting[0].id);
-// Check again after the new device answers if this returns "waiting".
-async function approveWhenAnswered() {
-  const code = await session.code();
-  if (code === null) return "waiting";
-  if (await confirmMatchingCodes(code)) await session.approve(code);
-}
-```
+`confirmMatchingCodes` is your own prompt. Show the code on the trusted device and ask the user
+whether the new device shows the same one. A wrong code approves nothing. The new device learns of
+a challenge within about 30 seconds.
 
-The new device hears of a challenge as soon as it syncs. In case it misses one, it also checks with
-the server 2 s after its last change, then less often, at least every 30 s while it waits; so
-`onChallenge` fires within about 30 seconds even then.
+The native clients have the same calls on their encryption handle: `devices`, `challenge`,
+`answer`, `approvalCode`, `approve` and `removeDevice`.
 
-`confirmMatchingCodes` is your UI prompt. Show the code on the trusted device and ask the user to
-confirm it matches the new device's screen. A wrong code approves nothing. See the
-[BandChat approval flow](https://github.com/garden-co/jazz/blob/94cd8e1e45/examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#L342-L386).
+## Set up recovery
 
-## Remove a device and recover with a phrase
+A user who loses every device needs a recovery key to get back in. In the browser, when the
+device is active and `db.encryption.recovery.list()` is empty, offer a backup from a button.
+Creating a passkey needs a click.
 
-`devices.remove(id)` removes a device and rotates the account; `devices.requestRemoval()` asks another
-device to remove this one. On a device account, removal does not revoke access from anyone who holds the
-account secret (see above). On an account your own sign-in manages, the same rotation retires the
-recovery credentials the removed device registered or used to recover. If that device may have copied
-a different recovery phrase, retire that credential separately and register a new secret. See the
-[device-removal test](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee/tests/protocol_account.rs#L1379-L1454).
-The account keeps a 24-word recovery phrase, shown once:
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-enable-ts
+</include>
 
-```ts
-const phrase = db.encryption.recovery.create(); // keep it; registers nothing
-await db.encryption.recovery.register(phrase); // on an approved device
-// After losing every device, on a new one:
-await db.encryption.recovery.restore(phrase);
-```
+`enable` saves the recovery key in a passkey where the browser offers one. Otherwise, or if the
+user declines the passkey, it returns a 24-word phrase to show once. A passkey provider may sync
+the passkey to the user's other devices, and the recovery key goes with it.
 
-The encryption recovery phrase is a different phrase from a device account's own (entering the wrong one
-just fails). `recovery.list()` shows the registered credentials and `recovery.retire(id)` retires one.
+On a new device, the user signs in and recovers with the passkey or the phrase:
 
-## Reset an app sign-in account
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-restore-ts
+</include>
 
-If a user loses every approved device and has no usable recovery phrase, their new device can
-call `await db.encryption.resetAccount()` while it is awaiting approval. This is available to
-accounts that use your app’s sign-in. In `schema.ts`, pass
-`{ encryption: { allowAccountReset: true } }` as the second argument to `s.defineSchema`.
-Run `npx jazz-tools generate` and deploy the generated app files. The setting is off by default.
+Outside the browser, use a phrase:
 
-Jazz refuses to retire the recovery root derived from a device account’s secret. You can use the
-secret to recover the account unless another client already retired that root. To retire a different
-derived root on a linked device, sign in with the account secret first.
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-phrase-ts
+</include>
 
-Reset starts a new account generation. Other members’ clients can send the new device the
-keys, including past keys, for spaces the account still belongs to. Enable reset only if your
-app’s sign-in is enough to grant this access. Anyone who can sign in as the user can reset the
-account on a new device and receive those space keys.
+The native clients call these `recoveryCreate`, `recoveryRegister` and `recoveryRestore`.
+`recovery.list()` shows the registered recovery keys and `recovery.retire(id)` retires one. A
+retired phrase can't be registered again.
 
-A member’s device reports a reset once per space, account and generation.
-It remembers the last 10,000 distinct event identities and drops the oldest
-when a new one arrives. Re-enrolment starts a fresh event history.
-See the [schema generation test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/schema-dsl/encryption.test.ts#L89-L105), the [account reset test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/encryption/node-e2e.test.ts#L175-L229) and the [key redelivery test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/spaces.rs#L4652-L4691).
+## Remove a device
+
+`db.encryption.devices.remove(id)` removes a device and changes the account's keys. The removed
+device keeps the keys it already has and gets no new ones. On an account your own sign-in manages,
+removal also retires the recovery keys that device registered or used. If the device may have
+seen another recovery phrase, retire that one too and register a new one.
+
+A device can ask to be removed with `devices.requestRemoval()`. Another active device of the
+account completes the removal when it is next online. An account's only device can't leave. The
+call fails with `no-other-device`.
+
+## Sign out
+
+Signing out of a browser keeps the saved keys, so the next sign-in there can read at once. On a
+shared computer, open the client with `clearOnSignOut: true`. Sign-out then wipes the account's
+local data and its saved keys. When the user signs in again, the browser is a new device.
+
+## Reset an account
+
+A user who has lost every device and has no recovery key can start over. Allow this in
+`schema.ts` by passing `{ encryption: { allowAccountReset: true } }` as the second argument of
+`s.defineSchema`, then generate and deploy. The new device, while it is awaiting approval, calls
+`await db.encryption.resetAccount()`. Device accounts can't reset.
+
+After a reset, the account's earlier devices lose access. Other members' devices send the new
+device the keys of the spaces the account still belongs to. Anyone who can sign in as the user can
+do this, so turn it on only if your sign-in is strong enough to grant that access.

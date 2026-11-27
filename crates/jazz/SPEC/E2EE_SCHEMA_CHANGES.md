@@ -311,9 +311,8 @@ with another read rule therefore moves in two deploys:
 
 ## 5. Encrypting existing data
 
-Jazz does not convert a plaintext column into an encrypted one. Follow the
-[migration guide](../../../docs/content/docs/e2ee/encrypting-existing-data.mdx)
-to copy it into a new encrypted table. The old table and every old reference
+Jazz does not convert a plaintext column into an encrypted one. Copy it into
+a new encrypted table, writing the copies from clients that hold the keys. The old table and every old reference
 must remain unwritable throughout the final copy and check; stop every writer,
 including sessions pinned to older bundles and backend jobs. A reference
 cannot be retargeted in place, and a required reference cannot be made
