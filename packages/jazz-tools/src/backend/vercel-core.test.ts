@@ -1,21 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CORE_LAUNCHER } from "./vercel-store.js";
 
 const addon = createRequire(import.meta.url).resolve("jazz-napi");
-
-async function freePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as { port: number };
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
 
 // The core a vercel() Sandbox runs: the start script's launcher, with the
 // napi addon, serving the production core shell until SIGTERM drains it.
@@ -28,9 +19,9 @@ describe("vercel() core launcher", () => {
   it("serves a core until SIGTERM, then stops cleanly", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "jazz-vercel-core-"));
     dirs.push(dataDir);
-    const port = await freePort();
+    // Port 0: the core binds a free port and logs which.
     const options = {
-      port,
+      port: 0,
       dataDir,
       blobs: { kind: "sqlite" },
       trustedWorkload: {
@@ -50,10 +41,14 @@ describe("vercel() core launcher", () => {
     const exited = new Promise<number | null>((resolve) => child.on("exit", resolve));
     try {
       const deadline = Date.now() + 20_000;
+      let port: string | undefined;
       for (;;) {
-        const ok = await fetch(`http://127.0.0.1:${port}/health`)
-          .then((response) => response.ok)
-          .catch(() => false);
+        port ??= /Listening on http:\/\/[^\s]+:(\d+)/.exec(stderr)?.[1];
+        const ok =
+          port !== undefined &&
+          (await fetch(`http://127.0.0.1:${port}/health`)
+            .then((response) => response.ok)
+            .catch(() => false));
         if (ok) break;
         if (Date.now() > deadline || child.exitCode !== null) {
           throw new Error(`core never became healthy: ${stderr}`);
