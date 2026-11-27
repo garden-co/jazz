@@ -18,7 +18,7 @@ use jazz::e2ee::{EncryptionSettings, SpaceAddress};
 use jazz::ids::AuthorSubject;
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
-use jazz_e2ee_client::host::bridge::JsStore;
+use jazz_e2ee_client::host::bridge::{JsStore, StoreWake};
 use jazz_e2ee_client::host::runtime::{Built, Encryption};
 use jazz_e2ee_client::{AccountStatus, E2eeClient, MemoryStore};
 
@@ -54,6 +54,8 @@ struct Opened {
     db: Rc<Db>,
     _link: Upstream,
     runtime: Rc<Encryption>,
+    /// The bridge store the runtime announces its deadlines through.
+    bridge: Rc<JsStore>,
 }
 
 impl Returning {
@@ -97,13 +99,14 @@ impl Returning {
         let status = drive(server, &[&db], client.ensure_account(&db));
         assert_eq!(status.unwrap(), AccountStatus::Active);
         let db = Rc::new(db);
+        let bridge = Rc::new(JsStore::default());
         let runtime = Encryption::new(
             Built {
                 spaces: serde_json::json!({}),
                 client: client.clone(),
                 reports: Rc::default(),
             },
-            Rc::new(JsStore::default()),
+            bridge.clone(),
             db.clone(),
         );
         Opened {
@@ -111,6 +114,7 @@ impl Returning {
             db,
             _link: link,
             runtime,
+            bridge,
         }
     }
 }
@@ -1209,6 +1213,232 @@ fn a_stored_delivery_of_an_unheld_space_is_acquired_in_the_background() {
             .position(|entry| *entry == ("acquire", target.clone()))
             .unwrap();
         assert_eq!(work[at - 1], ("background", target.clone()), "{work:?}");
+        session.close();
+    });
+}
+
+/// Contract: the deadline the runtime gives its host is the earliest of all
+/// its pending work: a read in back-off still wakes the host on time while
+/// a background step waits on the server.
+///
+/// ```text
+/// bob ──reads S1: acquire ✗, ✗ (back-off)──► background step (never answers)
+///     ──deadline told to the host: the read's retry
+/// ```
+#[test]
+fn a_background_step_does_not_hide_a_reads_retry_deadline() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        let told = Rc::new(std::cell::RefCell::new(Vec::new()));
+        session.bridge.set_store_wake(Some(Box::new({
+            let told = told.clone();
+            move |wake| {
+                if let StoreWake::Deadline(delay) = wake {
+                    told.borrow_mut().push(delay);
+                }
+            }
+        })));
+        session.client.hold_background_steps_for_test(true);
+        session.client.fail_acquisitions_for_test(2);
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(spaces[0])))),
+        );
+        let acquire = ("acquire", rotated.clone());
+        let mut failed = 0;
+        session.drive_until(&server, |work| {
+            failed = work.iter().filter(|entry| **entry == acquire).count();
+            failed == 2 && work.iter().any(|(kind, _)| *kind == "background")
+        });
+        let last = told.borrow().last().copied().flatten();
+        assert!(
+            last.is_some_and(|delay| delay <= std::time::Duration::from_secs(1)),
+            "the host was told {last:?}, not the read's retry"
+        );
+        session.close();
+    });
+}
+
+/// Contract: a connection notice abandons the background step running on
+/// the old connection and puts its space back, so the work restarts on the
+/// new one: Carol is served after the reconnect.
+///
+/// ```text
+/// bob ──background step stuck on the old connection
+///     ──offline, online──► step put back; reconnect pass ──► carol served
+/// ```
+#[test]
+fn a_reconnect_restarts_a_step_left_on_the_old_connection() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob, spaces) = bob_holding(&server, dir.path(), 3);
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        let session = bob.open_quiet(&server);
+        session.runtime.set_online(true);
+        session.client.hold_background_steps_for_test(true);
+        session.drive_until(&server, |work| {
+            work.iter().any(|(kind, _)| *kind == "background")
+        });
+        for _ in 0..200 {
+            session.runtime.drive();
+            block_on(session.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 0);
+
+        // The connection drops and comes back; the stuck request is lost.
+        session.runtime.set_online(false);
+        session.runtime.set_online(true);
+        session.client.hold_background_steps_for_test(false);
+        session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        });
+        session.close();
+    });
+}
+
+/// Contract: a step stopped midway, at any of its waits, for a read that
+/// became due is put back and completes later in the session.
+///
+/// ```text
+/// bob ──step S2: pass begins ──► app reads S1 (due) ──► step S2 dropped
+///     ──read settled ──► step S2 again ──► carol served
+/// ```
+#[test]
+fn a_step_stopped_midway_for_a_read_is_put_back_and_completes() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let carol = carol_added_by_a_dead_adder(&server, dir.path(), &alice, spaces[1]);
+        // A space Bob is a member of with no delivery to him: its read
+        // stays due until settled.
+        let holder = alice.open_quiet(&server);
+        let keyless = holder.space_of(&server, &[alice.id(), _bob.id()]);
+        holder.close();
+        let target = session.address(spaces[1]);
+        let mut work = session.drive_until(&server, |work| {
+            work.iter().any(|entry| *entry == ("pass", target.clone()))
+        });
+        assert_eq!(deliveries_to(&server, spaces[1], &carol.id()), 0);
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(keyless)))),
+        );
+        work.extend(session.drive_until(&server, |_| {
+            deliveries_to(&server, spaces[1], &carol.id()) == 1
+        }));
+        let steps = work
+            .iter()
+            .filter(|entry| **entry == ("background", target.clone()))
+            .count();
+        assert_eq!(steps, 2, "stopped midway, then run again: {work:?}");
+        session.close();
+    });
+}
+
+/// Contract: a step that keeps failing is retried all session but told
+/// `delivery-failed` once per space while its reason stays the same.
+///
+/// ```text
+/// bob ──step S1 ✗ (told) ──► retry ✗ ──► retry ✗ (not told again)
+/// ```
+#[test]
+fn a_step_that_keeps_failing_is_told_once() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        let heard = observe_reports(&session.client);
+        session
+            .client
+            .advance_settle_clock(std::time::Duration::ZERO);
+        session.client.fail_acquisitions_for_test(u32::MAX);
+        let attempts = |work: &[(&'static str, SpaceAddress)]| {
+            work.iter()
+                .filter(|entry| **entry == ("background", rotated.clone()))
+                .count()
+        };
+        let mut seen = 0;
+        for _ in 0..3 {
+            let work = session.drive_until(&server, |work| attempts(work) == 1);
+            seen += attempts(&work);
+            // Let the step finish failing before its wait is stepped over.
+            for _ in 0..200 {
+                session.runtime.drive();
+                block_on(session.db.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+            }
+            session
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(40));
+        }
+        assert_eq!(seen, 3);
+        let told = heard
+            .borrow()
+            .iter()
+            .filter(|report| {
+                matches!(report, jazz_e2ee_client::Report::DeliveryFailed { space, .. }
+                    if *space == rotated)
+            })
+            .count();
+        assert_eq!(told, 1);
+        session.close();
+    });
+}
+
+/// Contract: a background step never holds the runtime: while one waits
+/// forever on the server, a local call (`deviceId`) and a read are both
+/// answered at once.
+///
+/// ```text
+/// bob ──background step (never answers)
+///     ──deviceId ──► answered;  reads S1 ──► acquired
+/// ```
+#[test]
+fn a_slow_background_step_does_not_hold_back_calls_or_reads() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let (_alice, _bob, spaces, session, _deliveries) =
+            bob_with_a_stored_delivery(&server, dir.path());
+        let rotated = session.address(spaces[0]);
+        session.client.hold_background_steps_for_test(true);
+        session.drive_until(&server, |work| {
+            work.iter().any(|(kind, _)| *kind == "background")
+        });
+        let mut call = session
+            .runtime
+            .call("deviceId".to_owned(), serde_json::json!({}));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut answer = None;
+        for _ in 0..200 {
+            if let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) {
+                answer = Some(result);
+                break;
+            }
+            session.runtime.drive();
+            block_on(session.db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        let device = session.client.device().unwrap().id.clone();
+        assert_eq!(answer, Some(Ok(serde_json::json!(device))));
+        let _read = session.follow(
+            &server,
+            Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(spaces[0])))),
+        );
+        session.drive_until(&server, |work| {
+            work.iter()
+                .any(|entry| *entry == ("acquire", rotated.clone()))
+        });
         session.close();
     });
 }

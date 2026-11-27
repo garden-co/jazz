@@ -2116,12 +2116,15 @@ applications and users never handle deliveries.
   account names, one space at a time: it acquires the space when a stored
   delivery is of a version the device does not hold, then runs the pass over
   it (with the rest of this device's last rotation of it), even when that
-  acquisition failed. A step never runs ahead of a read that is due: one
-  that is running is stopped and put back. A space is done only once its
-  step succeeds: a step that failed offline waits for the connection, one
-  that failed online is tried again after 2 s, doubling to 32 s, and
-  neither holds back the other spaces; a listing of the spaces that failed
-  is tried again the same way. The first connection of a session that
+  acquisition failed. A step never holds the runtime: a read that is due,
+  an app call waiting for its turn or a connection notice stops a running
+  step and puts it back, and a step that runs past 60 s has failed. A space
+  is done only once its step succeeds: a step that failed offline waits for
+  the connection, one that failed online is tried again after 2 s, doubling
+  to 32 s (told `delivery-failed` once per space and reason), and neither
+  holds back the other spaces; a listing of the spaces that failed is tried
+  again the same way. The runtime asks its host to wake it at the earliest
+  time any of this work is due. The first connection of a session that
   started offline is not a reconnect: the steps waiting for it run. A
   connection that comes back after the session was online is a reconnect,
   and so is the first notice that the app is online when the session

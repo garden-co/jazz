@@ -306,6 +306,9 @@ pub struct Encryption {
     started_untold: Cell<bool>,
     /// Whether the connection went away after the session had been online.
     went_offline: Cell<bool>,
+    /// How many connection notices the host gave: a background step that
+    /// was running on the connection before one is abandoned and put back.
+    notices: Cell<u64>,
     status: Cell<Option<AccountStatus>>,
     /// Whether the client knows the catalogue identities, so it can open
     /// the encrypted rows its store holds with the keys it holds (loaded
@@ -569,6 +572,7 @@ impl Encryption {
             told: Cell::new(false),
             started_untold: Cell::new(false),
             went_offline: Cell::new(false),
+            notices: Cell::new(0),
             status: Cell::new(None),
             readable: Cell::new(false),
             native,
@@ -685,6 +689,7 @@ impl Encryption {
     /// is online is then a reconnect too.
     pub fn set_online(&self, online: bool) {
         self.client.set_online(online);
+        self.notices.set(self.notices.get() + 1);
         let first_notice = !self.told.replace(true);
         if online {
             if self.went_offline.replace(false) || (first_notice && self.started_untold.get()) {
@@ -1814,29 +1819,57 @@ async fn main_loop(this: Rc<Encryption>) {
                 // One due space per turn, and none while a read is due: the
                 // next turn settles reads and serves the spaces they wait for
                 // first. A read waiting out a back-off holds nothing back.
+                // Published before a step runs, which may wait long: the
+                // reads this turn put in back-off wake the host on time.
+                this.set_background_deadline(pending_deadline(
+                    &client,
+                    [retry_at, retry_challenge_at, recheck_at],
+                    background.as_ref(),
+                    background_retry,
+                ));
                 let blocked = client.reads_due()
                     || !this.uses.borrow().is_empty()
                     || !this.commands.borrow().is_empty();
                 let now = client.shared.now();
                 if !blocked
                     && let Some(queue) = background.as_mut()
-                    && let Some(step) = queue.next_due(now)
+                    && let Some(mut step) = queue.next_due(now)
                 {
                     this.stage.set("background pass");
-                    // The step is never awaited ahead of a read: when one
-                    // is due, or the app queued work, the step is dropped
-                    // and put back, and the next turn serves the read.
+                    // A step never holds the loop: when a read is due, the
+                    // app queued work, a call waits for its turn, or the
+                    // connection changed (its requests went to the old
+                    // one), the step is dropped and put back, and the next
+                    // turn serves the rest. A step that outlasts its bound
+                    // has failed.
+                    let notices = this.notices.get();
+                    let limit = web_time::Instant::now() + BACKGROUND_STEP_LIMIT;
+                    this.set_background_deadline(
+                        pending_deadline(
+                            &client,
+                            [retry_at, retry_challenge_at, recheck_at],
+                            Some(&*queue),
+                            background_retry,
+                        )
+                        .map_or(limit, |at| at.min(limit))
+                        .into(),
+                    );
                     let outcome = {
                         let mut running = Box::pin(client.background_step(&db, &step.space));
                         std::future::poll_fn(|context| {
                             if let Poll::Ready(outcome) = running.as_mut().poll(context) {
-                                return Poll::Ready(Some(outcome));
+                                return Poll::Ready(StepOutcome::Done(outcome));
                             }
                             if client.reads_due()
                                 || !this.uses.borrow().is_empty()
                                 || !this.commands.borrow().is_empty()
+                                || this.notices.get() != notices
+                                || this.gate.waiting.get()
                             {
-                                return Poll::Ready(None);
+                                return Poll::Ready(StepOutcome::Interrupted);
+                            }
+                            if web_time::Instant::now() >= limit {
+                                return Poll::Ready(StepOutcome::TimedOut);
                             }
                             Poll::Pending
                         })
@@ -1844,13 +1877,22 @@ async fn main_loop(this: Rc<Encryption>) {
                     };
                     match outcome {
                         // A step that served its space is done.
-                        Some(Ok(_)) => {}
-                        Some(Err(error)) => {
-                            client.tell_delivery_failed(&step.space.space, &error);
+                        StepOutcome::Done(Ok(_)) => {}
+                        StepOutcome::Done(Err(error)) => {
+                            // Told once per space and reason in the
+                            // session, however often the step is retried.
+                            let reason = error.to_string();
+                            if step.told.as_ref() != Some(&reason) {
+                                client.tell_delivery_failed(&step.space.space, &error);
+                                step.told = Some(reason);
+                            }
                             let online = client.shared.keys.borrow().online;
                             queue.failed(step, client.shared.now(), online);
                         }
-                        None => queue.put_back(step),
+                        StepOutcome::TimedOut => {
+                            queue.failed(step, client.shared.now(), true);
+                        }
+                        StepOutcome::Interrupted => queue.put_back(step),
                     }
                 }
                 if background.as_ref().is_some_and(BackgroundQueue::is_empty) {
@@ -1873,25 +1915,12 @@ async fn main_loop(this: Rc<Encryption>) {
         // deadline covers a failed watch or authoritative challenge read,
         // and the slow re-check a watch that stalls or a read that ran early.
         // So does the retry wait of a rotation's remaining deliveries.
-        this.set_background_deadline(
-            retry_at
-                .into_iter()
-                .chain(retry_challenge_at)
-                .chain(recheck_at)
-                .chain(client.next_rotation_retry())
-                .chain(client.next_settle_retry())
-                .chain(
-                    background
-                        .as_ref()
-                        .and_then(|queue| queue.next_retry(client.shared.now())),
-                )
-                .chain(
-                    background_retry
-                        .map(|(_, at)| at)
-                        .filter(|at| *at > client.shared.now()),
-                )
-                .min(),
-        );
+        this.set_background_deadline(pending_deadline(
+            &client,
+            [retry_at, retry_challenge_at, recheck_at],
+            background.as_ref(),
+            background_retry,
+        ));
         drop(turn);
         // A wake from queueing work may have been consumed while this
         // iteration was suspended after its drain point. Ask for the next
@@ -1908,6 +1937,38 @@ async fn main_loop(this: Rc<Encryption>) {
         }
         yield_now().await;
     }
+}
+
+/// The earliest time any pending work is due: the loop's own retries,
+/// a rotation's rest, a read in back-off, a background step's retry or a
+/// retry of the background listing. No kind of work hides another's.
+fn pending_deadline(
+    client: &E2eeClient,
+    loop_retries: [Option<web_time::Instant>; 3],
+    background: Option<&BackgroundQueue>,
+    background_retry: Option<(u32, web_time::Instant)>,
+) -> Option<web_time::Instant> {
+    let now = client.shared.now();
+    loop_retries
+        .into_iter()
+        .flatten()
+        .chain(client.next_rotation_retry())
+        .chain(client.next_settle_retry())
+        .chain(background.and_then(|queue| queue.next_retry(now)))
+        .chain(background_retry.map(|(_, at)| at).filter(|at| *at > now))
+        .min()
+}
+
+/// The longest a background step may run before it counts as failed and
+/// waits for its retry.
+const BACKGROUND_STEP_LIMIT: Duration = Duration::from_secs(60);
+
+/// How a background step's run ended.
+enum StepOutcome {
+    Done(Result<usize, ClientError>),
+    /// Stopped for a read, the app's work or a connection notice: put back.
+    Interrupted,
+    TimedOut,
 }
 
 /// The session's background pass (protocol §3.4): the spaces not yet
@@ -1928,6 +1989,8 @@ struct BackgroundStep {
     retry_at: Option<web_time::Instant>,
     /// It failed offline: it waits for the connection.
     waits_online: bool,
+    /// The reason of the last `delivery-failed` it told.
+    told: Option<String>,
 }
 
 impl BackgroundQueue {
@@ -1941,6 +2004,7 @@ impl BackgroundQueue {
                     failures: 0,
                     retry_at: None,
                     waits_online: false,
+                    told: None,
                 })
                 .collect(),
         }
@@ -1978,11 +2042,13 @@ impl BackgroundQueue {
         self.steps.push_front(step);
     }
 
-    /// The connection came (back): every step left is due.
+    /// The connection came (back): every step left is due, in a new round
+    /// of `delivery-failed` reports.
     fn connected(&mut self) {
         for step in &mut self.steps {
             step.waits_online = false;
             step.retry_at = None;
+            step.told = None;
         }
     }
 
