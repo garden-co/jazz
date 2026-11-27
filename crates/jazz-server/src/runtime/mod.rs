@@ -3626,7 +3626,8 @@ mod tests {
 
         // Nor from a runtime started through the public API, which owns its
         // store and has no registry.
-        let Err(error) = ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::InMemory)
+        let Err(error) =
+            ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::in_memory())
         else {
             panic!("a store-owning runtime has no registry either");
         };
