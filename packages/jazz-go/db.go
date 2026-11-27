@@ -222,6 +222,11 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A ctx that has already ended opens nothing: there is no native open
+	// to wait for, and no callback to register.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	type opened struct {
 		h        uintptr
 		err      error

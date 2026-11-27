@@ -292,6 +292,55 @@ func TestCancelledEncryptedOpenReleasesCallbacksAfterClose(t *testing.T) {
 	}
 }
 
+func TestEncryptedOpenCancelledBeforehandReturnsAtOnce(t *testing.T) {
+	originalOpen, originalClose := ffi.openEncrypted, ffi.close
+	t.Cleanup(func() {
+		ffi.openEncrypted, ffi.close = originalOpen, originalClose
+	})
+	// A native open that never ends by itself: Open mustn't wait for it.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	ffi.openEncrypted = func(_ *byte, _, _, _, _ uintptr, _ *uintptr) uintptr {
+		t.Error("a cancelled Open began a native open")
+		<-release
+		return 1
+	}
+	ffi.close = func(uintptr) { t.Error("a cancelled Open closed a handle") }
+	registered := func() (n int) {
+		count := func(_, _ any) bool { n++; return true }
+		providers.Range(count)
+		stores.Range(count)
+		return n
+	}
+	before := registered()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	type result struct {
+		db  *DB
+		err error
+	}
+	returned := make(chan result, 1)
+	go func() {
+		db, err := open(ctx, Config{
+			Auth:       Token(func(context.Context, TokenReason) (string, error) { return "", nil }),
+			Encryption: &EncryptionConfig{Store: newMemoryStore()},
+		})
+		returned <- result{db, err}
+	}()
+	select {
+	case r := <-returned:
+		if r.db != nil || !errors.Is(r.err, context.Canceled) {
+			t.Errorf("cancelled open returned db %v, err %v", r.db, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an Open cancelled beforehand waited for the native open")
+	}
+	if after := registered(); after != before {
+		t.Errorf("cancelled open retained callback registrations: %d before, %d after", before, after)
+	}
+}
+
 func TestEncryptedShutdownReleasesCallbacksAfterDraining(t *testing.T) {
 	originalCall, originalClose := ffi.call, ffi.close
 	t.Cleanup(func() { ffi.call, ffi.close = originalCall, originalClose })
