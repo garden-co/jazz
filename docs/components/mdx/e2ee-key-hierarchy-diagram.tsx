@@ -131,7 +131,7 @@ export function E2eeKeyHierarchyDiagram() {
         Encrypted columns
       </text>
       <text x="40" y="464">
-        Encrypted with ChaCha20-Poly1305 on the device
+        Encrypted with XChaCha20-Poly1305 on the device
       </text>
       <text x="40" y="480">
         Optional equality token for exact-match filters

@@ -63,7 +63,7 @@ After that, reading encrypted data costs a few microseconds per value more than 
 
 Every building block we use for E2EE in Jazz is standard and widely reviewed, taken from well-established open-source Rust libraries:
 
-- ChaCha20-Poly1305 for encrypting values, with a streaming construction for large ones such as files
+- XChaCha20-Poly1305 for encrypting values and wrapping keys, with a streaming construction (STREAM) for large ones such as files
 - HPKE (RFC 9180) with X25519 for sealing keys to accounts and devices
 - Ed25519 for signatures
 - BLAKE2 and SHA-2 for hashing
@@ -78,7 +78,7 @@ That's important today for use cases that require specific algorithms, or for ap
 
 For now, adding alternative crypto implementations requires a custom build, but the interfaces are designed to make this easy, and there's [an example of how you could do this](https://github.com/garden-co/jazz/blob/main/crates/jazz-e2ee/examples/custom_mechanism.rs) to get you (or your agent) going.
 
-_Note: as a last minute addition, we also added 'commitments' before releasing. These use hash-based certificates to allow a device to prove that a new, post-quantum key is owned by the same device. This holds as long as SHA does._
+_Note: as a last minute addition, we also added 'commitments' before releasing. Each device and recovery root commits to a post-quantum signing key (SLH-DSA, a hash-based signature scheme standardised as FIPS 205), so a future version can still verify an account's history if classical signatures are ever broken. This holds as long as SHA-2 does._
 
 ## Limitations
 
@@ -145,7 +145,7 @@ The full guide is in our docs: [Getting started with encryption](/docs/e2ee/gett
 
 ## What happens if someone loses all their devices?
 
-Keys live only on your users’ devices, so Jazz gives each account a way back in: a 24-word recovery phrase, or a passkey. A device restored this way gets back everything the account could read. Without either, someone who loses every device loses their encrypted data for good, because nobody else holds a copy of their keys: not us, and not your server. Local-first accounts use the same recovery phrase for the account, so you don't need users to remember two different phrases.
+Keys live only on your users’ devices, so Jazz gives each account a way back in: a 24-word recovery phrase, or a passkey (in the browser, for now). A device restored this way gets back everything the account could read. Without either, someone who loses every device loses their encrypted data for good, because nobody else holds a copy of their keys: not us, and not your server. Local-first accounts use the same recovery phrase for the account, so you don't need users to remember two different phrases.
 
 ## How does a new device get access?
 
