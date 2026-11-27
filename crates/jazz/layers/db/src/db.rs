@@ -2175,6 +2175,8 @@ impl Db {
                 overlay_replays: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_pulls: Default::default(),
+                #[cfg(all(feature = "e2ee-client", any(test, feature = "testing")))]
+                pausing_advice_seal: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: Default::default(),
                 replayed_commits: Cell::default(),
@@ -3253,6 +3255,16 @@ impl Db {
     #[doc(hidden)]
     pub fn fail_next_pulls_for_test(&self, pulls: usize) {
         self.inner.failing_pulls.set(pulls);
+    }
+
+    /// Make the next parked permission preflight a waiter seals
+    /// (`Db::permission_advice`) yield once mid-seal: taken from the parked
+    /// ones, not yet sealed or sent. Single-threaded storage never yields
+    /// there; a host whose storage does can drop or cancel the waiter then.
+    #[cfg(all(feature = "e2ee-client", any(test, feature = "testing")))]
+    #[doc(hidden)]
+    pub fn pause_next_advice_seal_for_test(&self) {
+        self.inner.pausing_advice_seal.set(true);
     }
 
     /// Where the current schema stores `table`'s `column`: (stored table,
@@ -11346,6 +11358,11 @@ struct Store {
     /// read anything (see `Db::fail_next_pulls_for_test`).
     #[cfg(any(test, feature = "testing"))]
     failing_pulls: Cell<usize>,
+    /// The next permission preflight sealed for sending yields once
+    /// between taking it from the parked ones and sealing it (see
+    /// `Db::pause_next_advice_seal_for_test`).
+    #[cfg(all(feature = "e2ee-client", any(test, feature = "testing")))]
+    pub(crate) pausing_advice_seal: Cell<bool>,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: RefCell<VecDeque<ErrorCode>>,

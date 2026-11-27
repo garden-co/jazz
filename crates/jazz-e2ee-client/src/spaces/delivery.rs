@@ -583,18 +583,35 @@ impl E2eeClient {
                     return Ok(written);
                 }
                 Err(error) => {
-                    if self.shared.keys.borrow().online {
-                        pending.failures += 1;
-                    }
-                    if pending.failures >= ROTATION_ATTEMPTS {
-                        watch.pending_deliveries.remove(space);
-                    } else {
-                        pending.retry_at = Some(self.shared.now() + retry_delay(pending.failures));
-                    }
                     drop(watch);
+                    self.rotation_attempt_failed(space);
                     return Err(self.forget_account_on(error));
                 }
             }
+        }
+    }
+
+    /// Counts a failed attempt at the rest of this device's rotation of
+    /// `space`, wherever it failed: in a batch, or before it, in the
+    /// acquisition that must succeed first. Online it is one more failure
+    /// in a row; the next attempt waits [`retry_delay`], and the
+    /// [`ROTATION_ATTEMPTS`]th failure leaves the rest to the pass of any
+    /// holder (protocol §3.4). Offline it is not counted, and waits as long
+    /// as a first failure. Nothing pending: nothing to count.
+    pub(crate) fn rotation_attempt_failed(&self, space: &SpaceAddress) {
+        let online = self.shared.keys.borrow().online;
+        let now = self.shared.now();
+        let mut watch = self.shared.member_watch.borrow_mut();
+        let Some(pending) = watch.pending_deliveries.get_mut(space) else {
+            return;
+        };
+        if online {
+            pending.failures += 1;
+        }
+        if pending.failures >= ROTATION_ATTEMPTS {
+            watch.pending_deliveries.remove(space);
+        } else {
+            pending.retry_at = Some(now + retry_delay(pending.failures));
         }
     }
 
@@ -805,7 +822,9 @@ mod tests {
     /// The rest of a rotation is tried again 2 s after its first failure,
     /// then 4, 8, 16 and 32 s, and left to the pass of any holder at the
     /// sixth failure in a row. An attempt that failed offline waits as long
-    /// as a first failure. The guide says the same.
+    /// as a first failure. `docs/lib/rotation-retries.test.ts` pins the
+    /// guide's sentence to these numbers, outside this crate, so its tests
+    /// build from the published package.
     #[test]
     fn rotation_retries_wait_2_to_32_seconds_then_give_up() {
         let waits: Vec<u64> = (1..ROTATION_ATTEMPTS)
@@ -814,16 +833,5 @@ mod tests {
         assert_eq!(waits, [2, 4, 8, 16, 32]);
         assert_eq!(ROTATION_ATTEMPTS, 6);
         assert_eq!(retry_delay(0), retry_delay(1));
-        let guide = include_str!("../../../../docs/content/docs/e2ee/sharing-and-keys.mdx")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(
-            guide.contains(
-                "it tries again after 2 seconds, then 4, 8, 16 and 32, and gives up after \
-                 6 failed attempts in a row"
-            ),
-            "the guide's retry schedule differs from the code's"
-        );
     }
 }

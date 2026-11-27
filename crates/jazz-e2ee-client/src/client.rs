@@ -722,6 +722,49 @@ impl E2eeClient {
         Ok(())
     }
 
+    /// Makes the next `count` full acquisitions of a space fail, as a
+    /// failed read of the space would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fail_acquisitions_for_test(&self, count: u32) {
+        self.shared.member_watch.borrow_mut().fail_acquisitions = count;
+    }
+
+    /// The rest of this device's last rotation of `space`, if any is
+    /// pending: its failed attempts in a row, and how long until its next
+    /// attempt may run (`None`: no wait).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_rotation_for_test(
+        &self,
+        space: &jazz::e2ee::SpaceAddress,
+    ) -> Result<Option<(u32, Option<std::time::Duration>)>, ClientError> {
+        let now = self.shared.now();
+        let space = crate::spaces::protocol_address(space)?;
+        Ok(self
+            .shared
+            .member_watch
+            .borrow()
+            .pending_deliveries
+            .get(&space)
+            .map(|pending| {
+                (
+                    pending.failures,
+                    pending.retry_at.map(|at| at.saturating_duration_since(now)),
+                )
+            }))
+    }
+
+    /// When the runtime is next woken to retry the rest of a rotation:
+    /// how long from now (`None`: no retry is scheduled).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn next_rotation_retry_for_test(&self) -> Option<std::time::Duration> {
+        let now = self.shared.now();
+        self.next_rotation_retry()
+            .map(|at| at.saturating_duration_since(now))
+    }
+
     /// Makes the next [`E2eeClient::sync_spaces`] fail before it serves
     /// anything, as a failed read of the local store would.
     #[doc(hidden)]
