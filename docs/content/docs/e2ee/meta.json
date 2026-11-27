@@ -1,10 +1,4 @@
 {
   "title": "End-to-end Encryption",
-  "pages": [
-    "getting-started",
-    "sharing-and-keys",
-    "devices-and-recovery",
-    "encrypting-existing-data",
-    "limits"
-  ]
+  "pages": ["getting-started", "sharing-and-keys", "devices-and-recovery", "limits"]
 }
