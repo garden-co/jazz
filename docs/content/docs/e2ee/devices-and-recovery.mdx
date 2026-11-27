@@ -9,7 +9,9 @@ profile, an app install and a Node process with its own private store are each o
 
 `await db.encryption.ready()` returns the device's status:
 
-- `"active"`: the device can read and write encrypted data.
+- `"active"`: the device belongs to the account. It reads and writes a space's encrypted data
+  once it holds that space's key, which another device sends it. An active device can still be
+  waiting for one space's key. See [When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
 - `"awaiting-approval"`: the device is new and needs approval or recovery.
 - `"reenrolled"`: the device was removed from the account and has signed up again as a new one.
 
@@ -18,7 +20,7 @@ needs depends on the kind of account.
 
 ## Device accounts
 
-For a [device account](/docs/setup/auth), the account secret is also the recovery secret. The
+For a [device account](/docs/setup/auth/device-accounts), the account secret is also the recovery secret. The
 secret is the account's 24-word phrase, passkey or exported key. A device that signs in with it
 becomes active by itself, so there is nothing to set up. The calls below that create or restore
 a recovery key throw on a device account.

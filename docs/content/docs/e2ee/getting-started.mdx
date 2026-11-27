@@ -13,6 +13,12 @@ With end-to-end encryption, your users' devices encrypt the columns you choose b
 leaves them. The server stores and syncs the encrypted values and holds no keys. Permissions work
 as usual, and they also decide who gets the keys.
 
+Encryption protects your data from anyone who gets the stored values outside Jazz, such as a
+leaked database, a backup or someone who reads the server's disk. It doesn't protect against your
+permissions. Whoever can add a member to a space, including your server and your backend, can add
+any account, and members' devices then send that account the keys.
+[Encryption limits](/docs/e2ee/limits#what-the-server-can-do) has the full list.
+
 For a complete app, see the
 [encrypted BandChat example](https://github.com/garden-co/jazz/tree/main/examples/band-chat/apps/react-hono-betterauth-e2ee).
 For how encryption works underneath, see the
@@ -69,14 +75,16 @@ so `title` is a string.
 - `isMember(table, id)` is true when the signed-in account is a member of that space. A space
   table's read rule must be `isMember` of its own `id`, as `projects` has above. You can combine
   it with other conditions in `allOf`. Deploy refuses the app otherwise.
+- Those other conditions decide which members Jazz sends the rows to, not who can decrypt them.
+  Every member gets the keys, so a member who gets the encrypted values some other way can read
+  them.
 
 [Sharing and keys](/docs/e2ee/sharing-and-keys) covers members.
 
-## Set up a device
+## Set up the browser
 
-Each device keeps its own keys. Where they are stored depends on the platform.
-
-### Browser
+Each device keeps its own keys. This section sets up a browser. For Node, React Native and the
+native platforms, see [Other platforms](#other-platforms).
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
@@ -84,12 +92,15 @@ import { app } from "./jazz.generated";
 
 const session = await createJazzClient({
   serverUrl: "/jazz",
+  initial: "device",
   encryption: { app },
   client: () => import("jazz-tools/local-first"),
 });
 ```
 
-Pass `app` so the client knows which columns are encrypted. Jazz keeps the keys in IndexedDB,
+Encryption needs a signed-in account. `initial: "device"` signs this browser in as a
+[device account](/docs/setup/auth/device-accounts); any other sign-in works too. Pass `app` so
+the client knows which columns are encrypted. Jazz keeps the keys in IndexedDB,
 protected by a WebCrypto key that scripts can use but can't export. Clearing the site's data
 removes the keys, and the browser is then a new device. All tabs of your app are one device. To
 keep the keys somewhere else, pass your own `store` next to `app`.
@@ -98,15 +109,76 @@ keep the keys somewhere else, pass your own `store` next to `app`.
 and upgrades in the background. Until the upgrade finishes:
 
 - Reads and writes of plain columns work.
-- Anything that touches an encrypted column waits up to 30 seconds for the upgrade. If the load
-  fails or takes longer, the call rejects with `EncryptionNeedsLocalFirstError`. Without `client`
-  it rejects at once.
+- A one-off read or write that touches an encrypted column waits up to 30 seconds for the
+  upgrade. If the load fails or takes longer, the call rejects with
+  `EncryptionNeedsLocalFirstError`. Without `client` it rejects at once.
+- A live query on an encrypted column waits for the upgrade with no time limit.
 - A write that waits is held in memory, and later writes queue behind it. They are lost if the
   page closes first.
 - A `db.transaction` callback that touches an encrypted column can run twice. Keep side effects
   out of it.
 
 `await db.encryption.ready()` waits for the upgrade and for the device's keys.
+
+## Read and write
+
+Create a project, add a task to it and read the task back:
+
+```ts
+const db = session.db;
+const accountId = session.getSnapshot().user!.accountId;
+
+// Jazz adds you as the project's first member, and your first encrypted write makes its key.
+const project = await db
+  .insert(app.projects, { name: "Spring tour", ownerId: accountId })
+  .wait({ tier: "global" });
+const projectId = project.id;
+
+await db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
+const tasks = await db.all(app.tasks.where({ projectId, title: "Call the venue" }));
+// tasks[0].title is "Call the venue". The server stored only the encrypted value.
+```
+
+An equality filter works on an `equality` column when the query also names one space, as
+`projectId` does here. Other filters, ordering, grouping and aggregates on an encrypted column
+fail with an error that names the pattern. So does reading `tasks` as an include of `projects`:
+query the tasks of a project directly. [Encryption limits](/docs/e2ee/limits#queries-and-schema)
+lists every case.
+
+A write to a space whose key hasn't reached this device waits up to ten seconds. Then it fails
+with the reason `key-pending`.
+
+### Rows this device cannot read
+
+A read leaves out the rows this device can't decrypt and tells you which ones.
+`unreadableRows(result)` returns each with its `table`, `id`, `column` and a `code` such as
+`key-pending`, `key-unavailable` or `invalid-ciphertext`.
+
+```ts
+import { unreadableRows } from "jazz-tools/client";
+
+const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
+const missing = unreadableRows(page);
+if (missing.length > 0) {
+  // This page is incomplete: `page.length + missing.length` rows matched.
+}
+```
+
+`limit` and `offset` count the rows left out, so a page can be short or empty without being the
+last one. A `key-pending` row appears once its key arrives. Read again, or use a subscription,
+which updates by itself and carries the list with every result.
+
+`unreadableRows` is exported from each framework's entry point and from `jazz-tools/client`.
+React's, Vue's and Solid's `useAll` and Svelte's `QuerySubscription` also return the list as
+`unreadable`, next to the data.
+
+A device that has never synced doesn't know yet which rows are encrypted. Its live queries on
+encrypted columns stay loading until its first sync. `db.encryption.readable()` resolves when
+the device can read.
+
+## Other platforms
+
+Everywhere outside the browser, you pass a private store that keeps the device's keys.
 
 ### Node
 
@@ -338,47 +410,6 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
 ```
 
 For tests, `memoryPrivateStore()` keeps keys in memory and protects nothing. Don't ship it.
-
-## Read and write
-
-```ts
-await session.db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
-const tasks = await session.db.all(app.tasks.where({ projectId, title: "Call the venue" }));
-```
-
-An equality filter works on an `equality` column. Other filters, ordering, joins, grouping and
-aggregates on an encrypted column fail with an error that names the pattern.
-
-A write to a space whose key hasn't reached this device waits up to ten seconds. Then it fails
-with the reason `key-pending`.
-
-### Rows this device cannot read
-
-A read leaves out the rows this device can't decrypt and tells you which ones.
-`unreadableRows(result)` returns each with its `table`, `id`, `column` and a `code` such as
-`key-pending`, `key-unavailable` or `invalid-ciphertext`.
-
-```ts
-import { unreadableRows } from "jazz-tools/backend";
-
-const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
-const missing = unreadableRows(page);
-if (missing.length > 0) {
-  // This page is incomplete: `page.length + missing.length` rows matched.
-}
-```
-
-`limit` and `offset` count the rows left out, so a page can be short or empty without being the
-last one. A `key-pending` row appears once its key arrives. Read again, or use a subscription,
-which updates by itself and carries the list with every result.
-
-`unreadableRows` is exported from each framework's entry point and from `jazz-tools/client`.
-React's, Vue's and Solid's `useAll` and Svelte's `QuerySubscription` also return the list as
-`unreadable`, next to the data.
-
-A device that has never synced doesn't know yet which rows are encrypted. Its live queries on
-encrypted columns stay loading until its first sync. `db.encryption.readable()` resolves when
-the device can read.
 
 ## On the backend
 

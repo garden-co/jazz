@@ -19,8 +19,9 @@ const project = await db
   .wait({ tier: "global" });
 await db.encryption.members.add(app.projects, project.id, otherAccountId).wait({ tier: "global" });
 const members = await db.encryption.members.list(app.projects, project.id);
-await db.encryption.members.remove(app.projects, project.id, otherAccountId);
 ```
+
+To remove a member, see [Remove a member](#remove-a-member). A removal needs a key change too.
 
 In Rust, pass the generated space row type:
 
@@ -40,7 +41,17 @@ table's name and the row ID.
 
 Jazz adds the creator only in these cases:
 
-- The space is created with `insert`. After an `upsert`, add the creator yourself.
+- The space is created with `insert`. After an `upsert`, add the creator yourself, in the same
+  transaction as the upsert. Only that transaction may add the creator without permission to
+  update the space row:
+
+  ```ts
+  await db.transaction((tx) => {
+    tx.upsert(app.projects, projectId, { name: "Plans", ownerId: accountId });
+    return tx.encryption.members.add(app.projects, projectId, accountId);
+  });
+  ```
+
 - The client is a signed-in device. A backend that creates a space for a user must add that user.
 - Automatic membership is on. To turn it off, pass `{ addCreatorAsMember: false }` as the third
   argument of `db.insert`, or set it in the client's `encryption` options.
@@ -93,12 +104,29 @@ const { delivered } = await db.encryption.keys.deliver();
 
 ## Remove a member
 
-`members.remove` returns the number of member rows it deleted. `0` means the caller could see no
-member row for that account.
+Removing a member deletes their member row. The removed member still holds the space's key, so
+change the key straight after:
 
-After a removal, the space needs a new key. Jazz makes one before the next encrypted write from
-a member who can update the space row. To change the key immediately, call
-`db.encryption.keys.rotate(space)`. If you remove several members, rotate once at the end.
+```ts
+const space = { table: "projects", id: project.id };
+
+const removed = await db.encryption.members.remove(app.projects, project.id, otherAccountId);
+if (removed > 0) {
+  try {
+    await db.encryption.keys.rotate(space);
+  } catch (error) {
+    // `rotation-needs-key`: try again once this device holds the key.
+    // Until the key changes, new writes still use the old one.
+    console.warn("key not rotated", (error as { code?: string }).code);
+  }
+}
+```
+
+`members.remove` resolves once the server accepts the removal, and returns the number of member
+rows it deleted. `0` means the caller could see no member row for that account.
+
+If you don't call `rotate`, Jazz makes a new key before the next encrypted write from a member
+who can update the space row. If you remove several members, rotate once at the end.
 
 `rotate` returns the number of members who got the new key in the same transaction, up to 100.
 It can fail with these codes:
@@ -114,8 +142,10 @@ any device that holds the new key delivers it to the members left out, the next 
 keys. If the app stops before the deliveries finish, the device that rotated delivers again the
 next time it starts.
 
-A removed member keeps everything they could already read. They get no rows and no keys from
-then on.
+A removed member keeps everything they could already read, and the old key. The server stops
+sending them rows, and they don't get the new key. Until every device has the new key, some
+writes still use the old one: writes made offline, and writes from a device that hasn't heard of
+the rotation yet. The removed member can read those if they get hold of them.
 
 To delete your own rows in the same transaction as the membership, use
 `db.serializableTransaction`. Read the member rows with the filter from

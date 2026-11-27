@@ -10,10 +10,16 @@ has the full list and the reasons.
 ## Queries and schema
 
 - You can filter an encrypted column by equality only, and only if it was declared with
-  `equality: true`. Ordering, ranges, text search, grouping and aggregates fail with an error
-  that names the pattern.
+  `equality: true`. The query must also filter the space column by one exact value, such as
+  `where({ projectId, title })`. Ordering, ranges, text search, grouping and aggregates on an
+  encrypted column fail with an error that names the pattern.
+- `count()` works with filters on plain columns. A `count()` with a filter on an encrypted
+  column fails.
 - `count()` includes rows this device can't decrypt yet, so it can be higher than `all().length`
   for the same filter.
+- A query can't read an encrypted table through a relation, even a relation on plain columns.
+  Reading `projects` with its `tasks` included fails when `tasks` is encrypted. Query the tasks
+  of each project on their own. Joins and history reads of an encrypted table fail too.
 - Jazz doesn't encrypt a plain column that already holds data. See
   [Encrypting existing data](/docs/e2ee/encrypting-existing-data).
 - `equality` can't be added to a table that already exists. Copy the column into a new table
@@ -32,7 +38,10 @@ has the full list and the reasons.
 - The server sees everything that isn't an encrypted column: row IDs, plain columns, who is a
   member of which space, and who wrote each row and when.
 - Permissions decide who gets keys. Anyone who can update a space row can add any account as a
-  member, and so can your backend. Members' devices then send that account the keys.
+  member, and so can your backend or a bug in your permissions. Members' devices then send that
+  account the keys.
+- Extra conditions in a space table's read rule decide which members Jazz sends rows to. Every
+  member still gets the keys and can decrypt any encrypted value of the space they get hold of.
 - The backend can't read or compute on encrypted columns. Do that on a client.
 - A Cloudflare Worker backend can serve an encrypted app with a Durable Object core
   (`durableObjects()`) or a native Jazz core (`remote()`). The Worker holds no keys and can't run

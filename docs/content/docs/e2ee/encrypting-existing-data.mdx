@@ -81,9 +81,19 @@ export const permissions = definePermissions({
     update: false,
     delete: false,
   },
+  secureTasks: {
+    read: (task) => isMember("projects", task.projectId),
+    insert: (task) => isMember("projects", task.projectId),
+    // The copy upserts, so a second run updates the row it wrote before.
+    update: (task) => isMember("projects", task.projectId),
+    delete: false,
+  },
   // ...
 });
 ```
+
+The copy in step 3 needs both `insert` and `update` on `secureTasks`. Without `update`, running
+it again for a space fails on the rows it already copied.
 
 Run `npx jazz-tools generate`, which writes these rules to `jazz.permissions.json`, and deploy
 your backend. A permissions change needs no migration.
@@ -170,9 +180,37 @@ async function checkCopy() {
 
 For a large table, check one space at a time. Fix what the check reports and run it again. A
 copy with no old row, or in a different space from its old row, means a writer is still running.
-Find it and stop it. Switch only when the check passes.
+Find it and stop it.
 
-## 5. Switch to the new table
+## 5. Check the values from clients
+
+The backend check can't see encrypted values, so it passes even if a copy holds the wrong title
+or can't be decrypted. Check the values on a client that holds the project's key:
+
+```ts
+import type { Db } from "jazz-tools";
+import { unreadableRows } from "jazz-tools/client";
+import { app } from "./jazz.generated";
+
+// On a client that holds the project's key. Empty lists mean the values are right.
+async function checkValues(db: Db, projectId: string) {
+  const old = await db.all(app.tasks.where({ projectId }), { tier: "remote" });
+  const copies = await db.all(app.secureTasks.where({ projectId }), { tier: "remote" });
+  const byId = new Map(copies.map((t) => [t.id, t]));
+  return {
+    // Copies this device can't decrypt, with the reason for each.
+    unreadable: unreadableRows(copies),
+    // Old rows whose copy is missing here or holds a different title.
+    different: old.filter((t) => byId.get(t.id)?.title !== t.title),
+  };
+}
+```
+
+A client can check only the spaces whose key it holds, so check each project from a member's
+device. Copy again any project the check reports, then check it again. Switch only when both
+checks pass for every project.
+
+## 6. Switch to the new table
 
 Ship the app version that reads and writes `secureTasks` and follows the new reference columns.
 Row IDs you keep elsewhere, such as in URLs, still work.
@@ -204,6 +242,6 @@ Run `npx jazz-tools generate` and deploy again.
 This needs `taskId` to be optional. If it's required, refuse every insert into that table with
 `insert: false` until you drop the old column.
 
-## 6. Drop the old table
+## 7. Drop the old table
 
 Once no client uses the old table, drop it and the old reference columns in a later migration.
