@@ -993,18 +993,77 @@ fn an_advice_request_that_cannot_be_sealed_is_unknown_and_unsent() {
     );
 }
 
-/// Contract: a preflight cancelled by id while it waits to be sealed is
-/// never sealed or sent, and its wait answers `Unknown`.
+/// Contract: a preflight waits, parked and unsent, until its answer is
+/// awaited; one cancelled by id before then is never sealed or sent, and
+/// its wait answers `Unknown`.
 #[test]
 fn an_advice_request_cancelled_while_parked_is_never_sent() {
     let (_hooks, alice, server, _link, _wire, sent, space) = advising_client();
     let before = advice_sent(&sent);
     let id = alice.request_permission_advice(advise_insert(note(space, SECRET)), None);
+    pump(&server, &alice);
+    assert_eq!(
+        advice_sent(&sent),
+        before,
+        "a parked preflight stays unsent"
+    );
     alice.cancel_permission_advice_request(id);
     let advice = drive(&server, &alice, alice.permission_advice(id));
     assert_eq!(advice, jazz::protocol::PermissionAdvice::Unknown);
     pump(&server, &alice);
     assert_eq!(advice_sent(&sent), before, "nothing went up");
+    assert_eq!(alice.advice_requests_kept_for_test(), 0);
+}
+
+/// Poll `future` once.
+fn poll_once<T>(future: std::pin::Pin<&mut impl std::future::Future<Output = T>>) -> bool {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    future.poll(&mut cx).is_ready()
+}
+
+/// Contract: a preflight cancelled while its waiter seals it (taken from
+/// the parked ones, not yet sent) is never sent, and the wait answers
+/// `Unknown`.
+///
+/// ```text
+/// alice ──can insert?──park──wait: seal…──cancel──…sealed──✗ (unsent)
+/// ```
+#[test]
+fn an_advice_request_cancelled_mid_seal_is_never_sent() {
+    let (_hooks, alice, server, _link, _wire, sent, space) = advising_client();
+    let before = advice_sent(&sent);
+    let id = alice.request_permission_advice(advise_insert(note(space, SECRET)), None);
+    pump(&server, &alice);
+    alice.pause_next_advice_seal_for_test();
+    let mut wait = std::pin::pin!(alice.permission_advice(id));
+    assert!(!poll_once(wait.as_mut()), "the wait pauses mid-seal");
+    alice.cancel_permission_advice_request(id);
+    let advice = drive(&server, &alice, wait);
+    assert_eq!(advice, jazz::protocol::PermissionAdvice::Unknown);
+    pump(&server, &alice);
+    assert_eq!(advice_sent(&sent), before, "nothing went up");
+    assert_eq!(alice.advice_requests_kept_for_test(), 0);
+}
+
+/// Contract: a preflight whose wait is dropped while it seals it is
+/// forgotten: never sent, and nothing of it kept for a cancel to clear.
+#[test]
+fn an_advice_wait_dropped_mid_seal_keeps_nothing() {
+    let (_hooks, alice, server, _link, _wire, sent, space) = advising_client();
+    let before = advice_sent(&sent);
+    let id = alice.request_permission_advice(advise_insert(note(space, SECRET)), None);
+    alice.pause_next_advice_seal_for_test();
+    {
+        let mut wait = std::pin::pin!(alice.permission_advice(id));
+        assert!(!poll_once(wait.as_mut()), "the wait pauses mid-seal");
+    }
+    pump(&server, &alice);
+    assert_eq!(advice_sent(&sent), before, "nothing went up");
+    assert_eq!(
+        alice.advice_requests_kept_for_test(),
+        0,
+        "the dropped wait's request is not kept"
+    );
 }
 
 /// Contract: a write that needs a key alice does not hold is refused on

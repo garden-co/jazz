@@ -555,12 +555,18 @@ impl E2eeClient {
                 }
             }
             // The rest of this device's rotation: every remaining member,
-            // whether or not another member's delivery reached it.
-            if pending_deliveries.contains(&space)
-                && state.is_ok()
-                && let Err(error) = self.finish_rotation(db, &space).await
-            {
-                state = Err(error);
+            // whether or not another member's delivery reached it. An
+            // acquisition that failed first is a failed attempt too: it
+            // waits its retry and counts toward giving up, or the rest
+            // would wait for the next sync trigger and never give up.
+            if pending_deliveries.contains(&space) {
+                if state.is_ok() {
+                    if let Err(error) = self.finish_rotation(db, &space).await {
+                        state = Err(error);
+                    }
+                } else {
+                    self.rotation_attempt_failed(&space);
+                }
             }
             // The pass: members that lack a version this device holds.
             let pass = needs_pass && !retry_only.contains(&space);

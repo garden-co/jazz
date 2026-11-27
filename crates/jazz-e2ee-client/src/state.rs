@@ -688,6 +688,9 @@ pub(crate) struct MemberWatch {
     /// Tests: the next sync fails before it serves anything.
     #[cfg(any(test, feature = "testing"))]
     pub fail_next_sync: bool,
+    /// Tests: how many of the next full acquisitions fail.
+    #[cfg(any(test, feature = "testing"))]
+    pub fail_acquisitions: u32,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 

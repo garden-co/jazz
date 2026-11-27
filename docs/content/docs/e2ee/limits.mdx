@@ -12,7 +12,7 @@ languageTabs: backend
   While keys are pending, `count()` can exceed `all().length` for the same filter.
 - **Cloudflare Workers can serve encrypted apps.** The Worker backend reaches its core through
   `durableObjects()` (a Durable Object core, which keeps your encryption declarations as a native
-  core does) or `remote()` (a native Jazz core). Either way the Worker holds no keys. Running a
+  core does) or `remote()` (a native Jazz core). Either way the Worker holds no encryption keys. Running a
   key-holding client on the Worker is unsupported.
 - **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
 - **Appending variants to an encrypted enum needs a new schema version.** Add a schema change that
