@@ -39,4 +39,4 @@ No physical device or arm64 is tested.
 
 ## Encryption
 
-An app that declares end-to-end encryption opens with a private store your app supplies; see [Encryption in Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/native.mdx).
+An app that declares end-to-end encryption opens with a private store your app supplies; see [Getting started: Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/getting-started.mdx#rust-swift-kotlin-and-go).
