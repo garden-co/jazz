@@ -2098,15 +2098,29 @@ applications and users never handle deliveries.
   its members' accounts from the authority, so a member the device's store
   had not seen is seen; it compares the members with the deliveries and the
   members' account generations (new members, and reset accounts whose
-  delivery is now stale). It runs at natural moments, never on a timer: when
-  the app starts or reconnects, once its subscriptions have caught up; right
-  after this device changes a space's members itself (so whoever adds a
-  member normally delivers at once); when a watched space changes (§3.8),
-  for the spaces in use; and whenever the app calls the public method that
-  runs it, for every space or for one. Applications should call it after
-  adding members. A new member of a space no holder is looking at gets its
-  key at the next natural moment of any holder, or when the app runs the
-  pass. (A pass that skipped a space nothing had changed in, and a catch-up
+  delivery is now stale). It runs at natural moments, never on a timer:
+  once per session in the background (below); when the app reconnects, once
+  its subscriptions have caught up; right after this device changes a
+  space's members itself (so whoever adds a member normally delivers at
+  once); when a watched space changes (§3.8), for the spaces in use; and
+  whenever the app calls the public method that runs it, for every space or
+  for one. Applications should call it after adding members. A new member
+  of a space no holder is looking at gets its key at the next session or
+  reconnect of any holder, or when the app runs the pass.
+- **Opening the app.** The deliveries and member rows already in the
+  device's store when its watches open are not changes: an open acquires
+  only what arrives or changes after them, and a space a read waits for (a
+  report waiting for its key, or a read that left rows out) is served
+  before the other spaces. Once per session, when the app starts and again
+  at its first connection if it started offline (the first connection is
+  not a reconnect), a background pass steps over every held space and every
+  space a stored delivery to the account names, one space at a time and
+  never ahead of a read: it acquires the space when a stored delivery is of
+  a version the device does not hold, then runs the pass over it (with the
+  rest of this device's last rotation of it). So a member whose adder
+  stopped before delivering, one invited before signing up, a delivery that
+  reached the store before the watch opened and a pass cut short are all
+  served by the next session of any holder. (A pass that skipped a space nothing had changed in, and a catch-up
   that widened the watch first, were measured at a saving of under half of a
   pass and are not part of the design.)
 - **Receiving.** A member's devices watch deliveries addressed to their
