@@ -1,0 +1,74 @@
+# NOT ENABLED: kept outside .github/workflows, as the starting point for
+# jazz-kotlin's real iOS CI job.
+#
+# Exactly the job that passed at 52df88af92cf58cdfd8ab5150128b24a75e40692:
+# https://github.com/garden-co/jazz/actions/runs/44984900281 (about 14-16
+# minutes uncached). It runs ios-gate.sh next to it: klibs, an unsigned
+# device link, the tests on the simulator, and the linked size. A real job
+# needs its own name and triggers (below are the spike branch's), and would
+# want a Rust cache, as swift-mirror.yml has.
+name: KMP spike iOS gate
+
+on:
+  push:
+    branches: [kotlin/kmp-spike]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kmp-spike-ios
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    if: github.repository == 'garden-co/jazz'
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUST_VERSION: "1.93.1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: The toolchains (the runner's Xcode and JDK 21, pinned Rust and Gradle)
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-ios --target aarch64-apple-ios-sim
+          echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$JAVA_HOME_21_arm64" >> "$GITHUB_ENV"
+          # Gradle as dev/scripts/kotlin-toolchain.sh pins it (its JDK is Linux-only).
+          eval "$(grep -E '^gradle_(version|url|sha256)=' dev/scripts/kotlin-toolchain.sh)"
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/gradle.zip" "$gradle_url"
+          echo "$gradle_sha256  $RUNNER_TEMP/gradle.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-$gradle_version/bin" >> "$GITHUB_PATH"
+      - name: libjazz_ffi.a for the device and the simulator
+        run: bash packages/jazz-kotlin-kmp/ci/ios-gate.sh rust
+      - name: "Gate 1: cinterop and klibs compile for both"
+        id: klibs
+        run: bash packages/jazz-kotlin-kmp/ci/ios-gate.sh klibs
+      - name: "Gate 2: binaries link for the device, unsigned"
+        id: link
+        run: bash packages/jazz-kotlin-kmp/ci/ios-gate.sh link
+      - name: "Gate 3: the tests pass on the simulator, on the real jazz-ffi"
+        # Whether or not the device linked: each criterion gets its own answer.
+        if: ${{ !cancelled() && steps.klibs.outcome == 'success' }}
+        run: bash packages/jazz-kotlin-kmp/ci/ios-gate.sh test
+      - name: What jazz-ffi adds to an iOS binary
+        if: ${{ !cancelled() && steps.link.outcome == 'success' }}
+        run: bash packages/jazz-kotlin-kmp/ci/ios-gate.sh size
+      - name: Keep the test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kmp-ios-test-results
+          path: packages/jazz-kotlin-kmp/build/test-results/**/*.xml
+          if-no-files-found: warn
+          retention-days: 14
