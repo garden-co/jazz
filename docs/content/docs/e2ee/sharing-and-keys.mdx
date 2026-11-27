@@ -77,7 +77,18 @@ A backend has no device, so when it creates a space for a user, it must add that
 update the space row, so an update rule based on `$createdBy` won't let them.
 
 `members.add` returns the member row. Await it, or call `.wait({ tier })` on it as on an insert.
-Adding an account that's already a member does no harm.
+Adding an account that this client already sees as a member returns its existing row and writes
+nothing. The check reads this client's local data, so two cases still write a second row for the
+account:
+
+- A client that hasn't synced the existing member row yet, because it's offline or another device
+  has just added the account.
+- Concurrent adds of the same account, which can each read before either writes: two calls in
+  `Promise.all` in TypeScript, in or out of a transaction, or two separate `add_member` calls
+  joined with `join!` outside a transaction in Rust. Inside one Rust transaction, adds run one
+  after another, so adding an account twice there gives one row.
+
+Removing the member (`members.remove`, or `remove_member` in Rust) deletes every one of its rows.
 
 To add a member together with other writes, use `tx.encryption.members.add`. It returns a promise
 of the member row. Await it inside the transaction:
@@ -209,7 +220,8 @@ the removed member may hold. Listen for this with `onReport`:
 
 - `rotation-check-failed`: Jazz couldn't check whether the space needs a new key.
 - `rotation-failed`: the key wasn't changed before a write. The next write tries again. After a
-  permission refusal, this client stops trying for the session.
+  permission refusal, this client stops rotating that space automatically while it runs. An
+  explicit `rotate` call still tries.
 - `delivery-failed`: Jazz couldn't deliver keys to the space's members. It tries again later.
 
 ## On the backend
