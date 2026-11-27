@@ -245,10 +245,12 @@ func TestCancelledEncryptedOpenReleasesCallbacksAfterClose(t *testing.T) {
 		ffi.openEncrypted, ffi.close = originalOpen, originalClose
 	})
 	var provider, store uint64
+	entered := make(chan struct{})
 	allowOpen := make(chan struct{})
 	closed := make(chan struct{})
 	ffi.openEncrypted = func(_ *byte, _, tokenCtx, _, storeCtx uintptr, _ *uintptr) uintptr {
 		provider, store = uint64(tokenCtx), uint64(storeCtx)
+		close(entered)
 		<-allowOpen
 		return 1
 	}
@@ -263,32 +265,31 @@ func TestCancelledEncryptedOpenReleasesCallbacksAfterClose(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// The open is cancelled while the native open runs; Open waits for it
+	// and closes what it gives before answering.
+	go func() {
+		<-entered
+		cancel()
+		time.Sleep(10 * time.Millisecond)
+		close(allowOpen)
+	}()
 	db, err := open(ctx, Config{
 		Auth:       Token(func(context.Context, TokenReason) (string, error) { return "", nil }),
 		Encryption: &EncryptionConfig{Store: newMemoryStore()},
 	})
-	close(allowOpen)
 	if db != nil || !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled open returned db %v, err %v", db, err)
 	}
 	select {
 	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("native close did not run")
+	default:
+		t.Fatal("native close had not run when Open returned")
 	}
-	defer providers.Delete(provider)
-	defer stores.Delete(store)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		_, hasProvider := providers.Load(provider)
-		_, hasStore := stores.Load(store)
-		if !hasProvider && !hasStore {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	_, hasProvider := providers.Load(provider)
+	_, hasStore := stores.Load(store)
+	if hasProvider || hasStore {
+		t.Error("cancelled open retained its callback registrations")
 	}
-	t.Error("cancelled open retained its callback registrations")
 }
 
 func TestEncryptedShutdownReleasesCallbacksAfterDraining(t *testing.T) {
