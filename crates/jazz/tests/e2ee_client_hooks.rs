@@ -1045,6 +1045,27 @@ fn an_advice_request_cancelled_mid_seal_is_never_sent() {
     assert_eq!(alice.advice_requests_kept_for_test(), 0);
 }
 
+/// Contract: a preflight whose wait is dropped while it seals it is
+/// forgotten: never sent, and nothing of it kept for a cancel to clear.
+#[test]
+fn an_advice_wait_dropped_mid_seal_keeps_nothing() {
+    let (_hooks, alice, server, _link, _wire, sent, space) = advising_client();
+    let before = advice_sent(&sent);
+    let id = alice.request_permission_advice(advise_insert(note(space, SECRET)), None);
+    alice.pause_next_advice_seal_for_test();
+    {
+        let mut wait = std::pin::pin!(alice.permission_advice(id));
+        assert!(!poll_once(wait.as_mut()), "the wait pauses mid-seal");
+    }
+    pump(&server, &alice);
+    assert_eq!(advice_sent(&sent), before, "nothing went up");
+    assert_eq!(
+        alice.advice_requests_kept_for_test(),
+        0,
+        "the dropped wait's request is not kept"
+    );
+}
+
 /// Contract: a write that needs a key alice does not hold is refused on
 /// the call itself, applies nothing, and says which space it needs; the
 /// same call succeeds once the key is held, its space's root staged in the

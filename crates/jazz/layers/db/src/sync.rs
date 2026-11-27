@@ -4387,6 +4387,23 @@ pub struct SubscriberId {
     generation: u64,
 }
 
+/// A parked preflight its wait took to seal and send
+/// (`Db::send_parked_advice`): dropped unsent, with the wait, it cancels the
+/// request, so nothing of it is kept or sent.
+#[cfg(feature = "e2ee-client")]
+struct UnsentAdvice<'a> {
+    inner: &'a Store,
+    id: u64,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Drop for UnsentAdvice<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .session_control(SessionControl::CancelAdvice(self.id));
+    }
+}
+
 /// A preflight parked for sealing: where it goes, what, and for whom.
 #[cfg(feature = "e2ee-client")]
 type ParkedAdvice = (
@@ -11312,6 +11329,12 @@ impl Db {
         let Some((port, action, acting)) = parked else {
             return;
         };
+        // Taken from the parked ones, the request is this wait's alone until
+        // it is sent: a wait dropped before then cancels it.
+        let unsent = UnsentAdvice {
+            inner: &self.inner,
+            id,
+        };
         #[cfg(any(test, feature = "testing"))]
         if self.inner.pausing_advice_seal.replace(false) {
             let mut yielded = false;
@@ -11332,6 +11355,7 @@ impl Db {
             acting,
             parked: true,
         });
+        std::mem::forget(unsent);
     }
 
     /// Resolve an outstanding request as `Unknown`: its waiter is removed,
