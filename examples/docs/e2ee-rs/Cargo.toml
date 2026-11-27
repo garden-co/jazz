@@ -1,0 +1,10 @@
+[package]
+name = "e2ee-docs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz-app-support = { path = "../../../crates/jazz-app", features = ["e2ee-client"] }
+jazz-e2ee-client = { path = "../../../crates/jazz-e2ee-client" }
+serde_json = "1"

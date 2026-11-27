@@ -14,22 +14,15 @@ transaction. Use `members.add` for everyone else.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
-    ```ts
-    const project = await db.insert(app.projects, { name: "Plans" }).wait({ tier: "global" });
-    await db.encryption.members.add(app.projects, project.id, otherAccountId).wait({ tier: "global" });
-    const members = await db.encryption.members.list(app.projects, project.id);
-    ```
+    <include cwd lang="ts">
+      ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-add-members-ts
+    </include>
 
   </Tab>
   <Tab value="Rust">
-    ```rust
-    use jazz_app::{DurabilityTier, NewProject, Project};
-
-    let durable = jazz.durable(DurabilityTier::GlobalServer);
-    let project = durable.insert(NewProject::new("Plans")).await?;
-    durable.add_member::<Project>(project.id, other_account).await?;
-    let members = jazz.list_members::<Project>(project.id).await?;
-    ```
+    <include cwd lang="rust">
+      ../examples/docs/e2ee-rs/src/docs_snippets.rs#e2ee-add-members-rust
+    </include>
 
     Pass the generated space row type.
 
@@ -75,12 +68,9 @@ To turn automatic membership off, pass `{ addCreatorAsMember: false }` as the th
 After an `upsert`, add the creator in the same transaction as the upsert. Only that transaction
 may add the creator without permission to update the space row:
 
-```ts
-await db.transaction((tx) => {
-  tx.upsert(app.projects, projectId, { name: "Plans" });
-  return tx.encryption.members.add(app.projects, projectId, accountId);
-});
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-upsert-creator-ts
+</include>
 
 A backend has no device, so when it creates a space for a user, it must add that user with
 `members.add`. The user's first encrypted write then creates the key, which needs permission to
@@ -92,12 +82,9 @@ Adding an account that's already a member does no harm.
 To add a member together with other writes, use `tx.encryption.members.add`. It returns a promise
 of the member row. Await it inside the transaction:
 
-```ts
-const written = await db.transaction(async (tx) => {
-  await tx.encryption.members.add(app.projects, project.id, otherAccountId);
-});
-await written.wait({ tier: "global" });
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-add-member-in-transaction-ts
+</include>
 
 Members are rows of the `__e2ee_members` table. To query or write it yourself,
 `db.encryption.members.where(space)` returns a filter for a space's member rows and
@@ -118,9 +105,9 @@ and a write to the space waits up to ten seconds for the key, then fails with `k
 Jazz delivers keys when the app starts, when it reconnects, and while it has a subscription on
 the space. To deliver straight away:
 
-```ts
-const { delivered } = await db.encryption.keys.deliver();
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-deliver-keys-ts
+</include>
 
 ## Remove a member
 
@@ -129,33 +116,15 @@ change the key straight after:
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
-    ```ts
-    const space = { table: "projects", id: project.id };
-
-    const removed = await db.encryption.members.remove(app.projects, project.id, otherAccountId);
-    if (removed > 0) {
-      try {
-        await db.encryption.keys.rotate(space);
-      } catch (error) {
-        // `rotation-needs-key`: try again once this device holds the key.
-        // Until the key changes, new writes still use the old one.
-        console.warn("key not rotated", (error as { code?: string }).code);
-      }
-    }
-    ```
+    <include cwd lang="ts">
+      ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-remove-member-ts
+    </include>
 
   </Tab>
   <Tab value="Rust">
-    ```rust
-    use serde_json::json;
-
-    let removed = jazz.remove_member::<Project>(project.id, other_account).await?;
-    if removed > 0 {
-        jazz.encryption()
-            .call("keysRotate", json!({ "table": "projects", "id": project.id.to_string() }))
-            .await?;
-    }
-    ```
+    <include cwd lang="rust">
+      ../examples/docs/e2ee-rs/src/docs_snippets.rs#e2ee-remove-member-rust
+    </include>
 
   </Tab>
   <Tab value="Swift">
@@ -234,16 +203,9 @@ in the spec.
 If Jazz can't change the key before a write, the write still goes ahead under the old key, which
 the removed member may hold. Listen for this with `onReport`:
 
-```ts
-db.encryption.onReport((report) => {
-  if (report.type === "rotation-check-failed")
-    console.warn("rotation check failed", report.space, report.reason);
-  if (report.type === "rotation-failed")
-    console.warn("key not rotated", report.space, report.reason);
-  if (report.type === "delivery-failed")
-    console.warn("key delivery failed", report.space, report.reason);
-});
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-on-report-ts
+</include>
 
 - `rotation-check-failed`: Jazz couldn't check whether the space needs a new key.
 - `rotation-failed`: the key wasn't changed before a write. The next write tries again. After a

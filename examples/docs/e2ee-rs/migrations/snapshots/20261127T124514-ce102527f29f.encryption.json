@@ -1,0 +1,15 @@
+{
+  "tables": {
+    "tasks": {
+      "space": "projectId",
+      "scope": "projects",
+      "columns": {
+        "title": "string",
+        "notes": "string?"
+      },
+      "equality": [
+        "title"
+      ]
+    }
+  }
+}

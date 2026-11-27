@@ -28,39 +28,9 @@ Mark a column with `.encrypted()` and give its table a `space`. A space is a row
 share one key, such as a project or a room. `{ space: "project" }` names the relation that leads
 to the space row. A table whose rows are their own spaces uses `{ space: "id" }`.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  projects: s.table({
-    name: s.string(),
-  }),
-  tasks: s.table(
-    {
-      projectId: s.uuid(),
-      title: s.string().encrypted({ equality: true }),
-      notes: s.string().optional().encrypted(),
-    },
-    { project: s.rel("projects", "projectId") },
-    { space: "project" },
-  ),
-});
-
-const { definePermissions, isMember, session } = schema;
-
-export const permissions = definePermissions({
-  projects: {
-    // isMember: the signed-in user has been added to this project, so they get its key.
-    read: (project) => isMember("projects", project.id),
-    insert: { "$createdBy.account": session.user },
-    update: { $createdBy: session.user },
-  },
-  tasks: {
-    read: (task) => isMember("projects", task.projectId),
-    insert: (task) => isMember("projects", task.projectId),
-  },
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/e2ee-ts/schema.ts
+</include>
 
 Run `npx jazz-tools generate`. Your code reads and writes an encrypted column as its plain type,
 so `title` is a string.
@@ -84,17 +54,9 @@ so `title` is a string.
 Each device keeps its own keys. This section sets up a browser. For Node, React Native and the
 native platforms, see [Other platforms](#other-platforms).
 
-```ts
-import { createJazzClient } from "jazz-tools/client";
-import { app } from "./jazz.generated";
-
-const session = await createJazzClient({
-  serverUrl: "/jazz",
-  initial: "device",
-  encryption: { app },
-  client: () => import("jazz-tools/local-first"),
-});
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/browser.ts#e2ee-browser-setup-ts
+</include>
 
 Encryption needs a signed-in account. `initial: "device"` signs this browser in as a <span style={{ whiteSpace: "nowrap" }}>[device account](/docs/setup/auth/device-accounts);</span>
 any other sign-in works too. Pass `app` so the client knows which columns are encrypted. Jazz keeps
@@ -123,17 +85,9 @@ on the thin client and upgrades in the background. Until the upgrade finishes:
 
 Create a project, add a task to it and read the task back:
 
-```ts
-const db = session.db;
-
-// Jazz adds you as the project's first member, and your first encrypted write makes its key.
-const project = await db.insert(app.projects, { name: "Spring tour" }).wait({ tier: "global" });
-const projectId = project.id;
-
-await db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
-const tasks = await db.all(app.tasks.where({ projectId, title: "Call the venue" }));
-// tasks[0].title is "Call the venue". The server stored only the encrypted value.
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-read-write-ts
+</include>
 
 An equality filter works on an `equality` column when the query also names one space, as
 `projectId` does here. Other filters, ordering, grouping and aggregates on an encrypted column
@@ -150,15 +104,9 @@ A read leaves out the rows this device can't decrypt and tells you which ones.
 `unreadableRows(result)` returns each with its `table`, `id`, `column` and a `code` such as
 `key-pending`, `key-unavailable` or `invalid-ciphertext`.
 
-```ts
-import { unreadableRows } from "jazz-tools/client";
-
-const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
-const missing = unreadableRows(page);
-if (missing.length > 0) {
-  // This page is incomplete: `page.length + missing.length` rows matched.
-}
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-unreadable-rows-ts
+</include>
 
 `limit` and `offset` count the rows left out, so a page can be short or empty without being the
 last one. A `key-pending` row appears once its key arrives. Read again, or use a subscription,
@@ -181,20 +129,9 @@ Everywhere outside the browser, you pass a private store that keeps the device's
 Node has no default store. Pass a [private store](#write-a-private-store). Without one, opening
 the app fails with `EncryptionStoreRequiredError`.
 
-```ts
-import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
-
-const session = await createJazzClient({
-  serverUrl,
-  app,
-  permissions,
-  store: accountStore,
-  initial: "device",
-  encryption: { store: privateStore },
-});
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/node.ts#e2ee-node-setup-ts
+</include>
 
 ### React Native and Expo
 
@@ -221,17 +158,9 @@ Pass a private store in the client's encryption config, then call `ready`.
 
 <Tabs items={["Rust", "Swift", "Kotlin", "Go"]}>
   <Tab value="Rust">
-    ```rust
-    use std::rc::Rc;
-    use jazz_app_support::{Auth, Config, EncryptionConfig, Jazz};
-
-    let config = Config::new(app_id)
-        .server("https://app.example/jazz")
-        .user(Auth::Device(device_key))
-        .encryption(EncryptionConfig::store(|| Rc::new(MyStore::open())).environment("production"));
-    let jazz = Jazz::open(files, config).await?;
-    let status = jazz.encryption().ready(std::time::Duration::from_secs(30)).await?;
-    ```
+    <include cwd lang="rust">
+      ../examples/docs/e2ee-rs/src/docs_snippets.rs#e2ee-open-rust
+    </include>
 
     `MyStore` implements `jazz_e2ee_client::PrivateStore`. Turn on the `e2ee-client` feature of
     `jazz-app-support`.
@@ -282,14 +211,9 @@ Your backend holds no keys. `createJazz` starts for an encrypted app and reads i
 as usual. Rows come back without their encrypted columns. A write, filter or ordering that names
 an encrypted column is refused. Query through `keyless(app)` so the types match:
 
-```ts
-import { keyless } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-
-const backendApp = keyless(app);
-// jazz = await createJazz({ app, ... }).ready()
-const tasks = await jazz.db.all(backendApp.tasks); // each task.title is undefined
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-keyless-backend-ts
+</include>
 
 <Accordions type="single">
 <Accordion id="write-a-private-store" title="Advanced: writing your own private store">
@@ -316,110 +240,9 @@ Only a missing document should read as absent, because an empty store looks like
 This store for Node keeps its documents in a directory. Use one instance for a directory, and
 don't share the directory between processes.
 
-```ts
-import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import {
-  PrivateStoreConflictError,
-  PrivateStoreWipedError,
-  type PrivateStore,
-} from "jazz-tools/backend";
-
-/** `machineKey` is 32 bytes from your operating system's key store. */
-export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
-  const at = (scope: string) => {
-    if (!scope || scope === "." || scope === "..") throw new Error("Invalid scope name");
-    return `${dir}/${encodeURIComponent(scope)}`;
-  };
-  const docPath = (scope: string, doc: string) => {
-    if (!doc || doc.startsWith(".")) throw new Error("Invalid document name");
-    return `${at(scope)}/${encodeURIComponent(doc)}`;
-  };
-  const marker = (scope: string) => `${at(scope)}/.incarnation`;
-  const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
-  const incarnationOf = async (scope: string) => {
-    try {
-      return BigInt(await readFile(marker(scope), "utf8"));
-    } catch (error) {
-      if (isMissing(error)) return null;
-      throw error;
-    }
-  };
-  const read = async (scope: string, doc: string) => {
-    try {
-      const text = await readFile(docPath(scope, doc), "utf8");
-      const { revision, bytes } = JSON.parse(text);
-      return { revision: BigInt(revision), bytes: new Uint8Array(Buffer.from(bytes, "base64")) };
-    } catch (error) {
-      // Only a missing file means "absent"; any other error must not read as a new device.
-      if (isMissing(error)) return null;
-      throw error;
-    }
-  };
-  let queue: Promise<unknown> = Promise.resolve();
-  // One operation at a time: a save checks and replaces atomically.
-  const serial = <T>(work: () => Promise<T>) => (queue = queue.then(work, work)) as Promise<T>;
-  return {
-    load: (scope, doc) =>
-      serial(async () => ((await incarnationOf(scope)) === null ? null : read(scope, doc))),
-    openScope: (scope) =>
-      serial(async () => {
-        const current = await incarnationOf(scope);
-        if (current !== null) return current;
-
-        await rm(at(scope), { recursive: true, force: true });
-        await mkdir(at(scope), { recursive: true, mode: 0o700 });
-        const incarnation = randomBytes(8).readBigUInt64BE() || 1n;
-        const pending = `${marker(scope)}.tmp`;
-        await writeFile(pending, incarnation.toString(), { mode: 0o600 });
-        await rename(pending, marker(scope));
-        return incarnation;
-      }),
-    save: (scope, incarnation, doc, bytes, expected) =>
-      serial(async () => {
-        if ((await incarnationOf(scope)) !== incarnation) throw new PrivateStoreWipedError();
-        const current = await read(scope, doc);
-        if ((current?.revision ?? null) !== expected) throw new PrivateStoreConflictError();
-        const revision = (current?.revision ?? 0n) + 1n;
-        const body = JSON.stringify({
-          revision: revision.toString(),
-          bytes: Buffer.from(bytes).toString("base64"),
-        });
-        const path = docPath(scope, doc);
-        const pending = `${at(scope)}/.document.tmp`;
-        await writeFile(pending, body, { mode: 0o600 });
-        await rename(pending, path);
-        return revision;
-      }),
-    list: (scope) =>
-      serial(async () => {
-        if ((await incarnationOf(scope)) === null) return [];
-        return (await readdir(at(scope)))
-          .filter((name) => !name.startsWith("."))
-          .map(decodeURIComponent);
-      }),
-    delete: (scope) =>
-      serial(async () => {
-        await unlink(marker(scope)).catch((error) => {
-          if (!isMissing(error)) throw error;
-        });
-        await rm(at(scope), { recursive: true, force: true });
-      }),
-    async protect(secret) {
-      const iv = randomBytes(12);
-      const cipher = createCipheriv("aes-256-gcm", machineKey, iv);
-      const sealed = Buffer.concat([cipher.update(secret), cipher.final()]);
-      return new Uint8Array(Buffer.concat([iv, cipher.getAuthTag(), sealed]));
-    },
-    async unprotect(blob) {
-      const bytes = Buffer.from(blob);
-      const decipher = createDecipheriv("aes-256-gcm", machineKey, bytes.subarray(0, 12));
-      decipher.setAuthTag(bytes.subarray(12, 28));
-      return new Uint8Array(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]));
-    },
-  };
-}
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/directory-store.ts
+</include>
 
 For tests, `memoryPrivateStore()` keeps keys in memory and protects nothing. Don't ship it.
 

@@ -35,23 +35,9 @@ On an account your own sign-in manages, a new device starts as `"awaiting-approv
 device approves it. Both devices show a six-digit code, and the user confirms that the codes
 match.
 
-```ts
-// On the new device: told when it is challenged, then answers and shows the code.
-db.encryption.onChallenge(async () => {
-  const code = await db.encryption.devices.answer();
-  show(code);
-});
-
-// On a trusted device:
-const waiting = (await db.encryption.devices.list()).filter((d) => d.status === "waiting");
-const session = await db.encryption.devices.challenge(waiting[0].id);
-// Check again after the new device answers if this returns "waiting".
-async function approveWhenAnswered() {
-  const code = await session.code();
-  if (code === null) return "waiting";
-  if (await confirmMatchingCodes(code)) await session.approve(code);
-}
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-approve-device-ts
+</include>
 
 `confirmMatchingCodes` is your own prompt. Show the code on the trusted device and ask the user
 whether the new device shows the same one. A wrong code approves nothing. The new device learns of
@@ -66,13 +52,9 @@ A user who loses every device needs a recovery key to get back in. In the browse
 device is active and `db.encryption.recovery.list()` is empty, offer a backup from a button.
 Creating a passkey needs a click.
 
-```ts
-const result = await session.db.encryption.recovery.enable({
-  appName: "My app",
-  accountName: user.email,
-});
-if (result.method === "phrase") showToKeep(result.phrase);
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-enable-ts
+</include>
 
 `enable` saves the recovery key in a passkey where the browser offers one. Otherwise, or if the
 user declines the passkey, it returns a 24-word phrase to show once. A passkey provider may sync
@@ -80,20 +62,15 @@ the passkey to the user's other devices, and the recovery key goes with it.
 
 On a new device, the user signs in and recovers with the passkey or the phrase:
 
-```ts
-await session.db.encryption.recovery.restoreFromPasskey({ appName: "My app" });
-// or
-await session.db.encryption.recovery.restore(phrase);
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-restore-ts
+</include>
 
 Outside the browser, use a phrase:
 
-```ts
-const phrase = db.encryption.recovery.create(); // keep it; registers nothing
-await db.encryption.recovery.register(phrase); // on an approved device
-// After losing every device, on a new one:
-await db.encryption.recovery.restore(phrase);
-```
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-phrase-ts
+</include>
 
 The native clients call these `recoveryCreate`, `recoveryRegister` and `recoveryRestore`.
 `recovery.list()` shows the registered recovery keys and `recovery.retire(id)` retires one. A
