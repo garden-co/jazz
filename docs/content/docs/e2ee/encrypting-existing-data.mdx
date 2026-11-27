@@ -36,29 +36,57 @@ that points at the new one, such as `secureTaskId` next to `taskId`. An existing
 can't be pointed at another table. The copies keep their row IDs, so the new column will hold the
 same values as the old one.
 
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  projects: s.table({
+    name: s.string(),
+  }),
+  tasks: s.table(
+    { projectId: s.uuid(), title: s.string() },
+    { project: s.rel("projects", "projectId") },
+  ),
+  secureTasks: s.table(
+    { projectId: s.uuid(), title: s.string().encrypted({ equality: true }) },
+    { project: s.rel("projects", "projectId") },
+    { space: "project" },
+  ),
+  comments: s.table({
+    authorId: s.uuid(),
+    taskId: s.uuid().optional(),
+    secureTaskId: s.uuid().optional(),
+  }),
+});
+```
+
 ## 2. Stop every writer
 
-Deploy permissions that refuse every write to the old table and to each table that references
-it. Keep their read rules.
+In `schema.ts`, refuse every write to the old table and to each table that references it. Keep
+their read rules.
 
-```json title="jazz.permissions.json"
-{
-  "tables": {
-    "tasks": {
-      "read": "…the rule it has now…",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "comments": {
-      "read": "…the rule it has now…",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, isMember, session } = schema;
+
+export const permissions = definePermissions({
+  tasks: {
+    read: (task) => isMember("projects", task.projectId), // the rule it has now
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  comments: {
+    read: { authorId: session.user }, // the rule it has now
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  // ...
+});
 ```
+
+Run `npx jazz-tools generate`, which writes these rules to `jazz.permissions.json`, and deploy
+your backend. A permissions change needs no migration.
 
 Then check two things:
 
@@ -154,26 +182,27 @@ reference column frozen. Otherwise an older client could change `taskId` and lea
 pointing elsewhere. An insert must leave `taskId` empty, and an update must keep it as it was
 (see [Update policies](/docs/schemas/policies#update-policies-old-row-vs-new-row)):
 
-```json title="jazz.permissions.json"
-{
-  "tables": {
-    "comments": {
-      "read": "…the rule it has now…",
-      "insert": { "allOf": ["…the rule it has now…", "taskId = null"] },
-      "update": {
-        "old": "…the rule it has now…",
-        "new": {
-          "allOf": ["…the rule it has now…", "exists comments(id = this.id, taskId = this.taskId)"]
-        }
-      },
-      "delete": "…the rule it has now…"
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, session, allOf } = schema;
+
+const own = { authorId: session.user }; // the rule comments has now
+
+export const permissions = definePermissions({
+  comments: {
+    read: own,
+    insert: allOf(own, { taskId: null }),
+    updateIf: own,
+    updateTo: (comment, old) => allOf(own, { taskId: old.taskId }),
+    delete: own,
+  },
+  // ...
+});
 ```
 
+Run `npx jazz-tools generate` and deploy again.
+
 This needs `taskId` to be optional. If it's required, refuse every insert into that table with
-`"insert": "false"` until you drop the old column.
+`insert: false` until you drop the old column.
 
 ## 6. Drop the old table
 
