@@ -55,7 +55,7 @@ For Jazz 2.0, we built E2EE with performance in mind from the start. The figures
 
 The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is setting up keys. This is a small up-front cost, paid once per device: the first time an account opens the app on a new device, getting its keys ready adds about 90ms in a native client, and about 300ms in the browser. Opening a space for the first time means unsealing the newest key the device was given, and opening older space keys. That work grows with the number of key rotations, not with how much data the space holds, and it adds only a few milliseconds in a native client, where it overlaps start-up, and about 20–40ms in the browser.
 
-After that, the cost is small. A device that opens the app again pays about 12–14ms more at start-up in a native client, and no measurable extra in the browser. Reading encrypted data costs under a millisecond more per query than plaintext, whether the query returns one row or 200, and a write costs about 0.2ms more.
+After that, the cost is small. A device that opens the app again pays about 12–14ms more at start-up in a native client. Reading encrypted data costs under a millisecond more per query than plaintext, whether the query returns one row or 200, and a write costs about 0.2ms more.
 
 ## No homegrown cryptography
 
