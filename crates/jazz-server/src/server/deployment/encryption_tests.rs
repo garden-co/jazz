@@ -2295,7 +2295,7 @@ async fn an_encrypted_schema_is_not_deployed_to_a_runtime_without_the_registry()
     *server.state.core_server_shell.write().unwrap() = Some(
         ServerRuntimeHandle::start_with_storage(
             jazz::schema::JazzSchema::new(&schema).unwrap(),
-            StorageConfig::InMemory,
+            StorageConfig::in_memory(),
         )
         .unwrap(),
     );

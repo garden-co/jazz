@@ -8,9 +8,9 @@ use crate::{
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BlobStore, BuiltServer, IdentityOpen, RecordedIdentity, ServerBuilder, ServerState,
-    ShutdownController, ShutdownPhase, StorageBackend, StoreIdentity, detach_store_identity,
-    open_store_identity, read_store_identity, set_store_app_id,
+    BlobStore, BuiltServer, IdentityOpen, PreparedServer, RecordedIdentity, ServerBuilder,
+    ServerState, ShutdownController, ShutdownPhase, StorageBackend, StoreIdentity,
+    detach_store_identity, open_store_identity, read_store_identity, set_store_app_id,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{

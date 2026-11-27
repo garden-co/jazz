@@ -235,13 +235,13 @@ module's `packages/jazz-go/version.go` (once it exists) in CI's lint partition.
 Run it on the Version Packages PR head before merging.
 
 The published crates are exactly the dependency closure of `jazz-app-support`,
-`jazz-tools`, `jazz-codegen` and `jazz-ffi` (`dev/scripts/rust-crates.mjs`).
+`jazz-tools`, `jazz-codegen`, `jazz-ffi` and `jazz-rivet` (`dev/scripts/rust-crates.mjs`).
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
 jazz-ruzstd  jazz-compression  jazz-text  jazz-types
 jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
-jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
+jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-rivet  jazz-tools  jazz-wasm-tracing
 ```
 
 `jazz-core` is the engine (`crates/jazz`, the package formerly named `jazz`;
@@ -286,7 +286,7 @@ crates are published with a short-lived token the first time:
    Don't paste it anywhere else. The new crates are:
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
-   jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
+   jazz-codegen, jazz-ffi, jazz-otel, jazz-server, jazz-rivet.
 3. **Publish:** `release-publish.yml`'s crates leg; the summary at the end of
    its log shows which auth each crate used.
    crates.io limits new crates to a burst of 5, then 1 every 10 minutes. On a

@@ -2449,6 +2449,9 @@ importers:
       '@better-auth/test-utils':
         specifier: ^1.7.22
         version: 1.7.22(@better-auth/core@1.7.22(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(@opentelemetry/api@1.9.1)(better-call@1.4.5(zod@4.3.6))(jose@6.2.2)(kysely@0.29.5)(nanostores@1.5.2))(better-auth@1.7.22(@opentelemetry/api@1.9.1)(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.53.6)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.3.8(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(solid-js@1.9.13)(svelte@5.53.6)(vitest@5.1.0)(vue@3.5.29(typescript@6.0.2)))(vitest@5.1.0)
+      '@rivetkit/engine-cli':
+        specifier: 3.1.1
+        version: 3.1.1
       '@sveltejs/package':
         specifier: ^2.0.0
         version: 2.5.7(svelte@5.53.6)(typescript@6.0.2)
@@ -6760,6 +6763,38 @@ packages:
     engines: {node: ^20.12.0 || >=22.0.0}
     peerDependencies:
       release-it: ^18.0.0 || ^19.0.0
+
+  '@rivetkit/engine-cli-darwin-arm64@3.1.1':
+    resolution: {integrity: sha512-F+RsEReO6Lnh3W3CRFcCX9EJogcxEMcRtOtVHSRt6W0apP4gj+WL25KJf/Xs7Oq473ToX3mASt2DB/u2FMDibw==}
+    engines: {node: '>= 20.0.0'}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
+  '@rivetkit/engine-cli-darwin-x64@3.1.1':
+    resolution: {integrity: sha512-X0tjdggFEAvzZq9UPYkPx4OCmL44veTCRcN7FDlo1SurLIg2F5DAYGwqzFeIDX7R+EDLSJ080aPQ3nhjbLJEVA==}
+    engines: {node: '>= 20.0.0'}
+    cpu: [x64]
+    os: [darwin]
+    hasBin: true
+
+  '@rivetkit/engine-cli-linux-arm64-musl@3.1.1':
+    resolution: {integrity: sha512-ZN8NNQtSrN+4dCmQd4CYFdHTKa67LIq0k37AFQvA0XDDJnX0vr5q8v+AGO9DLuzASQXRMqZ8JOTML9vzCJRodQ==}
+    engines: {node: '>= 20.0.0'}
+    cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@rivetkit/engine-cli-linux-x64-musl@3.1.1':
+    resolution: {integrity: sha512-/It+SssM2e8D7t6Qqqt2uID96cEUY2gIAvbTGVFg3vNMLeQ7Bm2TSObcBm1HBQ74Ux18uJQfVfZ7JZFJvOsvbQ==}
+    engines: {node: '>= 20.0.0'}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
+
+  '@rivetkit/engine-cli@3.1.1':
+    resolution: {integrity: sha512-GEit/mPb3yxo9LpXV5h7trmNST3wLodYX/opKAhj9h26iw+ltqfTJoMgptAiiYGU4F9OI0G7bbpO9n/evTN2KQ==}
+    engines: {node: '>= 20.0.0'}
 
   '@rolldown/binding-android-arm-eabi@1.2.19':
     resolution: {integrity: sha512-e+Ebe0WT+9tbXmNKPIiC8YrWAHYwug3m6i4p3rZGGulfZri1jtI4HslT+OZnFf/OIHowWF71DTlHwXBP2SiA7A==}
@@ -18640,6 +18675,25 @@ snapshots:
     transitivePeerDependencies:
       - conventional-commits-filter
       - conventional-commits-parser
+
+  '@rivetkit/engine-cli-darwin-arm64@3.1.1':
+    optional: true
+
+  '@rivetkit/engine-cli-darwin-x64@3.1.1':
+    optional: true
+
+  '@rivetkit/engine-cli-linux-arm64-musl@3.1.1':
+    optional: true
+
+  '@rivetkit/engine-cli-linux-x64-musl@3.1.1':
+    optional: true
+
+  '@rivetkit/engine-cli@3.1.1':
+    optionalDependencies:
+      '@rivetkit/engine-cli-darwin-arm64': 3.1.1
+      '@rivetkit/engine-cli-darwin-x64': 3.1.1
+      '@rivetkit/engine-cli-linux-arm64-musl': 3.1.1
+      '@rivetkit/engine-cli-linux-x64-musl': 3.1.1
 
   '@rolldown/binding-android-arm-eabi@1.2.19':
     optional: true

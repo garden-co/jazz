@@ -405,36 +405,40 @@ pub async fn workload_gate(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(error) = admit_backend_headers(&state, request.headers_mut()).await {
+        warn!(%error, "refused a request without a valid backend credential");
+        return (StatusCode::UNAUTHORIZED, error).into_response();
+    }
+    next.run(request).await
+}
+
+/// Apply the HTTP credential gate to an embedding host's WebSocket upgrade.
+pub async fn admit_backend_headers(
+    state: &ServerState,
+    headers: &mut HeaderMap,
+) -> Result<(), String> {
     let (Some(check), Some(secrets)) = (
         state.backend_credential.as_deref(),
         state.workload_secrets.as_ref(),
     ) else {
-        return next.run(request).await;
+        return Ok(());
     };
-    let headers = request.headers_mut();
     headers.remove(VOUCHED_HEADER);
     if !check.required() && !headers.contains_key(WORKLOAD_TOKEN_HEADER) {
         headers.remove(ACCESS_HEADER);
-        return next.run(request).await;
+        return Ok(());
     }
     for name in [ADMIN_SECRET_HEADER, BACKEND_SECRET_HEADER] {
         headers.remove(name);
     }
     let now = state.auth_config.clock.now_seconds();
-    let access = match admit(
+    let access = admit(
         check,
         now,
         header(headers, WORKLOAD_TOKEN_HEADER).as_deref(),
         header(headers, ACCESS_HEADER).as_deref(),
     )
-    .await
-    {
-        Ok(access) => access,
-        Err(error) => {
-            warn!(%error, "refused a request without a valid backend credential");
-            return (StatusCode::UNAUTHORIZED, error).into_response();
-        }
-    };
+    .await?;
     headers.remove(WORKLOAD_TOKEN_HEADER);
     headers.remove(ACCESS_HEADER);
     if let Ok(value) = HeaderValue::from_str(&vouched_value(secrets, access)) {
@@ -449,7 +453,7 @@ pub async fn workload_gate(
             headers.insert(name, value);
         }
     }
-    next.run(request).await
+    Ok(())
 }
 
 #[cfg(test)]

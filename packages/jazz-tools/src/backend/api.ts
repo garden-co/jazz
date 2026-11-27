@@ -41,6 +41,7 @@ export {
   type InspectHook,
   type InspectorOptions,
 } from "./create-jazz.js";
+export { rivet } from "./rivet-provider.js";
 export { durableObjects } from "./durable-objects-provider.js";
 export { memory, sqlite } from "./native-provider.js";
 export { remote, type BackendCredential } from "./remote-provider.js";

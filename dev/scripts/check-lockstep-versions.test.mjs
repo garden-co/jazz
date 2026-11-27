@@ -46,6 +46,8 @@ function workspace(version = V) {
       ["jazz-codegen", "*", "dev"],
     ]),
     pkg("jazz-ffi", V, [["jazz-app-support", `=${V}`]]),
+    pkg("jazz-server", V, [["jazz-core", `=${V}`]]),
+    pkg("jazz-rivet", V, [["jazz-server", `=${V}`]]),
     pkg("jazz-tools", version, [
       ["jazz-core", `=${V}`],
       ["jazz-codegen", `=${V}`],
@@ -80,6 +82,7 @@ test("orders the closure so every crate follows its dependencies", () => {
     ["jazz-ruzstd", "jazz-core"],
     ["jazz-core", "jazz-app-support"],
     ["jazz-app-support", "jazz-ffi"],
+    ["jazz-server", "jazz-rivet"],
     ["jazz-codegen", "jazz-tools"],
   ])
     assert.ok(plan.order.indexOf(before) < plan.order.indexOf(after), `${before} < ${after}`);

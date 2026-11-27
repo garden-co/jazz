@@ -1,0 +1,140 @@
+---
+title: Rivet
+description: Run your app's Jazz core in a Rivet actor.
+---
+
+In order to run Jazz on Rivet, you run the Jazz core and the Jazz backend as separate processes. The core is a standalone Rust application provided by the `jazz-rivet` crate. All of Jazz's data lives inside a Rivet actor's embedded SQLite database (except for large values, that can be stored in blob storage). The Jazz backend authenticates users and publishes the app and permissions to the actor. Clients connect to the backend's usual `/jazz` endpoint.
+
+<Callout type="warn" title="Experimental">
+  Jazz on Rivet is experimental. The `rivet()` store and the `jazz-rivet` runner may change in any
+  release, without a deprecation period. Try it, and tell us what breaks.
+</Callout>
+
+## Running Jazz locally
+
+### Requirements
+
+- A TypeScript app running Node.js 22.18 or newer, with `jazz-tools` and `ws` installed. Jazz uses `ws` as an optional dependency to accept WebSocket upgrades on the Node HTTP server.
+- Rust 1.100 or newer and a native C/C++ build toolchain.
+- A Rivet 3.x Engine binary to run locally.
+
+### Running the Jazz core
+
+From your TypeScript app directory, install the Jazz core version that matches your installed `jazz-tools` package.
+
+```sh
+version=$(node -p 'require("./node_modules/jazz-tools/package.json").version')
+cargo install --locked "jazz-rivet@$version"
+```
+
+Set `JAZZ_CORE_SECRET` to the same secret in the Jazz core and backend environments and start the core:
+
+```sh
+export JAZZ_CORE_SECRET='<your-shared-secret>'
+export RIVET_ENGINE_BINARY_PATH=/absolute/path/to/rivet-engine
+jazz-rivet
+```
+
+### Running the Jazz backend
+
+The Rust process registers the `jazz` actor in the `default` Rivet pool. The TypeScript process serves `/jazz` and connects to that actor:
+
+```ts
+import { createServer } from "node:http";
+import { createJazz, rivet } from "jazz-tools/backend";
+import { app } from "./jazz.generated.js";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+const jazz = createJazz({
+  app,
+  permissions,
+  store: rivet({
+    endpoint: process.env.JAZZ_RIVET_ENDPOINT!,
+    namespace: process.env.RIVET_NAMESPACE ?? "default",
+    token: process.env.RIVET_TOKEN!,
+    blobs: "sqlite",
+    pool: "default",
+    key: "my-app",
+    secret: process.env.JAZZ_CORE_SECRET!,
+  }),
+  authenticate, // Your existing main backend's session callback.
+});
+
+const server = createServer(jazz.nodeHandler);
+await jazz.attach(server);
+server.listen(Number(process.env.PORT ?? 3000));
+```
+
+`jazz.nodeHandler` serves HTTP requests at `/jazz`, and `jazz.attach(server)` handles WebSocket upgrades on the same port. If your app already has a Node HTTP server, route `/jazz` and its subpaths to `jazz.nodeHandler` and attach Jazz to that server.
+
+Opening the store gets or creates the actor in the Rivet pool. Keep its namespace and key stable across releases. A new key opens a separate database. WebSocket sessions keep the actor awake until disconnect. Its SQLite storage survives sleep.
+
+Choose where the core keeps large values with the required `blobs` option.
+
+- `"sqlite"` keeps the bytes in the actor database. Use this for existing actors that already store their large values there.
+- `s3({ bucket, region })` keeps chunks in an S3-compatible bucket.
+- `vercelBlob({ storeId })` keeps chunks in a private Vercel Blob store.
+
+You can move from SQLite to an external store. Switching away from an external destination is refused because existing chunks live there.
+
+Clients can reach Jazz at `http://localhost:3000/jazz` with the default port.
+
+## Deploy to Rivet Cloud
+
+You can package the Rust core and your TypeScript HTTP server in one app image and deploy it to the `default` pool. This runs both processes on the same node.
+
+Other deployment options (e.g. deploying the backend and core on separate pools) are possible, but the proposed setup is the simplest and works with the one-node limit in Rivet's free tier.
+
+Use the same HTTP server as in local development. Set `JAZZ_RIVET_ENDPOINT` to the cluster’s public HTTPS API endpoint. Rivet supplies `RIVET_ENDPOINT` and `RIVET_TOKEN` to the deployed processes.
+
+### Package both processes
+
+Add a Rust build stage to your app’s Dockerfile. Replace `<jazz-tools-version>` with the version installed in the TypeScript app.
+
+```dockerfile
+FROM rust:1.100.0-bookworm AS jazz-core
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake
+RUN cargo install --locked --root /opt/jazz "jazz-rivet@<jazz-tools-version>"
+```
+
+The container has one entry point for both commands. Save this as `start.sh`, replacing `node server.mjs` with your HTTP server’s start command. The script forwards shutdown signals and stops the other process if either exits.
+
+```bash
+#!/usr/bin/env bash
+jazz-rivet &
+core=$!
+node server.mjs &
+backend=$!
+
+shutdown() {
+  kill -TERM "$backend" "$core" 2>/dev/null || true
+  wait "$backend" "$core" 2>/dev/null || true
+}
+trap 'shutdown; exit 0' TERM INT
+wait -n
+status=$?
+shutdown
+exit "$status"
+```
+
+In the final Node stage, after installing your app (including `ws`) and building its server, copy in the executable and the startup script.
+
+```dockerfile
+COPY --from=jazz-core /opt/jazz/bin/jazz-rivet /usr/local/bin/jazz-rivet
+COPY --chmod=755 start.sh /usr/local/bin/start-jazz
+ENTRYPOINT ["/usr/local/bin/start-jazz"]
+```
+
+### Deploy the app image
+
+To deploy the app to Rivet Cloud, link your cluster and set `JAZZ_CORE_SECRET` once from the app directory. Both processes inherit the same value. Use the API hostname shown for your cluster in the dashboard.
+
+```sh
+npx @rivetkit/cli login
+npx @rivetkit/cli link --org my-org --cluster my-cluster
+npx @rivetkit/cli cluster secret set JAZZ_CORE_SECRET
+npx @rivetkit/cli deploy --pool default --secret JAZZ_CORE_SECRET \
+  --env "JAZZ_RIVET_ENDPOINT=https://<cluster-slug>-api.onrivet.dev"
+```
+
+For other deployment options, see [Rivet’s deployment guide](https://rivet.dev/docs/deploy/).

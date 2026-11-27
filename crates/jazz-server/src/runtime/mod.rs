@@ -69,18 +69,35 @@ use tokio::sync::{oneshot, watch};
 /// Encoded frames exchanged with a host transport.
 pub type AbiBytes = Vec<u8>;
 
+/// Opens connections to the same host-managed SQLite database.
+#[derive(Clone)]
+pub struct ManagedStore(pub Arc<dyn Fn() -> jazz::storage::Storage + Send + Sync>);
+
+impl std::fmt::Debug for ManagedStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ManagedStore")
+    }
+}
+
+impl PartialEq for ManagedStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ManagedStore {}
+
 /// Where the runtime keeps its store.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StorageConfig {
-    /// A store that lives as long as the runtime (tests, dry runs, probes).
+pub struct StorageConfig {
+    source: SqliteSource,
+    blobs: Blobs,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SqliteSource {
     InMemory,
-    /// One SQLite file (WAL), holding the server's host tables too.
-    SQLite {
-        /// The database file.
-        path: PathBuf,
-        /// Where settled large-value bytes live.
-        blobs: Blobs,
-    },
+    Managed(ManagedStore),
+    File(PathBuf),
 }
 
 /// Where a SQLite store keeps settled large-value bytes.
@@ -120,10 +137,24 @@ impl PartialEq for NetworkChunkStore {
 impl Eq for NetworkChunkStore {}
 
 impl StorageConfig {
+    pub fn in_memory() -> Self {
+        Self {
+            source: SqliteSource::InMemory,
+            blobs: Blobs::InFile,
+        }
+    }
+
+    pub fn managed(store: ManagedStore) -> Self {
+        Self {
+            source: SqliteSource::Managed(store),
+            blobs: Blobs::InFile,
+        }
+    }
+
     /// The durable store inside a server data directory.
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
-        Self::SQLite {
-            path: path.into().join("jazz.sqlite"),
+        Self {
+            source: SqliteSource::File(path.into().join("jazz.sqlite")),
             blobs: Blobs::InFile,
         }
     }
@@ -136,11 +167,11 @@ impl StorageConfig {
 
     /// The same store, with settled large-value bytes in `blobs`. In memory
     /// it changes nothing.
-    pub fn with_blobs(self, blobs: Blobs) -> Self {
-        match self {
-            Self::SQLite { path, .. } => Self::SQLite { path, blobs },
-            Self::InMemory => Self::InMemory,
+    pub fn with_blobs(mut self, blobs: Blobs) -> Self {
+        if !matches!(self.source, SqliteSource::InMemory) {
+            self.blobs = blobs;
         }
+        self
     }
 }
 
@@ -3595,7 +3626,8 @@ mod tests {
 
         // Nor from a runtime started through the public API, which owns its
         // store and has no registry.
-        let Err(error) = ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::InMemory)
+        let Err(error) =
+            ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::in_memory())
         else {
             panic!("a store-owning runtime has no registry either");
         };
