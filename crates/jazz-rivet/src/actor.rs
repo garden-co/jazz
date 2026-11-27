@@ -6,7 +6,13 @@ use rivetkit::{Actor, Ctx, Registry, Request, Response, WebSocket, WsMessage};
 use std::{collections::HashMap, sync::Arc};
 
 pub struct JazzActor {
-    core: EmbeddedServer,
+    auth: AuthConfig,
+    store: tokio::sync::Mutex<Store>,
+}
+
+struct Store {
+    destination: crate::blobs::Destination,
+    core: Option<Arc<EmbeddedServer>>,
 }
 
 #[async_trait]
@@ -24,36 +30,20 @@ impl Actor for JazzActor {
         if secret.len() < 32 {
             return Err(anyhow!("JAZZ_CORE_SECRET must have at least 32 characters"));
         }
-        let app_id = jazz::tools::AppId::from_name(ctx.actor_id());
-        let db = ctx.sql().clone();
-        let runtime = tokio::runtime::Handle::current();
-        let owner = ctx.clone();
-        let connection = crate::storage::Connection::new(db, runtime.clone(), move |reason| {
-            let _ = owner.stop_with_error(reason);
-        });
-        let storage = jazz_server::runtime::ManagedStore(Arc::new(move || {
-            jazz::storage::Storage::from_backend(connection.clone())
-        }));
-        let auth = AuthConfig {
-            admin_secret: Some(secret),
-            ..Default::default()
-        };
-        let core = tokio::task::spawn_blocking(move || {
-            runtime.block_on(
-                ServerBuilder::new(app_id)
-                    .with_auth_config(auth)
-                    .with_storage(StorageBackend::Managed(storage))
-                    .build(),
-            )
-        })
-        .await?
-        .map_err(|e| anyhow!(e))?;
+        let destination = crate::blobs::Destination::load(ctx.sql()).await?;
         Ok(Self {
-            core: EmbeddedServer::new(core),
+            auth: AuthConfig {
+                admin_secret: Some(secret),
+                ..Default::default()
+            },
+            store: tokio::sync::Mutex::new(Store {
+                destination,
+                core: None,
+            }),
         })
     }
 
-    async fn on_fetch(self: Arc<Self>, ctx: Ctx<Self>, request: Request) -> Result<Response> {
+    async fn on_fetch(self: Arc<Self>, ctx: Ctx<Self>, mut request: Request) -> Result<Response> {
         let _awake = ctx.keep_awake_region();
         let path = request
             .uri()
@@ -61,46 +51,71 @@ impl Actor for JazzActor {
             .map(|p| p.as_str())
             .unwrap_or("/");
         let path = path.strip_prefix("/request").unwrap_or(path).to_owned();
-        if path == "/app" {
+        let configure = path == "/app/blobs/v1" && request.method().as_str() == "PUT";
+        if path == "/app" || configure {
             let credential = request
                 .headers()
                 .get("x-jazz-backend-credential")
                 .and_then(|value| value.to_str().ok());
-            if jazz_server::middleware::auth::validate_admin_secret(
-                credential,
-                &self.core.state().auth_config,
-            )
-            .is_err()
+            if jazz_server::middleware::auth::validate_admin_secret(credential, &self.auth).is_err()
             {
                 return Response::from_parts(401, HashMap::new(), b"unauthorized".to_vec());
             }
-            return Response::from_parts(
-                200,
-                HashMap::new(),
-                serde_json::to_vec(&serde_json::json!({
-                    "appId": self.core.state().app_id.to_string()
-                }))?,
-            );
-        }
-        if !path.starts_with("/apps/") {
+        } else if !path.starts_with("/apps/") {
             return Response::from_parts(404, HashMap::new(), Vec::new());
         }
-        const MAX_BODY: usize = 8 << 20;
-        if request.body().len() > MAX_BODY {
+        // The SDK can supply either a buffered body or an initial buffer and stream.
+        let limit = if configure { 8192 } else { 8 << 20 };
+        let mut body = std::mem::take(request.body_mut());
+        if body.len() > limit {
             return Response::from_parts(413, HashMap::new(), Vec::new());
         }
-        let (method, _, headers, mut body) = request.to_parts();
-        let headers: Vec<_> = headers.into_iter().collect();
         if let Some(mut stream) = request.take_body_stream() {
             while let Some(chunk) = stream.recv().await? {
-                if chunk.len() > MAX_BODY - body.len() {
+                if chunk.len() > limit - body.len() {
                     return Response::from_parts(413, HashMap::new(), Vec::new());
                 }
                 body.extend_from_slice(&chunk);
             }
         }
+        if path == "/app" || configure {
+            let requested = if configure {
+                match serde_json::from_slice(&body) {
+                    Ok(dest) => Some(dest),
+                    Err(_) => {
+                        return Response::from_parts(
+                            400,
+                            HashMap::new(),
+                            b"invalid blob destination".to_vec(),
+                        );
+                    }
+                }
+            } else {
+                None
+            };
+            let core = match self.open(&ctx, requested).await {
+                Ok(core) => core,
+                Err(error) => {
+                    return Response::from_parts(
+                        409,
+                        HashMap::new(),
+                        error.to_string().into_bytes(),
+                    );
+                }
+            };
+            return Response::from_parts(
+                200,
+                HashMap::new(),
+                serde_json::to_vec(&serde_json::json!({
+                    "appId": core.state().app_id.to_string()
+                }))?,
+            );
+        }
+        let (method, _, headers, _) = request.to_parts();
+        let headers: Vec<_> = headers.into_iter().collect();
         let (status, headers, body) = self
-            .core
+            .open(&ctx, None)
+            .await?
             .handle_parts(&method, &path, &headers, body)
             .await
             .map_err(|e| anyhow!(e))?;
@@ -113,17 +128,18 @@ impl Actor for JazzActor {
         ws: WebSocket,
         request: Request,
     ) -> Result<()> {
+        let core = self.open(&ctx, None).await?;
         let path = request.uri().path();
         if path.strip_prefix("/websocket").unwrap_or(path)
-            != format!("/apps/{}/ws", self.core.state().app_id)
+            != format!("/apps/{}/ws", core.state().app_id)
         {
             return Err(anyhow!("unknown Jazz socket route"));
         }
         let mut upgrade = request.headers().clone();
-        jazz_server::middleware::workload::admit_backend_headers(self.core.state(), &mut upgrade)
+        jazz_server::middleware::workload::admit_backend_headers(core.state(), &mut upgrade)
             .await
             .map_err(|e| anyhow!(e))?;
-        let mut peer = self.core.open_socket(upgrade).map_err(|e| anyhow!(e))?;
+        let mut peer = core.open_socket(upgrade).map_err(|e| anyhow!(e))?;
         let input = peer.sender();
         ws.configure_message_event_callback(Some(Arc::new(move |message, _| {
             let bytes = match message {
@@ -162,12 +178,85 @@ impl Actor for JazzActor {
     }
 }
 impl JazzActor {
+    async fn open(
+        &self,
+        ctx: &Ctx<Self>,
+        requested: Option<crate::blobs::Destination>,
+    ) -> Result<Arc<EmbeddedServer>> {
+        let mut state = self.store.lock().await;
+        if requested.is_none()
+            && let Some(core) = &state.core
+        {
+            return Ok(core.clone());
+        }
+        let app_id = jazz::tools::AppId::from_name(ctx.actor_id());
+        let owner = app_id.to_string();
+        let (destination, blobs) = requested
+            .as_ref()
+            .unwrap_or(&state.destination)
+            .resolve(&owner)
+            .map_err(|e| anyhow!(e))?;
+        let changing = destination != state.destination;
+        if changing && state.destination != crate::blobs::Destination::Sqlite {
+            return Err(anyhow!(
+                "this actor already stores its large values in a different blob destination"
+            ));
+        }
+        if !changing && let Some(core) = &state.core {
+            return Ok(core.clone());
+        }
+        let db = ctx.sql().clone();
+        let runtime = tokio::runtime::Handle::current();
+        let owner = ctx.clone();
+        let connection = crate::storage::Connection::new(db, runtime.clone(), move |reason| {
+            let _ = owner.stop_with_error(reason);
+        });
+        let storage = jazz_server::runtime::ManagedStore(Arc::new(move || {
+            jazz::storage::Storage::from_backend(connection.clone())
+        }));
+        let prepared = ServerBuilder::new(app_id)
+            .with_auth_config(self.auth.clone())
+            .with_storage(StorageBackend::Managed(storage))
+            .with_blob_store(blobs)
+            .prepare_storage()
+            .await
+            .map_err(|e| anyhow!(e))?;
+        if changing {
+            if let Some(core) = &state.core {
+                drain(core).await?;
+            }
+            state.core = None;
+            // Record the resolved destination before any chunk can be externalized.
+            if let Err(error) = destination.pin(ctx.sql()).await {
+                let _ = ctx.stop_with_error("reload the persisted blob destination");
+                return Err(error);
+            }
+            state.destination = destination;
+        }
+        let built = tokio::task::spawn_blocking(move || {
+            let _entered = runtime.enter();
+            prepared.build()
+        })
+        .await?
+        .map_err(|e| anyhow!(e))?;
+        let core = Arc::new(EmbeddedServer::new(built));
+        state.core = Some(core.clone());
+        Ok(core)
+    }
+
     async fn shutdown(&self) -> Result<()> {
-        if self.core.shutdown().await != jazz_server::ShutdownPhase::StorageClosed {
-            return Err(anyhow!("Jazz storage did not drain"));
+        if let Some(core) = &self.store.lock().await.core {
+            drain(core).await?;
         }
         Ok(())
     }
+}
+
+async fn drain(core: &EmbeddedServer) -> Result<()> {
+    if core.shutdown().await != jazz_server::ShutdownPhase::StorageClosed {
+        return Err(anyhow!("Jazz storage did not drain"));
+    }
+    Ok(())
 }
 
 pub fn registry() -> Registry {

@@ -6958,7 +6958,7 @@ mod tests {
         let source = private_docs_public_schema();
         let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&source).unwrap(),
-            StorageConfig::InMemory,
+            StorageConfig::in_memory(),
         )
         .unwrap();
         let schema = || ThinRequest {
@@ -7032,7 +7032,7 @@ mod tests {
         let source = private_docs_public_schema();
         let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&source).unwrap(),
-            StorageConfig::InMemory,
+            StorageConfig::in_memory(),
         )
         .unwrap();
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -7128,7 +7128,7 @@ mod tests {
         let source = private_docs_public_schema();
         let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&source).unwrap(),
-            StorageConfig::InMemory,
+            StorageConfig::in_memory(),
         )
         .unwrap();
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -7274,7 +7274,7 @@ mod tests {
         use crate::runtime::{ServerRuntimeHandle, StorageConfig};
         let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&private_docs_public_schema()).unwrap(),
-            StorageConfig::InMemory,
+            StorageConfig::in_memory(),
         )
         .unwrap();
         runtime.set_egress_limits_for_test(limits).await;

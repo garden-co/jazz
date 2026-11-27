@@ -1,9 +1,11 @@
+import type { S3BlobStore, VercelBlobStore } from "./blobs.js";
 import type { JazzProvider } from "./core-provider.js";
 import { networkTransport } from "./core-transport.js";
 import { remote } from "./remote-provider.js";
 
 /** Connect a main backend to the Jazz core actor for this deployment key. */
 export function rivet(options: {
+  blobs: "sqlite" | S3BlobStore | VercelBlobStore;
   endpoint: string;
   namespace: string;
   pool: string;
@@ -31,6 +33,14 @@ export function rivet(options: {
       "rivet(): namespace, pool, key, token and a core secret of at least 32 characters are required",
     );
   }
+  const blobs = options.blobs;
+  if (blobs !== "sqlite" && blobs?.kind !== "s3" && blobs?.kind !== "vercel-blob") {
+    throw new Error('rivet(): blobs is required and must be "sqlite", s3() or vercelBlob()');
+  }
+  if (blobs !== "sqlite" && blobs.credentials !== undefined) {
+    throw new Error("rivet(): configure blob credentials on the jazz-rivet runner");
+  }
+  const destination = JSON.stringify(blobs === "sqlite" ? { kind: "sqlite" } : blobs);
   const base = endpoint.href.replace(/\/+$/, "");
   return {
     async open(context) {
@@ -64,10 +74,15 @@ export function rivet(options: {
           });
         },
       };
-      const response = await transport.fetch(`${http}/app`, {
-        headers: { "x-jazz-backend-credential": secret },
+      const response = await transport.fetch(`${http}/app/blobs/v1`, {
+        method: "PUT",
+        body: destination,
+        headers: { "x-jazz-backend-credential": secret, "content-type": "application/json" },
       });
-      if (!response.ok) throw new Error(`rivet(): core discovery returned HTTP ${response.status}`);
+      if (!response.ok)
+        throw new Error(
+          `rivet(): configuring blob storage returned HTTP ${response.status}: ${await response.text()}`,
+        );
       const { appId } = await response.json();
       return remote({ url: http, appId, secret, transport }).open(context);
     },

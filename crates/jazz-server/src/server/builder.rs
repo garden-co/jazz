@@ -62,27 +62,29 @@ enum ServerSchemaMode {
 /// registry in one SQLite file, `jazz.sqlite`, in the data directory.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
+    /// The host supplies the SQLite connection, as Rivet does for each actor.
     Managed(crate::runtime::ManagedStore),
     InMemory,
-    Persistent { path: PathBuf },
+    Persistent {
+        path: PathBuf,
+    },
 }
 
 /// Where a persistent store keeps the bytes of large values once they
 /// settle (see [`jazz::chunk_store`]). The rows and the chunk metadata
-/// always stay in `jazz.sqlite`.
+/// always stay in the store's SQLite database.
 #[derive(Debug, Clone)]
 pub enum BlobStore {
-    /// In `jazz.sqlite` itself. Simplest, but the file grows with every
-    /// large value.
+    /// In the same SQLite database as the rows.
     Sqlite,
     /// As files under `dir`; `None` is `blobs/` in the data directory.
     Files { dir: Option<PathBuf> },
     /// As objects in an S3-compatible bucket ([`crate::s3`]). The bucket
-    /// and prefix belong to this data directory alone: a store deletes the
+    /// and prefix belong to this store alone because it deletes the
     /// values it reclaims.
     S3(crate::s3::S3Options),
     /// As private blobs in a Vercel Blob store ([`crate::vercel_blob`]),
-    /// under a prefix that belongs to this data directory alone.
+    /// under a prefix that belongs to this store alone.
     VercelBlob(crate::vercel_blob::VercelBlobOptions),
 }
 
@@ -180,8 +182,53 @@ impl ServerBuilder {
     }
 
     pub async fn build(self) -> Result<BuiltServer, String> {
+        self.prepare_storage().await?.build()
+    }
+
+    /// Validate the row and blob destinations without opening the runtime.
+    /// A managed host can now durably pin its choice before the first chunk moves.
+    pub async fn prepare_storage(self) -> Result<PreparedServer, String> {
+        validate_server_config(&self.auth_config)?;
+        if self.max_websocket_connections == 0 {
+            return Err("max websocket connections must be at least 1".to_owned());
+        }
+        if self.max_websocket_connections_per_user == 0 {
+            return Err("max websocket connections per user must be at least 1".to_owned());
+        }
+        let identity = match &self.storage_backend {
+            StorageBackend::Persistent { path } => {
+                refuse_pre_sqlite_data_dir(path)?;
+                Some(super::identity::open_store_identity(
+                    path,
+                    super::identity::IdentityOpen::Server {
+                        app_id: &self.app_id.to_string(),
+                    },
+                )?)
+            }
+            StorageBackend::InMemory | StorageBackend::Managed(_) => None,
+        };
+
+        // One store per app: the catalogue and the account registry are host
+        // tables in the file the runtime's rows live in, all on its thread.
+        let storage = self.build_core_server_shell_storage_config(identity.as_ref())?;
+        if let Some(s3) = &storage.s3 {
+            s3.check_at_startup()
+                .await
+                .map_err(|error| format!("app {}: {error}", self.app_id))?;
+        }
+        Ok(PreparedServer {
+            builder: self,
+            storage,
+            identity,
+        })
+    }
+
+    fn build_prepared(
+        self,
+        storage: ShellStorage,
+        identity: Option<super::identity::StoreIdentity>,
+    ) -> Result<BuiltServer, String> {
         let mut auth_config = self.auth_config.clone();
-        validate_server_config(&auth_config)?;
         // A trusted workload replaces shared secrets: the server holds random
         // ones only internally, and a verified token stands in for them.
         // Otherwise the admin secret doubles as a backend credential, so a
@@ -222,38 +269,12 @@ impl ServerBuilder {
             }
             (None, None) => (None, None),
         };
-        if self.max_websocket_connections == 0 {
-            return Err("max websocket connections must be at least 1".to_owned());
-        }
-        if self.max_websocket_connections_per_user == 0 {
-            return Err("max websocket connections per user must be at least 1".to_owned());
-        }
-        let identity = match &self.storage_backend {
-            StorageBackend::Persistent { path } => {
-                refuse_pre_sqlite_data_dir(path)?;
-                Some(super::identity::open_store_identity(
-                    path,
-                    super::identity::IdentityOpen::Server {
-                        app_id: &self.app_id.to_string(),
-                    },
-                )?)
-            }
-            StorageBackend::InMemory | StorageBackend::Managed(_) => None,
-        };
         log_auth_config(&auth_config);
-
-        // One store per app: the catalogue and the account registry are host
-        // tables in the file the runtime's rows live in, all on its thread.
         let ShellStorage {
             config: storage_config,
             record: blob_store_record,
-            s3,
-        } = self.build_core_server_shell_storage_config(identity.as_ref())?;
-        if let Some(s3) = s3 {
-            s3.check_at_startup()
-                .await
-                .map_err(|error| format!("app {}: {error}", self.app_id))?;
-        }
+            ..
+        } = storage;
         let store = AppStore::open(&storage_config)?;
         // Only a store that opened is recorded as having moved its blobs.
         if let Some(record) = blob_store_record {
@@ -377,27 +398,38 @@ impl ServerBuilder {
         &self,
         identity: Option<&super::identity::StoreIdentity>,
     ) -> Result<ShellStorage, String> {
-        match &self.storage_backend {
-            StorageBackend::Managed(store) => {
-                if !matches!(self.blobs, BlobStore::Sqlite) {
-                    return Err("Managed storage requires SQLite blobs".into());
-                }
-                Ok(ShellStorage {
-                    config: StorageConfig::Managed(store.clone()),
+        let (base, owner, directory) = match &self.storage_backend {
+            StorageBackend::InMemory => {
+                return Ok(ShellStorage {
+                    config: StorageConfig::in_memory(),
                     record: None,
                     s3: None,
-                })
+                });
             }
-            StorageBackend::InMemory => Ok(ShellStorage {
-                config: StorageConfig::InMemory,
-                record: None,
-                s3: None,
-            }),
+            StorageBackend::Managed(store) => (
+                StorageConfig::managed(store.clone()),
+                self.app_id.to_string(),
+                None,
+            ),
             StorageBackend::Persistent { path } => {
                 let identity = identity.ok_or("a persistent store opens with its identity")?;
-                self.blobs.clone().open(path, identity)
+                (
+                    StorageConfig::data_dir(path),
+                    identity.store_id.clone(),
+                    Some((path, identity.blob_store.as_deref())),
+                )
             }
-        }
+        };
+        let mut blobs = self.blobs.clone();
+        blobs.default_prefix(&owner);
+        let plan = match directory {
+            Some((path, recorded)) => plan_blob_store(path, recorded, &blobs)?,
+            None => BlobStorePlan {
+                blob_dir: None,
+                record: None,
+            },
+        };
+        blobs.open_on(base, &owner, plan)
     }
 
     #[cfg(test)]
@@ -407,16 +439,8 @@ impl ServerBuilder {
 }
 
 impl BlobStore {
-    /// Open the destination for this data directory. Validate the persisted
-    /// choice before contacting a store or claiming a directory. The caller
-    /// writes the new record only after the database opens successfully.
-    fn open(
-        mut self,
-        path: &Path,
-        identity: &super::identity::StoreIdentity,
-    ) -> Result<ShellStorage, String> {
-        let owner = &identity.store_id;
-        let prefix = match &mut self {
+    fn default_prefix(&mut self, owner: &str) {
+        let prefix = match self {
             Self::S3(options) => Some(&mut options.prefix),
             Self::VercelBlob(options) => Some(&mut options.prefix),
             _ => None,
@@ -426,34 +450,40 @@ impl BlobStore {
         {
             *prefix = format!("jazz/{owner}/");
         }
-        let plan = plan_blob_store(path, identity.blob_store.as_deref(), &self)?;
-        let base = StorageConfig::data_dir(path);
+    }
+
+    fn open_on(
+        self,
+        base: StorageConfig,
+        owner: &str,
+        plan: BlobStorePlan,
+    ) -> Result<ShellStorage, String> {
+        use crate::runtime::{Blobs, NetworkChunkStore};
+
         let mut s3 = None;
         let config = match self {
             Self::Sqlite => base,
             Self::Files { .. } => {
-                let dir = plan.blob_dir.expect("plan resolves a files destination");
+                let dir = plan
+                    .blob_dir
+                    .ok_or("Managed storage does not support file blobs")?;
                 claim_blob_dir(owner, &dir)?;
                 base.with_blob_dir(dir)
             }
             Self::S3(options) => {
                 warn_on_distant_bucket(&options);
                 let name = options.describe();
-                let store = Arc::new(crate::s3::S3ChunkStore::new(options, owner.clone())?);
-                s3 = Some(Arc::clone(&store));
-                base.with_blobs(crate::runtime::Blobs::Network(
-                    crate::runtime::NetworkChunkStore { store, name },
-                ))
+                let store = Arc::new(crate::s3::S3ChunkStore::new(options, owner.into())?);
+                s3 = Some(store.clone());
+                base.with_blobs(Blobs::Network(NetworkChunkStore { store, name }))
             }
             Self::VercelBlob(options) => {
                 let name = options.describe();
                 let store = Arc::new(crate::vercel_blob::VercelBlobChunkStore::new(
                     options,
-                    owner.clone(),
+                    owner.into(),
                 )?);
-                base.with_blobs(crate::runtime::Blobs::Network(
-                    crate::runtime::NetworkChunkStore { store, name },
-                ))
+                base.with_blobs(Blobs::Network(NetworkChunkStore { store, name }))
             }
         };
         Ok(ShellStorage {
@@ -461,6 +491,19 @@ impl BlobStore {
             record: plan.record,
             s3,
         })
+    }
+}
+
+/// A server whose storage destinations have passed startup checks.
+pub struct PreparedServer {
+    builder: ServerBuilder,
+    storage: ShellStorage,
+    identity: Option<super::identity::StoreIdentity>,
+}
+
+impl PreparedServer {
+    pub fn build(self) -> Result<BuiltServer, String> {
+        self.builder.build_prepared(self.storage, self.identity)
     }
 }
 

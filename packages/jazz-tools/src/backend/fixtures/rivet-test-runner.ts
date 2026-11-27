@@ -8,8 +8,8 @@ import { getEnginePath } from "@rivetkit/engine-cli";
 import { afterAll, beforeAll, expect, vi } from "vitest";
 import { getAvailablePort } from "../../dev/test-helpers.js";
 
-export function rivetTestRunner() {
-  if (process.env.JAZZ_RIVET_TEST_ENDPOINT) {
+export function rivetTestRunner({ local = false } = {}) {
+  if (!local && process.env.JAZZ_RIVET_TEST_ENDPOINT) {
     return {
       endpoint: process.env.JAZZ_RIVET_TEST_ENDPOINT,
       namespace: process.env.RIVET_NAMESPACE ?? "default",
@@ -33,13 +33,16 @@ export function rivetTestRunner() {
     const { target_directory } = JSON.parse(
       execFileSync("cargo", ["metadata", "--format-version=1", "--no-deps"], { encoding: "utf8" }),
     );
+    const directory = await mkdtemp(join(tmpdir(), "jazz-rivet-"));
     const port = await getAvailablePort();
     config.endpoint = `http://127.0.0.1:${port}`;
-    const directory = await mkdtemp(join(tmpdir(), "jazz-rivet-"));
     const runner = spawn(join(target_directory, "debug", "jazz-rivet"), [], {
       cwd: directory,
       env: {
+        NODE_ENV: "test",
         PATH: process.env.PATH,
+        AWS_ACCESS_KEY_ID: "test-access-key",
+        AWS_SECRET_ACCESS_KEY: "test-secret-key",
         RIVET_ENGINE_BINARY_PATH: binary,
         RIVET_RUN_ENGINE_PORT: String(port),
         RIVETKIT_STORAGE_PATH: directory,

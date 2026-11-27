@@ -47,6 +47,7 @@ const jazz = createJazz({
     endpoint: process.env.JAZZ_RIVET_ENDPOINT!,
     namespace: process.env.RIVET_NAMESPACE ?? "default",
     token: process.env.RIVET_TOKEN!,
+    blobs: "sqlite",
     pool: "default",
     key: "my-app",
     secret: process.env.JAZZ_CORE_SECRET!,
@@ -62,6 +63,14 @@ server.listen(Number(process.env.PORT ?? 3000));
 `jazz.nodeHandler` serves HTTP requests at `/jazz`, and `jazz.attach(server)` handles WebSocket upgrades on the same port. If your app already has a Node HTTP server, route `/jazz` and its subpaths to `jazz.nodeHandler` and attach Jazz to that server.
 
 Opening the store gets or creates the actor in the Rivet pool. Keep its namespace and key stable across releases. A new key opens a separate database. WebSocket sessions keep the actor awake until disconnect. Its SQLite storage survives sleep.
+
+Choose where the core keeps large values with the required `blobs` option.
+
+- `"sqlite"` keeps the bytes in the actor database. Use this for existing actors that already store their large values there.
+- `s3({ bucket, region })` keeps chunks in an S3-compatible bucket.
+- `vercelBlob({ storeId })` keeps chunks in a private Vercel Blob store.
+
+You can move from SQLite to an external store. Switching away from an external destination is refused because existing chunks live there.
 
 Clients can reach Jazz at `http://localhost:3000/jazz` with the default port.
 

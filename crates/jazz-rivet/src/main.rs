@@ -1,4 +1,5 @@
 mod actor;
+mod blobs;
 mod storage;
 
 #[tokio::main]

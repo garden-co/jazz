@@ -88,17 +88,16 @@ impl Eq for ManagedStore {}
 
 /// Where the runtime keeps its store.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StorageConfig {
-    /// A store that lives as long as the runtime (tests, dry runs, probes).
+pub struct StorageConfig {
+    source: SqliteSource,
+    blobs: Blobs,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SqliteSource {
     InMemory,
     Managed(ManagedStore),
-    /// One SQLite file (WAL), holding the server's host tables too.
-    SQLite {
-        /// The database file.
-        path: PathBuf,
-        /// Where settled large-value bytes live.
-        blobs: Blobs,
-    },
+    File(PathBuf),
 }
 
 /// Where a SQLite store keeps settled large-value bytes.
@@ -138,10 +137,24 @@ impl PartialEq for NetworkChunkStore {
 impl Eq for NetworkChunkStore {}
 
 impl StorageConfig {
+    pub fn in_memory() -> Self {
+        Self {
+            source: SqliteSource::InMemory,
+            blobs: Blobs::InFile,
+        }
+    }
+
+    pub fn managed(store: ManagedStore) -> Self {
+        Self {
+            source: SqliteSource::Managed(store),
+            blobs: Blobs::InFile,
+        }
+    }
+
     /// The durable store inside a server data directory.
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
-        Self::SQLite {
-            path: path.into().join("jazz.sqlite"),
+        Self {
+            source: SqliteSource::File(path.into().join("jazz.sqlite")),
             blobs: Blobs::InFile,
         }
     }
@@ -154,11 +167,11 @@ impl StorageConfig {
 
     /// The same store, with settled large-value bytes in `blobs`. In memory
     /// it changes nothing.
-    pub fn with_blobs(self, blobs: Blobs) -> Self {
-        match self {
-            Self::SQLite { path, .. } => Self::SQLite { path, blobs },
-            other => other,
+    pub fn with_blobs(mut self, blobs: Blobs) -> Self {
+        if !matches!(self.source, SqliteSource::InMemory) {
+            self.blobs = blobs;
         }
+        self
     }
 }
 

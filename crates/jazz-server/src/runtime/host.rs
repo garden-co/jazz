@@ -69,24 +69,24 @@ pub(super) struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 pub(super) enum Source {
-    /// The database file, and where its large-value bytes live.
-    File(PathBuf, Blobs),
+    /// The database file containing rows and host tables.
+    File(PathBuf),
     /// An in-memory store shared by name within this process.
     Memory(String),
     Managed(ManagedStore),
 }
 
 impl Source {
-    pub(super) fn new(storage: &StorageConfig) -> Self {
+    pub(super) fn new(storage: &SqliteSource) -> Self {
         static NEXT_MEMORY_STORE: AtomicU64 = AtomicU64::new(0);
         match storage {
-            StorageConfig::Managed(store) => Self::Managed(store.clone()),
-            StorageConfig::InMemory => Self::Memory(format!(
+            SqliteSource::Managed(store) => Self::Managed(store.clone()),
+            SqliteSource::InMemory => Self::Memory(format!(
                 "jazz-server-{}-{}",
                 std::process::id(),
                 NEXT_MEMORY_STORE.fetch_add(1, Ordering::Relaxed)
             )),
-            StorageConfig::SQLite { path, blobs } => Self::File(path.clone(), blobs.clone()),
+            SqliteSource::File(path) => Self::File(path.clone()),
         }
     }
 
@@ -94,7 +94,7 @@ impl Source {
         match self {
             Self::Managed(store) => jazz::db::block_on(StoreFile::from_storage((store.0)())),
             Self::Memory(name) => jazz::db::block_on(StoreFile::shared_memory(name)),
-            Self::File(path, _) => {
+            Self::File(path) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -113,11 +113,22 @@ impl Source {
         .map_err(|error| format!("open server store: {error}"))
     }
 
+    pub(super) fn reader(&self) -> Result<HostReader, String> {
+        match self {
+            Self::Managed(store) => HostReader::from_storage((store.0)()),
+            Self::Memory(name) => HostReader::shared_memory(name),
+            Self::File(path) => HostReader::open(path, None),
+        }
+        .map_err(|error| format!("open server store reader: {error}"))
+    }
+}
+
+impl Blobs {
     /// The chunk store the runtime's large-value bytes go to, if not the
     /// database file.
     pub(super) fn chunk_store(&self) -> Result<Option<ChunkStoreChoice>, String> {
         match self {
-            Self::File(_, Blobs::Files(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
+            Self::Files(dir) => jazz::chunk_store::FileChunkStore::new(dir)
                 .map(|store| {
                     Some(ChunkStoreChoice {
                         store: Arc::new(store),
@@ -125,21 +136,12 @@ impl Source {
                     })
                 })
                 .map_err(|error| format!("open large-value directory {}: {error}", dir.display())),
-            Self::File(_, Blobs::Network(network)) => Ok(Some(ChunkStoreChoice {
+            Self::Network(network) => Ok(Some(ChunkStoreChoice {
                 store: Arc::clone(&network.store),
                 network: true,
             })),
-            _ => Ok(None),
+            Self::InFile => Ok(None),
         }
-    }
-
-    pub(super) fn reader(&self) -> Result<HostReader, String> {
-        match self {
-            Self::Managed(store) => HostReader::from_storage((store.0)()),
-            Self::Memory(name) => HostReader::shared_memory(name),
-            Self::File(path, _) => HostReader::open(path, None),
-        }
-        .map_err(|error| format!("open server store reader: {error}"))
     }
 }
 
@@ -427,7 +429,8 @@ impl ChunkIoRunner {
 impl AppStore {
     /// Open the store `storage` names on its own thread.
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
-        let source = Source::new(storage);
+        let source = Source::new(&storage.source);
+        let blobs = storage.blobs.clone();
         let (work, receiver) = std_mpsc::channel::<Work>();
         let thread_wake = work.clone();
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
@@ -460,6 +463,7 @@ impl AppStore {
                 };
                 StoreLoop {
                     source: thread_source,
+                    blobs,
                     work: receiver,
                     wake: thread_wake,
                     host: host_jobs,
@@ -514,7 +518,7 @@ impl AppStore {
 
     /// A store that lives as long as its handles.
     pub fn memory() -> Result<Self, String> {
-        Self::open(&StorageConfig::InMemory)
+        Self::open(&StorageConfig::in_memory())
     }
 
     /// Key-value access to one host table.
@@ -756,6 +760,7 @@ impl Unavailable {
 /// The store thread.
 pub(super) struct StoreLoop {
     pub(super) source: Source,
+    blobs: Blobs,
     pub(super) work: std_mpsc::Receiver<Work>,
     /// Hands runtime work back to this loop (a network chunk store's
     /// finished batches).
@@ -925,7 +930,7 @@ impl StoreLoop {
                 Owner::open(
                     runtime.schema.clone(),
                     file,
-                    self.source.chunk_store()?,
+                    self.blobs.chunk_store()?,
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
