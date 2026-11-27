@@ -9,9 +9,9 @@ profile, an app install and a Node process with its own private store are each o
 
 `await db.encryption.ready()` returns the device's status:
 
-- `"active"`: the device belongs to the account. It reads and writes a space's encrypted data
-  once it holds that space's key, which another device sends it. An active device can still be
-  waiting for one space's key. See [When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
+- `"active"`: the device belongs to the account and can open every space key sent to the
+  account. A key the account hasn't been sent yet, such as for a space it has just joined, still
+  has to arrive first. See [When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
 - `"awaiting-approval"`: the device is new and needs approval or recovery.
 - `"reenrolled"`: the device was removed from the account and has signed up again as a new one.
 
