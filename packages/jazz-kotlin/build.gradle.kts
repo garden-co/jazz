@@ -39,6 +39,8 @@
 
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
+import org.jetbrains.kotlin.konan.target.KonanTarget
 
 plugins {
     kotlin("multiplatform") version "2.2.21"
@@ -82,6 +84,22 @@ if (withAndroid) {
         }
     }
 }
+
+// ---- EXPERIMENTAL iOS (-PjazzIos=true): untested, compile and link only ----
+// Kotlin/Native over jazz-ffi's C ABI (src/nativeMain, cinterop on
+// crates/jazz-ffi/include/jazz_ffi.h), for iosArm64 and iosSimulatorArm64
+// (and iosX64 with -PjazzIosX64=true). Needs macOS with Xcode, and each
+// target's staticlib at <jazzIosLibs>/<rust target>/libjazz_ffi.a (default
+// <repo>/target/<rust target>/release, where build-swift-xcframework.sh's
+// cargo puts them; JAZZ_FFI_SLICES has the same layout).
+val withIos = (findProperty("jazzIos") as String?) == "true"
+val iosLibs: File? = (findProperty("jazzIosLibs") as String?)?.let { file(it) }
+
+/** Where the staticlib for Rust target [rust] is. */
+fun iosLibDir(rust: String): File = iosLibs?.resolve(rust) ?: repo.resolve("target/$rust/release")
+// nativeMain is shared by the iOS targets: its metadata compilation (published
+// with them) needs the cinterop bindings commonized.
+if (withIos) extra["kotlin.mpp.enableCInteropCommonization"] = "true"
 
 // ---- jazz-ffi for the JVM: the host's library and bindings ----
 
@@ -214,6 +232,47 @@ kotlin {
         testRuns.create("computed") {
             setExecutionSourceFrom(computed)
             executionTask.configure { useJUnitPlatform() }
+        }
+    }
+    // EXPERIMENTAL, UNTESTED iOS targets, only with -PjazzIos=true: without it
+    // this build (and what it publishes) is exactly the JVM + Android one.
+    if (withIos) {
+        val iosTargets = buildList {
+            add(iosArm64())
+            add(iosSimulatorArm64())
+            if (findProperty("jazzIosX64") == "true") add(iosX64())
+        }
+        iosTargets.forEach { target ->
+            val rust = when (target.konanTarget) {
+                KonanTarget.IOS_ARM64 -> "aarch64-apple-ios"
+                KonanTarget.IOS_SIMULATOR_ARM64 -> "aarch64-apple-ios-sim"
+                else -> "x86_64-apple-ios"
+            }
+            val libDir = iosLibDir(rust)
+            target.compilations.getByName("main").cinterops.create("jazzFfi") {
+                definitionFile.set(project.file("src/nativeInterop/cinterop/jazz_ffi.def"))
+                includeDirs(repo.resolve("crates/jazz-ffi/include"))
+                // The static library goes into the klib: an app linking the
+                // klib links jazz-ffi too, with no separate native artifact.
+                extraOpts("-staticLibrary", "libjazz_ffi.a", "-libraryPath", libDir.path)
+                tasks.named(interopProcessingTaskName) {
+                    // extraOpts are opaque to Gradle: without this a rebuilt jazz-ffi stays out of the klib.
+                    inputs.files(libDir.resolve("libjazz_ffi.a"))
+                    doFirst {
+                        check(libDir.resolve("libjazz_ffi.a").isFile) {
+                            "no ${libDir.resolve("libjazz_ffi.a")}: build it with `cargo rustc -p jazz-ffi --release --lib " +
+                                "--target $rust --crate-type staticlib` (as dev/scripts/build-swift-xcframework.sh does), " +
+                                "or point -PjazzIosLibs=<dir> at <dir>/$rust/libjazz_ffi.a"
+                        }
+                    }
+                }
+            }
+            // A framework only to prove the klib links (linkDebugFrameworkIos*); never published.
+            target.binaries.framework(listOf(NativeBuildType.DEBUG)) {
+                baseName = "JazzKotlinLinkCheck"
+                // libjazz_ffi.a is built for iOS 16.0, as JazzFFI.xcframework is.
+                freeCompilerArgs += "-Xoverride-konan-properties=osVersionMin.${target.konanTarget.name}=16.0"
+            }
         }
     }
     if (withAndroid) {

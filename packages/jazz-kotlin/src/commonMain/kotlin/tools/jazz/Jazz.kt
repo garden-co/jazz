@@ -716,7 +716,7 @@ public class Jazz internal constructor(
             }
         } catch (e: JazzException.StillQueued) {
             // On the innermost one: kotlinx may have wrapped it in a copy.
-            cancelledBy?.let { cancel -> runCatching { generateSequence<Throwable>(e) { it.cause }.last().initCause(cancel) } }
+            cancelledBy?.let { cancel -> runCatching { generateSequence<Throwable>(e) { it.cause }.last().initCauseCompat(cancel) } }
             throw e
         }
     }

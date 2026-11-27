@@ -64,6 +64,10 @@ internal actual fun <T> blockOn(block: suspend () -> T): T = runBlocking { block
 
 internal actual fun <E> SendChannel<E>.trySendBlockingCompat(element: E): ChannelResult<Unit> = trySendBlocking(element)
 
+internal actual fun Throwable.initCauseCompat(cause: Throwable) {
+    initCause(cause)
+}
+
 internal actual fun startThread(name: String, block: () -> Unit) {
     Thread(block, name).apply { isDaemon = false }.start()
 }
