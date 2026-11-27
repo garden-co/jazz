@@ -291,6 +291,15 @@ pub struct Encryption {
     /// Set when the connection came back: the loop verifies and runs the
     /// delivery pass again once caught up.
     reconnected: Cell<bool>,
+    /// Set when the first connection of this session came up before the
+    /// session was ever online: the loop verifies and runs the session's
+    /// background pass again, since one that ran offline served nothing.
+    first_online: Cell<bool>,
+    /// Whether this session has been online: told so, or its start ran
+    /// online. Only a connection that comes back after that is a reconnect.
+    been_online: Cell<bool>,
+    /// Whether the connection went away after the session had been online.
+    went_offline: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
     /// Whether the client knows the catalogue identities, so it can open
     /// the encrypted rows its store holds with the keys it holds (loaded
@@ -549,6 +558,9 @@ impl Encryption {
             commands: RefCell::default(),
             spaces,
             reconnected: Cell::new(false),
+            first_online: Cell::new(false),
+            been_online: Cell::new(false),
+            went_offline: Cell::new(false),
             status: Cell::new(None),
             readable: Cell::new(false),
             native,
@@ -655,10 +667,20 @@ impl Encryption {
     /// The connection to the server went away (`false`) or came back
     /// (`true`): offline, equality queries match every row of a space; back
     /// online, the loop verifies the account and runs the delivery pass.
+    /// The first connection of a session that was never online (a host
+    /// reports its link as it opens, before it connects) is not a
+    /// reconnect: the loop runs the session's background pass instead. A
+    /// reconnect after it is kept, however the notices are batched.
     pub fn set_online(&self, online: bool) {
         self.client.set_online(online);
         if online {
-            self.reconnected.set(true);
+            if !self.been_online.replace(true) {
+                self.first_online.set(true);
+            } else if self.went_offline.replace(false) {
+                self.reconnected.set(true);
+            }
+        } else if self.been_online.get() {
+            self.went_offline.set(true);
         }
         (self.wake)();
     }
@@ -1408,6 +1430,11 @@ async fn main_loop(this: Rc<Encryption>) {
     let mut retry_at: Option<web_time::Instant> = None;
     let mut start = true;
     let mut reconnect = false;
+    // The session's background pass (protocol §3.4): due at start and at
+    // the first connection; then one space per turn, after the turn's
+    // read-blocking work.
+    let mut background_due = false;
+    let mut background: Option<VecDeque<crate::spaces::BackgroundSpace>> = None;
     let mut approval: Option<(String, _)> = None;
     let mut noticed = false;
     let mut retry_challenge_at = None;
@@ -1433,6 +1460,10 @@ async fn main_loop(this: Rc<Encryption>) {
             // The retained subscriptions catch up through the normal sync path.
             verify = true;
             reconnect = true;
+        }
+        if this.first_online.replace(false) {
+            verify = true;
+            background_due = true;
         }
         if retry_at.is_some_and(|at| web_time::Instant::now() >= at) {
             retry_at = None;
@@ -1711,13 +1742,16 @@ async fn main_loop(this: Rc<Encryption>) {
                     };
                     let _ = reply.send(outcome);
                 }
-                if start || reconnect {
-                    let retained = (!start && covered).then_some(&*watch);
-                    let resume = start;
-                    start = false;
-                    reconnect = false;
+                if std::mem::take(&mut start) {
+                    if client.shared.keys.borrow().online {
+                        this.been_online.set(true);
+                    }
+                    background_due = true;
+                }
+                if std::mem::take(&mut reconnect) {
+                    let retained = covered.then_some(&*watch);
                     match client
-                        .deliver_keys_outside_watch(&db, retained, resume)
+                        .deliver_keys_outside_watch(&db, retained, false)
                         .await
                     {
                         Ok(results) => {
@@ -1732,9 +1766,40 @@ async fn main_loop(this: Rc<Encryption>) {
                         Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
                     }
                 }
+                if std::mem::take(&mut background_due) {
+                    match client.background_spaces(&db).await {
+                        Ok(spaces) => {
+                            client.shared.member_watch.borrow_mut().failure_round_held = true;
+                            background = Some(spaces.into());
+                        }
+                        Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
+                    }
+                }
+                // One space per turn, and none while a read waits: the next
+                // turn settles reads and serves the spaces they wait for
+                // first.
+                let blocked = !client.shared.missing.borrow().is_empty()
+                    || !this.uses.borrow().is_empty()
+                    || !this.commands.borrow().is_empty();
+                if !blocked && let Some(queue) = background.as_mut() {
+                    this.stage.set("background pass");
+                    if let Some(step) = queue.pop_front()
+                        && let Err(error) = Box::pin(client.background_step(&db, &step)).await
+                    {
+                        client.tell_delivery_failed(&step.space, &error);
+                    }
+                    if queue.is_empty() {
+                        background = None;
+                        client.shared.member_watch.borrow_mut().failure_round_held = false;
+                    }
+                }
             }
         }
-        this.stage.set("idle");
+        this.stage.set(if background.is_some() {
+            "background pass"
+        } else {
+            "idle"
+        });
         // The approval watch wakes the loop when evidence changes. A retry
         // deadline covers a failed watch or authoritative challenge read,
         // and the slow re-check a watch that stalls or a read that ran early.
@@ -1752,6 +1817,8 @@ async fn main_loop(this: Rc<Encryption>) {
         // iteration was suspended after its drain point. Ask for the next
         // iteration only if it can take work left in the queues.
         if this.reconnected.get()
+            || this.first_online.get()
+            || background.is_some()
             || !this.commands.borrow().is_empty()
             || (this.status.get() == Some(AccountStatus::Active)
                 && spaces.is_some()

@@ -34,6 +34,7 @@ use crate::error::ClientError;
 use crate::hooks::code;
 use crate::state::{Missing, Report, SettleBackoff, Shared, db_address};
 
+pub(crate) use delivery::BackgroundSpace;
 pub use delivery::MEMBER_LIMIT;
 use delivery::Rotation;
 pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
@@ -850,6 +851,7 @@ impl E2eeClient {
         #[cfg(any(test, feature = "testing"))]
         {
             let mut watch = self.shared.member_watch.borrow_mut();
+            watch.work.push(("acquire", space.clone()));
             if watch.fail_acquisitions > 0 {
                 watch.fail_acquisitions -= 1;
                 return Err(

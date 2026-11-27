@@ -582,6 +582,9 @@ pub(crate) struct WatchedMembers {
 pub(crate) struct WatchedRows<K> {
     pub stream: jazz::db::SubscriptionStream,
     pub rows: BTreeMap<RowUuid, (K, jazz::db::Pos)>,
+    /// The next delta is the stream's opening, kept as the rows already
+    /// seen rather than reported as changes.
+    baseline: bool,
 }
 
 impl<K: Ord + Clone> WatchedRows<K> {
@@ -589,6 +592,16 @@ impl<K: Ord + Clone> WatchedRows<K> {
         Self {
             stream,
             rows: BTreeMap::new(),
+            baseline: false,
+        }
+    }
+
+    /// A stream whose opening is a baseline: the rows it opens with are
+    /// not changes, only what later deltas add, update or remove is.
+    pub fn from_baseline(stream: jazz::db::SubscriptionStream) -> Self {
+        Self {
+            baseline: true,
+            ..Self::new(stream)
         }
     }
 
@@ -609,6 +622,14 @@ impl<K: Ord + Clone> WatchedRows<K> {
                     reset,
                     ..
                 } => {
+                    if std::mem::take(&mut self.baseline) {
+                        self.rows = added
+                            .into_iter()
+                            .chain(updated)
+                            .filter_map(|row| Some((row.row_uuid(), (owner(&row)?, row.seq()))))
+                            .collect();
+                        continue;
+                    }
                     let mut previous = if reset {
                         std::mem::take(&mut self.rows)
                     } else {
@@ -685,12 +706,19 @@ pub(crate) struct MemberWatch {
     /// Spaces told `delivery-failed` in the current round: one sync and the
     /// startup or reconnect sweep that follows it.
     pub delivery_failures_told: BTreeSet<SpaceAddress>,
+    /// While the session's background pass runs, over several turns of the
+    /// loop, the round lasts until it ends: a space is told once.
+    pub failure_round_held: bool,
     /// Tests: the next sync fails before it serves anything.
     #[cfg(any(test, feature = "testing"))]
     pub fail_next_sync: bool,
     /// Tests: how many of the next full acquisitions fail.
     #[cfg(any(test, feature = "testing"))]
     pub fail_acquisitions: u32,
+    /// Tests: the full acquisitions and passes run, in order, each with
+    /// its space.
+    #[cfg(any(test, feature = "testing"))]
+    pub work: Vec<(&'static str, SpaceAddress)>,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 

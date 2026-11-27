@@ -722,6 +722,18 @@ impl E2eeClient {
         Ok(())
     }
 
+    /// The full acquisitions (`"acquire"`), passes (`"pass"`) and steps of
+    /// the session's background pass (`"background"`, before that step's
+    /// own work) run since the last call, in order, each with its space.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn take_work_for_test(&self) -> Vec<(&'static str, jazz::e2ee::SpaceAddress)> {
+        std::mem::take(&mut self.shared.member_watch.borrow_mut().work)
+            .into_iter()
+            .map(|(kind, space)| (kind, crate::state::db_address(&space)))
+            .collect()
+    }
+
     /// Makes the next `count` full acquisitions of a space fail, as a
     /// failed read of the space would.
     #[doc(hidden)]
