@@ -19,6 +19,8 @@ use crate::records::Value;
 use crate::tools::OpenTransactionId;
 use crate::values::Schema;
 use crate::values::{CachedRow, Sql};
+#[cfg(feature = "e2ee-client")]
+use jazz_protocol::protocol::PermissionAdviceAction;
 
 impl Db {
     /// Counts retained staging state that a row read cannot observe.
@@ -742,4 +744,65 @@ fn member_address<'a>(
         Some(Value::Uuid(id)) => Some(*id),
         _ => None,
     })
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Db {
+    /// `action` as the authority will see the write it previews: an insert's
+    /// or update's cells sealed by the encryption hooks, as the write itself
+    /// seals them, so the dry run judges the cells the write would carry and
+    /// no encrypted column's plaintext leaves this device. Reads, deletes and
+    /// any action of a database without hooks pass through as they are.
+    ///
+    /// `None` when the advice cannot be judged from the one action: the
+    /// hooks refuse to seal it (no held key, a pending space, a keyless
+    /// backend writing an encrypted column), or sealing it would also stage
+    /// internal rows (a space's first root), which the write commits with it
+    /// and a single-action dry run leaves out.
+    pub(crate) async fn sealed_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> Option<PermissionAdviceAction> {
+        use super::UpdateOptions;
+        let Some(hooks) = self.inner.e2ee_hooks().cloned() else {
+            return Some(action);
+        };
+        let mut op = match action {
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    // The authority draws its own id for the candidate.
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..InsertOptions::default()
+                },
+            ),
+            PermissionAdviceAction::Update { table, row, patch } => {
+                StagedOp::Update(table, row, patch, UpdateOptions::default())
+            }
+            other => return Some(other),
+        };
+        let companions = {
+            let _operation = self.write_operation().await;
+            let schema = self.operation_schema();
+            self.inner
+                .without_overlay()
+                .seal_op(&schema, &mut op, None)
+                .await
+                .ok()?
+        };
+        if !companions.is_empty() {
+            hooks.companions_dropped(&companion_names(&companions));
+            return None;
+        }
+        match op {
+            StagedOp::Insert(table, cells, _) => {
+                Some(PermissionAdviceAction::Insert { table, cells })
+            }
+            StagedOp::Update(table, row, patch, _) => {
+                Some(PermissionAdviceAction::Update { table, row, patch })
+            }
+            _ => unreachable!("only inserts and updates are sealed"),
+        }
+    }
 }

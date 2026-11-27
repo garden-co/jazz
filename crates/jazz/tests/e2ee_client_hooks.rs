@@ -641,6 +641,8 @@ fn text(value: &str) -> Value {
 
 /// A transport that keeps every frame it sends, as bytes on the wire.
 struct Recorded {
+    /// Every message sent, kept for the tests that look at what went up.
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     wire: Rc<RefCell<Vec<u8>>>,
@@ -655,6 +657,7 @@ impl Transport for Recorded {
         if let (Some(reads), SyncMessage::Read { query, .. }) = (&self.reads, &message) {
             reads.borrow_mut().push((**query).clone());
         }
+        self.sent.borrow_mut().push(message.clone());
         self.out.borrow_mut().push_back(message);
         Ok(())
     }
@@ -676,10 +679,27 @@ fn link_as(
     author: AuthorSubject,
     reads: Option<Rc<RefCell<Vec<Query>>>>,
 ) -> (jazz::db::Upstream, Rc<RefCell<Vec<u8>>>) {
+    let (link, wire, _) = link_recording(client, server, author, reads);
+    (link, wire)
+}
+
+/// [`link_as`], also keeping every message `client` sends up.
+fn link_recording(
+    client: &Db,
+    server: &Db,
+    author: AuthorSubject,
+    reads: Option<Rc<RefCell<Vec<Query>>>>,
+) -> (
+    jazz::db::Upstream,
+    Rc<RefCell<Vec<u8>>>,
+    Rc<RefCell<Vec<SyncMessage>>>,
+) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let wire = Rc::new(RefCell::new(Vec::new()));
+    let sent = Rc::new(RefCell::new(Vec::new()));
     let link = block_on(client.connect_upstream(Box::new(Recorded {
+        sent: sent.clone(),
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
@@ -687,6 +707,7 @@ fn link_as(
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
+            sent: Rc::default(),
             out: down,
             inbound: up,
             wire: wire.clone(),
@@ -695,7 +716,7 @@ fn link_as(
         author,
     ))
     .unwrap();
-    (link, wire)
+    (link, wire, sent)
 }
 
 fn pump(server: &Db, client: &Db) {
@@ -870,6 +891,120 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
         !contains(&stored_bytes(&path), SECRET.as_bytes()),
         "plaintext in alice's store"
     );
+}
+
+/// How many permission preflights `sent` holds.
+fn advice_sent(sent: &RefCell<Vec<SyncMessage>>) -> usize {
+    sent.borrow()
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::CheckAllowed { .. }))
+        .count()
+}
+
+/// alice, linked to an authority, with the key of `space` held and its
+/// root written (so a later write to it stages no root).
+fn advising_client() -> (
+    Rc<Fake>,
+    Db,
+    Db,
+    jazz::db::Upstream,
+    Rc<RefCell<Vec<u8>>>,
+    Rc<RefCell<Vec<SyncMessage>>>,
+    uuid::Uuid,
+) {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
+    block_on(server.set_authority()).unwrap();
+    let (link, wire, sent) = link_recording(&alice, &server, AuthorSubject::SYSTEM, None);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    block_on(alice.insert("notes", note(space, "first"), Default::default())).unwrap();
+    pump(&server, &alice);
+    (hooks, alice, server, link, wire, sent, space)
+}
+
+fn advise_insert(cells: BTreeMap<String, Value>) -> jazz::protocol::PermissionAdviceAction {
+    jazz::protocol::PermissionAdviceAction::Insert {
+        table: "notes".to_owned(),
+        cells,
+    }
+}
+
+/// Contract: a permission preflight of an encrypted write goes up with its
+/// cells sealed, as the write would carry them: the authority judges
+/// ciphertext, and alice's plaintext never reaches the wire.
+///
+/// ```text
+/// alice ──can insert(note "secret")──seal──► server dry run ✓
+/// wire: ciphertext only
+/// ```
+#[test]
+fn a_sealed_advice_request_puts_no_plaintext_on_the_wire() {
+    let (_hooks, alice, server, _link, wire, sent, space) = advising_client();
+    let secret = format!("{SECRET}-advised");
+    let id = alice.request_permission_advice(advise_insert(note(space, &secret)), None);
+    let advice = drive(&server, &alice, alice.permission_advice(id));
+    assert_eq!(advice, jazz::protocol::PermissionAdvice::Allowed);
+    assert_eq!(advice_sent(&sent), 1, "the preflight went up");
+    let sealed = sent.borrow().iter().any(|message| {
+        matches!(message, SyncMessage::CheckAllowed {
+            action: jazz::protocol::PermissionAdviceAction::Insert { cells, .. }, ..
+        } if matches!(cells.get("body"), Some(Value::Bytes(cell)) if cell.starts_with(b"ct")))
+    });
+    assert!(sealed, "the preflight carries the sealed cell");
+    assert!(
+        !contains(&wire.borrow(), secret.as_bytes()),
+        "plaintext on the wire"
+    );
+}
+
+/// Contract: a preflight the hooks cannot seal on its own (no key held, or
+/// a space's first write, which stages a root the dry run would leave out)
+/// answers `Unknown` and sends nothing; the root it would have staged is
+/// told to the hooks as dropped.
+#[test]
+fn an_advice_request_that_cannot_be_sealed_is_unknown_and_unsent() {
+    let (hooks, alice, server, _link, wire, sent, _space) = advising_client();
+    let before = advice_sent(&sent);
+
+    let keyless = uuid::Uuid::new_v4();
+    let id = alice.request_permission_advice(advise_insert(note(keyless, SECRET)), None);
+    let advice = drive(&server, &alice, alice.permission_advice(id));
+    assert_eq!(advice, jazz::protocol::PermissionAdvice::Unknown);
+
+    let unrooted = uuid::Uuid::new_v4();
+    hooks.hold(unrooted);
+    let dropped = hooks.dropped.borrow().len();
+    let id = alice.request_permission_advice(advise_insert(note(unrooted, SECRET)), None);
+    let advice = drive(&server, &alice, alice.permission_advice(id));
+    assert_eq!(advice, jazz::protocol::PermissionAdvice::Unknown);
+    assert_eq!(
+        hooks.dropped.borrow().len(),
+        dropped + 1,
+        "the hooks hear of the root the preflight would have staged"
+    );
+
+    pump(&server, &alice);
+    assert_eq!(advice_sent(&sent), before, "nothing went up");
+    assert!(
+        !contains(&wire.borrow(), SECRET.as_bytes()),
+        "plaintext on the wire"
+    );
+}
+
+/// Contract: a preflight cancelled by id while it waits to be sealed is
+/// never sealed or sent, and its wait answers `Unknown`.
+#[test]
+fn an_advice_request_cancelled_while_parked_is_never_sent() {
+    let (_hooks, alice, server, _link, _wire, sent, space) = advising_client();
+    let before = advice_sent(&sent);
+    let id = alice.request_permission_advice(advise_insert(note(space, SECRET)), None);
+    alice.cancel_permission_advice_request(id);
+    let advice = drive(&server, &alice, alice.permission_advice(id));
+    assert_eq!(advice, jazz::protocol::PermissionAdvice::Unknown);
+    pump(&server, &alice);
+    assert_eq!(advice_sent(&sent), before, "nothing went up");
 }
 
 /// Contract: a write that needs a key alice does not hold is refused on
@@ -1566,6 +1701,7 @@ fn a_creating_upserts_large_sealed_default_travels_as_chunks() {
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let wire = Rc::new(RefCell::new(Vec::new()));
     let _link = block_on(alice.connect_upstream(Box::new(Recorded {
+        sent: Rc::default(),
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
@@ -1573,6 +1709,7 @@ fn a_creating_upserts_large_sealed_default_travels_as_chunks() {
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
+            sent: Rc::default(),
             out: down,
             inbound: up.clone(),
             wire,

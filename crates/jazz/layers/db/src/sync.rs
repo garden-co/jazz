@@ -2804,6 +2804,10 @@ pub(crate) struct Client {
     answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
+    /// Preflights waiting to be sealed before they are sent, by id: their
+    /// waiter seals them (`Db::permission_advice`).
+    #[cfg(feature = "e2ee-client")]
+    parked_advice: HashMap<u64, ParkedAdvice>,
     /// Nodes pushed for each unsettled commit.
     pushed: HashMap<u64, Vec<jazz_types::large_values::ContentHash>>,
     /// Chunks arrived this tick: results waiting for them run again.
@@ -4346,12 +4350,33 @@ pub struct SubscriberId {
     generation: u64,
 }
 
+/// A preflight parked for sealing: where it goes, what, and for whom.
+#[cfg(feature = "e2ee-client")]
+type ParkedAdvice = (
+    Option<Weak<UpstreamPort>>,
+    Box<PermissionAdviceAction>,
+    Acting,
+);
+
 pub(super) enum SessionControl {
     Observe(SubscriberId, RegistrationObserver, bool),
     Restored(SubscriberId),
     Disconnect(SubscriberId),
     Detach(u64),
+    /// Send a permission preflight; `action` `None` answers `Unknown`
+    /// unsent. A `parked` one (sealed since) is sent only if it is still
+    /// asked for.
     RequestAdvice {
+        id: u64,
+        port: Option<Weak<UpstreamPort>>,
+        action: Option<Box<PermissionAdviceAction>>,
+        acting: Acting,
+        parked: bool,
+    },
+    /// Keep a preflight to seal before it is sent (see
+    /// `Db::request_permission_advice`).
+    #[cfg(feature = "e2ee-client")]
+    ParkAdvice {
         id: u64,
         port: Option<Weak<UpstreamPort>>,
         action: Box<PermissionAdviceAction>,
@@ -4391,11 +4416,17 @@ impl SessionControl {
                 port,
                 action,
                 acting,
+                parked,
             } => {
                 if let Some(mut client) = inner.client_mut() {
-                    if port
-                        .as_ref()
-                        .is_some_and(|port| Weak::ptr_eq(port, &Rc::downgrade(&client.port)))
+                    if parked && !client.advice.contains_key(&id) {
+                        // Cancelled while it was sealed.
+                        return;
+                    }
+                    if let Some(action) = action
+                        && port
+                            .as_ref()
+                            .is_some_and(|port| Weak::ptr_eq(port, &Rc::downgrade(&client.port)))
                         && client.port.connected()
                         && may_wait(client.hint.get())
                     {
@@ -4415,7 +4446,23 @@ impl SessionControl {
                     }
                 }
             }
+            #[cfg(feature = "e2ee-client")]
+            Self::ParkAdvice {
+                id,
+                port,
+                action,
+                acting,
+            } => {
+                if let Some(mut client) = inner.client_mut() {
+                    client.advice.insert(id, None);
+                    client.parked_advice.insert(id, (port, action, acting));
+                }
+            }
             Self::CancelAdvice(id) => {
+                #[cfg(feature = "e2ee-client")]
+                if let Some(mut client) = inner.client_mut() {
+                    client.parked_advice.remove(&id);
+                }
                 if let Some(mut client) = inner.client_mut()
                     && client.advice.remove(&id).is_some()
                 {
@@ -9435,6 +9482,8 @@ impl Client {
             visibility_moved: false,
             answers: HashMap::new(),
             advice: HashMap::new(),
+            #[cfg(feature = "e2ee-client")]
+            parked_advice: HashMap::new(),
             pushed: HashMap::new(),
             arrived: false,
             relayed_fetches: Vec::new(),
@@ -11082,7 +11131,11 @@ impl Db {
     /// backend acts for, with its claims); wait with
     /// [`Db::permission_advice`]. Without a connected upstream the answer
     /// is `Unknown`: a replica's own policy evidence may be incomplete, so
-    /// it never decides locally.
+    /// it never decides locally. On a database with encryption hooks, an
+    /// insert or update goes up with its cells sealed, as the write would
+    /// carry them: it is sealed, then sent, once its answer is awaited
+    /// ([`Db::permission_advice`]), and one that cannot be sealed on its own
+    /// is `Unknown`, unsent.
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
@@ -11101,11 +11154,30 @@ impl Db {
             None => Acting::Own,
         };
         let port = self.inner.upstream.borrow().as_ref().map(Rc::downgrade);
+        // An insert or update on a database with encryption hooks goes up
+        // sealed, and sealing waits for the store: it is parked here and
+        // sealed by the wait for its answer (`permission_advice`).
+        #[cfg(feature = "e2ee-client")]
+        if self.inner.e2ee_hooks().is_some()
+            && matches!(
+                action,
+                PermissionAdviceAction::Insert { .. } | PermissionAdviceAction::Update { .. }
+            )
+        {
+            self.inner.session_control(SessionControl::ParkAdvice {
+                id,
+                port,
+                action: Box::new(action),
+                acting,
+            });
+            return id;
+        }
         self.inner.session_control(SessionControl::RequestAdvice {
             id,
             port,
-            action: Box::new(action),
+            action: Some(Box::new(action)),
             acting,
+            parked: false,
         });
         id
     }
@@ -11113,6 +11185,8 @@ impl Db {
     /// The answer to a [`Db::request_permission_advice`]; `Unknown` if the
     /// link fails or the request was cancelled first.
     pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
+        #[cfg(feature = "e2ee-client")]
+        self.send_parked_advice(id).await;
         self.poll_operation(|| {
             let inner = self.inner.without_overlay();
             let Some(mut client) = inner.client_mut() else {
@@ -11133,6 +11207,31 @@ impl Db {
             }
         })
         .await
+    }
+
+    /// Seal and send the request `id` parked for sealing
+    /// ([`Db::request_permission_advice`]), if it still is: `Unknown`,
+    /// unsent, when it can't be sealed on its own ([`Db::sealed_advice`]).
+    #[cfg(feature = "e2ee-client")]
+    async fn send_parked_advice(&self, id: u64) {
+        let parked = {
+            let _operation = self.write_operation().await;
+            self.inner
+                .without_overlay()
+                .client_mut()
+                .and_then(|mut client| client.parked_advice.remove(&id))
+        };
+        let Some((port, action, acting)) = parked else {
+            return;
+        };
+        let action = self.sealed_advice(*action).await.map(Box::new);
+        self.inner.session_control(SessionControl::RequestAdvice {
+            id,
+            port,
+            action,
+            acting,
+            parked: true,
+        });
     }
 
     /// Resolve an outstanding request as `Unknown`: its waiter is removed,
