@@ -35,7 +35,7 @@ export async function serveEncryptedTestApp(
     app: config.app,
     permissions: config.permissions,
     authenticate: config.authenticate ?? acceptDeviceAccounts,
-    store: config.storage === "memory" ? memory() : sqlite({ path: storePath }),
+    store: config.storage === "memory" ? memory() : sqlite({ path: storePath, blobs: "sqlite" }),
   });
   await jazz.ready().catch(async (error) => {
     await jazz.close().catch(() => undefined);

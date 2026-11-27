@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { durableObjects } from "./create-jazz.js";
+import { durableObjects } from "./durable-objects-provider.js";
 
 const secret = "s".repeat(32);
 

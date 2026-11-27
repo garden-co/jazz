@@ -18,6 +18,8 @@ pub mod resources;
 pub mod runtime;
 #[cfg(feature = "native")]
 pub mod s3;
+#[doc(hidden)]
+pub mod s3_signing;
 #[cfg(feature = "native")]
 pub mod server;
 #[cfg(feature = "native")]

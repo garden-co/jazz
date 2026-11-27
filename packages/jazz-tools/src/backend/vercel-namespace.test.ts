@@ -52,6 +52,11 @@ const BRANCHES = [
 ];
 
 describe("vercel() namespace", () => {
+  it("requires a blob destination when constructing the provider", () => {
+    // @ts-expect-error JavaScript callers can omit the required destination.
+    expect(() => vercel({ namespace: "production", region: "iad1" })).toThrow(/blobs is required/);
+  });
+
   it("names the cores earlier versions created by default identically with the perBranch recipe", () => {
     for (const project of PROJECTS) {
       const production = { VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main" };
@@ -129,15 +134,17 @@ describe("vercel() namespace", () => {
     } catch (error) {
       message = String(error);
     }
-    expect(message).toContain('vercel({ namespace, region: "iad1" })');
+    expect(message).toContain('vercel({ blobs: "sqlite", namespace, region: "iad1" })');
     expect(message).toContain("https://vercel.com/docs/sandbox/concepts/regions");
-    expect(() => vercel({ namespace: "production", region: "" })).toThrow(
+    expect(() => vercel({ blobs: "sqlite", namespace: "production", region: "" })).toThrow(
       /region must be a Vercel region/,
     );
-    expect(() => vercel({ namespace: "production", region: 1 as never })).toThrow(
+    expect(() => vercel({ blobs: "sqlite", namespace: "production", region: 1 as never })).toThrow(
       /region must be a Vercel region/,
     );
-    expect(() => vercel({ namespace: "production", region: "fra1" })).not.toThrow();
+    expect(() =>
+      vercel({ blobs: "sqlite", namespace: "production", region: "fra1" }),
+    ).not.toThrow();
   });
 
   it("refuses a core in another region than configured", () => {
@@ -186,10 +193,10 @@ describe("vercel() namespace", () => {
       message = String(error);
     }
     expect(message).toContain(
-      'vercel({ namespace: ({ environment }) => environment, region: "iad1" })',
+      'vercel({ blobs: "sqlite", namespace: ({ environment }) => environment, region: "iad1" })',
     );
     expect(message).toContain(
-      'vercel({ namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch), region: "iad1" })',
+      'vercel({ blobs: "sqlite", namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch), region: "iad1" })',
     );
   });
 
@@ -221,16 +228,22 @@ describe("vercel() namespace", () => {
   });
 
   it("refuses an empty or oversized namespace", () => {
-    expect(() => vercel({ namespace: "", region: "iad1" })).toThrow(/namespace is empty/);
-    expect(() => vercel({ namespace: "--", region: "iad1" })).toThrow(/no letters or digits/);
-    expect(() => vercel({ namespace: 3 as never, region: "iad1" })).toThrow(/must be a string/);
+    expect(() => vercel({ blobs: "sqlite", namespace: "", region: "iad1" })).toThrow(
+      /namespace is empty/,
+    );
+    expect(() => vercel({ blobs: "sqlite", namespace: "--", region: "iad1" })).toThrow(
+      /no letters or digits/,
+    );
+    expect(() => vercel({ blobs: "sqlite", namespace: 3 as never, region: "iad1" })).toThrow(
+      /must be a string/,
+    );
     // With a typical project id (32 characters) the prefix takes 38.
     expect(() =>
-      vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 38), region: "iad1" }),
+      vercel({ blobs: "sqlite", namespace: "a".repeat(SANDBOX_NAME_MAX - 38), region: "iad1" }),
     ).not.toThrow();
-    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 37), region: "iad1" })).toThrow(
-      /is 91 characters; with this project's prefix jazz-prj-x+- it may have at most 90/,
-    );
+    expect(() =>
+      vercel({ blobs: "sqlite", namespace: "a".repeat(SANDBOX_NAME_MAX - 37), region: "iad1" }),
+    ).toThrow(/is 91 characters; with this project's prefix jazz-prj-x+- it may have at most 90/);
     expect(() => coreName("prj_1", () => "a".repeat(200), {})).toThrow(/at most 117/);
   });
 

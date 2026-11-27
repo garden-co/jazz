@@ -15,9 +15,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub use crate::s3_signing::Keys;
+use crate::s3_signing::sign;
 use base64::Engine as _;
 use bytes::Bytes;
-use hmac::{Hmac, Mac};
 use jazz::chunk_store::{ChunkStore, NodeKey, StoreFuture};
 use jazz::db::{Error, ErrorCode};
 use sha2::{Digest, Sha256};
@@ -211,22 +212,6 @@ fn container_uri_allowed(uri: &str) -> bool {
     }
 }
 
-/// One set of AWS keys.
-#[derive(Clone)]
-pub struct Keys {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
-}
-
-impl std::fmt::Debug for Keys {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Keys")
-            .field("access_key_id", &self.access_key_id)
-            .finish_non_exhaustive()
-    }
-}
-
 /// An S3-compatible bucket for large-value bytes.
 #[derive(Clone, Debug)]
 pub struct S3Options {
@@ -351,6 +336,18 @@ impl S3Options {
         endpoint: Option<String>,
         prefix: Option<String>,
     ) -> Result<Self, String> {
+        Self::with_credentials(bucket, region, endpoint, prefix, None)
+    }
+
+    /// Resolve the bucket and region as in `from_env`, using supplied credentials
+    /// in preference to the host's credential chain.
+    pub fn with_credentials(
+        bucket: Option<String>,
+        region: Option<String>,
+        endpoint: Option<String>,
+        prefix: Option<String>,
+        credentials: Option<S3Credentials>,
+    ) -> Result<Self, String> {
         let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         let bucket = bucket
             .or_else(|| env("S3_BUCKET_NAME"))
@@ -360,7 +357,10 @@ impl S3Options {
             .or_else(|| env("AWS_DEFAULT_REGION"))
             .or_else(|| endpoint.as_ref().map(|_| "auto".to_owned()))
             .ok_or("s3 blobs: no region (set AWS_REGION or pass one)")?;
-        let credentials = S3Credentials::from_env()?;
+        let credentials = match credentials {
+            Some(credentials) => credentials,
+            None => S3Credentials::from_env()?,
+        };
         Ok(Self {
             bucket,
             region,
@@ -1574,61 +1574,6 @@ fn amz_date(at: SystemTime) -> String {
         rest / 3_600,
         rest % 3_600 / 60,
         rest % 60
-    )
-}
-
-fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-/// The SigV4 `Authorization` header for a request to S3. `headers` holds
-/// every header to sign, `x-amz-date` among them, and is sorted in place;
-/// `query` is the canonical query string.
-pub(crate) fn sign(
-    method: &str,
-    path: &str,
-    query: &str,
-    headers: &mut [(String, String)],
-    payload_hash: &str,
-    keys: &Keys,
-    region: &str,
-) -> String {
-    headers.sort_by(|a, b| a.0.cmp(&b.0));
-    let date_time = headers
-        .iter()
-        .find(|(name, _)| name == "x-amz-date")
-        .map(|(_, value)| value.clone())
-        .expect("x-amz-date is signed");
-    let date = &date_time[..8];
-    let canonical_headers: String = headers
-        .iter()
-        .map(|(name, value)| format!("{name}:{}\n", value.trim()))
-        .collect();
-    let signed_headers = headers
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
-    let canonical_request =
-        format!("{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-    let scope = format!("{date}/{region}/s3/aws4_request");
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{date_time}\n{scope}\n{}",
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-    let key = [region.as_bytes(), b"s3", b"aws4_request"].iter().fold(
-        hmac(
-            format!("AWS4{}", keys.secret_access_key).as_bytes(),
-            date.as_bytes(),
-        ),
-        |key, part| hmac(&key, part),
-    );
-    let signature = hex::encode(hmac(&key, string_to_sign.as_bytes()));
-    format!(
-        "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        keys.access_key_id
     )
 }
 

@@ -8,7 +8,7 @@ import { jazzAppId, jazzStore } from "./config";
 // workaround: real apps just `import { createJazz } from "jazz-tools/backend"`).
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { createJazz, remote, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -30,7 +30,7 @@ export function jazz(): Promise<Jazz> {
     store:
       store.kind === "remote"
         ? remote({ ...store, appId: jazzAppId })
-        : sqlite({ path: store.path }),
+        : sqlite({ path: store.path, blobs: files() }),
     // Better Auth's session cookie decides who the operator is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

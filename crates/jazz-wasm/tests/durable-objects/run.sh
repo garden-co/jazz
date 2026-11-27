@@ -12,9 +12,9 @@ wasm-pack build "$here/../.." --target web --dev --out-dir "$here/pkg" \
 # own build, never into the published `durable-object/pkg`.
 rm -rf "$here/do"
 mkdir -p "$here/do"
-cp "$here/../../durable-object/index.js" "$here/../../durable-object/host.js" "$here/do/"
+cp "$here/../../durable-object/index.js" "$here/../../durable-object/host.js" "$here/../../durable-object/blob-stores.js" "$here/do/"
 wasm-pack build "$here/../.." --target web --dev --out-dir "$here/do/pkg" \
   --out-name jazz_wasm_do --no-pack -- --features durable-object-tests
 node "$here/../../durable-object/reinstantiable.mjs" "$here/do/pkg/jazz_wasm_do.js"
 cd "$here/../.."
-node --test "$here/smoke.test.mjs" "$here/host.test.mjs" "$here/r2.test.mjs"
+node --test "$here/smoke.test.mjs" "$here/host.test.mjs" "$here/r2.test.mjs" "$here/blob-layout.test.mjs"

@@ -129,6 +129,7 @@ export const jazz = createJazz({
   permissions,
   // Production gets one core, and each preview branch its own (on your own server: sqlite()).
   store: vercel({
+    blobs: "sqlite",
     namespace: ({ environment, branch }) =>
       environment === "production" ? "production" : perBranch(branch),
     region: "iad1", // your functions' region; fixed once the core exists

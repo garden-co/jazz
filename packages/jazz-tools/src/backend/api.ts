@@ -29,32 +29,44 @@ export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
 export { fromJWT, type FromJWTOptions } from "./from-jwt.js";
 export {
   createJazz,
-  durableObjects,
-  files,
-  memory,
-  remote,
-  s3,
-  sqlite,
-  vercel,
-  vercelBlob,
-  type BlobStore,
-  type S3BlobStore,
-  type VercelBlobStore,
   type CreateJazzOptions,
   type Jazz,
-  type JazzStore,
-  type BackendCredential,
   type JazzUser,
   type DeviceAccountsAnswer,
   type DeviceAccountsOption,
   acceptDeviceAccounts,
-  perBranch,
-  type VercelNamespace,
-  type VercelNamespaceContext,
-  type VercelStoreOptions,
   type WsLikeSocket,
   type InspectEvent,
   type InspectGrant,
   type InspectHook,
   type InspectorOptions,
 } from "./create-jazz.js";
+export { durableObjects } from "./durable-objects-provider.js";
+export { memory, sqlite } from "./native-provider.js";
+export { remote, type BackendCredential } from "./remote-provider.js";
+export { vercel } from "./vercel-provider.js";
+export {
+  perBranch,
+  type VercelNamespace,
+  type VercelNamespaceContext,
+  type VercelStoreOptions,
+} from "./vercel-store.js";
+export {
+  files,
+  s3,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+} from "./blobs.js";
+export type {
+  JazzProvider,
+  JazzWebSocketUpgrade,
+  JazzCore,
+  JazzCoreTransport,
+  JazzCoreOpenContext,
+  JazzStore,
+  CoreSocket,
+  BackendAccess,
+} from "./core-provider.js";
+export type { CoreTransport } from "./core-transport.js";

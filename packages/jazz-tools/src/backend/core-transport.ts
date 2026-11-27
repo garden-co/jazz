@@ -27,19 +27,13 @@ export interface CoreTransport {
   openWebSocket(url: string, headers: Record<string, string>): CoreWebSocket;
 }
 
-/** A remote core reached through the host's HTTP and WebSocket APIs. */
+/** Network requests and authenticated socket upgrades on the backend host. */
 export function networkTransport(): CoreTransport {
-  // A Worker sends upgrade headers through fetch. Keep the backend credential
-  // on the configured origin if the core answers with a redirect.
-  if (backendNative().host === "workerd") {
-    return bindingTransport({
-      fetch: (input, init) => fetch(input, { ...init, redirect: "manual" }),
-    });
-  }
+  // A redirect could forward the core credential to another origin.
+  const fetchCore: StubFetch = (url, init) => fetch(url, { ...init, redirect: "manual" });
+  if (backendNative().host === "workerd") return workerdTransport(fetchCore);
   return {
-    // Every request carries the backend credential, which a redirect would
-    // hand to wherever it points: never follow one (see `refuseRedirect`).
-    fetch: (url, init) => fetch(url, { ...init, redirect: "manual" }),
+    fetch: fetchCore,
     openWebSocket(url, headers) {
       if (!globalThis.WebSocket) {
         throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
@@ -146,12 +140,16 @@ export async function bindingCredential(binding: CoreBinding): Promise<string> {
 
 export function bindingTransport(binding: CoreBinding): CoreTransport {
   const stub = coreStub(binding);
-  const stubFetch: StubFetch = (input, init) => stub.fetch(input, init);
+  return workerdTransport((input, init) => stub.fetch(input, init));
+}
+
+/** Workerd opens authenticated sockets with a fetch upgrade. */
+function workerdTransport(fetch: StubFetch): CoreTransport {
   return {
-    fetch: (url, init) => stubFetch(url, init),
+    fetch,
     openWebSocket(url, headers) {
       return upgradedSocket(
-        stubFetch(url.replace(/^ws/, "http"), { headers: { ...headers, Upgrade: "websocket" } }),
+        fetch(url.replace(/^ws/, "http"), { headers: { ...headers, Upgrade: "websocket" } }),
       );
     },
   };

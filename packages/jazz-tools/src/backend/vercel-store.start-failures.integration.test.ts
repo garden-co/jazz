@@ -17,6 +17,7 @@ describe("vercel() store: cores that fail to start", () => {
     const fake = fakeVercel({ ...core, appId });
     const opened = await openVercelCore({
       options: {
+        blobs: "sqlite",
         sdk: fake.sdk,
         backendCredential: core.credential,
         namespace: "test",
@@ -70,6 +71,7 @@ describe("vercel() store: cores that fail to start", () => {
     fake.state.slowStarts = 2;
     const opened = await openVercelCore({
       options: {
+        blobs: "sqlite",
         sdk: fake.sdk,
         backendCredential: core.credential,
         namespace: "test",
@@ -95,6 +97,7 @@ describe("vercel() store: cores that fail to start", () => {
     };
     const opened = await openVercelCore({
       options: {
+        blobs: "sqlite",
         sdk: fake.sdk,
         backendCredential: core.credential,
         namespace: "test",

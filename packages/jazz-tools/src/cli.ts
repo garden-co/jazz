@@ -44,7 +44,7 @@ const DEPLOY_REMOVED =
 const SERVER_REMOVED =
   "`jazz-tools server` was removed. Jazz runs inside your backend: " +
   "`createJazz({ store: vercel() })` runs it on Vercel, and " +
-  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server. " +
+  "`createJazz({ store: sqlite({ path, blobs: files() }) })` serves sync from your own server. " +
   "Jazz Cloud is deprecated for new apps.";
 
 const UPGRADE_GUIDE_URL =

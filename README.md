@@ -73,7 +73,7 @@ app's typed bindings) and a schema snapshot in `migrations/`. Commit them with
 
 ```ts
 // jazz.server.ts
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 // Generated from schema.ts by `jazz-tools generate`
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
@@ -82,7 +82,7 @@ export const jazz = createJazz({
   app,
   permissions,
   // vercel() on Vercel, sqlite() locally and on your own servers
-  store: sqlite({ path: "./jazz.db" }),
+  store: sqlite({ path: "./jazz.db", blobs: files() }),
   // Better Auth, WorkOS or any custom auth: return the user's ID, when their
   // session expires (Unix time in seconds) and the claims your permissions
   // check, or null if signed out

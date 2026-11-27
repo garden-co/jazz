@@ -21,7 +21,7 @@ export function jazz(): Promise<Jazz> {
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
       : process.env.NODE_ENV === "test"
         ? memory()
-        : sqlite({ path: config.dataPath }),
+        : sqlite({ path: config.dataPath, blobs: "sqlite" }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

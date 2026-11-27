@@ -5,10 +5,10 @@ import type { AddressInfo, Socket } from "node:net";
 import {
   acceptDeviceAccounts,
   createTestJazz,
-  remote,
   type CreateJazzOptions,
   type Jazz,
 } from "../backend/create-jazz.js";
+import { remote } from "../backend/remote-provider.js";
 import type { Session } from "../runtime/context.js";
 import type { AppPermissionsFile } from "../backend/create-jazz.js";
 import type { SchemaSourceInput } from "../schema-source.js";

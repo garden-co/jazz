@@ -1,7 +1,7 @@
 // #region quickstart-server-setup-ts
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { app as schemaApp } from "../jazz.generated.js";
 import permissions from "../jazz.permissions.json" with { type: "json" };
 
@@ -14,7 +14,7 @@ declare function currentUser(
 const jazz = createJazz({
   app: schemaApp,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   async authenticate(request) {
     const user = await currentUser(request);
     return user ? { userId: user.id, expiresAt: user.sessionExpiresAt } : null;

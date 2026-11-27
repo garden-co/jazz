@@ -1,5 +1,5 @@
 // Users and local-first guests on a Durable Object core: the app's backend
-// (createJazz on durableObjects()) serves its clients over HTTP, and its
+// (createJazz with remote()) serves its clients over HTTP, and its
 // core is the real jazz-wasm host in local workerd. The same checks as
 // guest-decision.integration.test.ts runs on the other stores.
 import { randomUUID } from "node:crypto";

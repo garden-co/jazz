@@ -4,6 +4,7 @@
 //! [`JazzCore::handle`] and each socket it upgraded to
 //! [`JazzCore::open_socket`]. Nothing listens on a port.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use jazz::tools::AppId;
@@ -15,30 +16,31 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JazzCoreOpenOptions {
-    /// Required in memory. A persistent core keeps its app in its store:
-    /// a new store mints one (or records this one), and a store for another
-    /// app is refused.
-    app_id: Option<String>,
     backend_secret: String,
     admin_secret: String,
-    data_dir: Option<String>,
-    in_memory: Option<bool>,
-    /// `"files"`, `"s3"` or `"sqlite"` (the default): where settled
-    /// large-value bytes of a persistent core live.
-    blobs: Option<String>,
-    /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
-    blobs_dir: Option<String>,
-    /// For `blobs: "s3"`, each defaulting to the environment
-    /// (`S3_BUCKET_NAME`, `AWS_REGION`; credentials always come from it,
-    /// or from the role the host attaches: ECS, EKS Pod Identity, EC2).
-    s3_bucket: Option<String>,
-    s3_region: Option<String>,
-    s3_endpoint: Option<String>,
-    s3_prefix: Option<String>,
     telemetry_collector_url: Option<String>,
+    storage: CoreStorage,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum CoreStorage {
+    Memory {
+        app_id: String,
+    },
+    Sqlite {
+        path: PathBuf,
+        app_id: Option<String>,
+        blobs: jazz_server::BlobDestination,
+    },
 }
 
 #[napi(object)]
@@ -73,7 +75,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }",
+        ts_args_type = r#"options: { backendSecret: string; adminSecret: string; telemetryCollectorUrl?: string; storage: { kind: "memory"; appId: string } | { kind: "sqlite"; path: string; appId?: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; credentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string } } | { kind: "vercel-blob"; storeId?: string; prefix?: string; credentials?: { readWriteToken: string } } } }"#,
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -88,58 +90,27 @@ impl JazzCore {
         };
         let mut dir_lock = None;
         let mut token_secret = None;
-        let (storage, app_id_text) = if opts.in_memory.unwrap_or(false) {
-            let app_id = opts
-                .app_id
-                .ok_or_else(|| napi::Error::from_reason("JazzCore needs appId in memory"))?;
-            (StorageBackend::InMemory, app_id)
-        } else {
-            let data_dir = opts.data_dir.ok_or_else(|| {
-                napi::Error::from_reason("JazzCore needs dataDir unless inMemory is set")
-            })?;
-            let path = std::path::Path::new(&data_dir);
-            dir_lock = Some(lock_data_dir(path)?);
-            let identity = jazz_server::open_store_identity(
+        let (storage, app_id_text, blobs) = match opts.storage {
+            CoreStorage::Memory { app_id } => (StorageBackend::InMemory, app_id, BlobStore::Sqlite),
+            CoreStorage::Sqlite {
                 path,
-                jazz_server::IdentityOpen::Embedded {
-                    app_id: opts.app_id.as_deref(),
-                },
-            )
-            .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?;
-            token_secret = identity.token_secret;
-            (
-                StorageBackend::Persistent {
-                    path: data_dir.into(),
-                },
-                identity.app_id,
-            )
+                app_id,
+                blobs,
+            } => {
+                let blobs = blobs.resolve(None).map_err(napi::Error::from_reason)?;
+                dir_lock = Some(lock_data_dir(&path)?);
+                let identity = jazz_server::open_store_identity(
+                    &path,
+                    jazz_server::IdentityOpen::Embedded {
+                        app_id: app_id.as_deref(),
+                    },
+                )
+                .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?;
+                token_secret = identity.token_secret;
+                (StorageBackend::Persistent { path }, identity.app_id, blobs)
+            }
         };
         let app_id = AppId::from_text(&app_id_text);
-        let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
-            (None | Some("sqlite"), None) => BlobStore::Sqlite,
-            (Some("files"), dir) => BlobStore::Files {
-                dir: dir.map(Into::into),
-            },
-            (Some("s3"), None) => BlobStore::S3(
-                jazz_server::s3::S3Options::from_env(
-                    opts.s3_bucket,
-                    opts.s3_region,
-                    opts.s3_endpoint,
-                    opts.s3_prefix,
-                )
-                .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?,
-            ),
-            (Some("sqlite" | "s3") | None, Some(_)) => {
-                return Err(napi::Error::from_reason(
-                    "JazzCore: blobsDir needs blobs: \"files\"",
-                ));
-            }
-            (Some(other), _) => {
-                return Err(napi::Error::from_reason(format!(
-                    "JazzCore: blobs must be \"files\", \"s3\" or \"sqlite\", not {other:?}"
-                )));
-            }
-        };
         let built = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_storage(storage)

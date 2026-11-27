@@ -55,7 +55,7 @@ async function openSnapshot(path: string) {
   const jazz = await createJazz({
     app,
     permissions,
-    store: sqlite({ path }),
+    store: sqlite({ path, blobs: "sqlite" }),
     authenticate: async () => null,
   }).ready();
   // Jazz's key-version table is not part of the app's typed bindings.

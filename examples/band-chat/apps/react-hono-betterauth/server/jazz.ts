@@ -1,4 +1,4 @@
-import { createJazz, memory, remote, sqlite, type Jazz } from "jazz-tools/backend";
+import { createJazz, memory, remote, files, sqlite, type Jazz } from "jazz-tools/backend";
 import { app } from "../jazz.generated";
 import permissions from "../jazz.permissions.json" with { type: "json" };
 import { assertConfiguration } from "../src/lib/config.mjs";
@@ -16,7 +16,7 @@ export function jazz(): Promise<Jazz> {
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
       : process.env.NODE_ENV === "test"
         ? memory()
-        : sqlite({ path: config.dataPath }),
+        : sqlite({ path: config.dataPath, blobs: files() }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

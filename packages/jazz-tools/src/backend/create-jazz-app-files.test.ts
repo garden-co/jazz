@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp, type TestAppFile } from "../testing/test-app.js";
-import { createJazz, memory, remote, sqlite } from "./create-jazz.js";
+import { createJazz } from "./create-jazz.js";
+import { memory, sqlite } from "./native-provider.js";
+import { remote } from "./remote-provider.js";
 import { keyless } from "../encryption/keyless-types.js";
 
 const notes: TestAppFile = { format: 1, tables: { notes: { columns: { body: "string" } } } };
@@ -154,7 +156,9 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
 
   it("opens an encrypted app with a keyless backend", async () => {
     await inProject();
-    const jazz = await startEncrypted(sqlite({ path: join(process.cwd(), "store") }));
+    const jazz = await startEncrypted(
+      sqlite({ path: join(process.cwd(), "store"), blobs: "sqlite" }),
+    );
     // The backend's types have no encrypted column: its reads never carry
     // one, and writing one is refused at runtime too.
     const app = keyless(testApp(encrypted));
@@ -174,7 +178,7 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
   it("leaves the SQLite store untouched when the app has invalid permissions", async () => {
     await inProject();
     await expect(
-      startEncrypted(sqlite({ path: join(process.cwd(), "store") }), {
+      startEncrypted(sqlite({ path: join(process.cwd(), "store"), blobs: "sqlite" }), {
         tables: {},
       }),
     ).rejects.toThrow(/permissions.*must be the app's jazz\.permissions\.json/);

@@ -109,51 +109,127 @@ pub struct BlobOptions {
     pub environment: Option<String>,
 }
 
+/// A native destination before the core resolves its host's defaults.
+/// Embedded callers supply credential values. Launchers can select workload
+/// credentials for their own environment before calling the same resolver.
+#[derive(serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum BlobDestination {
+    Sqlite {},
+    Files {
+        dir: Option<std::path::PathBuf>,
+    },
+    S3 {
+        bucket: Option<String>,
+        region: Option<String>,
+        endpoint: Option<String>,
+        prefix: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_keys")]
+        credentials: Option<s3::S3Credentials>,
+    },
+    VercelBlob {
+        store_id: Option<String>,
+        prefix: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_blob_token")]
+        credentials: Option<vercel_blob::VercelBlobCredentials>,
+    },
+}
+
+fn deserialize_keys<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> Result<Option<s3::S3Credentials>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<s3::Keys>::deserialize(input)?.map(s3::S3Credentials::Static))
+}
+
+fn deserialize_blob_token<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> Result<Option<vercel_blob::VercelBlobCredentials>, D::Error> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct BlobToken {
+        read_write_token: String,
+    }
+    Ok(Option::<BlobToken>::deserialize(input)?
+        .map(|c| vercel_blob::VercelBlobCredentials::ReadWriteToken(c.read_write_token)))
+}
+
+impl BlobDestination {
+    pub fn resolve(self, environment: Option<String>) -> Result<BlobStore, String> {
+        match self {
+            Self::Sqlite {} => Ok(BlobStore::Sqlite),
+            Self::Files { dir } => Ok(BlobStore::Files { dir }),
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                prefix,
+                credentials,
+            } => {
+                let mut options =
+                    s3::S3Options::with_credentials(bucket, region, endpoint, prefix, credentials)?;
+                options.environment = environment;
+                Ok(BlobStore::S3(options))
+            }
+            Self::VercelBlob {
+                store_id,
+                prefix,
+                credentials,
+            } => {
+                let mut options =
+                    vercel_blob::VercelBlobOptions::from_env(store_id, prefix, credentials)?;
+                options.environment = environment;
+                Ok(BlobStore::VercelBlob(options))
+            }
+        }
+    }
+}
+
 impl BlobOptions {
-    /// The store these options name.
     pub fn resolve(self) -> Result<BlobStore, String> {
-        match self.kind.as_str() {
-            "sqlite" => Ok(BlobStore::Sqlite),
-            "files" => Ok(BlobStore::Files {
+        let destination = match self.kind.as_str() {
+            "sqlite" => BlobDestination::Sqlite {},
+            "files" => BlobDestination::Files {
                 dir: self.dir.map(Into::into),
-            }),
-            "s3" => {
-                let mut options = s3::S3Options::from_env(
-                    self.s3_bucket,
-                    self.s3_region,
-                    self.s3_endpoint,
-                    self.s3_prefix,
-                )?;
-                if self.s3_role_from_workload {
-                    // The workload's role wins over any keys also set, as
-                    // it did before the default chain put keys first.
+            },
+            "s3" => BlobDestination::S3 {
+                bucket: self.s3_bucket,
+                region: self.s3_region,
+                endpoint: self.s3_endpoint,
+                prefix: self.s3_prefix,
+                credentials: if self.s3_role_from_workload {
                     let role_arn = std::env::var("AWS_ROLE_ARN")
                         .ok()
                         .filter(|arn| !arn.is_empty())
                         .ok_or("s3 role from workload needs AWS_ROLE_ARN")?;
-                    options.credentials = s3::S3Credentials::WebIdentity {
+                    Some(s3::S3Credentials::WebIdentity {
                         role_arn,
                         token: s3::WebIdentityToken::Workload,
-                    };
-                }
-                options.environment = self.environment;
-                Ok(BlobStore::S3(options))
-            }
-            "vercel-blob" => vercel_blob::VercelBlobOptions::from_env(
-                self.vercel_blob_store_id,
-                self.vercel_blob_prefix,
-                self.vercel_blob_token_from_workload.then_some(
+                    })
+                } else {
+                    None
+                },
+            },
+            "vercel-blob" => BlobDestination::VercelBlob {
+                store_id: self.vercel_blob_store_id,
+                prefix: self.vercel_blob_prefix,
+                credentials: self.vercel_blob_token_from_workload.then_some(
                     vercel_blob::VercelBlobCredentials::Oidc(s3::WebIdentityToken::Workload),
                 ),
-            )
-            .map(|mut options| {
-                options.environment = self.environment;
-                BlobStore::VercelBlob(options)
-            }),
-            other => Err(format!(
-                "blobs must be files, s3, vercel-blob or sqlite, not {other:?}"
-            )),
-        }
+            },
+            other => {
+                return Err(format!(
+                    "blobs must be files, s3, vercel-blob or sqlite, not {other:?}"
+                ));
+            }
+        };
+        destination.resolve(self.environment)
     }
 }
 

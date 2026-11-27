@@ -22,7 +22,7 @@ backend as Jazz, so `authenticate` asks it directly who the request's session co
 
 ```ts title="jazz.server.ts"
 import { betterAuth } from "better-auth";
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
@@ -34,7 +34,7 @@ export const auth = betterAuth({
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   // The Better Auth session cookie decides who the user is.
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
@@ -252,7 +252,7 @@ Create Jazz in your backend ([Main Backend](/docs/setup/deployment/own-server)),
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
@@ -261,7 +261,7 @@ import { authOptions } from "./auth-options";
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }), // or vercel() / remote(), as for any backend
+  store: sqlite({ path: "./data/jazz", blobs: files() }), // or vercel() / remote(), as for any backend
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) return null;

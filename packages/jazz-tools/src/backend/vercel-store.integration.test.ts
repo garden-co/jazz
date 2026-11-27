@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { onVercelHost } from "./vercel-host.js";
 import {
   connect as connectTcp,
   createServer as createNetServer,
@@ -12,15 +14,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
-import { createJazz, vercel, vercelBlob } from "./index.js";
+import { createJazz, files, memory, remote, s3, vercel, vercelBlob } from "./index.js";
 import { HANDSHAKE_TIMEOUT_MS } from "../runtime/native-runtime/websocket.js";
 import {
   newerVersion,
   perBranch,
   openVercelCore,
   onVercelDeployment,
-  onVercelHost,
   refuseOtherEnvironment,
+  prepareSandboxBlobs,
   startScript,
   workloadOf,
   type SandboxSdk,
@@ -44,6 +46,148 @@ import {
 runCleanupsAfterEach();
 
 describe("vercel() store", () => {
+  it.each([
+    {
+      blobs: s3({
+        bucket: "chunks",
+        region: "auto",
+        endpoint: "https://bucket.example",
+        credentials: {
+          accessKeyId: "test-key",
+          secretAccessKey: "test-secret",
+          sessionToken: "test-session",
+        },
+      }),
+      expectedEnv: {
+        AWS_ACCESS_KEY_ID: "test-key",
+        AWS_SECRET_ACCESS_KEY: "test-secret",
+        AWS_SESSION_TOKEN: "test-session",
+      },
+      mode: { kind: "s3", roleFromWorkload: false, endpoint: "https://bucket.example" },
+    },
+    {
+      blobs: vercelBlob({ credentials: { readWriteToken: "vercel_blob_rw_Example_test" } }),
+      expectedEnv: { BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_Example_test", VERCEL_OIDC_TOKEN: "" },
+      mode: { kind: "vercel-blob", tokenFromWorkload: false, storeId: "Example" },
+    },
+  ])(
+    "supplies $mode.kind credentials on first start and resume",
+    async ({ blobs, expectedEnv, mode }) => {
+      const core = await startTrustedCore(randomUUID());
+      const fake = fakeVercel(core);
+      const checks: { url: string; authorization: string | null }[] = [];
+      const open = () =>
+        openVercelCore({
+          options: {
+            sdk: fake.sdk,
+            backendCredential: core.credential,
+            namespace: "test",
+            region: "iad1",
+            blobs,
+          },
+          openRemote: ({ url }) => ({ serverUrl: url, close: async () => {} }) as never,
+          version: "1.2.3",
+          env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test", BLOB_STORE_ID: "other" },
+          fetch: async (input, init) => {
+            checks.push({
+              url: String(input),
+              authorization: new Headers(init?.headers).get("authorization"),
+            });
+            return new Response("production");
+          },
+        });
+      await (await open()).close();
+      fake.state.status = "stopped";
+      fake.state.running = undefined;
+      await (await open()).close();
+      expect(fake.calls).toContain("resume jazz-prj-test-test");
+      if (blobs.kind === "vercel-blob") {
+        const claim = {
+          url: "https://example.private.blob.vercel-storage.com/.jazz-environment?cache=0",
+          authorization: "Bearer vercel_blob_rw_Example_test",
+        };
+        expect(checks).toEqual([claim, claim]);
+      }
+      expect(fake.launches).toHaveLength(2);
+      for (const { env, args } of fake.launches) {
+        expect(env).toEqual(expectedEnv);
+        const path = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
+        const script = fake.files.get(path)!.toString();
+        expect(JSON.parse(script.match(/"\$app_id" '(.*)'\s*$/)![1]!).blobs).toMatchObject({
+          ...mode,
+          environment: "production",
+        });
+        for (const secret of Object.values(expectedEnv).filter(Boolean)) {
+          expect(script + args.join(" ")).not.toContain(secret);
+        }
+      }
+    },
+    60000,
+  );
+
+  it("reopens large values from files on the same Drive after restarting the Sandbox core", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-sandbox-drive-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const issuer = await startIssuer();
+    const appId = randomUUID();
+    const { destination: blobs } = prepareSandboxBlobs({ region: "iad1", blobs: files() }, {});
+    const script = startScript(
+      "1.0.0",
+      "unused",
+      { issuer, audience: AUDIENCE, subject: SUBJECT },
+      blobs,
+      root,
+    );
+    // Run the same native entry and JSON options the script passes to the addon.
+    const { serveCore } = createRequire(import.meta.url)("jazz-napi") as typeof import("jazz-napi");
+    const options = JSON.parse(script.match(/"\$app_id" '(.*)'\s*$/)![1]!);
+    const start = async () => {
+      const listener = createNetServer();
+      await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+      const port = (listener.address() as AddressInfo).port;
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+      const core = serveCore({ ...options, port, appId });
+      const closed = core.closed();
+      const stop = async () => {
+        core.stop();
+        await closed;
+      };
+      cleanups.push(stop);
+      const url = `http://127.0.0.1:${port}`;
+      await expect
+        .poll(async () =>
+          fetch(url + "/health").then(
+            (r) => r.ok,
+            () => false,
+          ),
+        )
+        .toBe(true);
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: remote({ url, appId, backendCredential: () => oidcToken(issuer) }),
+      }).ready();
+      cleanups.push(() => jazz.close());
+      return { jazz, stop };
+    };
+    const text = "on the Drive ".repeat(30000);
+    const first = await start();
+    const row = await first.jazz.db.insert(app.notes, { text }).wait({ tier: "global" });
+    await expect
+      .poll(
+        async () =>
+          (await readdir(join(root, "data/store/blobs"), { recursive: true })).some((p) =>
+            /[0-9a-f]{64}$/.test(p),
+          ),
+        { timeout: 20000 },
+      )
+      .toBe(true);
+    await first.jazz.close();
+    await first.stop();
+    const next = await start();
+    expect((await next.jazz.db.all(app.notes.where({ id: row.id })))[0]?.text).toBe(text);
+  }, 60000);
+
   it("creates the app's Sandbox and Drive on first use and serves through it", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
@@ -59,6 +203,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -91,6 +236,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -100,6 +246,32 @@ describe("vercel() store", () => {
     cleanups.push(() => again.close());
     const seen = await again.db.all(app.notes.where({ id: row.id }));
     expect(seen.map((note) => note.text)).toEqual(["on vercel"]);
+  }, 60_000);
+
+  it("refreshes credentials on reuse and refuses changes to the live Sandbox configuration", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const { sdk } = fakeVercel({ ...core, appId });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const options = {
+      blobs: "sqlite" as const,
+      namespace: "test",
+      region: "iad1",
+      sdk,
+      backendCredential: core.credential,
+    };
+    const jazz = await createJazz({ app, permissions, store: vercel(options) }).ready();
+    cleanups.push(() => jazz.close());
+
+    const refreshed = vi.fn(core.credential);
+    expect(
+      createJazz({ app, permissions, store: vercel({ ...options, backendCredential: refreshed }) }),
+    ).toBe(jazz);
+    expect(() =>
+      createJazz({ app, permissions, store: vercel({ ...options, region: "fra1" }) }),
+    ).toThrow(/other store settings/);
+    await jazz.createAccountFor("alice");
+    expect(refreshed).toHaveBeenCalled();
   }, 60_000);
 
   it("reaches a core only with the trusted workload's token", async () => {
@@ -116,6 +288,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fresh.sdk,
@@ -140,6 +313,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -160,6 +334,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fake.sdk,
@@ -189,6 +364,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fake.sdk,
@@ -215,7 +391,12 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk }),
+        store: vercel({
+          blobs: "sqlite",
+          namespace: legacyNamespace,
+          region: "iad1",
+          sdk: fake.sdk,
+        }),
       }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
@@ -247,6 +428,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: () => credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -318,6 +500,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: () => credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -400,6 +583,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "fra1",
       },
@@ -424,6 +608,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -448,6 +633,7 @@ describe("vercel() store", () => {
           options: {
             sdk: fake.sdk,
             backendCredential: core.credential,
+            blobs: "sqlite",
             namespace: "test",
             region: "fra1",
           },
@@ -469,7 +655,13 @@ describe("vercel() store", () => {
     const core = await startTrustedCore(appId);
     const open = (sdk: SandboxSdk, region: string) =>
       openVercelCore({
-        options: { sdk, backendCredential: core.credential, namespace: "test", region },
+        options: {
+          blobs: "sqlite",
+          sdk,
+          backendCredential: core.credential,
+          namespace: "test",
+          region,
+        },
         openRemote: ({ url }) =>
           ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
         version: "1.2.3",
@@ -507,6 +699,7 @@ describe("vercel() store", () => {
         options: {
           sdk: fake.sdk,
           backendCredential: core.credential,
+          blobs: "sqlite",
           namespace: "test",
           region: "fra1",
         },
@@ -545,6 +738,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -626,6 +820,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -689,6 +884,7 @@ describe("vercel() store", () => {
             options: {
               sdk: fake.sdk,
               backendCredential: () => credential,
+              blobs: "sqlite",
               namespace: "test",
               region: "iad1",
             },
@@ -722,6 +918,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -749,6 +946,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -767,6 +965,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -777,6 +976,27 @@ describe("vercel() store", () => {
     expect(wakes()).toHaveLength(1);
   }, 60_000);
 
+  it("refuses another serverless host even with an in-memory local fallback", () => {
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("AWS_LAMBDA_FUNCTION_NAME", "app");
+    try {
+      expect(() =>
+        createJazz({
+          app,
+          permissions,
+          store: vercel({
+            blobs: "sqlite",
+            namespace: legacyNamespace,
+            region: "iad1",
+            local: memory(),
+          }),
+        }),
+      ).toThrow(/vercel\(\) requires a Vercel production or preview deployment/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("runs its local store outside a Vercel deployment", async () => {
     const appId = randomUUID();
     const fake = fakeVercel({ appId, url: "http://unused.invalid" });
@@ -785,11 +1005,16 @@ describe("vercel() store", () => {
     cleanups.push(async () => {
       if (before !== undefined) process.env.VERCEL = before;
     });
-    const { memory } = await import("./index.js");
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk, local: memory() }),
+      store: vercel({
+        blobs: "sqlite",
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        local: memory(),
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     await jazz.db.insert(app.notes, { text: "local" }).wait({ tier: "global" });
@@ -807,6 +1032,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: older.sdk,
@@ -825,6 +1051,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: newer.sdk,
@@ -851,6 +1078,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,

@@ -18,7 +18,7 @@ When Jazz runs inside your [main backend](/docs/how-jazz-works#how-a-backend-tal
 backend already knows who is signed in, so it tells Jazz:
 
 ```ts title="jazz.server.ts"
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
@@ -26,7 +26,7 @@ import permissions from "./jazz.permissions.json" with { type: "json" };
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) return null;

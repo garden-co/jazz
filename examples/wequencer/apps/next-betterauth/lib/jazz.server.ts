@@ -9,7 +9,7 @@ const createRequire =
 // Load the backend through Node at runtime, never through the bundler: Turbopack
 // bundles a static "jazz-tools/backend" import (and jazz-napi with it) despite
 // serverExternalPackages, and then fails to resolve the native binding.
-const { createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { createJazz, remote, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -30,7 +30,7 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store: config.remote
       ? remote({ ...config.remote, appId: config.appId })
-      : sqlite({ path: config.dataPath! }),
+      : sqlite({ path: config.dataPath!, blobs: files() }),
     // Better Auth's session cookie decides who the bandmate is.
     authenticate: async (request) => {
       const { auth } = await import("@/lib/auth");

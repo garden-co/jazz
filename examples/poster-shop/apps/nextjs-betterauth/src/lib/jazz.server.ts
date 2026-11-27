@@ -8,7 +8,7 @@ import { assertBuildConfiguration } from "./build-config.mjs";
 // workaround: real apps just `import { createJazz } from "jazz-tools/backend"`).
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { createJazz, remote, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -32,7 +32,7 @@ export function jazz(): Promise<Jazz> {
     store: sync
       ? // assertBuildConfiguration checked that the admin secret is set.
         remote({ url: sync.url, appId: config.appId, secret: sync.adminSecret! })
-      : sqlite({ path: config.dataPath }),
+      : sqlite({ path: config.dataPath, blobs: files() }),
     // Better Auth's session cookie decides who the user is. The display name
     // rides along as a claim, for the first poster's title.
     authenticate: async (request) => {

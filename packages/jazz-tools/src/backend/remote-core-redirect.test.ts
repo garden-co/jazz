@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { testApp } from "../testing/index.js";
 import { networkTransport } from "./core-transport.js";
-import { CoreRedirectError, createJazz, durableObjects, remote } from "./index.js";
+import { CoreRedirectError, createJazz, remote } from "./index.js";
 // Types only: the Worker entry loads jazz-wasm, which Node tests don't build.
 import type * as workerdEntry from "./workerd.js";
 
@@ -77,22 +77,6 @@ describe.each(REDIRECTS)("a core answering %i", (status) => {
     expect(String((error as Error).message)).toContain(target.url);
     expect(String((error as Error).message)).toContain(
       "configure remote() with the core's final URL",
-    );
-    expect(target.reached).toEqual([]);
-  });
-
-  it("fails a durableObjects() url with a named error and never reaches the target", async () => {
-    const target = await elsewhere();
-    const core = await redirectingCore(status, target.url);
-    const jazz = createJazz({
-      app: testApp({ tables: { todos: { columns: { title: "string" } } } }),
-      permissions: { format: 1, tables: { todos: { read: "true", insert: "true" } } },
-      store: durableObjects({ url: core, secret: "s".repeat(40) }),
-    });
-    cleanups.push(() => jazz.close());
-    await expect(jazz.ready()).rejects.toBeInstanceOf(CoreRedirectError);
-    await expect(jazz.ready()).rejects.toThrow(
-      `the Jazz core at ${core} redirected to ${target.url}/app; Jazz never follows a core's redirects, since they would carry the backend credential along: configure durableObjects() with the core's final URL`,
     );
     expect(target.reached).toEqual([]);
   });

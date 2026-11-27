@@ -324,6 +324,22 @@ jobs:
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
           else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - run: $AG/t4.sh
+      - name: Check RC large values on Vercel Drive and private Blob
+        if: inputs.t4_mode != 'skip'
+        env:
+          T4_BLOB_READ_WRITE_TOKEN: ${{ secrets.T4_BLOB_READ_WRITE_TOKEN }}
+        run: |
+          result="$AG/.results/t4-storage.txt"
+          echo "FAIL t4-storage did not complete" > "$result"
+          app="$RUNNER_TEMP/t4-work/app"
+          smoke="$app/storage-smoke"
+          mkdir -p "$smoke"
+          cp "$AG/t4/scripts/live-storage.mjs" "$smoke/"
+          echo '{"private":true,"type":"module"}' > "$smoke/package.json"
+          npm install --prefix "$smoke" --no-audit --no-fund --ignore-scripts @vercel/blob@2.3.0
+          archive="$app/tgz/garden-co-jazz-napi-linux-x64-gnu-$(cat "$AG/.rc/VERSION").tgz"
+          (cd "$app" && node storage-smoke/live-storage.mjs "$archive")
+          echo "PASS t4-storage RC read back offloaded bytes from Vercel Drive and private Blob" > "$result"
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -393,6 +409,7 @@ jobs:
       - name: Verdict
         run: |
           expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t4-noregion,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
+          [ "${{ inputs.t4_mode }}" = skip ] || expected=$expected,t4-storage
           [ -n "${{ inputs.artifacts_run_id }}" ] && expected=$expected,provenance
           node $AG/verdict.mjs results "$expected"
       - if: always()

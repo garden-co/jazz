@@ -4,7 +4,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { createJazz, sqlite, trustWorkload, acceptDeviceAccounts } from "jazz-tools/backend";
+import { createJazz, files, sqlite, trustWorkload, acceptDeviceAccounts } from "jazz-tools/backend";
 import { readFileSync } from "node:fs";
 const APP_DIR = process.env.APP_DIR!,
   PORT = Number(process.env.PORT ?? 8780),
@@ -17,7 +17,7 @@ const jwks = createRemoteJWKSet(new URL(`${USERS_OIDC}/jwks`));
 const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: process.env.DATA ?? "./data/jazz" }),
+  store: sqlite({ path: process.env.DATA ?? "./data/jazz", blobs: files() }),
   authenticate: async (req) => {
     const t = req.headers.get("authorization")?.replace(/^Bearer /, "");
     if (!t) return process.env.DEVICE ? acceptDeviceAccounts(req) : null;

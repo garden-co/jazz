@@ -1,29 +1,23 @@
+import type { JazzCore } from "./core-provider.js";
 // The `vercel()` store: the app's core runs in a persistent Vercel Sandbox
 // in the app's own Vercel project, with its data on a Drive. The backend
 // creates the Sandbox on first use, wakes it when a request needs it and lets
-// it stop when the app goes quiet. The function's own Vercel OIDC token is
-// the only credential: the Sandbox SDK authenticates with it, and the core
-// trusts exactly that workload (its issuer, audience and subject) and admits
-// nothing else, so the app sets no Jazz env vars and no secret exists.
+// it stop when the app goes quiet. The function's Vercel OIDC token authenticates
+// Sandbox SDK calls by default. The core trusts the pinned workload (issuer,
+// audience and subject) independently of its bucket credentials.
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
+import { posix } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
-  connectedBlobStore,
+  type BlobStore,
   resolveVercelBlob,
   resolveVercelS3,
-  vercelBlob,
-  type S3BlobStore,
   type VercelBlob,
-  type VercelBlobStore,
   type VercelS3,
 } from "./blobs.js";
-import {
-  fetchFor,
-  inProcessWebSocketFor,
-  registerInProcessTransport,
-} from "../runtime/in-process-transport.js";
+import { routeJazzCoreClient } from "./core-provider.js";
 import type {
   DeferredConnectWebSocket,
   WebSocketConstructor,
@@ -51,6 +45,8 @@ export interface VercelNamespaceContext {
  * one per deployment.
  */
 export type VercelNamespace = string | ((context: VercelNamespaceContext) => string | undefined);
+
+type SandboxBlobs = VercelS3 | VercelBlob | Extract<BlobStore, { kind: "files" }>;
 
 export interface VercelStoreOptions {
   /**
@@ -90,18 +86,10 @@ export interface VercelStoreOptions {
    */
   region: string;
   /**
-   * Where large values' bytes go:
-   * - `vercelBlob()`: the project's Blob store, written by the core
-   *   through `/jazz`. The default whenever a Blob store is connected to
-   *   the project (`BLOB_STORE_ID` is set).
-   * - `s3()`: a bucket connected through the Vercel Marketplace.
-   * - `"sqlite"`: the core's database file on its Drive, which grows with
-   *   every large value. The default without a Blob store.
-   *
-   * A core may move from `"sqlite"` to either of the others, never back or
-   * between them.
+   * Destination for large values on the deployed core. Use files() for
+   * files on the Drive, "sqlite" for inline storage, or an external store.
    */
-  blobs?: VercelBlobStore | S3BlobStore | "sqlite";
+  blobs: BlobStore;
   /** vCPUs for the core (2 GB of memory each). Defaults to 1. Fixed at creation. */
   vcpus?: number;
   /** Drive size in bytes. Defaults to 10 GiB. Fixed at creation. */
@@ -159,6 +147,7 @@ export interface SandboxHandle {
   runCommand(params: {
     cmd: string;
     args: string[];
+    env?: Record<string, string>;
     detached?: boolean;
   }): Promise<SandboxCommandResult | void>;
   writeFiles(files: { path: string; content: Buffer }[]): Promise<void>;
@@ -172,40 +161,12 @@ export interface SandboxCommandResult {
   stdout(): Promise<string>;
 }
 
-/** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
-export interface VercelCore {
-  /** The app id the core runs as, kept on its Drive. */
-  readonly appId: string;
-  readonly serverUrl: string;
-  readonly adminSecret: string;
-  readonly backendSecret: string;
-  /** `access` is what the backend states next to its credential (see `Core`). */
-  handle(
-    method: string,
-    path: string,
-    headers: string[][],
-    body: Uint8Array,
-    access?: "admin" | "backend" | "session",
-  ): Promise<{ status: number; headers: string[][]; body: Uint8Array }>;
-  openSocket(
-    headers: string[][],
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access?: "admin" | "backend" | "session",
-  ): {
-    send(data: Uint8Array): boolean;
-    close(): void;
-    /** Resolves once the session reaches the core (see `CoreSocket.opened`). */
-    readonly opened?: Promise<void>;
-  };
-  close(): Promise<void>;
-}
-
 /** A core reached at `url` with this backend credential: `remote()`'s core. */
 export type OpenRemote = (target: {
   appId: string;
   url: string;
   backendCredential: () => string | Promise<string>;
-}) => VercelCore;
+}) => JazzCore | Promise<JazzCore>;
 
 /** The workload a core trusts: the claims of the function's own OIDC token. */
 export interface TrustedWorkload {
@@ -500,7 +461,7 @@ export function startScript(
   version: string,
   tarballUrl: string,
   trust: TrustedWorkload,
-  blobs?: VercelS3 | VercelBlob,
+  blobs?: SandboxBlobs,
   /** @internal Prefix for /data and /tmp, for tests. */
   root = "",
 ): string {
@@ -600,21 +561,10 @@ exec node -e ${shellQuote(CORE_LAUNCHER)} "$addon" "$app_id" ${shellQuote(
 `;
 }
 
-/**
- * The environment a core with `s3()` starts with: it assumes the
- * Marketplace's role with the function's OIDC token, which every request
- * carries. With `vercelBlob()` that token is the Blob credential itself.
- */
-function blobsSetup(blobs: VercelS3 | VercelBlob | undefined): string {
-  if (!blobs) {
-    return "\n# Large values stay in its SQLite file (they can move to Vercel Blob or S3 later).";
-  }
-  if ("storeId" in blobs) {
-    return "\n# Large values go to the project's Blob store, with the function's own OIDC token.";
-  }
-  return `
-# Large values go to S3, under the role this project's functions assume.
-export S3_BUCKET_NAME=${shellQuote(blobs.bucket)} AWS_REGION=${shellQuote(blobs.region)} AWS_ROLE_ARN=${shellQuote(blobs.roleArn)}`;
+function blobsSetup(blobs: SandboxBlobs | undefined): string {
+  if (!blobs || !("bucket" in blobs)) return "";
+  const role = blobs.roleArn ? ` AWS_ROLE_ARN=${shellQuote(blobs.roleArn)}` : "";
+  return `\nexport S3_BUCKET_NAME=${shellQuote(blobs.bucket)} AWS_REGION=${shellQuote(blobs.region)}${role}`;
 }
 
 /**
@@ -629,7 +579,7 @@ export function environmentOf(trust: TrustedWorkload): string | undefined {
 function coreOptions(
   dataDir: string,
   trust: TrustedWorkload,
-  blobs: VercelS3 | VercelBlob | undefined,
+  blobs: SandboxBlobs | undefined,
 ): Record<string, unknown> {
   // A bucket or Blob store is claimed for the core's environment: one
   // environment's OIDC token reaches the whole store, so preview and
@@ -641,51 +591,64 @@ function coreOptions(
     dataDir,
     blobs: !blobs
       ? { kind: "sqlite" }
-      : "storeId" in blobs
-        ? {
-            kind: "vercel-blob",
-            tokenFromWorkload: true,
-            storeId: blobs.storeId,
-            ...claim,
-            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
-          }
-        : {
-            kind: "s3",
-            roleFromWorkload: true,
-            ...claim,
-            ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
-            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
-          },
+      : "kind" in blobs
+        ? blobs
+        : "storeId" in blobs
+          ? {
+              kind: "vercel-blob",
+              tokenFromWorkload: !blobs.useReadWriteToken,
+              storeId: blobs.storeId,
+              ...claim,
+              ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+            }
+          : {
+              kind: "s3",
+              roleFromWorkload: !!blobs.roleArn,
+              ...claim,
+              ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
+              ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+            },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
   };
 }
 
-/**
- * Said once per process: a Next.js server bundles each route on its own, so
- * a module-level flag would say it once per route that opens Jazz.
- */
-const WARNED_NO_BLOB_STORE = Symbol.for("jazz-tools.vercel.warnedNoBlobStore");
-const warnedOnce = globalThis as { [WARNED_NO_BLOB_STORE]?: true };
-
-/**
- * Where a `vercel()` core keeps large values: as asked, or by default the
- * project's Blob store when one is connected, and its SQLite file when not.
- */
-export function resolveCoreBlobs(
+/** Prepare the public script input separately from the command environment carrying secrets. */
+export function prepareSandboxBlobs(
   options: Pick<VercelStoreOptions, "blobs" | "region">,
   env: Record<string, string | undefined>,
   warn: (message: string) => void = console.warn,
-): VercelS3 | VercelBlob | undefined {
-  const blobs = options.blobs ?? (connectedBlobStore(env) ? vercelBlob() : undefined);
-  if (blobs === undefined && !warnedOnce[WARNED_NO_BLOB_STORE]) {
-    warnedOnce[WARNED_NO_BLOB_STORE] = true;
-    warn(
-      "vercel(): no Blob store is connected to this project, so large values stay in the core's SQLite file. Connect one (Storage tab in the Vercel dashboard) and they go there from then on.",
-    );
+): { destination?: SandboxBlobs; credentialEnv?: Record<string, string> } {
+  const { blobs } = options;
+  if (!blobs) throw new Error("vercel(): blobs is required");
+  if (blobs === "sqlite") return {};
+  if (blobs.kind === "files") {
+    if (blobs.dir === undefined) return { destination: { kind: "files" } };
+    const dir = posix.resolve("/data/store", blobs.dir);
+    if (!dir.startsWith("/data/"))
+      throw new Error("vercel(): the blob directory must be on the /data Drive");
+    return { destination: { kind: "files", dir } };
   }
-  if (blobs === undefined || blobs === "sqlite") return undefined;
-  if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
-  return resolveVercelS3(blobs, options.region, env, warn);
+  if (blobs.kind === "vercel-blob") {
+    return {
+      destination: resolveVercelBlob(blobs, env),
+      // Empty OIDC selects the supplied read-write token in the native resolver.
+      credentialEnv: blobs.credentials && {
+        BLOB_READ_WRITE_TOKEN: blobs.credentials.readWriteToken,
+        VERCEL_OIDC_TOKEN: "",
+      },
+    };
+  }
+  if (blobs.kind === "s3") {
+    return {
+      destination: resolveVercelS3(blobs, options.region, env, warn),
+      credentialEnv: blobs.credentials && {
+        AWS_ACCESS_KEY_ID: blobs.credentials.accessKeyId,
+        AWS_SECRET_ACCESS_KEY: blobs.credentials.secretAccessKey,
+        AWS_SESSION_TOKEN: blobs.credentials.sessionToken ?? "",
+      },
+    };
+  }
+  throw new Error('vercel(): blobs must be files(), s3(), vercelBlob() or "sqlite"');
 }
 
 /**
@@ -802,16 +765,6 @@ export function onVercelDeployment(env: Record<string, string | undefined> = pro
   return !!env.VERCEL && (env.VERCEL_ENV === "production" || env.VERCEL_ENV === "preview");
 }
 
-/**
- * Whether this process runs on Vercel's serverless hosts: no lasting disk,
- * sockets only through `upgradeWebSocket`. Only `vercel dev` (VERCEL_ENV
- * development) is a local machine; a VERCEL flag without VERCEL_ENV counts
- * as a host, the safer default for refusing local disk.
- */
-export function onVercelHost(env: Record<string, string | undefined> = process.env): boolean {
-  return !!env.VERCEL && env.VERCEL_ENV !== "development";
-}
-
 /** Vercel's limit on a Sandbox name. */
 export const SANDBOX_NAME_MAX = 128;
 /** Vercel's limit on a Drive name. */
@@ -832,8 +785,8 @@ const PER_BRANCH_RECIPE =
 export function missingNamespaceError(): Error {
   return new Error(
     "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
-      '  vercel({ namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
-      `  vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+      '  vercel({ blobs: "sqlite", namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
+      `  vercel({ blobs: "sqlite", ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
   );
 }
 
@@ -845,7 +798,7 @@ export function missingRegionError(): Error {
   return new Error(
     "vercel(): pass `region`, the Vercel region this deployment's core runs and keeps its data in (its Sandbox and its Drive, fixed when the core is created). " +
       "Earlier versions created every core in iad1; to keep existing cores where they are, pass:\n" +
-      '  vercel({ namespace, region: "iad1" })\n' +
+      '  vercel({ blobs: "sqlite", namespace, region: "iad1" })\n' +
       `For a new app, pick the region your functions run in (see ${SANDBOX_REGIONS_DOCS}).`,
   );
 }
@@ -909,7 +862,7 @@ export function refuseVercelName(options: {
   if (!("name" in options)) return;
   const defaults =
     "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-    `vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
+    `vercel({ blobs: "sqlite", ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
   const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
   const name = options.name;
   // The Sandbox a namespace names: "jazz-", the project id lowercased with
@@ -1089,6 +1042,7 @@ async function installedVersion(): Promise<string> {
 export interface OpenVercelCoreOptions {
   options: VercelStoreOptions;
   openRemote: OpenRemote;
+  routeClient?: typeof routeJazzCoreClient;
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
@@ -1123,7 +1077,7 @@ const SANDBOX_REQUIRE_ESM_HINT =
   "@vercel/sandbox 4.1.0 to 5.0.0 do this through @vercel/drives in a function Vercel doesn't bundle " +
   "(a plain Node function in api/; Next.js bundles it): install @vercel/sandbox@4.0.0.";
 
-export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
+export async function openVercelCore(params: OpenVercelCoreOptions): Promise<JazzCore> {
   const { options, openRemote } = params;
   refuseVercelAppId(options);
   const env = params.env ?? process.env;
@@ -1153,8 +1107,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
-  const blobs = resolveCoreBlobs(options, env);
-  if (blobs && environmentOf(trust) === undefined) {
+  const { destination: blobs, credentialEnv } = prepareSandboxBlobs(options, env);
+  if (blobs && !("kind" in blobs) && environmentOf(trust) === undefined) {
     console.warn(
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );
@@ -1162,7 +1116,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // Read while the core wakes; refused before anything is served.
   const storeChecked =
     blobs && "storeId" in blobs
-      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      ? refuseOtherEnvironmentsBlobStore(
+          blobs.storeId,
+          environmentOf(trust),
+          credentialEnv?.BLOB_READ_WRITE_TOKEN ?? token,
+          params.fetch,
+        )
       : undefined;
   void storeChecked?.catch(() => {});
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
@@ -1180,6 +1139,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     await sbx.runCommand({
       cmd: "bash",
       args: ["-lc", `exec bash ${path} >>/data/server.log 2>&1`],
+      ...(credentialEnv && { env: credentialEnv }),
       detached: true,
     });
   };
@@ -1555,7 +1515,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   let live:
-    | { sbx: SandboxHandle; base: string; appId: string; core: VercelCore; checkedAt: number }
+    | { sbx: SandboxHandle; base: string; appId: string; core: JazzCore; checkedAt: number }
     | undefined;
   let pending: Promise<NonNullable<typeof live>> | undefined;
   let lastActivity = Date.now();
@@ -1639,7 +1599,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           sbx,
           base,
           appId: coreAppId,
-          core: openRemote({ appId: coreAppId, url: base, backendCredential }),
+          core: await openRemote({ appId: coreAppId, url: base, backendCredential }),
           checkedAt: Date.now(),
         };
         if (replaced) void replaced.close().catch(() => {});
@@ -1691,14 +1651,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
   // presents the backend credential.
-  const serverUrl = `http://jazz-vercel-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(serverUrl, {
+  const route = (params.routeClient ?? routeJazzCoreClient)({
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
       const send = async (sent: Request) => {
-        const inner = (await ensure()).core.serverUrl;
-        return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, sent));
+        const inner = (await ensure()).core;
+        const fetchCore = inner.clientTransport?.fetch ?? globalThis.fetch;
+        return fetchCore(new Request(`${inner.serverUrl}${url.pathname}${url.search}`, sent));
       };
       // Kept to send again only when that costs little: a clone tees the
       // body, buffering a streamed upload whole while the first send runs.
@@ -1712,7 +1672,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       void response.body?.cancel().catch(() => {});
       return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, {
+    WebSocket: wakingWebSocket(async () => (await ensure()).core, {
       dropped: distrust,
       unreached: connectionUnreached,
       reached: connectionReached,
@@ -1721,7 +1681,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 
   return {
     appId: first.appId,
-    serverUrl,
+    ...route,
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
     async handle(method, path, headers, body, access) {
@@ -1735,12 +1695,16 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     },
     openSocket(headers, onEvent, access) {
       sockets++;
-      let inner: ReturnType<VercelCore["openSocket"]> | undefined;
+      let inner: ReturnType<JazzCore["openSocket"]> | undefined;
       let closed = false;
-      const queued: Uint8Array[] = [];
+      let wake!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        wake = resolve;
+      });
       const done = () => {
         if (!closed) sockets--;
         closed = true;
+        wake();
       };
       ensure().then(
         ({ core }) => {
@@ -1773,7 +1737,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             } as JazzCoreSocketEvent);
             return;
           }
-          for (const data of queued.splice(0)) inner.send(data);
+          wake();
         },
         (error: unknown) => {
           done();
@@ -1789,8 +1753,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           if (closed) return false;
           lastActivity = Date.now();
           if (inner) return inner.send(data);
-          queued.push(data);
-          return true;
+          return ready.then(() => !closed && !!inner && inner.send(data));
         },
         close() {
           done();
@@ -1800,7 +1763,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     },
     async close() {
       clearInterval(keepalive);
-      unregister();
+      route.close();
       await live?.core.close();
     },
   };
@@ -1838,7 +1801,7 @@ function resendable(request: Request, given?: unknown): boolean {
  * only waited for the wake), and `reached` once one opens.
  */
 function wakingWebSocket(
-  resolveOrigin: () => Promise<string>,
+  resolveCore: () => Promise<JazzCore>,
   hooks: { dropped: () => void; unreached: () => void; reached: () => void },
 ): WebSocketConstructor {
   return class WakingSocket implements DeferredConnectWebSocket {
@@ -1860,11 +1823,13 @@ function wakingWebSocket(
     }
 
     private connect(): void {
-      resolveOrigin().then(
-        (origin) => {
+      resolveCore().then(
+        (core) => {
           if (this.readyState >= 2) return;
-          const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
-          const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
+          const Socket = core.clientTransport?.WebSocket ?? globalThis.WebSocket;
+          const socket = new Socket(
+            `${core.serverUrl.replace(/^http/, "ws")}${this.path}`,
+          ) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           this.tried = true;

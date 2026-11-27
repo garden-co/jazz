@@ -7,7 +7,7 @@ import { serverConfig } from "./config";
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { acceptDeviceAccounts, createJazz, remote, sqlite } = createRequire(import.meta.url)(
+const { acceptDeviceAccounts, createJazz, remote, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -29,7 +29,7 @@ export function backend(): Promise<Jazz> {
     permissions,
     store: sync
       ? remote({ ...sync, appId: serverConfig.appId })
-      : sqlite({ path: serverConfig.dataPath }),
+      : sqlite({ path: serverConfig.dataPath, blobs: files() }),
     // Better Auth's session cookie decides who the shopper is. Guests have
     // no Better Auth session: they stay on their device account.
     authenticate: async (request) => {

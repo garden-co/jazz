@@ -9,7 +9,7 @@ import permissions from "../jazz.permissions.json" with { type: "json" };
 // This is a workaround to resolve correctly NAPI modules in the monorepo
 // Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire } from "node:module";
-const { createJazz, sqlite } = createRequire(import.meta.url)(
+const { createJazz, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -87,7 +87,7 @@ function withSession(cookieHeader: string | null | undefined, sealed: string): s
 const jazz = createJazz({
   app: schema,
   permissions,
-  store: sqlite({ path: ".jazz" }),
+  store: sqlite({ path: ".jazz", blobs: files() }),
   refresh: async (request, next) => {
     // An open session renews up to ~90 s before its expiry: refresh a token
     // that expires within two minutes too, not only an expired one.

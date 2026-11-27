@@ -19,6 +19,8 @@ const required = [
   "durable-object/index.js",
   "durable-object/index.d.ts",
   "durable-object/host.js",
+  "durable-object/blob-stores.js",
+  "durable-object/blob-stores.d.ts",
   "durable-object/pkg/jazz_wasm_do.js",
   "durable-object/pkg/jazz_wasm_do_bg.wasm",
 ];

@@ -10,7 +10,7 @@ import { findUser, createUser, type User } from "./users.ts";
 // This is a workaround to resolve correctly NAPI modules in the monorepo
 // Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire } from "node:module";
-const { acceptDeviceAccounts, createJazz, memory, sqlite } = createRequire(import.meta.url)(
+const { acceptDeviceAccounts, createJazz, memory, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -54,7 +54,7 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
   const jazz = createJazz({
     app: schema,
     permissions,
-    store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
+    store: options.dataDir ? sqlite({ path: options.dataDir, blobs: files() }) : memory(),
     authenticate: (request) => {
       const user = userFromCookie(request.headers.get("cookie"));
       // This demo's sessions never expire: an open connection asks again hourly.

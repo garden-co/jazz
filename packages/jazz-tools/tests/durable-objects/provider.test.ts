@@ -1,14 +1,12 @@
-// `durableObjects()` against a Jazz Durable Object Worker in local workerd:
+// A Node backend reaching a Jazz Durable Object core with remote() in local workerd:
 // the deployment's routing and admission, and createJazz reaching the core
 // through it. These run the mock core (`mock-core.mjs`), which admits like
 // the jazz-wasm host but runs no Jazz; `real-core.test.ts` runs the host.
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CoreRedirectError, createJazz, durableObjects } from "../../src/backend/index.js";
+import { createJazz, durableObjects, remote } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/index.js";
 import { startDurableObjectCore, type DurableObjectCore } from "./harness.js";
 
@@ -41,7 +39,7 @@ type Seen = {
 const seen = async (url: string) => (await (await fetch(`${url}/__mock/seen`)).json()) as Seen[];
 
 /** createJazz on `store` until its open fails (the mock core runs no Jazz): the error. */
-async function openFailure(store: ReturnType<typeof durableObjects>): Promise<Error> {
+async function openFailure(store: ReturnType<typeof remote>): Promise<Error> {
   const jazz = createJazz({ app, permissions, store });
   try {
     await jazz.ready();
@@ -63,12 +61,6 @@ function openSocket(url: string, headers: Record<string, string>): Promise<"open
     });
     ws.addEventListener("error", () => resolve("refused"));
   });
-}
-
-async function listening(server: Server): Promise<string> {
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(() => new Promise((resolve) => server.close(resolve)));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
 describe("a Jazz Durable Object Worker", () => {
@@ -106,11 +98,16 @@ describe("a Jazz Durable Object Worker", () => {
   });
 });
 
-describe("createJazz with durableObjects()", () => {
-  it("asks the core for its app id, then reaches its admin routes as admin with the secret", async () => {
+describe("a Node backend connecting to a Durable Object core", () => {
+  it("requires remote() before contacting the core", () => {
+    const store = durableObjects({ url: "http://localhost:1", secret: "s".repeat(40) });
+    expect(() => createJazz({ app, permissions, store })).toThrow(/Cloudflare Worker.*remote\(/);
+  });
+
+  it("reaches admin routes through remote() with the configured app id and secret", async () => {
     const { url, secret, appId } = await core();
     const id = await appId();
-    const error = await openFailure(durableObjects({ url, secret }));
+    const error = await openFailure(remote({ url, appId: id, secret }));
     // The mock core runs no Jazz: publishing ends at its 501.
     expect(error.message).toMatch(/501|not implemented/);
     const asked = (path: string, access: string | null = null) => ({
@@ -121,7 +118,6 @@ describe("createJazz with durableObjects()", () => {
       access,
     });
     expect(await seen(url)).toEqual([
-      asked("/app"), // the test's own
       asked("/app"),
       asked(`/apps/${id}/admin/migrations/graph`, "admin"),
     ]);
@@ -135,61 +131,9 @@ describe("createJazz with durableObjects()", () => {
     await first.dispose();
     const again = await core({ persist });
     expect(await again.appId()).toBe(id);
-    await openFailure(durableObjects({ url: again.url, secret: again.secret }));
+    await openFailure(remote({ url: again.url, appId: id, secret: again.secret }));
     expect((await seen(again.url)).map((r) => r.path)).toContain(
       `/apps/${id}/admin/migrations/graph`,
     );
-  });
-
-  it("names a wrong secret", async () => {
-    const { url } = await core();
-    const error = await openFailure(durableObjects({ url, secret: "w".repeat(40) }));
-    expect(error.message).toMatch(
-      /refused the secret: durableObjects\(\)'s secret must be the Worker's JAZZ_CORE_SECRET/,
-    );
-  });
-
-  it.each(["..", "a/b", "a\nb", ""])(
-    "refuses an app id the core names that isn't plain: %j",
-    async (appId) => {
-      const asked: string[] = [];
-      const url = await listening(
-        createServer((request, response) => {
-          asked.push(request.url!);
-          response.setHeader("content-type", "application/json");
-          response.end(JSON.stringify({ appId }));
-        }),
-      );
-      const error = await openFailure(durableObjects({ url, secret: "s".repeat(40) }));
-      expect(error.message).toMatch(
-        /did not answer as a Jazz Durable Object core \(GET \/app: 200\)/,
-      );
-      expect(asked).toEqual(["/app"]);
-    },
-  );
-
-  it("follows no redirect, so the secret goes nowhere else", async () => {
-    const reached: IncomingHttpHeaders[] = [];
-    const elsewhere = await listening(
-      createServer((request, response) => {
-        reached.push(request.headers);
-        response.end(JSON.stringify({ appId: "00000000-0000-4000-8000-000000000000" }));
-      }),
-    );
-    const redirecting = await listening(
-      createServer((request, response) => {
-        response.writeHead(307, { location: `${elsewhere}${request.url}` });
-        response.end();
-      }),
-    );
-    const error = await openFailure(durableObjects({ url: redirecting, secret: "s".repeat(40) }));
-    // A redirect is refused with a named error, not followed or read as a
-    // core that isn't Jazz: configure the core's final URL instead.
-    expect(error).toBeInstanceOf(CoreRedirectError);
-    expect(error).toMatchObject({ url: redirecting, location: `${elsewhere}/app` });
-    expect(error.message).toBe(
-      `the Jazz core at ${redirecting} redirected to ${elsewhere}/app; Jazz never follows a core's redirects, since they would carry the backend credential along: configure durableObjects() with the core's final URL`,
-    );
-    expect(reached).toEqual([]);
   });
 });

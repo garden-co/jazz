@@ -12,5 +12,5 @@ for _ in $(seq 1 60); do curl -s -o /dev/null "localhost:$PORT" && break; sleep 
 curl -s -o /dev/null -X POST "localhost:$PORT/jazz/apps/x/accounts/backend-user"; sleep 2
 pid=$(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2); [ -n "$pid" ] && kill "$pid"
 grep -A3 "Error: vercel()" "$T4_WORK/dev-noregion.log" | head -4
-if grep -q 'vercel({ namespace, region: "iad1" })' "$T4_WORK/dev-noregion.log" && grep -q "vercel.com/docs/sandbox/concepts/regions" "$T4_WORK/dev-noregion.log"; then
+if grep -q 'vercel({ blobs: "sqlite", namespace, region: "iad1" })' "$T4_WORK/dev-noregion.log" && grep -q "vercel.com/docs/sandbox/concepts/regions" "$T4_WORK/dev-noregion.log"; then
   echo "PASS next dev: missing-region error names the fix and the regions page"; else echo "FAIL next dev: expected missing-region error not found"; fi

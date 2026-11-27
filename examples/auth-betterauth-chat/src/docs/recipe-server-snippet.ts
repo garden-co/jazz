@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { app } from "../../jazz.generated";
 import permissions from "../../jazz.permissions.json" with { type: "json" };
 
@@ -11,7 +11,7 @@ export const auth = betterAuth({
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   // The Better Auth session cookie decides who the user is.
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });

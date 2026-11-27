@@ -30,23 +30,27 @@ encrypted data without holding encryption keys. See [Encryption limits](/docs/e2
 ```ts title="src/worker.ts"
 import { Hono } from "hono";
 import { createJazz, durableObjects } from "jazz-tools/backend";
+import { r2 } from "jazz-tools/durable-object";
 import { jazzWorker } from "jazz-tools/cloudflare";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
-const worker = jazzWorker((env: Env) => {
-  const jazz = createJazz({
-    app,
-    permissions,
-    // The core in this Worker, through its binding.
-    store: durableObjects({ binding: env.JAZZ }),
-    // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
-    authenticate: async (request) => null,
-  });
-  // Your own routes. Requests under /jazz (sync and sign-in) are Jazz's.
-  const routes = new Hono().get("/api/todos", async (c) => c.json(await jazz.db.all(app.todos)));
-  return { jazz, fetch: routes.fetch };
-});
+const worker = jazzWorker(
+  (env: Env) => {
+    const jazz = createJazz({
+      app,
+      permissions,
+      // The core in this Worker, through its binding.
+      store: durableObjects({ binding: env.JAZZ }),
+      // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+      authenticate: async (request) => null,
+    });
+    // Your own routes. Requests under /jazz (sync and sign-in) are Jazz's.
+    const routes = new Hono().get("/api/todos", async (c) => c.json(await jazz.db.all(app.todos)));
+    return { jazz, fetch: routes.fetch };
+  },
+  { blobs: (env) => r2(env.JAZZ_BLOBS) },
+);
 
 export const { JazzCore, JazzBackend } = worker;
 export default worker;
@@ -82,10 +86,31 @@ does this, with Better Auth on Jazz (`examples/band-chat/apps/react-hono-bettera
 - **Keep the names.** Your app's data lives in the `JazzCore` object. A renamed class, binding or
   Worker starts a new, empty app.
 - **R2** has to be enabled on your Cloudflare account once (Dashboard → R2 Object Storage), which
-  asks for a payment method even within R2's free tier. Without the `JAZZ_BLOBS` binding, large
-  values stay in the Durable Object's SQLite, which grows with each of them. Once a core has put
+  asks for a payment method even within R2's free tier. To store large values inline, select `{ blobs: "sqlite" }` and omit the R2 binding. The bytes stay in the Durable Object's SQLite, which grows with each of them. Once a core has put
   values in a bucket, keep that binding: it refuses another bucket, and refuses to start without one.
 - **Size:** the Worker is about 20 MB, under Workers' 64 MiB limit on every plan, Free included.
+
+## Large values in S3 or Vercel Blob
+
+Select an existing bucket or private Blob store in the **core Worker**. Every
+backend connecting to that core uses the same destination. For S3, set
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as Worker secrets, plus
+`AWS_SESSION_TOKEN` for temporary credentials. For Vercel Blob, set
+`BLOB_READ_WRITE_TOKEN`.
+
+For S3, pass `{ blobs: () => s3({ bucket: "app-chunks", region: "us-east-1" }) }` as the second argument to `jazzWorker`. Import `s3` from `jazz-tools/durable-object`.
+
+Set `endpoint` for an S3-compatible service. For private Vercel Blob, import
+`vercelBlob` from the same entry and use `blobs: () => vercelBlob()`. The core
+can read the store ID from a read-write token or from `storeId`.
+
+For custom secret bindings, return `s3({ bucket, region, credentials: {
+accessKeyId, secretAccessKey, sessionToken } })` or `vercelBlob({ credentials:
+{ readWriteToken } })` from the callback, using values from its `env` argument.
+Both destinations default to the app's own prefix. Give each core a unique
+explicit `prefix` if you override it. Vercel Blob does not document atomic
+first creation when two cores claim the same custom prefix simultaneously. As with R2, the core claims the prefix,
+keeps chunks in SQLite until their uploads succeed, and checks their hashes on read.
 
 ## WebSocket hibernation
 

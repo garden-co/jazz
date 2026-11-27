@@ -1,34 +1,40 @@
 // Where a core keeps the bytes of large values once they settle.
-
-/** An S3-compatible bucket for large-value bytes; see {@link s3}. */
-export interface S3BlobStore {
-  readonly kind: "s3";
-  /** Defaults to `S3_BUCKET_NAME`. */
-  readonly bucket?: string;
-  /** Defaults to `AWS_REGION`; `auto` for R2. */
-  readonly region?: string;
-  /** An S3-compatible endpoint other than AWS, e.g. R2's. */
-  readonly endpoint?: string;
-  /**
-   * Prepended to every object name. Defaults to `jazz/<store id>/`,
-   * one per store, so stores sharing a bucket (a preview core per branch)
-   * never share objects. A prefix is claimed by the first store that uses
-   * it, and any other store is refused there. A `vercel()` core also claims
-   * the whole bucket for its environment, so production and previews each
-   * need a bucket of their own.
-   */
-  readonly prefix?: string;
-}
+import type { S3BlobStore, VercelBlobStore } from "jazz-wasm/durable-object/blob-stores.js";
+export type { S3BlobStore, VercelBlobStore } from "jazz-wasm/durable-object/blob-stores.js";
 
 /**
  * Where a store keeps the bytes of large values once they settle. Rows and
  * the chunk index stay in the database either way.
- * - `files()`: one file per chunk in a directory (the default for `sqlite()`).
+ * - `files()`: one file per chunk in a directory.
  * - `s3()`: one object per chunk in an S3-compatible bucket.
+ * - `vercelBlob()`: one private blob per chunk in a Vercel Blob store.
  * - `"sqlite"`: inside the database file. Works, but the file grows with
  *   every large value, so it is not recommended.
  */
-export type BlobStore = { readonly kind: "files"; readonly dir?: string } | S3BlobStore | "sqlite";
+export type BlobStore =
+  | { readonly kind: "files"; readonly dir?: string }
+  | S3BlobStore
+  | VercelBlobStore
+  | "sqlite";
+
+export function validateBlobCredentials(blobs: BlobStore): void {
+  if (blobs === "sqlite" || blobs.kind === "files" || blobs.credentials === undefined) return;
+  if (blobs.kind === "vercel-blob") {
+    requireCredential("readWriteToken", blobs.credentials?.readWriteToken);
+    return;
+  }
+  requireCredential("accessKeyId", blobs.credentials?.accessKeyId);
+  requireCredential("secretAccessKey", blobs.credentials?.secretAccessKey);
+  if (blobs.credentials.sessionToken !== undefined) {
+    requireCredential("sessionToken", blobs.credentials.sessionToken);
+  }
+}
+
+function requireCredential(field: string, value: unknown) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`blobs.credentials.${field} must be a nonempty string`);
+  }
+}
 
 /**
  * Large-value bytes as files in `dir`, by default `blobs/` in the store's
@@ -45,11 +51,8 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
  * `AWS_ROLE_ARN`, and the core assumes that role with the function's own
  * OIDC token), MinIO, or Cloudflare R2 through R2's S3 API (an `endpoint`
  * of `https://<account id>.r2.cloudflarestorage.com`, `region: "auto"` and an
- * R2 API token's keys). `s3()` is for cores that run as a native server
- * (`sqlite()` on a host of your own, `vercel()`); a core on a Cloudflare
- * Durable Object (`durableObjects()`) reaches R2 through its Worker's
- * `JAZZ_BLOBS` R2 binding instead, set in that Worker's Wrangler config, not
- * here. Elsewhere the core finds
+ * R2 API token's keys). On a Durable Object, configure the core Worker with
+ * this helper or use a direct R2 binding via `r2(bucket)`. Native SQLite finds
  * credentials as the AWS SDKs do: `AWS_ACCESS_KEY_ID` and
  * `AWS_SECRET_ACCESS_KEY`, then `AWS_ROLE_ARN` with
  * `AWS_WEB_IDENTITY_TOKEN_FILE`, then the role ECS, Fargate, EKS Pod
@@ -68,28 +71,12 @@ export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
   return { kind: "s3", ...Object.fromEntries(set) };
 }
 
-/** A Vercel Blob store for large-value bytes; see {@link vercelBlob}. */
-export interface VercelBlobStore {
-  readonly kind: "vercel-blob";
-  /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
-  readonly storeId?: string;
-  /**
-   * Prepended to every blob's pathname. Defaults to `jazz/<store id>/`,
-   * one per core, so the preview cores of different branches sharing a Blob
-   * store never share blobs. A prefix is claimed by the first core that uses
-   * it. The Blob store itself serves one environment: production and
-   * previews each need their own.
-   */
-  readonly prefix?: string;
-}
-
 /**
- * Large-value bytes in a Vercel Blob store, for a `vercel()` core (and its
- * default whenever `BLOB_STORE_ID` is set). Browsers send and fetch large
- * values through the app's `/jazz` route; the core writes and reads the
- * blobs itself, so nothing but connecting a Blob store is needed. It
- * authenticates with the function's own OIDC token, which reaches it with
- * each request, and the Sandbox holds only the store's id.
+ * Large-value bytes in a private Vercel Blob store. With `sqlite()` or `vercel()`, supply
+ * `credentials: { readWriteToken }` (native SQLite also reads `BLOB_READ_WRITE_TOKEN`).
+ * On Vercel, omitting credentials uses the connected store and authenticates
+ * with the function's workload OIDC token. Browsers send and fetch large values
+ * through the app's `/jazz` route. The core reads and writes the blobs.
  * Blobs are private, and each is checked against its SHA-256 when read.
  *
  * One Blob store serves one Vercel environment: any function of the
@@ -104,6 +91,7 @@ export function vercelBlob(options: Omit<VercelBlobStore, "kind"> = {}): VercelB
 
 /** What a `vercel()` core is started with for `vercelBlob()`. */
 export interface VercelBlob {
+  useReadWriteToken?: boolean;
   storeId: string;
   prefix?: string;
 }
@@ -123,13 +111,19 @@ export function resolveVercelBlob(
   blobs: VercelBlobStore,
   env: Record<string, string | undefined>,
 ): VercelBlob {
-  const storeId = blobs.storeId?.replace(/^store_/, "") ?? connectedBlobStore(env);
+  const tokenStore = /^vercel_blob_rw_([^_]+)_/.exec(blobs.credentials?.readWriteToken ?? "")?.[1];
+  const storeId = blobs.storeId?.replace(/^store_/, "") ?? tokenStore ?? connectedBlobStore(env);
   if (!storeId) {
     throw new Error(
       "vercel({ blobs: vercelBlob() }): BLOB_STORE_ID is not set. Connect a Blob store to this project (Storage tab in the Vercel dashboard), or pass vercelBlob({ storeId }).",
     );
   }
-  return { storeId, ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }) };
+  if (!/^[a-zA-Z0-9-]+$/.test(storeId)) throw new Error("vercelBlob(): invalid storeId");
+  return {
+    storeId,
+    ...(blobs.credentials && { useReadWriteToken: true }),
+    ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+  };
 }
 
 /** The AWS region a Vercel region runs in. */
@@ -164,7 +158,7 @@ const VERCEL_TO_AWS: Record<string, string> = {
 export interface VercelS3 {
   bucket: string;
   region: string;
-  roleArn: string;
+  roleArn?: string;
   endpoint?: string;
   prefix?: string;
 }
@@ -186,11 +180,11 @@ export function resolveVercelS3(
 ): VercelS3 {
   const bucket = blobs.bucket ?? env.S3_BUCKET_NAME;
   const region = blobs.region ?? env.AWS_REGION ?? (blobs.endpoint ? "auto" : undefined);
-  const roleArn = env.AWS_ROLE_ARN;
+  const roleArn = blobs.credentials ? undefined : env.AWS_ROLE_ARN;
   const missing = [
     bucket ? null : "S3_BUCKET_NAME (or s3({ bucket }))",
     region ? null : "AWS_REGION (or s3({ region }))",
-    roleArn ? null : "AWS_ROLE_ARN",
+    roleArn || blobs.credentials ? null : "AWS_ROLE_ARN",
   ].filter((name): name is string => name !== null);
   if (missing.length > 0) {
     throw new Error(
@@ -206,7 +200,7 @@ export function resolveVercelS3(
   return {
     bucket: bucket!,
     region: region!,
-    roleArn: roleArn!,
+    ...(roleArn && { roleArn }),
     ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
     ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
   };

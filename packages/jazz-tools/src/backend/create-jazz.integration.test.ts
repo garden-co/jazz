@@ -41,9 +41,12 @@ import {
   isRequestAuthenticationError,
   memory,
   remote,
+  s3,
   sqlite,
   vercel,
+  vercelBlob,
   type Jazz,
+  type JazzProvider,
   type RequestAuthenticationError,
   type WsLikeSocket,
 } from "./index.js";
@@ -202,13 +205,11 @@ describe("createJazz", () => {
     // Record every prelude the backend forwards to the core.
     const forwarded: Array<Record<string, unknown>> = [];
     const realOpenSocket = JazzCore.prototype.openSocket;
-    JazzCore.prototype.openSocket = function (this: unknown, ...args: unknown[]) {
-      const sock = (
-        realOpenSocket as (...a: unknown[]) => { send(data: Uint8Array): boolean }
-      ).apply(this, args);
+    JazzCore.prototype.openSocket = function (...args: Parameters<typeof realOpenSocket>) {
+      const sock = realOpenSocket.apply(this, args);
       let first = true;
-      const realSend = sock.send.bind(sock);
-      sock.send = (data: Uint8Array) => {
+      const realSend = sock.sendWithRoom.bind(sock);
+      sock.sendWithRoom = (data: Uint8Array) => {
         if (first) {
           first = false;
           try {
@@ -220,7 +221,7 @@ describe("createJazz", () => {
         return realSend(data);
       };
       return sock;
-    } as never;
+    };
     cleanups.push(async () => {
       JazzCore.prototype.openSocket = realOpenSocket;
     });
@@ -1159,7 +1160,12 @@ describe("createJazz", () => {
   it("lets guests in through acceptDeviceAccounts from another copy of the module", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-two-copies-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    const first = createJazz({ app, permissions, store: sqlite({ path: dir }), authenticate });
+    const first = createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+      authenticate,
+    });
     cleanups.push(() => first.close());
 
     vi.resetModules();
@@ -1171,7 +1177,7 @@ describe("createJazz", () => {
     const jazz = copy.createJazz({
       app,
       permissions,
-      store: copy.sqlite({ path: dir }),
+      store: copy.sqlite({ path: dir, blobs: copy.files() }),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
         return userId ? { userId, expiresAt: inAnHour() } : copy.acceptDeviceAccounts(request);
@@ -1439,7 +1445,7 @@ describe("createJazz", () => {
     async (kind, transport, scoping) => {
       const dir = await mkdtemp(join(tmpdir(), "jazz-link-"));
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
-      const store = kind === "memory" ? memory() : sqlite({ path: dir });
+      const store = kind === "memory" ? memory() : sqlite({ path: dir, blobs: files() });
       const jazz = await createJazz({ app, permissions, store, authenticate }).ready();
       const appId = jazz.appId;
       cleanups.push(() => jazz.close());
@@ -2463,7 +2469,10 @@ describe("createJazz", () => {
     // One Jazz per sqlite directory: a later createJazz for it is a reload.
     const dir = await mkdtemp(join(tmpdir(), "jazz-stream-reuse-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    const { configure, send, asked } = await streamSendsOf({}, sqlite({ path: dir }));
+    const { configure, send, asked } = await streamSendsOf(
+      {},
+      sqlite({ path: dir, blobs: files() }),
+    );
     expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
     let n = asked();
     expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
@@ -2651,6 +2660,109 @@ describe("createJazz", () => {
     }
   }, 60_000);
 
+  it("accepts Next.js upgrades on Vercel when the store is remote", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const upgradeWebSocket = vi.fn(() => new Response("Vercel upgrade"));
+    vi.doMock("@vercel/functions", () => ({ upgradeWebSocket, getDeadline: () => undefined }));
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("VERCEL_ENV", "production");
+    try {
+      const url = `http://app.test/jazz/apps/${appId}/ws`;
+      const request = new Request(url, { headers: { upgrade: "websocket" } });
+      expect((await jazz.handle(request)).headers.get("x-jazz-stream")).toBe("1");
+      expect(await (await jazz.next().GET(request)).text()).toBe("Vercel upgrade");
+      expect(upgradeWebSocket).toHaveBeenCalledWith(expect.any(Function), {
+        maxPayload: 2 * 1024 * 1024,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.doUnmock("@vercel/functions");
+    }
+  });
+
+  it("uses a provider's incoming upgrade only for an allowed sync request", async () => {
+    const upgrade = vi.fn(() => new Response("upgraded by the provider"));
+    const store: JazzProvider = {
+      open: (context) => memory().open(context),
+      getWebSocketUpgrade: (handler) => (handler === "fetch" ? upgrade : undefined),
+    };
+    const jazz = await createJazz({ app, permissions, store }).ready();
+    cleanups.push(() => jazz.close());
+    const path = `http://app.test/jazz/apps/${jazz.appId}/ws`;
+    const request = (url = path, origin = "http://app.test") =>
+      new Request(url, { headers: { origin, upgrade: "websocket" } });
+    expect((await jazz.handle(request("http://app.test/jazz/other/ws"))).status).toBe(404);
+    expect((await jazz.handle(request(path, "https://elsewhere.test"))).status).toBe(403);
+    expect((await jazz.handle(new Request(path))).headers.get("x-jazz-stream")).toBeNull();
+    expect((await jazz.next().GET(request())).headers.get("x-jazz-stream")).toBe("1");
+    expect(upgrade).not.toHaveBeenCalled();
+    const incoming = request();
+    expect(await (await jazz.handle(incoming)).text()).toBe("upgraded by the provider");
+    expect(upgrade).toHaveBeenCalledWith(incoming, expect.any(Function), {
+      maxPayload: 2 * 1024 * 1024,
+    });
+  });
+
+  it("releases an application core provider if publication fails", async () => {
+    const close = vi.fn(async () => {});
+    const openSocket = vi.fn(() => {
+      throw new Error("unexpected socket");
+    });
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: {
+        open: async ({ connect }) =>
+          connect({
+            appId: randomUUID(),
+            close,
+            openSocket,
+            async handle() {
+              throw new Error("core unavailable during publication");
+            },
+          }),
+      },
+    });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(/core unavailable during publication/);
+    expect(openSocket).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens an application core provider on demand and releases it on close", async () => {
+    const close = vi.fn();
+    const open = vi.fn<JazzProvider["open"]>(async (context) => {
+      const core = await memory().open(context);
+      return {
+        ...core,
+        async close() {
+          await core.close();
+          close();
+        },
+      };
+    });
+    const jazz = createJazz({ app, permissions, store: { open } });
+    cleanups.push(() => jazz.close());
+    expect(open).not.toHaveBeenCalled();
+    await Promise.all([jazz.ready(), jazz.ready()]);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(jazz.appId).toBe((await open.mock.results[0]!.value).appId);
+    const row = await jazz.db
+      .insert(app.todos, { title: "external", owner: randomUUID() })
+      .wait({ tier: "global" });
+    expect((await jazz.db.one(app.todos.where({ id: row.id })))?.title).toBe("external");
+    await jazz.close();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
@@ -2658,21 +2770,21 @@ describe("createJazz", () => {
     // pid, back after a restart) holds nothing: only the OS lock counts.
     await writeFile(join(dir, "jazz.lock"), `process ${process.pid}`);
     // In one process, every createJazz for the directory is the same Jazz.
-    const first = createJazz({ app, permissions, store: sqlite({ path: dir }) });
-    expect(createJazz({ app, permissions, store: sqlite({ path: `${dir}/.` }) })).toBe(first);
+    const first = createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) });
+    expect(
+      createJazz({ app, permissions, store: sqlite({ path: `${dir}/.`, blobs: files() }) }),
+    ).toBe(first);
     const appId = (await first.ready()).appId;
     await first.close();
 
     // Another core holding it (in production, another process) is refused,
     // with why and what to do.
     const other = await JazzCore.open({
-      appId,
       backendSecret: randomUUID(),
       adminSecret: randomUUID(),
-      dataDir: dir,
-      blobs: "files",
+      storage: { kind: "sqlite", path: dir, appId, blobs: files() },
     });
-    const refused = createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const refused = createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) });
     expect(refused).not.toBe(first);
     await expect(refused.ready()).rejects.toThrow(/is already open.*another process/s);
     await other.close();
@@ -2686,9 +2798,9 @@ describe("createJazz", () => {
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
     try {
-      await expect(
-        createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready(),
-      ).rejects.toThrow(/Use vercel\(\), whose local store runs sqlite\(\) in dev, or remote\(/);
+      expect(() =>
+        createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) }),
+      ).toThrow(/Use vercel\(\), whose local store runs sqlite\(\) in dev, or remote\(/);
     } finally {
       if (previous === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previous;
@@ -2700,7 +2812,11 @@ describe("createJazz", () => {
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
 
     // The core names its own app and keeps that id with its data.
-    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    const first = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
     const appId = first.appId;
     expect(appId).toMatch(/^[0-9a-f-]{36}$/);
     const inserted = await first.db
@@ -2708,12 +2824,18 @@ describe("createJazz", () => {
       .wait({ tier: "global" });
     await first.close();
 
-    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    const second = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
     cleanups.push(() => second.close());
     expect(second.appId).toBe(appId);
     // The store keeps its own id: naming one is refused, not ignored.
     expect(() =>
-      sqlite({ path: dir, appId: randomUUID() } as unknown as Parameters<typeof sqlite>[0]),
+      sqlite({ path: dir, blobs: files(), appId: randomUUID() } as unknown as Parameters<
+        typeof sqlite
+      >[0]),
     ).toThrow(/appId is not an option.*jazz-alpha59-alpha60-import/);
     expect(() => memory({ appId: randomUUID() } as never)).toThrow(/appId is not an option/);
     // vercel() too, when called: in dev its local store would never read it.
@@ -2741,7 +2863,7 @@ describe("createJazz", () => {
       createJazz({
         app,
         permissions: editable,
-        store: sqlite({ path: dir }),
+        store: sqlite({ path: dir, blobs: files() }),
         authenticate,
       }).ready();
     const alice = () => new Request("http://app/x", { headers: { "x-test-user": "alice" } });
@@ -2953,7 +3075,11 @@ describe("createJazz", () => {
     // data: the id exactly as given, case included.
     const alpha59 = "0A590000-0000-4000-8000-000000000059";
     await writeFile(join(dir, "app-id"), `${alpha59}\n`);
-    const jazz = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
     cleanups.push(() => jazz.close());
     expect(jazz.appId).toBe(alpha59);
     await jazz.db.insert(app.todos, { title: "after import", owner: randomUUID() }).wait({
@@ -2965,7 +3091,7 @@ describe("createJazz", () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
 
-    const first = createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const first = createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) });
     // Resolved at "local": the backend's own client has it, the core may not yet.
     const written = await Promise.all(
       Array.from({ length: 5 }, (_, i) =>
@@ -2976,18 +3102,118 @@ describe("createJazz", () => {
     );
     await first.close();
 
-    const second = createJazz({ app, permissions, store: sqlite({ path: dir }) });
+    const second = createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) });
     cleanups.push(() => second.close());
     const rows = await second.db.all(app.todos, { tier: "remote" });
     expect(rows.map((todo) => todo.id).sort()).toEqual(written.map((todo) => todo.id).sort());
   }, 60_000);
+
+  it("rejects invalid native storage options before creating the store", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-invalid-storage-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const auth = { backendSecret: randomUUID(), adminSecret: randomUUID() };
+    await expect(
+      // @ts-expect-error Persistent storage requires a blob destination.
+      JazzCore.open({ ...auth, storage: { kind: "sqlite", path: dir } }),
+    ).rejects.toThrow(/missing field `blobs`/);
+    await expect(
+      // @ts-expect-error A memory store cannot have a persistent path.
+      JazzCore.open({ ...auth, storage: { kind: "memory", appId: randomUUID(), path: dir } }),
+    ).rejects.toThrow(/unknown field `path`/);
+    await expect(
+      JazzCore.open({
+        ...auth,
+        // @ts-expect-error An inline blob store cannot have bucket credentials.
+        storage: { kind: "sqlite", path: dir, blobs: { kind: "sqlite", credentials: {} } },
+      }),
+    ).rejects.toThrow(/unknown field `credentials`/);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it("requires sqlite callers to choose a blob store", () => {
+    // @ts-expect-error JavaScript callers can omit the required option.
+    expect(() => sqlite({ path: "unused" })).toThrow(/blobs is required/);
+  });
+
+  it("uses the supplied S3 session keys when the native core claims its prefix", async () => {
+    vi.stubEnv("AWS_ACCESS_KEY_ID", "ambient-key");
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "ambient-secret");
+    cleanups.push(async () => vi.unstubAllEnvs());
+    const dir = await mkdtemp(join(tmpdir(), "jazz-s3-credentials-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const requests: { authorization?: string; token?: string | string[]; path?: string }[] = [];
+    const bucket = createServer((req, res) => {
+      requests.push({
+        authorization: req.headers.authorization,
+        token: req.headers["x-amz-security-token"],
+        path: req.url,
+      });
+      // An existing claim also verifies that the native ownership check ran.
+      res.end("another-store");
+    });
+    await new Promise<void>((resolve) => bucket.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => bucket.close(resolve)));
+    const blobs = s3({
+      bucket: "chunks",
+      endpoint: `http://127.0.0.1:${(bucket.address() as AddressInfo).port}`,
+      prefix: "app/",
+      credentials: {
+        accessKeyId: "test-key",
+        secretAccessKey: "test-secret",
+        sessionToken: "test-session",
+      },
+    });
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, blobs }) }).ready(),
+    ).rejects.toThrow(/belongs to store another-store/);
+    expect(requests).toContainEqual({
+      authorization: expect.stringContaining("Credential=test-key/"),
+      token: "test-session",
+      path: "/chunks/app/.jazz-owner",
+    });
+  });
+
+  it("resolves a native Vercel Blob destination from the supplied token", async () => {
+    vi.stubEnv("BLOB_STORE_ID", "store_ambient");
+    cleanups.push(async () => vi.unstubAllEnvs());
+    const dir = await mkdtemp(join(tmpdir(), "jazz-vercel-blob-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
+    await first.close();
+    const blobs = vercelBlob({
+      prefix: "app/",
+      credentials: { readWriteToken: "vercel_blob_rw_teststore_secret" },
+    });
+    // Changing an existing file store fails before the first network request.
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, blobs }) }).ready(),
+    ).rejects.toThrow(/moving them to "vercel-blob teststore\/app\/" is not supported/);
+  });
+
+  it("names an empty explicit credential instead of falling back to ambient credentials", () => {
+    const path = "unused";
+    expect(() =>
+      sqlite({ path, blobs: s3({ credentials: { accessKeyId: "key", secretAccessKey: "" } }) }),
+    ).toThrow("blobs.credentials.secretAccessKey");
+    expect(() =>
+      sqlite({ path, blobs: vercelBlob({ credentials: { readWriteToken: "" } }) }),
+    ).toThrow("blobs.credentials.readWriteToken");
+  });
 
   it("keeps a sqlite store's large values as files, and keeps that choice", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-blobs-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const title = "large ".repeat(60_000);
 
-    const first = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    const first = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
     const inserted = await first.db
       .insert(app.todos, { title, owner: randomUUID() })
       .wait({ tier: "global" });
@@ -2999,7 +3225,11 @@ describe("createJazz", () => {
     await expect.poll(blobFiles, { timeout: 20_000 }).not.toHaveLength(0);
     await first.close();
 
-    const second = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    const second = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual([title]);
     await second.close();

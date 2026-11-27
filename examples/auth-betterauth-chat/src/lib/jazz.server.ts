@@ -8,7 +8,7 @@ import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
-const { acceptDeviceAccounts, createJazz, memory, sqlite } = nodeRequire(
+const { acceptDeviceAccounts, createJazz, memory, files, sqlite } = nodeRequire(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -22,7 +22,7 @@ export function jazz(): Promise<Jazz> {
   const pending = (globalThis.__authBetterAuthChatJazz ??= createJazz({
     app,
     permissions,
-    store: process.env.NODE_ENV === "test" ? memory() : sqlite({ path: ".jazz" }),
+    store: process.env.NODE_ENV === "test" ? memory() : sqlite({ path: ".jazz", blobs: files() }),
     // Better Auth's session cookie decides who the user is; its `role`
     // becomes the claim the chat permissions check.
     authenticate: async (request) => {

@@ -63,6 +63,7 @@ describe("vercel() store: connections waiting for a wake", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,

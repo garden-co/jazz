@@ -82,6 +82,7 @@ export async function startTrustedCore(appId: string) {
  * local jazz-tools server, and whose Drive holds that server's app id.
  */
 export function fakeVercel(core: { appId: string; url: string }) {
+  const launches: Parameters<SandboxHandle["runCommand"]>[0][] = [];
   const calls: string[] = [];
   const state = {
     exists: false,
@@ -165,8 +166,10 @@ export function fakeVercel(core: { appId: string; url: string }) {
         state.timeout += ms;
       },
     }),
-    runCommand: async ({ args }) => {
+    runCommand: async (command) => {
+      const { args } = command;
       if (args[0] === "-c") return inSandbox(args);
+      launches.push(command);
       const scriptPath = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
       const script = files.get(scriptPath)!.toString();
       const startId = scriptPath.replace(/^.*\//, "").replace(/\.sh$/, "");
@@ -263,7 +266,7 @@ export function fakeVercel(core: { appId: string; url: string }) {
       },
     },
   };
-  return { sdk, calls, state, files, recycleClaims };
+  return { sdk, calls, state, files, launches, recycleClaims };
 }
 
 export function onVercel(env: Record<string, string>) {

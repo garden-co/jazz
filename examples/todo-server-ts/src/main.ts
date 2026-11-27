@@ -13,6 +13,7 @@ import {
   fromJWT,
   memory,
   remote,
+  files,
   sqlite,
   type Db,
   type JazzStore,
@@ -134,7 +135,8 @@ export async function createServer(
     }
     store = remote({ url: serverUrl, appId, secret });
   } else {
-    store = storage.type === "persistent" ? sqlite({ path: storage.dataPath }) : memory();
+    store =
+      storage.type === "persistent" ? sqlite({ path: storage.dataPath, blobs: files() }) : memory();
   }
 
   // Who a request is, this API decides: here, the subject of a JWT that
