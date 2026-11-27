@@ -11312,6 +11312,18 @@ impl Db {
         let Some((port, action, acting)) = parked else {
             return;
         };
+        #[cfg(any(test, feature = "testing"))]
+        if self.inner.pausing_advice_seal.replace(false) {
+            let mut yielded = false;
+            poll_fn(|cx| {
+                if std::mem::replace(&mut yielded, true) {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+        }
         let action = self.sealed_advice(*action).await.map(Box::new);
         self.inner.session_control(SessionControl::RequestAdvice {
             id,
@@ -11326,6 +11338,14 @@ impl Db {
     /// a request not yet sent is never sent, and a late answer is ignored.
     pub fn cancel_permission_advice_request(&self, id: u64) {
         self.inner.session_control(SessionControl::CancelAdvice(id));
+    }
+
+    /// How many permission advice requests this client still keeps: parked,
+    /// waiting for their answer, or answered and not yet taken.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn advice_requests_kept_for_test(&self) -> usize {
+        self.inner.client().map_or(0, |client| client.advice.len())
     }
 
     /// Dry-run `action` as `identity` (`None`: a trusted link) and roll it
