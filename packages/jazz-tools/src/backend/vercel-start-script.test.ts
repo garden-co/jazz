@@ -436,6 +436,26 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     spawnSync("bash", ["-c", releaseRecycleScript(root), "jazz-release-recycle", "2000"]);
     expect(await claim("2000")).toBe(0);
   });
+
+  // uutils' mkdir (Ubuntu's coreutils since 25.10) exits 0 when it loses the
+  // race to a concurrent mkdir of the same path, as if it had made it: a claim
+  // must not rest on mkdir failing. This mkdir does what that race does, every time.
+  it("keeps a recycle claim exclusive with a mkdir that succeeds on an existing directory", () => {
+    writeFileSync(join(root, "fakebin/mkdir"), '#!/bin/bash\nexec /bin/mkdir -p "$@"\n');
+    chmodSync(join(root, "fakebin/mkdir"), 0o755);
+    const env = { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}` };
+    const claim = (session: string) =>
+      spawnSync("bash", ["-c", claimRecycleScript(root), "jazz-claim-recycle", session], { env })
+        .status;
+    expect(claim("1000")).toBe(0);
+    expect(claim("1000")).toBe(1);
+    // A claim an earlier release made as a directory still holds its session.
+    mkdirSync(join(root, "tmp/jazz-recycled-3000"));
+    expect(claim("3000")).toBe(1);
+    // And is dropped, like any other, once the next session is claimed.
+    expect(claim("4000")).toBe(0);
+    expect(existsSync(join(root, "tmp/jazz-recycled-3000"))).toBe(false);
+  });
 });
 
 // The launcher the start script execs, in this machine's Node, with a
