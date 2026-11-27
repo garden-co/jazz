@@ -1121,12 +1121,16 @@ impl E2eeClient {
         for (space, entries) in by_space {
             let backoff = self.shared.settle_backoff.borrow().get(&space).copied();
             if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+                // Its last fetch failed: the version is still missing.
+                self.report_missing(&entries);
                 for entry in entries {
                     self.shared.missing(entry);
                 }
                 continue;
             }
-            match self.settle_space(db, &space, &entries).await {
+            let settled = self.settle_space(db, &space, &entries).await;
+            self.report_missing(&entries);
+            match settled {
                 Ok((settled, any_held)) => {
                     self.shared.settle_backoff.borrow_mut().remove(&space);
                     reports.extend(settled);
@@ -1222,10 +1226,39 @@ impl E2eeClient {
     pub async fn settle_reads(&self, db: &Db) -> Result<bool, ClientError> {
         self.ensure_open()?;
         let missing: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
-        if missing.is_empty() || !self.shared.keys.borrow().online {
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        if !self.shared.keys.borrow().online {
+            // No fetch runs offline: the versions are missing now.
+            self.report_missing(&missing);
             return Ok(false);
         }
         self.settle_missing(db, missing).await
+    }
+
+    /// Tells the listeners of each of `entries` whose version this device
+    /// still does not hold: a read left its row out, and the fetch of the
+    /// key finished or failed (or none can run) without it. While the
+    /// fetch runs nothing is told, so a first read of a space whose key
+    /// arrives is not reported (protocol §4.2).
+    fn report_missing(&self, entries: &[Missing]) {
+        let reports: Vec<Report> = {
+            let keys = self.shared.keys.borrow();
+            entries
+                .iter()
+                .filter(|entry| !keys.held.holds(&entry.space, &entry.epoch_id))
+                .map(|entry| Report::MissingKey {
+                    table: entry.table.clone(),
+                    space: db_address(&entry.space),
+                    epoch_id: entry.epoch_id.clone(),
+                })
+                .collect()
+        };
+        for report in reports {
+            self.shared.report(report);
+        }
+        self.shared.flush(Vec::new());
     }
 
     /// Whether a read that left rows out is due to be settled: online, and
