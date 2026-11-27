@@ -1,0 +1,40 @@
+{
+ "rows": [
+  {
+   "file": "/assets/useIsomorphicLayoutEffect-XBBAHvy4.js",
+   "phase": "initial",
+   "raw": 34574,
+   "gzip": 9054,
+   "br": 7715
+  },
+  {
+   "file": "/assets/Tooltip-DU7vqhdn.js",
+   "phase": "initial",
+   "raw": 1912,
+   "gzip": 865,
+   "br": 749
+  },
+  {
+   "file": "/assets/useMediaQuery-DvCE6lTH.js",
+   "phase": "initial",
+   "raw": 3137,
+   "gzip": 1409,
+   "br": 1277
+  },
+  {
+   "file": "/assets/useTooltip-DpaUS7FW.js",
+   "phase": "initial",
+   "raw": 19372,
+   "gzip": 7052,
+   "br": 6293
+  },
+  {
+   "file": "/assets/index-CLLSpBW8.js",
+   "phase": "initial",
+   "raw": 1227787,
+   "gzip": 363717,
+   "br": 299224
+  }
+ ],
+ "errors": []
+}

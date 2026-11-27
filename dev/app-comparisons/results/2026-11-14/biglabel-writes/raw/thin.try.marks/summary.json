@@ -1,0 +1,15 @@
+{
+ "next": {
+  "median": 32.2,
+  "n": 4
+ },
+ "update": {
+  "median": 118.5,
+  "n": 4
+ },
+ "cross": {
+  "median": 118.25,
+  "a_median": 111.6,
+  "n": 4
+ }
+}

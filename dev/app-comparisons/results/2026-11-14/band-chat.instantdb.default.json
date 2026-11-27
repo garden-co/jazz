@@ -1,0 +1,54 @@
+{
+  "hero": "band-chat",
+  "stack": "instantdb",
+  "variant": "default",
+  "date": "2026-11-14T19:54:40.372Z",
+  "where": "hosted (Instant Cloud temporary app, api.instantdb.com via CloudFront IAD / us-east); auth server local",
+  "runs": 7,
+  "samples": 20,
+  "bc_open_room": {
+    "median": 1946,
+    "p95": 3317,
+    "min": 1801,
+    "n": 7
+  },
+  "bc_resume": {
+    "median": 1925,
+    "p95": 2150,
+    "min": 1817,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 264,
+  "bc_send": {
+    "median": 331.8,
+    "p95": 452.7,
+    "min": 296.2,
+    "n": 20
+  },
+  "bc_switch_room": {
+    "median": 308.8,
+    "p95": 1005.3,
+    "min": 2.5,
+    "n": 20
+  },
+  "bc_cross_client": {
+    "median": 760.2,
+    "p95": 874.3,
+    "min": 659,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 886,
+    "gzip_kb": 265,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 6.6,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 10,
+  "self_reload_phases": {
+    "bc_open_room": 9,
+    "bc_cross_client": 1
+  }
+}

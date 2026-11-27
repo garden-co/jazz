@@ -1,0 +1,12 @@
+diff -ru a/dist/runtime/native-runtime/native-runtime-adapter.js b/dist/runtime/native-runtime/native-runtime-adapter.js
+--- a/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 16:59:15.575083998 +0000
++++ b/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 17:34:45.065352386 +0000
+@@ -31,7 +31,7 @@
+ export { encodeSchema } from "./schema-codec.js";
+ const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
+ const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
+-const SERVER_PUMP_DEBOUNCE_MS = 16;
++const SERVER_PUMP_DEBOUNCE_MS = 0;
+ const REMOTE_LINK_HINTS = {
+     none: "none",
+     connecting: "attempting",

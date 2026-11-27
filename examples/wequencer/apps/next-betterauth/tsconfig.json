@@ -33,6 +33,7 @@
     "node_modules",
     "tests/browser/**",
     "vitest.config.browser.ts",
-    "scripts/test-browser-focused.mjs"
+    "scripts/test-browser-focused.mjs",
+    "comparison"
   ]
 }

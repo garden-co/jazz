@@ -1,0 +1,33 @@
+{
+  "case": "band-chat.thin.settle30s.marks",
+  "variant": "thin",
+  "log": "default",
+  "samples": 15,
+  "settleMs": 30000,
+  "cross": {
+    "a page: send:start": {
+      "median": 3,
+      "n": 15
+    },
+    "a page: ws out": {
+      "median": 4.6,
+      "n": 15
+    },
+    "a page: send:committed": {
+      "median": 7.1,
+      "n": 15
+    },
+    "b page: ws in": {
+      "median": 40.3,
+      "n": 15
+    },
+    "b page: data:newest": {
+      "median": 70.8,
+      "n": 15
+    },
+    "b page: dom": {
+      "median": 336.2,
+      "n": 15
+    }
+  }
+}

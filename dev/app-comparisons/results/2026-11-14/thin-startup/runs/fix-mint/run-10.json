@@ -1,0 +1,464 @@
+{
+ "realm": "page",
+ "url": "http://127.0.0.1:4402/#/shows/01a1db01-b1fa-7713-b82b-873c140f5f89",
+ "timeOrigin": 1794676292011.6,
+ "navigation": [
+  {
+   "name": "http://127.0.0.1:4402/#/shows/01a1db01-b1fa-7713-b82b-873c140f5f89",
+   "entryType": "navigation",
+   "startTime": 0,
+   "duration": 112.90000000002328,
+   "initiatorType": "navigation",
+   "deliveryType": "cache",
+   "nextHopProtocol": "",
+   "renderBlockingStatus": "non-blocking",
+   "contentEncoding": "",
+   "workerStart": 0,
+   "workerRouterEvaluationStart": 0,
+   "workerCacheLookupStart": 0,
+   "workerMatchedSourceType": "",
+   "workerFinalSourceType": "",
+   "redirectStart": 0,
+   "redirectEnd": 0,
+   "fetchStart": 0.09999999997671694,
+   "domainLookupStart": 0.09999999997671694,
+   "domainLookupEnd": 0.09999999997671694,
+   "connectStart": 0.09999999997671694,
+   "secureConnectionStart": 0,
+   "connectEnd": 0.09999999997671694,
+   "requestStart": 1.3000000000465661,
+   "responseStart": 2,
+   "firstInterimResponseStart": 0,
+   "finalResponseHeadersStart": 2,
+   "responseEnd": 2.5,
+   "transferSize": 300,
+   "encodedBodySize": 832,
+   "decodedBodySize": 832,
+   "responseStatus": 200,
+   "serverTiming": [],
+   "unloadEventStart": 4.400000000023283,
+   "unloadEventEnd": 4.400000000023283,
+   "domInteractive": 14.599999999976717,
+   "domContentLoadedEventStart": 112.40000000002328,
+   "domContentLoadedEventEnd": 112.40000000002328,
+   "domComplete": 112.90000000002328,
+   "loadEventStart": 112.90000000002328,
+   "loadEventEnd": 112.90000000002328,
+   "type": "reload",
+   "redirectCount": 0,
+   "activationStart": 0,
+   "criticalCHRestart": 0,
+   "notRestoredReasons": null,
+   "confidence": {
+    "randomizedTriggerRate": 0.4994798,
+    "value": "high"
+   }
+  }
+ ],
+ "marks": [
+  {
+   "name": "jz:eval:self-signed-token",
+   "t": 107.90000000002328
+  },
+  {
+   "name": "jz:eval:react-index",
+   "t": 108.09999999997672
+  },
+  {
+   "name": "app:main",
+   "t": 111.69999999995343
+  },
+  {
+   "name": "jz:session:start",
+   "t": 118.69999999995343
+  },
+  {
+   "name": "jz:accounts:start",
+   "t": 118.69999999995343
+  },
+  {
+   "name": "jz:mint:start",
+   "t": 119.5
+  },
+  {
+   "name": "jz:mint:end",
+   "t": 120
+  },
+  {
+   "name": "jz:mint:start",
+   "t": 120
+  },
+  {
+   "name": "jz:mint:end",
+   "t": 120.30000000004657
+  },
+  {
+   "name": "jz:accounts:end",
+   "t": 128.19999999995343
+  },
+  {
+   "name": "jz:session-owner:start",
+   "t": 128.19999999995343
+  },
+  {
+   "name": "jz:open-thin:start",
+   "t": 128.40000000002328
+  },
+  {
+   "name": "jz:mint:start",
+   "t": 128.69999999995343
+  },
+  {
+   "name": "jz:mint:end",
+   "t": 128.90000000002328
+  },
+  {
+   "name": "jz:session-owner:end",
+   "t": 130.40000000002328
+  },
+  {
+   "name": "jz:session:ready",
+   "t": 130.40000000002328
+  },
+  {
+   "name": "jazz:client-ready",
+   "t": 130.69999999995343
+  },
+  {
+   "name": "jz:client-created",
+   "t": 141.40000000002328
+  },
+  {
+   "name": "jz:connect-transport",
+   "t": 141.40000000002328
+  },
+  {
+   "name": "jz:thin:open",
+   "t": 141.69999999995343
+  },
+  {
+   "name": "ws:create",
+   "t": 152.5,
+   "detail": {
+    "n": 1,
+    "url": "ws://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/ws"
+   }
+  },
+  {
+   "name": "ws:open",
+   "t": 155.69999999995343,
+   "detail": {
+    "n": 1
+   }
+  },
+  {
+   "name": "ws:first-send",
+   "t": 155.80000000004657
+  },
+  {
+   "name": "ws:first-recv",
+   "t": 160.19999999995343
+  },
+  {
+   "name": "jz:thin:negotiated",
+   "t": 160.40000000002328
+  },
+  {
+   "name": "jz:thin:schema-sent",
+   "t": 160.40000000002328,
+   "detail": {
+    "bytes": 3866
+   }
+  },
+  {
+   "name": "jz:thin:schema-bound",
+   "t": 161.90000000002328
+  },
+  {
+   "name": "jz:thin:subscribe-sent",
+   "t": 161.90000000002328,
+   "detail": {
+    "n": 1
+   }
+  },
+  {
+   "name": "jz:thin:delta",
+   "t": 165.5,
+   "detail": {
+    "n": 1
+   }
+  },
+  {
+   "name": "jz:thin:subscribe-sent",
+   "t": 171.19999999995343,
+   "detail": {
+    "n": 2
+   }
+  },
+  {
+   "name": "jz:thin:subscribe-sent",
+   "t": 171.80000000004657,
+   "detail": {
+    "n": 3
+   }
+  },
+  {
+   "name": "jz:thin:subscribe-sent",
+   "t": 172.09999999997672,
+   "detail": {
+    "n": 4
+   }
+  },
+  {
+   "name": "jz:thin:delta",
+   "t": 179.90000000002328,
+   "detail": {
+    "n": 2
+   }
+  },
+  {
+   "name": "jz:thin:delta",
+   "t": 180.40000000002328,
+   "detail": {
+    "n": 3
+   }
+  },
+  {
+   "name": "jz:thin:delta",
+   "t": 183.59999999997672,
+   "detail": {
+    "n": 4
+   }
+  },
+  {
+   "name": "data:show",
+   "t": 189.09999999997672
+  },
+  {
+   "name": "data:tasks",
+   "t": 189.09999999997672,
+   "detail": {
+    "n": 100
+   }
+  },
+  {
+   "name": "data:tasks-100",
+   "t": 189.09999999997672
+  },
+  {
+   "name": "render:board",
+   "t": 225.30000000004657,
+   "detail": {
+    "n": 100
+   }
+  },
+  {
+   "name": "render:board-100",
+   "t": 225.30000000004657
+  },
+  {
+   "name": "dom:cards-100",
+   "t": 241.40000000002328,
+   "detail": {
+    "key": "100"
+   }
+  }
+ ],
+ "resources": [
+  {
+   "name": "http://127.0.0.1:4402/assets/index-BXhZSXoY.js",
+   "start": 7.5,
+   "responseEnd": 44.699999999953434,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/useIsomorphicLayoutEffect-XBBAHvy4.js",
+   "start": 7.599999999976717,
+   "responseEnd": 41.59999999997672,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/useTooltip-DpaUS7FW.js",
+   "start": 7.699999999953434,
+   "responseEnd": 41.699999999953434,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/Tooltip-DU7vqhdn.js",
+   "start": 7.699999999953434,
+   "responseEnd": 41.800000000046566,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/useMediaQuery-DvCE6lTH.js",
+   "start": 7.800000000046566,
+   "responseEnd": 41.90000000002328,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/index-Xocr6jHK.css",
+   "start": 7.900000000023283,
+   "responseEnd": 40.40000000002328,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+   "start": 116.5,
+   "responseEnd": 123.59999999997672,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+   "start": 138.59999999997672,
+   "responseEnd": 142.90000000002328,
+   "bytes": 300
+  },
+  {
+   "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-user",
+   "start": 148.09999999997672,
+   "responseEnd": 153.80000000004657,
+   "bytes": 313
+  },
+  {
+   "name": "http://127.0.0.1:4402/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+   "start": 217.90000000002328,
+   "responseEnd": 220.30000000004657,
+   "bytes": 300
+  }
+ ],
+ "ws": [
+  {
+   "t": 1794676292167.4001,
+   "dir": "out",
+   "bytes": 1079
+  },
+  {
+   "t": 1794676292167.6,
+   "dir": "out",
+   "bytes": 9
+  },
+  {
+   "t": 1794676292171.8,
+   "dir": "in",
+   "bytes": 35
+  },
+  {
+   "t": 1794676292172,
+   "dir": "out",
+   "bytes": 3874
+  },
+  {
+   "t": 1794676292173.4001,
+   "dir": "in",
+   "bytes": 5
+  },
+  {
+   "t": 1794676292173.6,
+   "dir": "out",
+   "bytes": 111
+  },
+  {
+   "t": 1794676292173.6,
+   "dir": "out",
+   "bytes": 114
+  },
+  {
+   "t": 1794676292175.1,
+   "dir": "in",
+   "bytes": 82
+  },
+  {
+   "t": 1794676292177,
+   "dir": "in",
+   "bytes": 128
+  },
+  {
+   "t": 1794676292184.7002,
+   "dir": "out",
+   "bytes": 108
+  },
+  {
+   "t": 1794676292184.8,
+   "dir": "out",
+   "bytes": 149
+  },
+  {
+   "t": 1794676292184.8,
+   "dir": "out",
+   "bytes": 172
+  },
+  {
+   "t": 1794676292191.4001,
+   "dir": "in",
+   "bytes": 24719
+  }
+ ],
+ "ports": [
+  {
+   "t": 1794676292123.9001,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292124.9001,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292126.6,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292129.7002,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292146,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292159.2002,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292175.5,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292175.6,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292176.6,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292176.7002,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292180.4001,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292188.2002,
+   "dir": "in"
+  },
+  {
+   "t": 1794676292214.4001,
+   "dir": "out"
+  },
+  {
+   "t": 1794676292258.1,
+   "dir": "in"
+  }
+ ],
+ "console": [],
+ "counts": {
+  "ws": 1
+ },
+ "longtasks": [
+  {
+   "t": 1794676292191.2002,
+   "ms": 61
+  }
+ ]
+}

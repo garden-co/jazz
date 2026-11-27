@@ -1,0 +1,13 @@
+{
+  "name": "comparison-harness",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "node run.mjs",
+    "loc": "node loc.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.58.2",
+    "fast-glob": "3.3.3"
+  }
+}

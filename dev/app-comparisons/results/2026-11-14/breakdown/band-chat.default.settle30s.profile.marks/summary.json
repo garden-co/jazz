@@ -1,0 +1,49 @@
+{
+  "case": "band-chat.default.settle30s.profile.marks",
+  "variant": "default",
+  "log": "default",
+  "samples": 6,
+  "settleMs": 30000,
+  "cross": {
+    "a page: send:start": {
+      "median": 3.5,
+      "n": 6
+    },
+    "a page: send:committed": {
+      "median": 11,
+      "n": 6
+    },
+    "a page: port out": {
+      "median": 329.3,
+      "n": 6
+    },
+    "a worker: port in": {
+      "median": 329.6,
+      "n": 6
+    },
+    "a worker: ws out": {
+      "median": 347.3,
+      "n": 6
+    },
+    "b worker: ws in": {
+      "median": 410.8,
+      "n": 6
+    },
+    "b worker: port out": {
+      "median": 448.3,
+      "n": 6
+    },
+    "b page: port in": {
+      "median": 449.6,
+      "n": 6
+    },
+    "b page: data:newest": {
+      "median": 510.1,
+      "n": 6
+    },
+    "b page: dom": {
+      "median": 832.1,
+      "n": 6
+    }
+  }
+}

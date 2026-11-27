@@ -5,6 +5,30 @@ packages:
   - crates/jazz-rn/npm/*
   - examples/*
   - examples/*/apps/*
+  # dev/app-comparisons: the hero apps ported to other stacks (see its
+  # README.md). Each is a standalone pnpm project with its own lockfile, kept
+  # out of the workspace and every gate for now. Literal paths:
+  # dev/gates/test/example-typecheck.test.mjs reads these entries as directories.
+  - "!examples/stage-plan/apps/react-zero"
+  - "!examples/stage-plan/apps/react-convex"
+  - "!examples/stage-plan/apps/react-instantdb"
+  - "!examples/stage-plan/apps/react-postgres"
+  - "!examples/stage-plan/apps/react-neon"
+  - "!examples/band-chat/apps/react-hono-zero"
+  - "!examples/band-chat/apps/react-hono-convex"
+  - "!examples/band-chat/apps/react-hono-instantdb"
+  - "!examples/band-chat/apps/react-hono-postgres"
+  - "!examples/band-chat/apps/react-hono-neon"
+  - "!examples/wequencer/apps/next-zero"
+  - "!examples/wequencer/apps/next-convex"
+  - "!examples/wequencer/apps/next-instantdb"
+  - "!examples/wequencer/apps/next-postgres"
+  - "!examples/wequencer/apps/next-neon"
+  - "!examples/big-label/apps/next-zero"
+  - "!examples/big-label/apps/next-convex"
+  - "!examples/big-label/apps/next-instantdb"
+  - "!examples/big-label/apps/next-postgres"
+  - "!examples/big-label/apps/next-neon"
   - examples/docs/*
   - "!examples/docs/todo-client-localfirst-expo"
   - dev/stress-tests/*

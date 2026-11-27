@@ -1,0 +1,19 @@
+{
+  "tag": "scale-busy200",
+  "variant": "default",
+  "flags": {
+    "BENCH_BUSY_MESSAGES": "200"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 7.4,
+    "render": 23.7,
+    "port out": 220.1,
+    "a dom": 222.4,
+    "b dom": 632.4,
+    "a longtask ms": 1033
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

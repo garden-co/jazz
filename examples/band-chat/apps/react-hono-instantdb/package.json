@@ -1,0 +1,35 @@
+{
+  "name": "band-chat-instantdb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names server,vite \"pnpm dev:server\" \"vite\"",
+    "dev:server": "tsx watch --env-file=.env server/index.ts",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx --env-file=.env server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx --env-file=.env seed.ts"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@hono/node-server": "^1.19.11",
+    "@instantdb/admin": "1.0.67",
+    "@instantdb/react": "1.0.67",
+    "hono": "^4.12.9",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.0.1",
+    "concurrently": "^9.1.0",
+    "instant-cli": "1.0.67",
+    "typescript": "6.0.2",
+    "vite": "8.0.1"
+  }
+}

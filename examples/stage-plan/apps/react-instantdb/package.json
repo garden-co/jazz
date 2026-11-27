@@ -1,0 +1,31 @@
+{
+  "name": "stage-plan-instantdb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "instant:setup": "node scripts/setup-instant.mjs",
+    "seed": "tsx --env-file=.env seed.ts"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@instantdb/react": "1.0.67",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@instantdb/admin": "1.0.67",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.0.1",
+    "instant-cli": "1.0.67",
+    "tsx": "^4.23.15",
+    "typescript": "6.0.2",
+    "vite": "8.0.1"
+  }
+}

@@ -1,0 +1,48 @@
+diff -ru a/dist/runtime/native-runtime/browser-worker-transport.js b/dist/runtime/native-runtime/browser-worker-transport.js
+--- a/dist/runtime/native-runtime/browser-worker-transport.js	2026-11-14 16:59:15.569765467 +0000
++++ b/dist/runtime/native-runtime/browser-worker-transport.js	2026-11-14 17:34:45.099756271 +0000
+@@ -121,6 +121,7 @@
+         if (this.closed)
+             return false;
+         const frames = normalizeTransportFrames(this.transport.recvWireFrames());
++        if (frames.length > 0) globalThis.performance?.mark?.('jazz:drain', { detail: frames.length });
+         if (frames.length > 0)
+             this.sendFrames(frames);
+         const auxiliary = this.transport.recvAuxiliaryWireFrames;
+@@ -136,6 +137,7 @@
+         if (this.closed || this.outboundDrainScheduled)
+             return;
+         this.outboundDrainScheduled = true;
++        globalThis.performance?.mark?.('jazz:outbound-drain-scheduled');
+         queueMicrotask(() => {
+             this.outboundDrainScheduled = false;
+             if (!this.closed)
+@@ -146,6 +148,7 @@
+         if (this.closed || this.running)
+             return;
+         this.running = true;
++        globalThis.performance?.mark?.('jazz:pump');
+         const generation = this.requestedGeneration;
+         try {
+             this.drainOutboundFrames();
+diff -ru a/dist/runtime/native-runtime/native-runtime-adapter.js b/dist/runtime/native-runtime/native-runtime-adapter.js
+--- a/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 16:59:15.575083998 +0000
++++ b/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 17:34:45.099270999 +0000
+@@ -1507,7 +1507,9 @@
+         if (!pending.hasStagedMutations && pending.kind === "mergeable") {
+             throw new Error("Commit transaction failed: empty mergeable transaction has no committed unit; roll it back instead");
+         }
++        globalThis.performance?.mark?.('jazz:commit:native-start');
+         const write = this.db.commitTransaction(openTransactionId, pending.kind);
++        globalThis.performance?.mark?.('jazz:commit:native-end');
+         this.pendingTxs.delete(openTransactionId);
+         this.completedTxs.set(openTransactionId, {
+             kind: pending.kind,
+@@ -2846,6 +2848,7 @@
+         }
+     }
+     pumpSubscriptions() {
++        globalThis.performance?.mark?.('jazz:pumpSubscriptions');
+         this.drainSubscriptionPool();
+         for (const [handle, subscription] of this.subscriptions) {
+             if (subscription.poolId !== undefined)

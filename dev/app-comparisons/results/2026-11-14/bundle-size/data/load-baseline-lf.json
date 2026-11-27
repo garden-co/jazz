@@ -1,0 +1,82 @@
+{
+ "rows": [
+  {
+   "file": "/assets/useIsomorphicLayoutEffect-DS4XUBXS.js",
+   "phase": "initial",
+   "raw": 34703,
+   "gzip": 9109,
+   "br": 7798
+  },
+  {
+   "file": "/assets/preload-helper-rov5CBGT.js",
+   "phase": "initial",
+   "raw": 1193,
+   "gzip": 681,
+   "br": 563
+  },
+  {
+   "file": "/assets/useTooltip-CxM86C4k.js",
+   "phase": "initial",
+   "raw": 19372,
+   "gzip": 7050,
+   "br": 6289
+  },
+  {
+   "file": "/assets/Tooltip-DmpUXXqp.js",
+   "phase": "initial",
+   "raw": 1912,
+   "gzip": 867,
+   "br": 748
+  },
+  {
+   "file": "/assets/useMediaQuery-D3i3weFR.js",
+   "phase": "initial",
+   "raw": 3137,
+   "gzip": 1407,
+   "br": 1277
+  },
+  {
+   "file": "/assets/metro-setup-error-CVOA8i3J.js",
+   "phase": "initial",
+   "raw": 255471,
+   "gzip": 78203,
+   "br": 66996
+  },
+  {
+   "file": "/assets/index-DG95FuTj.js",
+   "phase": "initial",
+   "raw": 1111105,
+   "gzip": 323445,
+   "br": 268000
+  },
+  {
+   "file": "/assets/delete-local-first-store-Cwlw3JKE.js",
+   "phase": "deferred",
+   "raw": 43707,
+   "gzip": 12494,
+   "br": 11272
+  },
+  {
+   "file": "/assets/local-first-CFFkfEDt.js",
+   "phase": "deferred",
+   "raw": 7230,
+   "gzip": 2675,
+   "br": 2401
+  },
+  {
+   "file": "/assets/jazz_wasm-DD0GWEeJ.js",
+   "phase": "deferred",
+   "raw": 38932,
+   "gzip": 9371,
+   "br": 8156
+  },
+  {
+   "file": "/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+   "phase": "deferred",
+   "raw": 8965223,
+   "gzip": 3181647,
+   "br": 2203544
+  }
+ ],
+ "errors": []
+}

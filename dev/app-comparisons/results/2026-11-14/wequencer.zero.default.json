@@ -1,0 +1,51 @@
+{
+  "hero": "wequencer",
+  "stack": "zero",
+  "variant": "default",
+  "date": "2026-11-14T18:53:33.475Z",
+  "where": "local (Postgres 18 + zero-cache + Next/Better Auth server, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 685,
+    "p95": 937,
+    "min": 658,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 289,
+    "p95": 368,
+    "min": 255,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 497,
+  "wq_toggle_pad": {
+    "median": 3.8,
+    "p95": 5.9,
+    "min": 2.3,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 25.5,
+    "p95": 49.2,
+    "min": 21.6,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 785.5,
+    "p95": 992.1,
+    "min": 675.8,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 2096,
+    "gzip_kb": 626,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.8,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

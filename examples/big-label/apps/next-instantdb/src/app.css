@@ -1,0 +1,13 @@
+/* Page chrome only; components come from Astryx with the Jazz theme. */
+body {
+  margin: 0;
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+/* The account email is a nice-to-have in the top bar; phones need the room. */
+@media (max-width: 640px) {
+  .account-email {
+    display: none;
+  }
+}

@@ -74,7 +74,15 @@ export function useGracefulSignOut() {
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
-      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
+      config={{
+        serverUrl: "/jazz",
+        // Bench only (dev/app-comparisons): NEXT_PUBLIC_JAZZ_THIN=1 builds the thin client alone;
+        // NEXT_PUBLIC_JAZZ_LOCAL_FIRST=now opens the local-first client at once. Unset: as shipped.
+        ...(process.env.NEXT_PUBLIC_JAZZ_THIN === "1" ? {} : { client: loadLocalFirst }),
+        ...(process.env.NEXT_PUBLIC_JAZZ_LOCAL_FIRST === "now"
+          ? { localFirst: "now" as const }
+          : {}),
+      }}
       // Signed-out pages (the sign-in form) need no Jazz.
       signedOut={children}
       loading={<LoadingScreen label="Opening your Jazz account…" />}

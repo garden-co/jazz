@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "zero",
+  "variant": "default",
+  "date": "2026-11-14T19:14:28.947Z",
+  "where": "local (Postgres 18 + zero-cache + Next/Better Auth server, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 643,
+    "p95": 713,
+    "min": 560,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 224,
+    "p95": 284,
+    "min": 198,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 518,
+  "bl_search": {
+    "median": 8.6,
+    "p95": 86.3,
+    "min": 6.7,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 47.9,
+    "p95": 76.6,
+    "min": 8.6,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 11.4,
+    "p95": 20.8,
+    "min": 9.2,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 6.6,
+    "p95": 12.3,
+    "min": 5.7,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 49.5,
+    "p95": 99.3,
+    "min": 38.8,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1947,
+    "gzip_kb": 561,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 1,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

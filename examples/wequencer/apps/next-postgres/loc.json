@@ -1,0 +1,39 @@
+{
+  "_note": "Hand-written sync: the API's REST reads, RPC writes and transaction/NOTIFY helper, the WebSocket server (LISTEN + broadcast) and its process (live-server.ts) are `server` (permission helpers count as `permissions`); the client's fetch, subscribe, cache and write code is `data`. SQL migrations and row types count as schema; Better Auth's tables come from its own migrations (scripts/db.ts). scripts/ and harness.mjs are bench plumbing.",
+  "schema": ["schema.ts", "db/*.sql"],
+  "permissions": ["lib/permissions.server.ts"],
+  "server": [
+    "live-server.ts",
+    "lib/api.server.ts",
+    "lib/live.server.ts",
+    "lib/auth.ts",
+    "lib/db.server.ts",
+    "lib/bootstrap.ts",
+    "lib/server-secret.ts",
+    "lib/app-origin.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": [
+    "queries.ts",
+    "mutators.ts",
+    "lib/data/*.ts",
+    "components/data-provider.tsx",
+    "lib/auth-client.ts",
+    "lib/session-setup.ts",
+    "lib/step-id.ts",
+    "lib/report-write.ts",
+    "components/presence-heartbeat.ts"
+  ],
+  "ui": [
+    "app/**/*.tsx",
+    "app/globals.css",
+    "components/*.tsx",
+    "components/use-sequencer-audio.ts",
+    "lib/audio.ts",
+    "lib/instruments.ts",
+    "lib/roles.ts",
+    "lib/transport.ts",
+    "!components/data-provider.tsx"
+  ],
+  "exclude": ["scripts/**", "harness.mjs"]
+}

@@ -1,0 +1,15 @@
+node_modules
+.next
+.env
+.bench-ctx.json
+next-env.d.ts
+dist
+.jazz
+.env*.local
+test-results
+playwright-report
+.convex
+.zero
+*.sqlite
+.bench-*
+*.tsbuildinfo

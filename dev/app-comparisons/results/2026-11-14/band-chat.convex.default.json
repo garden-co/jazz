@@ -1,0 +1,51 @@
+{
+  "hero": "band-chat",
+  "stack": "convex",
+  "variant": "default",
+  "date": "2026-11-14T19:41:42.297Z",
+  "where": "local (anonymous Convex local backend via `npx convex dev`, Vite preview for the app)",
+  "runs": 7,
+  "samples": 20,
+  "bc_open_room": {
+    "median": 1121,
+    "p95": 1268,
+    "min": 962,
+    "n": 7
+  },
+  "bc_resume": {
+    "median": 894,
+    "p95": 1117,
+    "min": 846,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 0,
+  "bc_send": {
+    "median": 262.2,
+    "p95": 418.2,
+    "min": 217.2,
+    "n": 20
+  },
+  "bc_switch_room": {
+    "median": 186.5,
+    "p95": 628.1,
+    "min": 3,
+    "n": 20
+  },
+  "bc_cross_client": {
+    "median": 584.4,
+    "p95": 762.1,
+    "min": 461.3,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 810,
+    "gzip_kb": 240,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.9,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

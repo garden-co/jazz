@@ -1,0 +1,51 @@
+{
+  "hero": "band-chat",
+  "stack": "jazz",
+  "variant": "now",
+  "date": "2026-11-17T11:06:41.194Z",
+  "where": "local (Jazz in the app's Hono server)",
+  "runs": 7,
+  "samples": 20,
+  "bc_open_room": {
+    "median": 2193,
+    "p95": 2358,
+    "min": 2094,
+    "n": 7
+  },
+  "bc_resume": {
+    "median": 1511,
+    "p95": 1655,
+    "min": 1462,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 422,
+  "bc_send": {
+    "median": 218,
+    "p95": 293.1,
+    "min": 204.2,
+    "n": 20
+  },
+  "bc_switch_room": {
+    "median": 153.7,
+    "p95": 426.3,
+    "min": 2.5,
+    "n": 20
+  },
+  "bc_cross_client": {
+    "median": 627,
+    "p95": 728.3,
+    "min": 561.9,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1935,
+    "gzip_kb": 560,
+    "wasm_gzip_kb": 2998,
+    "worker_js_gzip_kb": 111
+  },
+  "rtt_ms": 0.9,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

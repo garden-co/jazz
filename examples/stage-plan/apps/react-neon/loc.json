@@ -1,0 +1,9 @@
+{
+  "_note": "Neon Realtime has no permissions file: read rules are the filters of the server's sealed SQL queries (server/queries.ts), write rules are checks in the server's write handlers (server/mutators.ts), so both count as server, as Convex's function checks do. SQL migrations count as schema. scripts/ (db reset, seed, permission checks), neon.ts (config) and harness.mjs are bench plumbing.",
+  "schema": ["schema.ts", "db/*.sql"],
+  "permissions": [],
+  "server": ["server/**/*.ts"],
+  "data": ["queries.ts", "demo.ts", "src/account.ts", "src/App.tsx", "src/main.tsx", "src/model/**/*.ts"],
+  "ui": ["src/components/**/*.tsx", "src/components/**/*.ts", "src/router.ts", "src/styles.css"],
+  "exclude": ["scripts/**", "harness.mjs", "neon.ts"]
+}

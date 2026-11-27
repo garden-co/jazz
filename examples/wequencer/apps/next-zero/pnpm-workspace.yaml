@@ -1,0 +1,10 @@
+packages:
+  - '.'
+allowBuilds:
+  '@rocicorp/zero-sqlite3': true
+  esbuild: true
+  protobufjs: true
+  '@astryxdesign/core': false
+  sharp: false
+minimumReleaseAgeExclude:
+  - '@rocicorp/zero'

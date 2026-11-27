@@ -18,5 +18,5 @@
     }
   },
   "include": ["**/*.ts", "**/*.tsx", "**/*.mts"],
-  "exclude": ["node_modules", "dist", "server/worker.ts"]
+  "exclude": ["node_modules", "dist", "server/worker.ts", "comparison"]
 }

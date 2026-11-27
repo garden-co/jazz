@@ -1,0 +1,330 @@
+{
+  "case": "stage-plan.thin.base.marks",
+  "variant": "thin",
+  "log": "default",
+  "wait0": false,
+  "runs": 5,
+  "reloads": 6,
+  "join": {
+    "nav:responseEnd": {
+      "median": 3.1,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 177.3,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 179.1,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 179.6,
+      "n": 5
+    },
+    "page lf:session:accounts:start": {
+      "median": 207.6,
+      "n": 5
+    },
+    "page lf:session:accounts:ready": {
+      "median": 210.3,
+      "n": 5
+    },
+    "page lf:session:openClient": {
+      "median": 283.8,
+      "n": 5
+    },
+    "page lf:createDb:start": {
+      "median": 284.8,
+      "n": 5
+    },
+    "page lf:auth:resolved": {
+      "median": 287.5,
+      "n": 5
+    },
+    "page lf:load:start": {
+      "median": 287.7,
+      "n": 5
+    },
+    "page lf:load:end": {
+      "median": 287.7,
+      "n": 5
+    },
+    "page lf:db:create": {
+      "median": 287.7,
+      "n": 5
+    },
+    "page lf:createDb:end": {
+      "median": 288.8,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 291.4,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 331,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 342.5,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 342.9,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 342.9,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 354.7,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 354.7,
+      "n": 5
+    },
+    "page join:accepted": {
+      "median": 399.7,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 417.8,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 461.1,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 461.1,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 489.8,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 489.9,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 490.4,
+      "n": 5
+    }
+  },
+  "reload": {
+    "nav:responseEnd": {
+      "median": 3,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 85.5,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 86.2,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 86.7,
+      "n": 5
+    },
+    "page lf:session:accounts:start": {
+      "median": 93.5,
+      "n": 5
+    },
+    "page lf:session:accounts:ready": {
+      "median": 168.3,
+      "n": 5
+    },
+    "page lf:session:openClient": {
+      "median": 168.4,
+      "n": 5
+    },
+    "page lf:createDb:start": {
+      "median": 168.6,
+      "n": 5
+    },
+    "page lf:auth:resolved": {
+      "median": 170.7,
+      "n": 5
+    },
+    "page lf:load:start": {
+      "median": 170.7,
+      "n": 5
+    },
+    "page lf:load:end": {
+      "median": 170.7,
+      "n": 5
+    },
+    "page lf:db:create": {
+      "median": 170.7,
+      "n": 5
+    },
+    "page lf:createDb:end": {
+      "median": 170.9,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 171.7,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 191.8,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 198,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 198.2,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 198.2,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 205.8,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 205.9,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 223.8,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 234,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 234,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 266.6,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 266.6,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 276.9,
+      "n": 5
+    }
+  },
+  "reloadLast": {
+    "nav:responseEnd": {
+      "median": 2.5,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 31.3,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 31.9,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 32.3,
+      "n": 5
+    },
+    "page lf:session:accounts:start": {
+      "median": 63.2,
+      "n": 5
+    },
+    "page lf:session:accounts:ready": {
+      "median": 138.8,
+      "n": 5
+    },
+    "page lf:session:openClient": {
+      "median": 138.8,
+      "n": 5
+    },
+    "page lf:createDb:start": {
+      "median": 139,
+      "n": 5
+    },
+    "page lf:auth:resolved": {
+      "median": 141.2,
+      "n": 5
+    },
+    "page lf:load:start": {
+      "median": 141.2,
+      "n": 5
+    },
+    "page lf:load:end": {
+      "median": 141.2,
+      "n": 5
+    },
+    "page lf:db:create": {
+      "median": 141.2,
+      "n": 5
+    },
+    "page lf:createDb:end": {
+      "median": 141.6,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 142.3,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 157.7,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 162.3,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 162.4,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 162.4,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 170.3,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 170.4,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 193.3,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 196.6,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 196.6,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 224.3,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 224.3,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 236,
+      "n": 5
+    }
+  }
+}

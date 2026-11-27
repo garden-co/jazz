@@ -1,0 +1,306 @@
+{
+ "a": {
+  "byFile": [
+   {
+    "file": "(native)",
+    "ms": 1847
+   },
+   {
+    "file": "index-VG17y32C.js",
+    "ms": 918
+   },
+   {
+    "file": "useIsomorphicLayoutEffect-DsK3Iq2B.js",
+    "ms": 425
+   },
+   {
+    "file": "jazz_wasm_bg-HpkRDlj-.wasm",
+    "ms": 22
+   },
+   {
+    "file": "jazz_wasm-D9-cS1v1.js",
+    "ms": 3
+   },
+   {
+    "file": "metro-setup-error-B3lx0Qdw.js",
+    "ms": 2
+   },
+   {
+    "file": "delete-local-first-store-CBthIchE.js",
+    "ms": 0
+   }
+  ],
+  "byFunction": [
+   {
+    "ms": 817,
+    "k": "(idle) @ (native)"
+   },
+   {
+    "ms": 600,
+    "k": "(program) @ (native)"
+   },
+   {
+    "ms": 335,
+    "k": "(garbage collector) @ (native)"
+   },
+   {
+    "ms": 122,
+    "k": "(anonymous) @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 117,
+    "k": "ls @ index-VG17y32C.js"
+   },
+   {
+    "ms": 86,
+    "k": "Me @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 74,
+    "k": "F @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 61,
+    "k": "ut @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 52,
+    "k": "gy @ index-VG17y32C.js"
+   },
+   {
+    "ms": 51,
+    "k": "Q @ index-VG17y32C.js"
+   },
+   {
+    "ms": 51,
+    "k": "ul @ index-VG17y32C.js"
+   },
+   {
+    "ms": 39,
+    "k": "oc @ index-VG17y32C.js"
+   },
+   {
+    "ms": 37,
+    "k": "X @ index-VG17y32C.js"
+   },
+   {
+    "ms": 36,
+    "k": "us @ index-VG17y32C.js"
+   },
+   {
+    "ms": 36,
+    "k": "ts @ index-VG17y32C.js"
+   },
+   {
+    "ms": 36,
+    "k": "Id @ index-VG17y32C.js"
+   },
+   {
+    "ms": 31,
+    "k": "b @ index-VG17y32C.js"
+   },
+   {
+    "ms": 28,
+    "k": "matchMedia @ (native)"
+   },
+   {
+    "ms": 28,
+    "k": "Du @ index-VG17y32C.js"
+   },
+   {
+    "ms": 25,
+    "k": "Ue @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 21,
+    "k": "Zo @ index-VG17y32C.js"
+   },
+   {
+    "ms": 20,
+    "k": "addRange @ (native)"
+   },
+   {
+    "ms": 19,
+    "k": "v @ index-VG17y32C.js"
+   },
+   {
+    "ms": 18,
+    "k": "querySelectorAll @ (native)"
+   },
+   {
+    "ms": 18,
+    "k": "Wa @ index-VG17y32C.js"
+   },
+   {
+    "ms": 18,
+    "k": "v @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 18,
+    "k": "dp @ index-VG17y32C.js"
+   },
+   {
+    "ms": 16,
+    "k": "he @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 15,
+    "k": "Cc @ index-VG17y32C.js"
+   },
+   {
+    "ms": 14,
+    "k": "Wm @ index-VG17y32C.js"
+   }
+  ]
+ },
+ "b": {
+  "byFile": [
+   {
+    "file": "(native)",
+    "ms": 2069
+   },
+   {
+    "file": "index-VG17y32C.js",
+    "ms": 433
+   },
+   {
+    "file": "useIsomorphicLayoutEffect-DsK3Iq2B.js",
+    "ms": 198
+   },
+   {
+    "file": "jazz_wasm_bg-HpkRDlj-.wasm",
+    "ms": 18
+   },
+   {
+    "file": "metro-setup-error-B3lx0Qdw.js",
+    "ms": 4
+   },
+   {
+    "file": "jazz_wasm-D9-cS1v1.js",
+    "ms": 1
+   }
+  ],
+  "byFunction": [
+   {
+    "ms": 928,
+    "k": "(program) @ (native)"
+   },
+   {
+    "ms": 653,
+    "k": "(idle) @ (native)"
+   },
+   {
+    "ms": 467,
+    "k": "(garbage collector) @ (native)"
+   },
+   {
+    "ms": 58,
+    "k": "ls @ index-VG17y32C.js"
+   },
+   {
+    "ms": 52,
+    "k": "ut @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 44,
+    "k": "(anonymous) @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 44,
+    "k": "Me @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 32,
+    "k": "F @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 24,
+    "k": "X @ index-VG17y32C.js"
+   },
+   {
+    "ms": 24,
+    "k": "Q @ index-VG17y32C.js"
+   },
+   {
+    "ms": 23,
+    "k": "Nd @ index-VG17y32C.js"
+   },
+   {
+    "ms": 21,
+    "k": "oc @ index-VG17y32C.js"
+   },
+   {
+    "ms": 21,
+    "k": "gy @ index-VG17y32C.js"
+   },
+   {
+    "ms": 16,
+    "k": "b @ index-VG17y32C.js"
+   },
+   {
+    "ms": 14,
+    "k": "ul @ index-VG17y32C.js"
+   },
+   {
+    "ms": 13,
+    "k": "ts @ index-VG17y32C.js"
+   },
+   {
+    "ms": 12,
+    "k": "Id @ index-VG17y32C.js"
+   },
+   {
+    "ms": 11,
+    "k": "Zo @ index-VG17y32C.js"
+   },
+   {
+    "ms": 10,
+    "k": "v @ index-VG17y32C.js"
+   },
+   {
+    "ms": 9,
+    "k": "Ue @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 9,
+    "k": "m @ index-VG17y32C.js"
+   },
+   {
+    "ms": 9,
+    "k": "dm @ index-VG17y32C.js"
+   },
+   {
+    "ms": 8,
+    "k": "cy @ index-VG17y32C.js"
+   },
+   {
+    "ms": 8,
+    "k": "Fu @ index-VG17y32C.js"
+   },
+   {
+    "ms": 8,
+    "k": "Qc @ index-VG17y32C.js"
+   },
+   {
+    "ms": 8,
+    "k": "Cc @ index-VG17y32C.js"
+   },
+   {
+    "ms": 8,
+    "k": "v @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 7,
+    "k": "matchMedia @ (native)"
+   },
+   {
+    "ms": 7,
+    "k": "Wa @ index-VG17y32C.js"
+   },
+   {
+    "ms": 7,
+    "k": "us @ index-VG17y32C.js"
+   }
+  ]
+ }
+}

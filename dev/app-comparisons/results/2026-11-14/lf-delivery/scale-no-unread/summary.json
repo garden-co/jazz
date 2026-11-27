@@ -1,0 +1,19 @@
+{
+  "tag": "scale-no-unread",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_NO_UNREAD": "1"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 7.3,
+    "render": 74.7,
+    "port out": 287.8,
+    "a dom": 291,
+    "b dom": 676.6,
+    "a longtask ms": 1319
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

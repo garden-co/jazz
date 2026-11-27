@@ -18,12 +18,13 @@ const PERMISSIONS_IMPORT =
   /\bfrom\s+["'](?:(?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?|@\/|\$lib\/)jazz\.permissions\.json["']|\bimport\(\s*["'](?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?jazz\.permissions\.json["']/;
 
 /**
- * Paths that never reach a client bundle: tests, benchmarks, scripts, and
+ * Paths that never reach a client bundle: tests, benchmarks (including the
+ * `comparison/` bench hooks of dev/app-comparisons), scripts, and
  * anything whose path names it a server (`server/`, `jazz-server.ts`,
  * `todo-server-ts/`, `*-server-snippet.ts`).
  */
 const NOT_CLIENT =
-  /server|(?:^|\/)(?:tests?|__tests__|benchmarks?|scripts|api)\/|\.(?:test|spec|server)\.[cm]?[jt]sx?$|(?:^|\/)(?:permissions|backend[^/]*|server|jazz\.server|middleware|instrumentation)\.[cm]?[jt]sx?$|(?:^|\/)route\.[jt]s$/;
+  /server|(?:^|\/)(?:tests?|__tests__|benchmarks?|comparison|scripts|api)\/|\.(?:test|spec|server)\.[cm]?[jt]sx?$|(?:^|\/)(?:permissions|backend[^/]*|server|jazz\.server|middleware|instrumentation)\.[cm]?[jt]sx?$|(?:^|\/)route\.[jt]s$/;
 
 function trackedSources() {
   return execFileSync(

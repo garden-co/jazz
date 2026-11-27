@@ -1,0 +1,6 @@
+# Dependency build scripts, decided explicitly (pnpm 11 fails the install otherwise).
+allowBuilds:
+  esbuild: true
+  "@astryxdesign/core": false
+  "@parcel/watcher": false
+  msgpackr-extract: false

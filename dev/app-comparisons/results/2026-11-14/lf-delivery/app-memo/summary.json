@@ -1,0 +1,19 @@
+{
+  "tag": "app-memo",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_MEMO": "1"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 7.2,
+    "render": 9.2,
+    "port out": 26.8,
+    "a dom": 28.8,
+    "b dom": 148.8,
+    "a longtask ms": 0
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

@@ -1,0 +1,317 @@
+{
+ "median": 79.5,
+ "samples": [
+  {
+   "t0": 1794687681697.2,
+   "done": 1794687681798.5,
+   "ms": 101.3,
+   "via": "mutation",
+   "muts": [
+    66.4,
+    70,
+    101.2
+   ],
+   "net": [
+    {
+     "ev": "send",
+     "id": "3865.91",
+     "t": 14.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\f\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001øã£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 33.4,
+     "bytes": 3655,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....B......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..released.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer.",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.91",
+     "t": 34.4,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "send",
+     "id": "3865.92",
+     "t": 69.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\r\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001øÄè£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.92",
+     "t": 79.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 81.8,
+     "bytes": 3655,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....B......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..released.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer.",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "send",
+     "id": "3865.93",
+     "t": 133.4,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 489,
+     "body": "\u0001\u0000\u0000\u0001ä\u0001á\u0003\u0004\u0002\u0010\rì<\u0000ªD#ëvá»»èé£Þ\r\u0001øÄè£Þ\r\u0001øÏ«|çV!«>\\\"¬`\u001a\u0000\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\u0000øÄè£Þ\r\u0000\u0001\u0001\breleases\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\t\u000fartistId~df33f8\t\u0010\u0001¡Ûµ\\Ós\"j\u0002'^6A?\u0014catalogNumber~3c9918\u0006\u0007NRE-065\u0016catalogSequence~f0296e\r\u0001\u000f\u0001\u0012catalogueId~422bb8\r\u0001\t\u0010\u0001¡Ûµ\\ÐpsÒQ&\u001b\b¯8\rformat~0b9815\u0006\u0006Single\u0012releaseDate~873976\u0003¸2\u0010searchKey~22f35b\u0006\u0016rooms distance nre-065\rstatus~d50a0e\u0006\bplanning\ftitle~84fbed\u0006\u000eRooms Distance\u0000\u0000\u0001\u0000\u0000øÄè£Þ\r\u0000\u0000\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.93",
+     "t": 146.9,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 151.6,
+     "bytes": 449,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "......6......<..D#..v...................4....W.(.......L.N....................\\.}p.`x..Y......].pc.&..~.......\\.z\"...N.2.n....]:z..j..uh.l....].w...F...].....\\.}.......4X....]\"x...s<v{s.....\\.zp............](y......1\".....].w.....;.Z.....]:z..j-...i.....\\.{......_.;....\\.z\"...6Mz%=....]$s.....xQ.B....].}..W..........]$s........}....]<r.....E.t.....].t\".ws.8.......].w..#.0...w....\\.{......REv....].|0.[....-..................].pc.&..~.............",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "longtasks": []
+  },
+  {
+   "t0": 1794687682953.4,
+   "done": 1794687683032.9,
+   "ms": 79.5,
+   "via": "mutation",
+   "muts": [
+    44.5,
+    47.2,
+    79.5
+   ],
+   "net": [
+    {
+     "ev": "send",
+     "id": "3865.94",
+     "t": 15.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\u000e\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001øÄè£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 26.5,
+     "bytes": 3655,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....B......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..planning.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer.",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.94",
+     "t": 27.3,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "send",
+     "id": "3865.95",
+     "t": 53.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\u000f\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001é£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.95",
+     "t": 65.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 66.3,
+     "bytes": 3655,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....B......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..planning.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer.",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "send",
+     "id": "3865.96",
+     "t": 87.7,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 490,
+     "body": "\u0001\u0000\u0000\u0001å\u0001â\u0003\u0004\u0003\u0010\rì<\u0000ªD#ëvá»»Ýé£Þ\r\u0001é£Þ\r\u0001øÏ«|çV!«>\\\"¬`\u001a\u0000\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\u0000é£Þ\r\u0000\u0001\u0001\breleases\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\t\u000fartistId~df33f8\t\u0010\u0001¡Ûµ\\Ós\"j\u0002'^6A?\u0014catalogNumber~3c9918\u0006\u0007NRE-065\u0016catalogSequence~f0296e\r\u0001\u000f\u0001\u0012catalogueId~422bb8\r\u0001\t\u0010\u0001¡Ûµ\\ÐpsÒQ&\u001b\b¯8\rformat~0b9815\u0006\u0006Single\u0012releaseDate~873976\u0003¸2\u0010searchKey~22f35b\u0006\u0016rooms distance nre-065\rstatus~d50a0e\u0006\tscheduled\ftitle~84fbed\u0006\u000eRooms Distance\u0000\u0000\u0001\u0000\u0000é£Þ\r\u0000\u0000\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.96",
+     "t": 101.2,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 104.5,
+     "bytes": 449,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "......6......<..D#..v...................4...:.......}#u.$..\\..................\\.}p.`x..Y......].pc.&..~.......\\.z\"...N.2.n....]:z..j..uh.l....].w...F...].....\\.}.......4X....]\"x...s<v{s.....\\.zp............](y......1\".....].w.....;.Z.....]:z..j-...i.....\\.{......_.;....\\.z\"...6Mz%=....]$s.....xQ.B....].}..W..........]$s........}....]<r.....E.t.....].t\".ws.8.......].w..#.0...w....\\.{......REv....].|0.[....-..................].pc.&..~.............",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "longtasks": []
+  },
+  {
+   "t0": 1794687684080.7,
+   "done": 1794687684158.2998,
+   "ms": 77.6,
+   "via": "mutation",
+   "muts": [
+    37.7,
+    40.3,
+    77.6
+   ],
+   "net": [
+    {
+     "ev": "send",
+     "id": "3865.97",
+     "t": 10.4,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\u0010\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001é£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.97",
+     "t": 23.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 24.2,
+     "bytes": 3656,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....C......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..scheduled.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "send",
+     "id": "3865.98",
+     "t": 44.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 144,
+     "body": "\u0001\u0000\u0000\u0000\u0001\u0001\u0000\u0011\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0001ðÞé£Þ\r\u0001\u0012æÁ´¼îR0ó>u[Õ1V\"%\b(åÚÓ\ry\ntÙÑü\u0001\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.98",
+     "t": 57.5,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 58.9,
+     "bytes": 3656,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "....C......releases....].pc.&..~...............organizationId~b26fbf......\\.}....m5J.1.artistId~df33f8......\\.s\".j.'^6A?.catalogueId~422bb8......\\.ps..Q&...8.catalogNumber~3c9918..NRE-065.catalogSequence~f0296e....title~84fbed..Rooms Distance.format~0b9815..Single.releaseDate~873976......d.status~d50a0e..scheduled.searchKey~22f35b..rooms distance nre-065.$createdAt......h.$updatedAt......h.$createdBy.account........Fx.b.m.....$createdBy.identity.issuer..jazz:backend.$createdBy.identity.subject.$01a1dbb5-4224-7343-a958-734913b9088c.$updatedBy.account........Fx.b.m.....$updatedBy.identity.issuer",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "send",
+     "id": "3865.99",
+     "t": 90.8,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "bytes": 489,
+     "body": "\u0001\u0000\u0000\u0001ä\u0001á\u0003\u0004\u0004\u0010\rì<\u0000ªD#ëvá»»°£ê£Þ\r\u0001ðÞé£Þ\r\u0001øÏ«|çV!«>\\\"¬`\u001a\u0000\breleases\u0002\u0003\u0000\u000eorganizationId\u0003\t\u0010\u0001¡Ûµ\\}°¨¯üm5J1\u0003\u0000\rcatalogNumber\u0003\u0006\u0007NRE-065\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\u0000ðÞé£Þ\r\u0000\u0001\u0001\breleases\u0001¡Ûµ]\u0002pc¨&¤Ä~ Ï¸\t\u000fartistId~df33f8\t\u0010\u0001¡Ûµ\\Ós\"j\u0002'^6A?\u0014catalogNumber~3c9918\u0006\u0007NRE-065\u0016catalogSequence~f0296e\r\u0001\u000f\u0001\u0012catalogueId~422bb8\r\u0001\t\u0010\u0001¡Ûµ\\ÐpsÒQ&\u001b\b¯8\rformat~0b9815\u0006\u0006Single\u0012releaseDate~873976\u0003¸2\u0010searchKey~22f35b\u0006\u0016rooms distance nre-065\rstatus~d50a0e\u0006\breleased\ftitle~84fbed\u0006\u000eRooms Distance\u0000\u0000\u0001\u0000\u0000ðÞé£Þ\r\u0000\u0000\u0000",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "resp",
+     "id": "3865.99",
+     "t": 114.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b11",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/9858f015-f85f-44c5-bbe7-6c9f06e38b1"
+    },
+    {
+     "ev": "data",
+     "id": "3865.78",
+     "t": 123.2,
+     "bytes": 449,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "body": "......6......<..D#..v...................4............q.2..1...................\\.}p.`x..Y......].pc.&..~.......\\.z\"...N.2.n....]:z..j..uh.l....].w...F...].....\\.}.......4X....]\"x...s<v{s.....\\.zp............](y......1\".....].w.....;.Z.....]:z..j-...i.....\\.{......_.;....\\.z\"...6Mz%=....]$s.....xQ.B....].}..W..........]$s........}....]<r.....E.t.....].t\".ws.8.......].w..#.0...w....\\.{......REv....].|0.[....-..................].pc.&..~.............",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "longtasks": []
+  }
+ ]
+}

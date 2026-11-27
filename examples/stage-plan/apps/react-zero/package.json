@@ -1,0 +1,40 @@
+{
+  "name": "stage-plan-zero",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"pnpm dev:api\" \"pnpm dev:ui\" \"pnpm dev:zero-cache\"",
+    "dev:ui": "vite",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:zero-cache": "zero-cache-dev",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@hono/node-server": "1.19.6",
+    "@rocicorp/zero": "1.12.0",
+    "hono": "4.10.6",
+    "jose": "6.1.2",
+    "pg": "8.16.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.0.1",
+    "concurrently": "9.2.1",
+    "tsx": "4.20.6",
+    "typescript": "6.0.2",
+    "vite": "8.0.1"
+  }
+}

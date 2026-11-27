@@ -1,0 +1,20 @@
+{
+  "tag": "scale-history500-render200",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_HISTORY": "500",
+    "VITE_BENCH_RENDER_LIMIT": "200"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 8.1,
+    "render": 25.1,
+    "port out": 229.4,
+    "a dom": 231.7,
+    "b dom": 657.3,
+    "a longtask ms": 1063
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "hero": "wequencer",
+  "stack": "convex",
+  "variant": "default",
+  "date": "2026-11-15T07:06:35.850Z",
+  "where": "local (anonymous Convex local backend via `npx convex dev`, `next start` for the app)",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 600,
+    "p95": 675,
+    "min": 572,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 253,
+    "p95": 322,
+    "min": 242,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 327,
+  "wq_toggle_pad": {
+    "median": 25.1,
+    "p95": 45.9,
+    "min": 19,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 23.4,
+    "p95": 30.1,
+    "min": 18.1,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 1391.1,
+    "p95": 1998.6,
+    "min": 1359.9,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 1471,
+    "gzip_kb": 448,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 1.2,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

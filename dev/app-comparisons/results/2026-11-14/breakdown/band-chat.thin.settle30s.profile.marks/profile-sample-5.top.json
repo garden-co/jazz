@@ -1,0 +1,278 @@
+{
+ "a": {
+  "byFile": [
+   {
+    "file": "(native)",
+    "ms": 1981
+   },
+   {
+    "file": "index-Dwogtu-s.js",
+    "ms": 569
+   },
+   {
+    "file": "useIsomorphicLayoutEffect-DsK3Iq2B.js",
+    "ms": 250
+   }
+  ],
+  "byFunction": [
+   {
+    "ms": 904,
+    "k": "(program) @ (native)"
+   },
+   {
+    "ms": 871,
+    "k": "(idle) @ (native)"
+   },
+   {
+    "ms": 160,
+    "k": "(garbage collector) @ (native)"
+   },
+   {
+    "ms": 81,
+    "k": "us @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 61,
+    "k": "Me @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 50,
+    "k": "(anonymous) @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 41,
+    "k": "F @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 34,
+    "k": "ut @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 34,
+    "k": "dl @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 29,
+    "k": "Z @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 28,
+    "k": "Ld @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 25,
+    "k": "ns @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 21,
+    "k": "Ou @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 21,
+    "k": "Pd @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 19,
+    "k": "bl @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 19,
+    "k": "he @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 18,
+    "k": "Zg @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 18,
+    "k": "(anonymous) @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 17,
+    "k": "querySelectorAll @ (native)"
+   },
+   {
+    "ms": 15,
+    "k": "Y @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 14,
+    "k": "b @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 14,
+    "k": "Qo @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 13,
+    "k": "Ue @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 13,
+    "k": "sc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 12,
+    "k": "ds @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 12,
+    "k": "Qc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 11,
+    "k": "Fc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 10,
+    "k": "ot @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 10,
+    "k": "v @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 10,
+    "k": "v @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   }
+  ]
+ },
+ "b": {
+  "byFile": [
+   {
+    "file": "(native)",
+    "ms": 1549
+   },
+   {
+    "file": "index-Dwogtu-s.js",
+    "ms": 438
+   },
+   {
+    "file": "useIsomorphicLayoutEffect-DsK3Iq2B.js",
+    "ms": 177
+   }
+  ],
+  "byFunction": [
+   {
+    "ms": 946,
+    "k": "(program) @ (native)"
+   },
+   {
+    "ms": 509,
+    "k": "(garbage collector) @ (native)"
+   },
+   {
+    "ms": 79,
+    "k": "(idle) @ (native)"
+   },
+   {
+    "ms": 59,
+    "k": "us @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 46,
+    "k": "Me @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 43,
+    "k": "(anonymous) @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 33,
+    "k": "F @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 29,
+    "k": "ut @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 24,
+    "k": "Zg @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 22,
+    "k": "Z @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 18,
+    "k": "ns @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 16,
+    "k": "Qo @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 15,
+    "k": "Y @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 14,
+    "k": "Ld @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 14,
+    "k": "ds @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 13,
+    "k": "b @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 13,
+    "k": "Vc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 13,
+    "k": "sc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 11,
+    "k": "_build @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 10,
+    "k": "bl @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 10,
+    "k": "Ue @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 10,
+    "k": "Ou @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 10,
+    "k": "(anonymous) @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 9,
+    "k": "dl @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 8,
+    "k": "Fc @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 7,
+    "k": "v @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 7,
+    "k": "ho @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 7,
+    "k": "v @ useIsomorphicLayoutEffect-DsK3Iq2B.js"
+   },
+   {
+    "ms": 6,
+    "k": "Jq @ index-Dwogtu-s.js"
+   },
+   {
+    "ms": 6,
+    "k": "wc @ index-Dwogtu-s.js"
+   }
+  ]
+ }
+}

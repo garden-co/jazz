@@ -24,7 +24,13 @@ export function useBandChatLifecycle(): AuthActions {
 export function JazzProvider({ children }: React.PropsWithChildren) {
   return (
     <Jazz
-      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
+      config={{
+        serverUrl: "/jazz",
+        // Bench only (dev/app-comparisons): VITE_JAZZ_THIN=1 builds the thin client alone;
+        // VITE_JAZZ_LOCAL_FIRST=now opens the local-first client at once. Unset: as shipped.
+        ...(import.meta.env.VITE_JAZZ_THIN === "1" ? {} : { client: loadLocalFirst }),
+        ...(import.meta.env.VITE_JAZZ_LOCAL_FIRST === "now" ? { localFirst: "now" as const } : {}),
+      }}
       loading={<LoadingScreen label="Connecting BandChat…" />}
       signedOut={<LoadingScreen label="Signing in…" />}
       error={(state) => (

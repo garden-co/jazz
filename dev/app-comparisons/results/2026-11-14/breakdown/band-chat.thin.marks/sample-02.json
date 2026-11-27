@@ -1,0 +1,483 @@
+{
+ "case": "band-chat.thin.marks",
+ "text": "bench cross 1794645943839-2",
+ "sent": 1794645943920.3,
+ "sinceOpenMs": 3779,
+ "sender": {
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+   "timeOrigin": 1794645935002.8,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 180,
+     "initiatorType": "navigation",
+     "deliveryType": "",
+     "nextHopProtocol": "http/1.1",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.19999999995343387,
+     "domainLookupStart": 1.8000000000465661,
+     "domainLookupEnd": 1.8000000000465661,
+     "connectStart": 1.8000000000465661,
+     "secureConnectionStart": 0,
+     "connectEnd": 2,
+     "requestStart": 2.5,
+     "responseStart": 4.800000000046566,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 4.800000000046566,
+     "responseEnd": 6.399999999906868,
+     "transferSize": 1106,
+     "encodedBodySize": 806,
+     "decodedBodySize": 806,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 0,
+     "unloadEventEnd": 0,
+     "domInteractive": 19.100000000093132,
+     "domContentLoadedEventStart": 179.5,
+     "domContentLoadedEventEnd": 179.5,
+     "domComplete": 179.89999999990687,
+     "loadEventStart": 180,
+     "loadEventEnd": 180,
+     "type": "navigate",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "high"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "send:start",
+     "t": 8920.600000000093,
+     "detail": {
+      "text": "bench cross 1794645943839-2"
+     }
+    },
+    {
+     "name": "send:committed",
+     "t": 8925.100000000093,
+     "detail": {
+      "text": "bench cross 1794645943839-2"
+     }
+    },
+    {
+     "name": "data:newest",
+     "t": 9001.100000000093,
+     "detail": {
+      "text": "bench cross 1794645943839-2",
+      "n": 200
+     }
+    },
+    {
+     "name": "dom:needle",
+     "t": 9376,
+     "detail": {
+      "key": "bench cross 1794645943839-2"
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4402/assets/index-Dwogtu-s.js",
+     "start": 11.100000000093132,
+     "responseEnd": 43.60000000009313,
+     "bytes": 1251013
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/useIsomorphicLayoutEffect-DsK3Iq2B.js",
+     "start": 11.300000000046566,
+     "responseEnd": 30,
+     "bytes": 44623
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/Tooltip-CQTI69p6.js",
+     "start": 11.399999999906868,
+     "responseEnd": 32.60000000009313,
+     "bytes": 2164
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/index-BVoIA84T.css",
+     "start": 11.5,
+     "responseEnd": 33,
+     "bytes": 186614
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 193.39999999990687,
+     "responseEnd": 208.30000000004657,
+     "bytes": 124216
+    },
+    {
+     "name": "http://127.0.0.1:4402/api/auth/get-session",
+     "start": 201.39999999990687,
+     "responseEnd": 237.10000000009313,
+     "bytes": 916
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-user",
+     "start": 249.19999999995343,
+     "responseEnd": 265.60000000009313,
+     "bytes": 448
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-sign-in",
+     "start": 267.60000000009313,
+     "responseEnd": 279.5,
+     "bytes": 471
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 383.39999999990687,
+     "responseEnd": 421.39999999990687,
+     "bytes": 121316
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 631.1999999999534,
+     "responseEnd": 942.6999999999534,
+     "bytes": 55860
+    }
+   ],
+   "ws": [
+    {
+     "t": 1794645943925.9001,
+     "dir": "out",
+     "bytes": 49
+    },
+    {
+     "t": 1794645943925.9001,
+     "dir": "out",
+     "bytes": 207,
+     "needle": true
+    },
+    {
+     "t": 1794645943925.9001,
+     "dir": "out",
+     "bytes": 95
+    },
+    {
+     "t": 1794645943940.9001,
+     "dir": "in",
+     "bytes": 6
+    },
+    {
+     "t": 1794645943949.8,
+     "dir": "in",
+     "bytes": 22
+    },
+    {
+     "t": 1794645943949.9001,
+     "dir": "in",
+     "bytes": 22
+    },
+    {
+     "t": 1794645943950.1,
+     "dir": "out",
+     "bytes": 39
+    },
+    {
+     "t": 1794645943968.9001,
+     "dir": "in",
+     "bytes": 29
+    },
+    {
+     "t": 1794645943970.1,
+     "dir": "in",
+     "bytes": 631,
+     "needle": true
+    },
+    {
+     "t": 1794645944378.9001,
+     "dir": "out",
+     "bytes": 124
+    },
+    {
+     "t": 1794645944416.3,
+     "dir": "in",
+     "bytes": 29
+    },
+    {
+     "t": 1794645944416.5,
+     "dir": "in",
+     "bytes": 324
+    }
+   ],
+   "ports": [
+    {
+     "t": 1794645943906.6,
+     "dir": "out"
+    },
+    {
+     "t": 1794645943920.1,
+     "dir": "in"
+    },
+    {
+     "t": 1794645943925.6,
+     "dir": "out"
+    },
+    {
+     "t": 1794645943930.2,
+     "dir": "in"
+    },
+    {
+     "t": 1794645943930.9001,
+     "dir": "out"
+    },
+    {
+     "t": 1794645943932.3,
+     "dir": "in"
+    },
+    {
+     "t": 1794645943940.8,
+     "dir": "out"
+    },
+    {
+     "t": 1794645943946.3,
+     "dir": "in"
+    },
+    {
+     "t": 1794645943946.7,
+     "dir": "out"
+    },
+    {
+     "t": 1794645943949.9001,
+     "dir": "in"
+    },
+    {
+     "t": 1794645944311.5,
+     "dir": "out"
+    },
+    {
+     "t": 1794645944416.1,
+     "dir": "in"
+    },
+    {
+     "t": 1794645944726.1,
+     "dir": "out"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "ws": 1
+   },
+   "longtasks": [
+    {
+     "t": 1794645943970.1,
+     "ms": 409
+    }
+   ]
+  },
+  "workers": []
+ },
+ "receiver": {
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+   "timeOrigin": 1794645937617.1,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 228.80000000004657,
+     "initiatorType": "navigation",
+     "deliveryType": "",
+     "nextHopProtocol": "http/1.1",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.19999999995343387,
+     "domainLookupStart": 1.1999999999534339,
+     "domainLookupEnd": 1.1999999999534339,
+     "connectStart": 1.1999999999534339,
+     "secureConnectionStart": 0,
+     "connectEnd": 1.3999999999068677,
+     "requestStart": 1.5,
+     "responseStart": 5.399999999906868,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 5.399999999906868,
+     "responseEnd": 9.699999999953434,
+     "transferSize": 1106,
+     "encodedBodySize": 806,
+     "decodedBodySize": 806,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 0,
+     "unloadEventEnd": 0,
+     "domInteractive": 21.699999999953434,
+     "domContentLoadedEventStart": 228,
+     "domContentLoadedEventEnd": 228.19999999995343,
+     "domComplete": 228.80000000004657,
+     "loadEventStart": 228.80000000004657,
+     "loadEventEnd": 228.80000000004657,
+     "type": "navigate",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "high"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "data:newest",
+     "t": 6371.09999999986,
+     "detail": {
+      "text": "bench cross 1794645943839-2",
+      "n": 200
+     }
+    },
+    {
+     "name": "dom:needle",
+     "t": 6661,
+     "detail": {
+      "key": "bench cross 1794645943839-2"
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4402/assets/index-Dwogtu-s.js",
+     "start": 16.899999999906868,
+     "responseEnd": 59.5,
+     "bytes": 1251013
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/useIsomorphicLayoutEffect-DsK3Iq2B.js",
+     "start": 17.399999999906868,
+     "responseEnd": 30,
+     "bytes": 44623
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/Tooltip-CQTI69p6.js",
+     "start": 17.5999999998603,
+     "responseEnd": 34.5999999998603,
+     "bytes": 2164
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/index-BVoIA84T.css",
+     "start": 20.300000000046566,
+     "responseEnd": 45.800000000046566,
+     "bytes": 186614
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 243.5999999998603,
+     "responseEnd": 284.39999999990687,
+     "bytes": 124216
+    },
+    {
+     "name": "http://127.0.0.1:4402/api/auth/get-session",
+     "start": 253.89999999990687,
+     "responseEnd": 317.69999999995343,
+     "bytes": 916
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-user",
+     "start": 333.69999999995343,
+     "responseEnd": 354.0999999998603,
+     "bytes": 448
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-sign-in",
+     "start": 357,
+     "responseEnd": 369.19999999995343,
+     "bytes": 471
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 783,
+     "responseEnd": 1193.5999999998603,
+     "bytes": 121316
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 785.8999999999069,
+     "responseEnd": 1193.6999999999534,
+     "bytes": 55860
+    }
+   ],
+   "ws": [
+    {
+     "t": 1794645943962.3,
+     "dir": "in",
+     "bytes": 631,
+     "needle": true
+    },
+    {
+     "t": 1794645944278.2002,
+     "dir": "out",
+     "bytes": 124
+    },
+    {
+     "t": 1794645944297.9001,
+     "dir": "in",
+     "bytes": 29
+    },
+    {
+     "t": 1794645944298.2002,
+     "dir": "in",
+     "bytes": 324
+    }
+   ],
+   "ports": [
+    {
+     "t": 1794645944227.9001,
+     "dir": "out"
+    },
+    {
+     "t": 1794645944296.6,
+     "dir": "in"
+    },
+    {
+     "t": 1794645944566.1,
+     "dir": "out"
+    },
+    {
+     "t": 1794645944611.3,
+     "dir": "in"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "ws": 1
+   },
+   "longtasks": [
+    {
+     "t": 1794645943962.2002,
+     "ms": 316
+    },
+    {
+     "t": 1794645944298.1,
+     "ms": 310
+    }
+   ]
+  },
+  "workers": []
+ }
+}

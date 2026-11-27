@@ -1,0 +1,42 @@
+{
+  "_note": "Zero has no separate permissions file: read rules are filters in queries.ts, write rules are server-side checks in mutators.ts, so both count as data. SQL migrations count as schema; Better Auth's tables come from its own migrations (scripts/db.ts). scripts/ and harness.mjs are bench plumbing.",
+  "schema": [
+    "schema.ts",
+    "db/*.sql"
+  ],
+  "permissions": [],
+  "server": [
+    "lib/auth.ts",
+    "lib/db.server.ts",
+    "lib/zero.server.ts",
+    "lib/bootstrap.ts",
+    "lib/server-secret.ts",
+    "lib/app-origin.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": [
+    "queries.ts",
+    "mutators.ts",
+    "components/zero-provider.tsx",
+    "lib/auth-client.ts",
+    "lib/session-setup.ts",
+    "lib/step-id.ts",
+    "lib/report-write.ts",
+    "components/presence-heartbeat.ts"
+  ],
+  "ui": [
+    "app/**/*.tsx",
+    "app/globals.css",
+    "components/*.tsx",
+    "components/use-sequencer-audio.ts",
+    "lib/audio.ts",
+    "lib/instruments.ts",
+    "lib/roles.ts",
+    "lib/transport.ts",
+    "!components/zero-provider.tsx"
+  ],
+  "exclude": [
+    "scripts/**",
+    "harness.mjs"
+  ]
+}

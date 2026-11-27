@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "jazz",
+  "variant": "now",
+  "date": "2026-11-17T10:59:02.135Z",
+  "where": "local (Jazz inside the Next server)",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 1511,
+    "p95": 1735,
+    "min": 1369,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 494,
+    "p95": 893,
+    "min": 394,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 545,
+  "bl_search": {
+    "median": 8.5,
+    "p95": 82.7,
+    "min": 6.1,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 103.4,
+    "p95": 144.8,
+    "min": 40.9,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 6.4,
+    "p95": 7.8,
+    "min": 6,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 42.6,
+    "p95": 70.2,
+    "min": 33.1,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 91.4,
+    "p95": 122.4,
+    "min": 78.2,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 2986,
+    "gzip_kb": 858,
+    "wasm_gzip_kb": 2998,
+    "worker_js_gzip_kb": 115
+  },
+  "rtt_ms": 2.3,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

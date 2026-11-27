@@ -1,0 +1,151 @@
+{
+  "case": "stage-plan.thin.marks",
+  "variant": "thin",
+  "log": "default",
+  "wait0": false,
+  "runs": 5,
+  "join": {
+    "nav:responseEnd": {
+      "median": 3.4,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 191.7,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 193.5,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 194,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 322.5,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 364.3,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 381.3,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 381.8,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 381.8,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 391.6,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 391.6,
+      "n": 5
+    },
+    "page join:accepted": {
+      "median": 441.8,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 468.1,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 468.1,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 468.1,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 515.1,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 515.1,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 534.6,
+      "n": 5
+    }
+  },
+  "reload": {
+    "nav:responseEnd": {
+      "median": 3,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 99,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 100,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 100.6,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 205.6,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 230.9,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 236.4,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 236.5,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 236.5,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 244.3,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 244.3,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 282.7,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 305.2,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 305.2,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 342.6,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 342.6,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 345.9,
+      "n": 5
+    }
+  }
+}

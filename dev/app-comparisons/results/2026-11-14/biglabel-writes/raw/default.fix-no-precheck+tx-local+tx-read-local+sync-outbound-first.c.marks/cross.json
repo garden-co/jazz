@@ -1,0 +1,835 @@
+{
+ "median": 103.65,
+ "a_median": 13.4,
+ "samples": [
+  {
+   "t0": 1794688725616.2,
+   "done": 1794688725790.7002,
+   "ms": 174.5,
+   "via": "mutation",
+   "muts": [
+    174.5
+   ],
+   "a_ms": 24.1,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.118",
+     "t": 7.3,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.118",
+     "t": 86.9,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.119",
+     "t": 87.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 532,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.119",
+     "t": 114.9,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 154.2,
+     "bytes": 15593,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 154.6,
+     "bytes": 16524,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 155.1,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688726298.1,
+   "done": 1794688726475,
+   "ms": 176.9,
+   "via": "mutation",
+   "muts": [
+    176.9
+   ],
+   "a_ms": 26.8,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.120",
+     "t": 3.7,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.120",
+     "t": 111,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.121",
+     "t": 111.5,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.121",
+     "t": 125.3,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.122",
+     "t": 133.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 159.9,
+     "bytes": 30807,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.122",
+     "t": 222,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 160.8,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688726998.2,
+   "done": 1794688727150.8,
+   "ms": 152.6,
+   "via": "mutation",
+   "muts": [
+    152.6
+   ],
+   "a_ms": 21.3,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.123",
+     "t": 8.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.123",
+     "t": 87,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.124",
+     "t": 87.3,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.124",
+     "t": 111.7,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 140.6,
+     "bytes": 27227,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "send",
+     "id": "6947.125",
+     "t": 206.4,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.125",
+     "t": 218.6,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 139.4,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688727654.6,
+   "done": 1794688727784.3,
+   "ms": 129.7,
+   "via": "mutation",
+   "muts": [
+    129.7
+   ],
+   "a_ms": 16.3,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.126",
+     "t": 2.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.126",
+     "t": 76.3,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.127",
+     "t": 76.8,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.127",
+     "t": 88.9,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 112.4,
+     "bytes": 22365,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 112.5,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688728293.5,
+   "done": 1794688728401.5,
+   "ms": 108,
+   "via": "mutation",
+   "muts": [
+    108
+   ],
+   "a_ms": 13.5,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.128",
+     "t": 13.3,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 12,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.128",
+     "t": 61,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.129",
+     "t": 61.2,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.129",
+     "t": 74.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 93.7,
+     "bytes": 16223,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 93.7,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688728963.9,
+   "done": 1794688729063.2002,
+   "ms": 99.3,
+   "via": "mutation",
+   "muts": [
+    99.3
+   ],
+   "a_ms": 13.3,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.130",
+     "t": 6.9,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.130",
+     "t": 51.5,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.131",
+     "t": 52.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.131",
+     "t": 63.5,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 81.9,
+     "bytes": 12672,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 82.6,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688729592.9,
+   "done": 1794688729706.8,
+   "ms": 113.9,
+   "via": "mutation",
+   "muts": [
+    113.8
+   ],
+   "a_ms": 18.6,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.132",
+     "t": 14,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 12,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.132",
+     "t": 59.1,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.133",
+     "t": 59.4,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.133",
+     "t": 71.7,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 80.8,
+     "bytes": 4610,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 81.7,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688730271.1,
+   "done": 1794688730349.2002,
+   "ms": 78.1,
+   "via": "mutation",
+   "muts": [
+    78
+   ],
+   "a_ms": 10.8,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.134",
+     "t": 7.6,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 9,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.134",
+     "t": 31.3,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "send",
+     "id": "6947.135",
+     "t": 31.8,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.135",
+     "t": 42.8,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 46.5,
+     "bytes": 99,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 170.7,
+     "bytes": 8,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 47,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688730859.9,
+   "done": 1794688730927.1,
+   "ms": 67.2,
+   "via": "mutation",
+   "muts": [
+    67.1
+   ],
+   "a_ms": 10.2,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.136",
+     "t": 19.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 523,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.136",
+     "t": 38.5,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 42.6,
+     "bytes": 99,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 43.1,
+     "bytes": 1074,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    },
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 345.2,
+     "bytes": 8,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688731444.6,
+   "done": 1794688731505.2002,
+   "ms": 60.6,
+   "via": "mutation",
+   "muts": [
+    60.6
+   ],
+   "a_ms": 11.6,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.137",
+     "t": 22,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 525,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.137",
+     "t": 37.2,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 46.4,
+     "bytes": 99,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 46.1,
+     "bytes": 1076,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688732002.3,
+   "done": 1794688732065.3,
+   "ms": 63,
+   "via": "mutation",
+   "muts": [
+    63
+   ],
+   "a_ms": 11.9,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.138",
+     "t": 23.9,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 525,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.138",
+     "t": 37.3,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 42,
+     "bytes": 99,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 41.6,
+     "bytes": 1076,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  },
+  {
+   "t0": 1794688732582.7,
+   "done": 1794688732656,
+   "ms": 73.3,
+   "via": "mutation",
+   "muts": [
+    73.3
+   ],
+   "a_ms": 10.7,
+   "net_a": [
+    {
+     "ev": "send",
+     "id": "6947.139",
+     "t": 21.1,
+     "method": "POST",
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "bytes": 525,
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "resp",
+     "id": "6947.139",
+     "t": 39.1,
+     "status": 204,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b442",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream/3a1ee7f8-22e4-4e97-b825-61ee7836b44"
+    },
+    {
+     "ev": "data",
+     "id": "6947.78",
+     "t": 42.8,
+     "bytes": 99,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ],
+   "net_b": [
+    {
+     "ev": "data",
+     "id": "6956.78",
+     "t": 42.6,
+     "bytes": 1076,
+     "url": "http://127.0.0.1:4404/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream",
+     "target": "shared_worker",
+     "path": "/jazz/apps/f1d40fe0-b849-5efa-8f09-3aeb4d2c52d5/stream"
+    }
+   ]
+  }
+ ]
+}

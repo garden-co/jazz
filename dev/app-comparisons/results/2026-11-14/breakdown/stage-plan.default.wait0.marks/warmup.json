@@ -1,0 +1,1801 @@
+{
+ "case": "stage-plan.default.wait0.marks",
+ "ctx": {
+  "showId": "01a1d92c-b211-7e82-b7f0-2573737f745d",
+  "code": "invite-0-1mmw9"
+ },
+ "join": {
+  "selfLoads": 0,
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4401/#/shows/01a1d92c-b211-7e82-b7f0-2573737f745d",
+   "timeOrigin": 1794645183926.6,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4401/#/join/01a1d92c-b211-7e82-b7f0-2573737f745d/invite-0-1mmw9",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 196.19999999995343,
+     "initiatorType": "navigation",
+     "deliveryType": "",
+     "nextHopProtocol": "http/1.1",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.30000000004656613,
+     "domainLookupStart": 1.5999999998603016,
+     "domainLookupEnd": 1.5999999998603016,
+     "connectStart": 1.5999999998603016,
+     "secureConnectionStart": 0,
+     "connectEnd": 1.8000000000465661,
+     "requestStart": 1.8999999999068677,
+     "responseStart": 4.300000000046566,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 4.300000000046566,
+     "responseEnd": 5.099999999860302,
+     "transferSize": 1305,
+     "encodedBodySize": 1005,
+     "decodedBodySize": 1005,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 0,
+     "unloadEventEnd": 0,
+     "domInteractive": 16.800000000046566,
+     "domContentLoadedEventStart": 195.69999999995343,
+     "domContentLoadedEventEnd": 195.80000000004657,
+     "domComplete": 196.19999999995343,
+     "loadEventStart": 196.19999999995343,
+     "loadEventEnd": 196.19999999995343,
+     "type": "navigate",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "low"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "app:main",
+     "t": 193.80000000004657
+    },
+    {
+     "name": "jazz:client-ready",
+     "t": 320.39999999990687
+    },
+    {
+     "name": "ws:create",
+     "t": 366.5999999998603,
+     "detail": {
+      "n": 1,
+      "url": "ws://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/ws"
+     }
+    },
+    {
+     "name": "page:shared-worker-created",
+     "t": 400.69999999995343,
+     "detail": {
+      "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js"
+     }
+    },
+    {
+     "name": "wasm:instantiateStreaming:start",
+     "t": 442.5999999998603,
+     "detail": {
+      "n": 1
+     }
+    },
+    {
+     "name": "ws:open",
+     "t": 474.0999999998603,
+     "detail": {
+      "n": 1
+     }
+    },
+    {
+     "name": "ws:first-send",
+     "t": 474.69999999995343
+    },
+    {
+     "name": "ws:first-recv",
+     "t": 572.5999999998603
+    },
+    {
+     "name": "wasm:instantiateStreaming:end",
+     "t": 712.3999999999069,
+     "detail": {
+      "n": 1
+     }
+    },
+    {
+     "name": "wasm:ready",
+     "t": 712.3999999999069
+    },
+    {
+     "name": "join:accepted",
+     "t": 768.5
+    },
+    {
+     "name": "page:shared-worker-created",
+     "t": 947.8000000000466,
+     "detail": {
+      "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js"
+     }
+    },
+    {
+     "name": "data:show",
+     "t": 1004
+    },
+    {
+     "name": "data:tasks",
+     "t": 1138.3999999999069,
+     "detail": {
+      "n": 100
+     }
+    },
+    {
+     "name": "data:tasks-100",
+     "t": 1138.3999999999069
+    },
+    {
+     "name": "render:board",
+     "t": 1181.8000000000466,
+     "detail": {
+      "n": 100
+     }
+    },
+    {
+     "name": "render:board-100",
+     "t": 1181.8999999999069
+    },
+    {
+     "name": "dom:cards-100",
+     "t": 1182.3999999999069,
+     "detail": {
+      "key": "100"
+     }
+    },
+    {
+     "name": "ws:close",
+     "t": 1667.5999999998603,
+     "detail": {
+      "n": 1,
+      "code": 1005
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4401/assets/index-DVfA2eIp.js",
+     "start": 9.099999999860302,
+     "responseEnd": 98.39999999990687,
+     "bytes": 324697
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useIsomorphicLayoutEffect-DS4XUBXS.js",
+     "start": 9.699999999953434,
+     "responseEnd": 34.699999999953434,
+     "bytes": 9356
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/preload-helper-rov5CBGT.js",
+     "start": 9.699999999953434,
+     "responseEnd": 36.89999999990687,
+     "bytes": 981
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useTooltip-CxM86C4k.js",
+     "start": 9.800000000046566,
+     "responseEnd": 42.300000000046566,
+     "bytes": 7316
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/Tooltip-DmpUXXqp.js",
+     "start": 10,
+     "responseEnd": 45.39999999990687,
+     "bytes": 1132
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useMediaQuery-D3i3weFR.js",
+     "start": 10.099999999860302,
+     "responseEnd": 56.89999999990687,
+     "bytes": 1664
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/metro-setup-error-CVOA8i3J.js",
+     "start": 10.099999999860302,
+     "responseEnd": 85.30000000004657,
+     "bytes": 78603
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/index-Xocr6jHK.css",
+     "start": 10.199999999953434,
+     "responseEnd": 45.300000000046566,
+     "bytes": 33861
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 209.5,
+     "responseEnd": 218.69999999995343,
+     "bytes": 121316
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 332.39999999990687,
+     "responseEnd": 359.80000000004657,
+     "bytes": 124216
+    },
+    {
+     "name": "http://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/accounts/backend-user",
+     "start": 353.89999999990687,
+     "responseEnd": 480.5999999998603,
+     "bytes": 313
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/local-first-CfgxEgc4.js",
+     "start": 379.89999999990687,
+     "responseEnd": 393.89999999990687,
+     "bytes": 2939
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/delete-local-first-store-Cwlw3JKE.js",
+     "start": 380.19999999995343,
+     "responseEnd": 394.19999999995343,
+     "bytes": 12780
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/jazz_wasm-DD0GWEeJ.js",
+     "start": 406.39999999990687,
+     "responseEnd": 423.69999999995343,
+     "bytes": 9687
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+     "start": 428.69999999995343,
+     "responseEnd": 650.8000000000466,
+     "bytes": 8965523
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 737.1999999999534,
+     "responseEnd": 753.3000000000466,
+     "bytes": 55860
+    }
+   ],
+   "ws": [
+    {
+     "t": 1794645184401.2002,
+     "dir": "out",
+     "bytes": 1079
+    },
+    {
+     "t": 1794645184401.5,
+     "dir": "out",
+     "bytes": 9
+    },
+    {
+     "t": 1794645184499.2002,
+     "dir": "in",
+     "bytes": 36
+    },
+    {
+     "t": 1794645184500.4001,
+     "dir": "out",
+     "bytes": 3874
+    },
+    {
+     "t": 1794645184525.5,
+     "dir": "in",
+     "bytes": 5
+    },
+    {
+     "t": 1794645184526.3,
+     "dir": "out",
+     "bytes": 111
+    },
+    {
+     "t": 1794645184526.4001,
+     "dir": "out",
+     "bytes": 114
+    },
+    {
+     "t": 1794645184549.6,
+     "dir": "in",
+     "bytes": 8
+    },
+    {
+     "t": 1794645184553.8,
+     "dir": "out",
+     "bytes": 196
+    },
+    {
+     "t": 1794645184556.7002,
+     "dir": "in",
+     "bytes": 26
+    },
+    {
+     "t": 1794645184642.8,
+     "dir": "in",
+     "bytes": 28
+    },
+    {
+     "t": 1794645184644.2002,
+     "dir": "in",
+     "bytes": 128
+    },
+    {
+     "t": 1794645184669,
+     "dir": "out",
+     "bytes": 146
+    },
+    {
+     "t": 1794645184678.9001,
+     "dir": "in",
+     "bytes": 8
+    },
+    {
+     "t": 1794645184682,
+     "dir": "out",
+     "bytes": 275
+    },
+    {
+     "t": 1794645184687.8,
+     "dir": "in",
+     "bytes": 28
+    },
+    {
+     "t": 1794645184689.3,
+     "dir": "out",
+     "bytes": 114
+    },
+    {
+     "t": 1794645184694.9001,
+     "dir": "in",
+     "bytes": 28
+    },
+    {
+     "t": 1794645184708,
+     "dir": "out",
+     "bytes": 75
+    },
+    {
+     "t": 1794645184708.8,
+     "dir": "out",
+     "bytes": 149
+    },
+    {
+     "t": 1794645184708.9001,
+     "dir": "out",
+     "bytes": 172
+    },
+    {
+     "t": 1794645184929.6,
+     "dir": "in",
+     "bytes": 210
+    },
+    {
+     "t": 1794645185033.8,
+     "dir": "in",
+     "bytes": 6362
+    },
+    {
+     "t": 1794645185059.8,
+     "dir": "in",
+     "bytes": 13509
+    },
+    {
+     "t": 1794645185560.6,
+     "dir": "out",
+     "bytes": 6
+    },
+    {
+     "t": 1794645185585.7002,
+     "dir": "out",
+     "bytes": 6
+    },
+    {
+     "t": 1794645185585.8,
+     "dir": "out",
+     "bytes": 6
+    },
+    {
+     "t": 1794645185585.8,
+     "dir": "out",
+     "bytes": 6
+    }
+   ],
+   "ports": [
+    {
+     "t": 1794645184122.1,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184123.9001,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184134.2002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184142.2002,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184255.4001,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184279.3,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184330.2002,
+     "dir": "out",
+     "type": "probe-foreground-node-lease-worker"
+    },
+    {
+     "t": 1794645184554,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184554.7002,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184556.6,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184562.1,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184564.1,
+     "dir": "in",
+     "type": "foreground-node-lease-worker-alive"
+    },
+    {
+     "t": 1794645184564.2002,
+     "dir": "out",
+     "type": "acquire-foreground-node-lease"
+    },
+    {
+     "t": 1794645184661.4001,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184678.8,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184700.6,
+     "dir": "out"
+    },
+    {
+     "t": 1794645184713.4001,
+     "dir": "in"
+    },
+    {
+     "t": 1794645184715.7002,
+     "dir": "in",
+     "type": "foreground-node-lease-ready"
+    },
+    {
+     "t": 1794645184875.5,
+     "dir": "out",
+     "type": "connect-runtime"
+    },
+    {
+     "t": 1794645184948.7002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645185033.2002,
+     "dir": "in"
+    },
+    {
+     "t": 1794645185057.7002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645185130.5,
+     "dir": "in",
+     "type": "worker-alive"
+    },
+    {
+     "t": 1794645185130.8,
+     "dir": "in"
+    },
+    {
+     "t": 1794645185256.7002,
+     "dir": "in",
+     "type": "runtime-ready"
+    },
+    {
+     "t": 1794645185257.2002,
+     "dir": "out",
+     "type": "init"
+    },
+    {
+     "t": 1794645185270.4001,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645185270.7002,
+     "dir": "in",
+     "type": "result"
+    },
+    {
+     "t": 1794645185275.4001,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185275.9001,
+     "dir": "out",
+     "type": "liveness-lock"
+    },
+    {
+     "t": 1794645185276,
+     "dir": "out",
+     "type": "wait-server"
+    },
+    {
+     "t": 1794645185276,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645185289,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185303.1,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645185303.9001,
+     "dir": "in",
+     "type": "result"
+    },
+    {
+     "t": 1794645185318.3,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185325.6,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185466.4001,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185503.7002,
+     "dir": "out",
+     "type": "wait-server"
+    },
+    {
+     "t": 1794645185505.5,
+     "dir": "in",
+     "type": "result"
+    },
+    {
+     "t": 1794645185507.1,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185541.9001,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185583.2002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645185587.3,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185590.3,
+     "dir": "in"
+    },
+    {
+     "t": 1794645185612.4001,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185639.2002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645185641.6,
+     "dir": "in"
+    },
+    {
+     "t": 1794645185680.6,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645185724.7002,
+     "dir": "out"
+    },
+    {
+     "t": 1794645185727.4001,
+     "dir": "in"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "ws": 1,
+    "wasm:instantiateStreaming": 1
+   }
+  },
+  "workers": [
+   {
+    "sessionId": "CFB78014509DB01EB219984C8111B1B3",
+    "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js",
+    "attachedAt": 1794645184330,
+    "detached": false,
+    "realm": "worker",
+    "timeOrigin": 1794645184345.5,
+    "navigation": [],
+    "marks": [
+     {
+      "name": "worker:connect",
+      "t": 217.5
+     },
+     {
+      "name": "wasm:instantiateStreaming:start",
+      "t": 244.39999999990687,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:instantiateStreaming:end",
+      "t": 340.69999999995343,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:ready",
+      "t": 340.69999999995343
+     },
+     {
+      "name": "worker:connect",
+      "t": 689.3000000000466
+     },
+     {
+      "name": "ws:create",
+      "t": 945.3999999999069,
+      "detail": {
+       "n": 1,
+       "url": "ws://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/ws"
+      }
+     },
+     {
+      "name": "ws:open",
+      "t": 946.5999999998603,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "ws:first-send",
+      "t": 947
+     },
+     {
+      "name": "ws:first-recv",
+      "t": 954
+     }
+    ],
+    "resources": [
+     {
+      "name": "http://127.0.0.1:4401/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+      "start": 229.5,
+      "responseEnd": 307.39999999990687,
+      "bytes": 8965523
+     }
+    ],
+    "ws": [
+     {
+      "t": 1794645185292.5,
+      "dir": "out",
+      "bytes": 1126
+     },
+     {
+      "t": 1794645185292.8,
+      "dir": "out",
+      "bytes": 9
+     },
+     {
+      "t": 1794645185299.5,
+      "dir": "in",
+      "bytes": 36
+     },
+     {
+      "t": 1794645185303.4,
+      "dir": "out",
+      "bytes": 52
+     },
+     {
+      "t": 1794645185306.2,
+      "dir": "in",
+      "bytes": 90
+     },
+     {
+      "t": 1794645185326.7,
+      "dir": "out",
+      "bytes": 335
+     },
+     {
+      "t": 1794645185340.4,
+      "dir": "in",
+      "bytes": 152113
+     },
+     {
+      "t": 1794645185515.9,
+      "dir": "out",
+      "bytes": 117
+     },
+     {
+      "t": 1794645185528.4,
+      "dir": "in",
+      "bytes": 21445
+     },
+     {
+      "t": 1794645185611.8,
+      "dir": "out",
+      "bytes": 493
+     },
+     {
+      "t": 1794645185659.9,
+      "dir": "in",
+      "bytes": 8366
+     }
+    ],
+    "ports": [
+     {
+      "t": 1794645184563.4,
+      "dir": "in",
+      "type": "probe-foreground-node-lease-worker"
+     },
+     {
+      "t": 1794645184563.8,
+      "dir": "out",
+      "type": "foreground-node-lease-worker-alive"
+     },
+     {
+      "t": 1794645184575.3,
+      "dir": "in",
+      "type": "acquire-foreground-node-lease"
+     },
+     {
+      "t": 1794645184704.7,
+      "dir": "out",
+      "type": "foreground-node-lease-ready"
+     },
+     {
+      "t": 1794645185034.9,
+      "dir": "in",
+      "type": "connect-runtime"
+     },
+     {
+      "t": 1794645185035.2,
+      "dir": "out",
+      "type": "worker-alive"
+     },
+     {
+      "t": 1794645185256.3,
+      "dir": "out",
+      "type": "runtime-ready"
+     },
+     {
+      "t": 1794645185259.2,
+      "dir": "in",
+      "type": "init"
+     },
+     {
+      "t": 1794645185270.2,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185270.3,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185270.8,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185275.5,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185288.8,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185291,
+      "dir": "in",
+      "type": "liveness-lock"
+     },
+     {
+      "t": 1794645185291.8,
+      "dir": "in",
+      "type": "wait-server"
+     },
+     {
+      "t": 1794645185302.9,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185303.8,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185318.9,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185325.5,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185466.1,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185505.3,
+      "dir": "in",
+      "type": "wait-server"
+     },
+     {
+      "t": 1794645185505.3,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185507.1,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185541.8,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185587.3,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185611.3,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185679.7,
+      "dir": "out",
+      "type": "frames"
+     }
+    ],
+    "console": [],
+    "counts": {
+     "wasm:instantiateStreaming": 1,
+     "ws": 1
+    }
+   }
+  ]
+ },
+ "reload": {
+  "selfLoads": 0,
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4401/#/shows/01a1d92c-b211-7e82-b7f0-2573737f745d",
+   "timeOrigin": 1794645186695.9,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4401/#/shows/01a1d92c-b211-7e82-b7f0-2573737f745d",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 144.10000000009313,
+     "initiatorType": "navigation",
+     "deliveryType": "cache",
+     "nextHopProtocol": "",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.4000000001396984,
+     "domainLookupStart": 0.4000000001396984,
+     "domainLookupEnd": 0.4000000001396984,
+     "connectStart": 0.4000000001396984,
+     "secureConnectionStart": 0,
+     "connectEnd": 0.4000000001396984,
+     "requestStart": 1.4000000001396984,
+     "responseStart": 14.199999999953434,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 14.199999999953434,
+     "responseEnd": 15.300000000046566,
+     "transferSize": 300,
+     "encodedBodySize": 1005,
+     "decodedBodySize": 1005,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 18.5,
+     "unloadEventEnd": 18.5,
+     "domInteractive": 45,
+     "domContentLoadedEventStart": 143.5,
+     "domContentLoadedEventEnd": 143.60000000009313,
+     "domComplete": 144.10000000009313,
+     "loadEventStart": 144.10000000009313,
+     "loadEventEnd": 144.10000000009313,
+     "type": "reload",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "low"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "app:main",
+     "t": 142.80000000004657
+    },
+    {
+     "name": "page:shared-worker-created",
+     "t": 245.80000000004657,
+     "detail": {
+      "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js"
+     }
+    },
+    {
+     "name": "wasm:instantiateStreaming:start",
+     "t": 265.80000000004657,
+     "detail": {
+      "n": 1
+     }
+    },
+    {
+     "name": "wasm:instantiateStreaming:end",
+     "t": 404.5,
+     "detail": {
+      "n": 1
+     }
+    },
+    {
+     "name": "wasm:ready",
+     "t": 404.5
+    },
+    {
+     "name": "jazz:client-ready",
+     "t": 410.69999999995343
+    },
+    {
+     "name": "page:shared-worker-created",
+     "t": 460.80000000004657,
+     "detail": {
+      "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js"
+     }
+    },
+    {
+     "name": "data:show",
+     "t": 668.1000000000931
+    },
+    {
+     "name": "data:tasks",
+     "t": 668.1000000000931,
+     "detail": {
+      "n": 100
+     }
+    },
+    {
+     "name": "data:tasks-100",
+     "t": 668.1000000000931
+    },
+    {
+     "name": "render:board",
+     "t": 708.6000000000931,
+     "detail": {
+      "n": 100
+     }
+    },
+    {
+     "name": "render:board-100",
+     "t": 708.6000000000931
+    },
+    {
+     "name": "dom:cards-100",
+     "t": 722.3000000000466,
+     "detail": {
+      "key": "100"
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4401/assets/index-DVfA2eIp.js",
+     "start": 26.4000000001397,
+     "responseEnd": 72.4000000001397,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useIsomorphicLayoutEffect-DS4XUBXS.js",
+     "start": 27.9000000001397,
+     "responseEnd": 63.9000000001397,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/preload-helper-rov5CBGT.js",
+     "start": 28,
+     "responseEnd": 64.10000000009313,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useTooltip-CxM86C4k.js",
+     "start": 28,
+     "responseEnd": 64.10000000009313,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/useMediaQuery-D3i3weFR.js",
+     "start": 28.100000000093132,
+     "responseEnd": 64.4000000001397,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/Tooltip-DmpUXXqp.js",
+     "start": 28.100000000093132,
+     "responseEnd": 64.30000000004657,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/index-Xocr6jHK.css",
+     "start": 28.300000000046566,
+     "responseEnd": 63.5,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/metro-setup-error-CVOA8i3J.js",
+     "start": 28.300000000046566,
+     "responseEnd": 70.4000000001397,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 150.19999999995343,
+     "responseEnd": 156.19999999995343,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/local-first-CfgxEgc4.js",
+     "start": 232.4000000001397,
+     "responseEnd": 240.9000000001397,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/delete-local-first-store-Cwlw3JKE.js",
+     "start": 232.60000000009313,
+     "responseEnd": 242.10000000009313,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/jazz_wasm-DD0GWEeJ.js",
+     "start": 250.19999999995343,
+     "responseEnd": 252.69999999995343,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+     "start": 259.69999999995343,
+     "responseEnd": 356.10000000009313,
+     "bytes": 8965523
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 418.19999999995343,
+     "responseEnd": 423.80000000004657,
+     "bytes": 300
+    },
+    {
+     "name": "http://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/accounts/backend-user",
+     "start": 474.19999999995343,
+     "responseEnd": 482.4000000001397,
+     "bytes": 313
+    },
+    {
+     "name": "http://127.0.0.1:4401/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 701.3000000000466,
+     "responseEnd": 705.6999999999534,
+     "bytes": 300
+    }
+   ],
+   "ws": [],
+   "ports": [
+    {
+     "t": 1794645186839.4,
+     "dir": "out"
+    },
+    {
+     "t": 1794645186840.5,
+     "dir": "in"
+    },
+    {
+     "t": 1794645186843.4,
+     "dir": "out"
+    },
+    {
+     "t": 1794645186849.4,
+     "dir": "in"
+    },
+    {
+     "t": 1794645186942,
+     "dir": "out",
+     "type": "probe-foreground-node-lease-worker"
+    },
+    {
+     "t": 1794645186983.7998,
+     "dir": "in",
+     "type": "foreground-node-lease-worker-alive"
+    },
+    {
+     "t": 1794645186983.9,
+     "dir": "out",
+     "type": "acquire-foreground-node-lease"
+    },
+    {
+     "t": 1794645187014.5,
+     "dir": "in",
+     "type": "foreground-node-lease-ready"
+    },
+    {
+     "t": 1794645187111.2,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187158.4,
+     "dir": "out",
+     "type": "connect-runtime"
+    },
+    {
+     "t": 1794645187168.7,
+     "dir": "in"
+    },
+    {
+     "t": 1794645187186.7998,
+     "dir": "in",
+     "type": "worker-alive"
+    },
+    {
+     "t": 1794645187240.5999,
+     "dir": "in",
+     "type": "runtime-ready"
+    },
+    {
+     "t": 1794645187240.7,
+     "dir": "out",
+     "type": "init"
+    },
+    {
+     "t": 1794645187247.5999,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645187248,
+     "dir": "in",
+     "type": "result"
+    },
+    {
+     "t": 1794645187248.7998,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187249.0999,
+     "dir": "out",
+     "type": "liveness-lock"
+    },
+    {
+     "t": 1794645187250.2998,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187251.9,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645187254.7998,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187262.9,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187263.2998,
+     "dir": "in"
+    },
+    {
+     "t": 1794645187264.5,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187268,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187268.0999,
+     "dir": "in"
+    },
+    {
+     "t": 1794645187278.5,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187278.7,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187279,
+     "dir": "in"
+    },
+    {
+     "t": 1794645187333.2998,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187387.4,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187427.5,
+     "dir": "in"
+    },
+    {
+     "t": 1794645187428,
+     "dir": "in",
+     "type": "remote-link"
+    },
+    {
+     "t": 1794645187428.4,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645187447.5999,
+     "dir": "out"
+    },
+    {
+     "t": 1794645187450.9,
+     "dir": "in"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "wasm:instantiateStreaming": 1
+   }
+  },
+  "workers": [
+   {
+    "sessionId": "CFB78014509DB01EB219984C8111B1B3",
+    "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js",
+    "attachedAt": 1794645184330,
+    "detached": true,
+    "realm": "worker",
+    "timeOrigin": 1794645184345.5,
+    "navigation": [],
+    "marks": [
+     {
+      "name": "worker:connect",
+      "t": 217.5
+     },
+     {
+      "name": "wasm:instantiateStreaming:start",
+      "t": 244.39999999990687,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:instantiateStreaming:end",
+      "t": 340.69999999995343,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:ready",
+      "t": 340.69999999995343
+     },
+     {
+      "name": "worker:connect",
+      "t": 689.3000000000466
+     },
+     {
+      "name": "ws:create",
+      "t": 945.3999999999069,
+      "detail": {
+       "n": 1,
+       "url": "ws://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/ws"
+      }
+     },
+     {
+      "name": "ws:open",
+      "t": 946.5999999998603,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "ws:first-send",
+      "t": 947
+     },
+     {
+      "name": "ws:first-recv",
+      "t": 954
+     }
+    ],
+    "resources": [
+     {
+      "name": "http://127.0.0.1:4401/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+      "start": 229.5,
+      "responseEnd": 307.39999999990687,
+      "bytes": 8965523
+     }
+    ],
+    "ws": [
+     {
+      "t": 1794645185292.5,
+      "dir": "out",
+      "bytes": 1126
+     },
+     {
+      "t": 1794645185292.8,
+      "dir": "out",
+      "bytes": 9
+     },
+     {
+      "t": 1794645185299.5,
+      "dir": "in",
+      "bytes": 36
+     },
+     {
+      "t": 1794645185303.4,
+      "dir": "out",
+      "bytes": 52
+     },
+     {
+      "t": 1794645185306.2,
+      "dir": "in",
+      "bytes": 90
+     },
+     {
+      "t": 1794645185326.7,
+      "dir": "out",
+      "bytes": 335
+     },
+     {
+      "t": 1794645185340.4,
+      "dir": "in",
+      "bytes": 152113
+     },
+     {
+      "t": 1794645185515.9,
+      "dir": "out",
+      "bytes": 117
+     },
+     {
+      "t": 1794645185528.4,
+      "dir": "in",
+      "bytes": 21445
+     },
+     {
+      "t": 1794645185611.8,
+      "dir": "out",
+      "bytes": 493
+     },
+     {
+      "t": 1794645185659.9,
+      "dir": "in",
+      "bytes": 8366
+     }
+    ],
+    "ports": [
+     {
+      "t": 1794645184563.4,
+      "dir": "in",
+      "type": "probe-foreground-node-lease-worker"
+     },
+     {
+      "t": 1794645184563.8,
+      "dir": "out",
+      "type": "foreground-node-lease-worker-alive"
+     },
+     {
+      "t": 1794645184575.3,
+      "dir": "in",
+      "type": "acquire-foreground-node-lease"
+     },
+     {
+      "t": 1794645184704.7,
+      "dir": "out",
+      "type": "foreground-node-lease-ready"
+     },
+     {
+      "t": 1794645185034.9,
+      "dir": "in",
+      "type": "connect-runtime"
+     },
+     {
+      "t": 1794645185035.2,
+      "dir": "out",
+      "type": "worker-alive"
+     },
+     {
+      "t": 1794645185256.3,
+      "dir": "out",
+      "type": "runtime-ready"
+     },
+     {
+      "t": 1794645185259.2,
+      "dir": "in",
+      "type": "init"
+     },
+     {
+      "t": 1794645185270.2,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185270.3,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185270.8,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185275.5,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185288.8,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185291,
+      "dir": "in",
+      "type": "liveness-lock"
+     },
+     {
+      "t": 1794645185291.8,
+      "dir": "in",
+      "type": "wait-server"
+     },
+     {
+      "t": 1794645185302.9,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645185303.8,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185318.9,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185325.5,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185466.1,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185505.3,
+      "dir": "in",
+      "type": "wait-server"
+     },
+     {
+      "t": 1794645185505.3,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645185507.1,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185541.8,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185587.3,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185611.3,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645185679.7,
+      "dir": "out",
+      "type": "frames"
+     }
+    ],
+    "console": [],
+    "counts": {
+     "wasm:instantiateStreaming": 1,
+     "ws": 1
+    }
+   },
+   {
+    "sessionId": "AF77E98FC2A4A8D9C3EE4987CB20CEE5",
+    "url": "http://127.0.0.1:4401/assets/jazz-broker-worker-BT2qs-Yn.js",
+    "attachedAt": 1794645186944,
+    "detached": false,
+    "realm": "worker",
+    "timeOrigin": 1794645186950.3,
+    "navigation": [],
+    "marks": [
+     {
+      "name": "worker:connect",
+      "t": 31.799999999813735
+     },
+     {
+      "name": "wasm:instantiateStreaming:start",
+      "t": 83.79999999981374,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:instantiateStreaming:end",
+      "t": 232.5,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "wasm:ready",
+      "t": 232.5
+     },
+     {
+      "name": "worker:connect",
+      "t": 234
+     },
+     {
+      "name": "ws:create",
+      "t": 321.5999999998603,
+      "detail": {
+       "n": 1,
+       "url": "ws://127.0.0.1:4401/jazz/apps/e68d2baa-733c-55fc-b92e-f672c96da521/ws"
+      }
+     },
+     {
+      "name": "ws:open",
+      "t": 327.39999999990687,
+      "detail": {
+       "n": 1
+      }
+     },
+     {
+      "name": "ws:first-send",
+      "t": 329.0999999998603
+     },
+     {
+      "name": "ws:first-recv",
+      "t": 370.39999999990687
+     }
+    ],
+    "resources": [
+     {
+      "name": "http://127.0.0.1:4401/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+      "start": 35.5999999998603,
+      "responseEnd": 195.5999999998603,
+      "bytes": 8965523
+     }
+    ],
+    "ws": [
+     {
+      "t": 1794645187279.4001,
+      "dir": "out",
+      "bytes": 1126
+     },
+     {
+      "t": 1794645187279.7,
+      "dir": "out",
+      "bytes": 9
+     },
+     {
+      "t": 1794645187320.7,
+      "dir": "in",
+      "bytes": 35
+     },
+     {
+      "t": 1794645187327.4001,
+      "dir": "out",
+      "bytes": 544
+     },
+     {
+      "t": 1794645187402.4001,
+      "dir": "in",
+      "bytes": 8464
+     }
+    ],
+    "ports": [
+     {
+      "t": 1794645186982.3,
+      "dir": "in",
+      "type": "probe-foreground-node-lease-worker"
+     },
+     {
+      "t": 1794645186982.6,
+      "dir": "out",
+      "type": "foreground-node-lease-worker-alive"
+     },
+     {
+      "t": 1794645186986.2,
+      "dir": "in",
+      "type": "acquire-foreground-node-lease"
+     },
+     {
+      "t": 1794645187014.3,
+      "dir": "out",
+      "type": "foreground-node-lease-ready"
+     },
+     {
+      "t": 1794645187184.3,
+      "dir": "in",
+      "type": "connect-runtime"
+     },
+     {
+      "t": 1794645187186.7,
+      "dir": "out",
+      "type": "worker-alive"
+     },
+     {
+      "t": 1794645187240.4001,
+      "dir": "out",
+      "type": "runtime-ready"
+     },
+     {
+      "t": 1794645187240.9001,
+      "dir": "in",
+      "type": "init"
+     },
+     {
+      "t": 1794645187247.6,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645187247.8,
+      "dir": "out",
+      "type": "result"
+     },
+     {
+      "t": 1794645187251.9001,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645187252.5,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187254.7,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187263.6,
+      "dir": "in",
+      "type": "liveness-lock"
+     },
+     {
+      "t": 1794645187263.8,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187264.4001,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187279.8,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187320.2,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645187327,
+      "dir": "out",
+      "type": "remote-link"
+     },
+     {
+      "t": 1794645187424.3,
+      "dir": "out",
+      "type": "frames"
+     }
+    ],
+    "console": [],
+    "counts": {
+     "wasm:instantiateStreaming": 1,
+     "ws": 1
+    }
+   }
+  ]
+ }
+}

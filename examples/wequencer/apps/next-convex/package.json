@@ -1,0 +1,31 @@
+{
+  "name": "wequencer-convex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "backend": "convex dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "seed": "node scripts/seed.mjs"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@auth/core": "0.37.4",
+    "@convex-dev/auth": "0.0.98",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "convex": "1.50.0",
+    "next": "16.2.11",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jose": "^5.10.0",
+    "typescript": "6.0.2"
+  }
+}

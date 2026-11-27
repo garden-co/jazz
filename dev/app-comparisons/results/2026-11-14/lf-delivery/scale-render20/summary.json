@@ -1,0 +1,19 @@
+{
+  "tag": "scale-render20",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_RENDER_LIMIT": "20"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 4.6,
+    "render": 22.6,
+    "port out": 53.7,
+    "a dom": 54.3,
+    "b dom": 282.6,
+    "a longtask ms": 242
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

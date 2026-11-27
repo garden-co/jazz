@@ -1,0 +1,51 @@
+{
+  "hero": "wequencer",
+  "stack": "postgres",
+  "variant": "default",
+  "date": "2026-11-14T18:59:51.141Z",
+  "where": "local (Postgres 18 + Next/Better Auth/Hono API routes + a ws server fed by LISTEN/NOTIFY, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 445,
+    "p95": 461,
+    "min": 420,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 278,
+    "p95": 346,
+    "min": 248,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 327,
+  "wq_toggle_pad": {
+    "median": 5.2,
+    "p95": 9.4,
+    "min": 2.8,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 30.3,
+    "p95": 47.2,
+    "min": 24.9,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 582.9,
+    "p95": 753.6,
+    "min": 532.3,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 1464,
+    "gzip_kb": 452,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 1.5,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

@@ -1,0 +1,18 @@
+{
+  "tag": "patch-sync-outbound-first",
+  "variant": "default",
+  "flags": {},
+  "samples": 9,
+  "medians": {
+    "committed": 7.1,
+    "render": 27,
+    "port out": 7,
+    "a dom": 265.7,
+    "b dom": 332.9,
+    "a longtask ms": 987
+  },
+  "patchStats": {
+    "syncOutbound": 14,
+    "errors": []
+  }
+}

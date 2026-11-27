@@ -43,7 +43,15 @@ const SKIPPED_ENTRIES = new Set([
   "playwright-report",
   ".env",
   ".env.local",
+  // Bench hooks of dev/app-comparisons (see its README): not part of the app.
+  "comparison",
 ]);
+
+/**
+ * A variant's top-level entries the harness never takes along: big-label's
+ * apps/ holds dev/app-comparisons' ports of it to other stacks (see its README).
+ */
+const SKIPPED_TOP_LEVEL = new Set(["apps"]);
 
 export const ORIGIN = "http://localhost:3000";
 
@@ -200,7 +208,9 @@ function discoverTarballs(dir) {
 function copyVariant(sourceDir, appDir) {
   fs.cpSync(sourceDir, appDir, {
     recursive: true,
-    filter: (src) => !SKIPPED_ENTRIES.has(path.basename(src)),
+    filter: (src) =>
+      !SKIPPED_ENTRIES.has(path.basename(src)) &&
+      !(path.dirname(src) === sourceDir && SKIPPED_TOP_LEVEL.has(path.basename(src))),
   });
 }
 

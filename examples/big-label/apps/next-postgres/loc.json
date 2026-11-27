@@ -1,0 +1,33 @@
+{
+  "_note": "Hand-written sync: the API (generic tenant-scoped read, RPC writes, transaction/NOTIFY helper), the WebSocket server (LISTEN + broadcast), auth, bootstrap, members and demo data are `server` (role checks in permissions.server.ts and src/roles.ts count as `permissions`); the client's fetch, query builder, subscribe, cache and write code is `data`. SQL migrations and schema.ts (row types, readable tables/relations) are schema; Better Auth's tables come from its own migrations. src/scenarios.ts and src/fixtures.ts feed the demo-data route, as in the Jazz copy. scripts/ and harness.mjs are bench plumbing.",
+  "schema": ["schema.ts", "db/*.sql"],
+  "permissions": ["src/lib/permissions.server.ts", "src/roles.ts"],
+  "server": [
+    "live-server.ts",
+    "src/lib/api.server.ts",
+    "src/lib/query.server.ts",
+    "src/lib/writes.server.ts",
+    "src/lib/live.server.ts",
+    "src/lib/db.server.ts",
+    "src/lib/auth.ts",
+    "src/lib/bootstrap.ts",
+    "src/lib/server-secret.ts",
+    "src/lib/request-account.ts",
+    "src/lib/members.ts",
+    "src/lib/demo-data.ts",
+    "src/lib/emails.ts",
+    "src/fixtures.ts",
+    "src/scenarios.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": [
+    "src/data/*.ts",
+    "src/data/*.tsx",
+    "src/lib/auth-client.ts",
+    "src/lib/mutations.ts",
+    "src/lib/use-write.ts",
+    "src/lib/write-errors.ts"
+  ],
+  "ui": ["app/**/*.tsx", "src/**/*.tsx", "src/app.css", "src/styles.d.ts", "src/lib/route.ts", "!src/data/**"],
+  "exclude": ["scripts/**", "harness.mjs"]
+}

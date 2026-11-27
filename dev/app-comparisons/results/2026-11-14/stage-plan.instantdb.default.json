@@ -1,0 +1,51 @@
+{
+  "hero": "stage-plan",
+  "stack": "instantdb",
+  "variant": "default",
+  "date": "2026-11-14T18:41:30.607Z",
+  "where": "hosted (Instant Cloud temporary app, api.instantdb.com via CloudFront IAD / us-east)",
+  "runs": 7,
+  "samples": 20,
+  "sp_join_board": {
+    "median": 495,
+    "p95": 754,
+    "min": 474,
+    "n": 7
+  },
+  "sp_reload_board": {
+    "median": 120,
+    "p95": 129,
+    "min": 117,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 273,
+  "sp_add_task": {
+    "median": 16.4,
+    "p95": 19.5,
+    "min": 13.3,
+    "n": 20
+  },
+  "sp_move_done": {
+    "median": 18.7,
+    "p95": 28.9,
+    "min": 17.5,
+    "n": 20
+  },
+  "sp_cross_client": {
+    "median": 172.8,
+    "p95": 319.8,
+    "min": 147.2,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 924,
+    "gzip_kb": 277,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 6.1,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

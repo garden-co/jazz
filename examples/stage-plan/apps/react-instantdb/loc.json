@@ -1,0 +1,9 @@
+{
+  "_note": "seed.ts and harness.mjs are bench plumbing. There is no app server: Instant is hosted.",
+  "schema": ["instant.schema.ts"],
+  "permissions": ["instant.perms.ts"],
+  "server": [],
+  "data": ["src/App.tsx", "src/main.tsx", "src/model/**/*.ts"],
+  "ui": ["src/components/**/*.tsx", "src/components/**/*.ts", "src/router.ts", "src/styles.css"],
+  "exclude": ["seed.ts", "harness.mjs"]
+}
