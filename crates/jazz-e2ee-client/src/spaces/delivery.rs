@@ -822,9 +822,7 @@ mod tests {
     /// The rest of a rotation is tried again 2 s after its first failure,
     /// then 4, 8, 16 and 32 s, and left to the pass of any holder at the
     /// sixth failure in a row. An attempt that failed offline waits as long
-    /// as a first failure. `docs/lib/rotation-retries.test.ts` pins the
-    /// guide's sentence to these numbers, outside this crate, so its tests
-    /// build from the published package.
+    /// as a first failure.
     #[test]
     fn rotation_retries_wait_2_to_32_seconds_then_give_up() {
         let waits: Vec<u64> = (1..ROTATION_ATTEMPTS)

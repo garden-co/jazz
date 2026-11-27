@@ -41,7 +41,7 @@ const BOARDS_WITH_PRIORITY: &str = r#"{ "title": "string", "priority": "int?" }"
 fn assert_names_the_change(error: &str, what: &str) {
     assert!(
         error.contains("tasks.notes")
-            && error.contains("docs/e2ee/encrypting-existing-data")
+            && error.contains("docs/e2ee/limits#queries-and-schema")
             && error.contains("can't change"),
         "{what}: {error}"
     );

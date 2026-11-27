@@ -1063,6 +1063,19 @@ importers:
         specifier: ^4.80.0
         version: 4.80.0
 
+  examples/docs/e2ee-ts:
+    dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../../packages/jazz-tools
+    devDependencies:
+      '@types/node':
+        specifier: catalog:default
+        version: 22.19.13
+      typescript:
+        specifier: catalog:default
+        version: 6.0.2
+
   examples/docs/todo-client-localfirst-react:
     dependencies:
       jazz-tools:

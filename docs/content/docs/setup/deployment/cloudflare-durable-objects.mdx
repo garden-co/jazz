@@ -23,9 +23,8 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 Choose the store according to where your core runs. Use `durableObjects()` for a core in a
 Cloudflare Durable Object, as in the example below. Use `remote({ url, appId, secret })` for a
-separately hosted native Jazz core. Both serve apps with encrypted columns: a Durable Object core
-keeps their encryption declarations as a native core does, and the Worker backend relays
-encrypted data without holding encryption keys. See [Encryption limits](/docs/e2ee/limits).
+separately hosted native Jazz core. Both can serve an app with encrypted columns. The Worker holds
+no encryption keys. See [Encryption limits](/docs/e2ee/limits).
 
 ```ts title="src/worker.ts"
 import { Hono } from "hono";

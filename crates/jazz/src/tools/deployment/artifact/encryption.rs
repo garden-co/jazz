@@ -25,7 +25,7 @@ use super::expr::OUTER_ROW;
 use super::system_tables::{MEMBERS, is_system_table};
 
 /// How an existing plaintext app can adopt encryption.
-const COPY_GUIDE: &str = "into a new encrypted table (docs/e2ee/encrypting-existing-data)";
+const COPY_GUIDE: &str = "into a new encrypted table (docs/e2ee/limits#queries-and-schema)";
 
 /// A schema version's encryption entries, by table.
 pub type Entries = BTreeMap<String, EncryptionEntry>;

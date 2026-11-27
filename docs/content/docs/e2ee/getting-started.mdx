@@ -1,6 +1,6 @@
 ---
 title: Getting Started with Encryption
-description: "Encrypt columns so only your users' devices can read them: declare them, give each device a private store, and read and write as usual."
+description: "Encrypt columns so that only your users' devices can read them."
 languageTabs: backend
 ---
 
@@ -9,307 +9,242 @@ languageTabs: backend
   [Discord](https://discord.gg/RN9UKh52be).
 </Callout>
 
-With end-to-end encryption, the content of some columns is sealed on your users' devices before it
-leaves them. Your server and your backend store and relay it but cannot read it. Everything else
-about Jazz stays the same: permissions decide who may read and write a row, and encryption keeps the
-content unreadable to anyone outside Jazz's permissions.
+With end-to-end encryption, your users' devices encrypt the columns you choose before the data
+leaves them. The server stores and syncs the encrypted values and holds no keys. Permissions work
+as usual, and they also decide who gets the keys.
+
+Encryption protects your data from anyone who gets the stored values outside Jazz, such as a
+leaked database, a backup or someone who reads the server's disk. See
+[Encryption limits](/docs/e2ee/limits#what-the-server-can-do) for more detail.
+
+For a complete app, see the
+[encrypted BandChat example](https://github.com/garden-co/jazz/tree/main/examples/band-chat/apps/react-hono-betterauth-e2ee).
+For how encryption works under the hood, see the
+[protocol spec](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_PROTOCOL.md).
 
 ## Declare the encrypted columns
 
-Encryption is declared in `schema.ts`. Mark each column to seal with `.encrypted()`, and give its table
-a **space**: the row whose members share one key. `{ space: "project" }` names the relation that
-leads to it; a table whose rows are their own spaces says `{ space: "id" }`.
+Mark a column with `.encrypted()` and give its table a `space`. A space is a row whose members
+share one key, such as a project or a room. `{ space: "project" }` names the relation that leads
+to the space row. A table whose rows are their own spaces uses `{ space: "id" }`.
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/e2ee-ts/schema.ts
+</include>
 
-export const schema = s.defineSchema({
-  projects: s.table({
-    name: s.string(),
-    ownerId: s.uuid(),
-  }),
-  tasks: s.table(
-    {
-      projectId: s.uuid(),
-      title: s.string().encrypted({ equality: true }),
-      notes: s.string().optional().encrypted(),
-    },
-    { project: s.rel("projects", "projectId") },
-    { space: "project" },
-  ),
-});
+Run `npx jazz-tools generate`. Your code reads and writes an encrypted column as its plain type,
+so `title` is a string.
 
-const { definePermissions, isMember, session } = schema;
+- `equality: true` lets you filter the column by exact value. The server can then tell which rows
+  share a value, but not what the value is. Other encrypted columns can't be filtered.
+- `.encrypted()` covers the whole stored value, including an array or a JSON value.
+- Computed fields, transformed columns, relation columns and columns with a merge strategy can't
+  be encrypted. A space's `id` and the column its relation uses stay plain.
+- `isMember(table, id)` is true when the signed-in account is a member of that space. A space
+  table's read rule must be `isMember` of its own `id`, as `projects` has above. You can combine
+  it with other conditions in `allOf`. Deploy refuses the app otherwise.
+- Those other conditions decide which members Jazz sends the rows to, not who can decrypt them.
+  Every member gets the keys, so a member who gets the encrypted values some other way can read
+  them.
 
-export const permissions = definePermissions({
-  projects: {
-    read: (project) => isMember("projects", project.id),
-    insert: { "$createdBy.account": session.user },
-    update: { ownerId: session.user },
-  },
-  tasks: {
-    read: (task) => isMember("projects", task.projectId),
-    insert: (task) => isMember("projects", task.projectId),
-  },
-});
-```
+[Sharing and keys](/docs/e2ee/sharing-and-keys) covers members.
 
-`npx jazz-tools generate` writes the declaration into `jazz.app.json`, where each encrypted column is
-stored as `bytes`. Your code never sees that: the generated types and the values you write and read are
-the plaintext type (`title` is a string, `notes` a string or `null`). `equality: true` lets you filter
-by a column's exact value, through tokens that show the server which rows share a value; the other
-encrypted columns can't be filtered. Apply `.encrypted()` to a whole stored column, such as
-`s.array(s.string()).encrypted()`. Encryption applies to the entire array or JSON value.
-Computed fields, transformed columns and relation columns cannot be encrypted.
+## Set up the browser
 
-Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
-and `isMember(table, id)` holds when the signed-in account has a member row for that space. A space
-table's read rule must be `isMember` of its own `id`, alone (as `projects` has above) or in `allOf` with
-further conditions, or deploy refuses the app. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+Each device keeps its own keys. This section sets up a browser. For Node, React Native and the
+native platforms, see [Other platforms](#other-platforms).
 
-`generate` refuses, naming the table, what deploy would refuse: a `space` that is not `"id"` or a
-relation over one `uuid` column, an encrypted column without a space, and a merge strategy on an
-encrypted column (the server can't merge ciphertext, so its writes are last-writer-wins). A space's
-`id` and its relation's column stay plain, because the server routes rows by them.
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/browser.ts#e2ee-browser-setup-ts
+</include>
 
-When a signed-in client inserts a space row, Jazz adds the creator as a member in the same
-transaction. Use `db.encryption.members.add(app.projects, projectId, accountId)`,
-`list(app.projects, projectId)` and `remove(app.projects, projectId, accountId)` to manage membership.
-Pass `{ addCreatorAsMember: false }` to `db.insert` or set `addCreatorAsMember: false` in the client's
-`encryption` options to turn off automatic membership. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+Encryption needs a signed-in account. `initial: "device"` signs this browser in as a <span style={{ whiteSpace: "nowrap" }}>[device account](/docs/setup/auth/device-accounts);</span>
+any other sign-in works too. Pass `app` so the client knows which columns are encrypted. Jazz keeps
+the keys in IndexedDB, protected by a WebCrypto key that scripts can use but can't export. Clearing
+the site's data removes the keys, and the browser is then a new device. All tabs of your app are one
+device. To keep the keys somewhere else, pass your own `store` next to `app`.
 
-On a thin browser client, creating a space with automatic membership loads the local-first
-encryption runtime at the first insert. Either opt-out keeps a plaintext space insert on the thin
-client.
+`client` loads the local-first client. Encryption needs it: the thin client doesn't include the
+encryption code or the key management, so it can't encrypt, decrypt or hold keys. The app starts
+on the thin client and upgrades in the background. Until the upgrade finishes:
 
-## Give each device a private store
+- Reads and writes of plain columns work.
+- A one-off read or write that touches an encrypted column waits up to 30 seconds for the
+  upgrade. If the load fails or takes longer, the call rejects with
+  `EncryptionNeedsLocalFirstError`. Without `client` it rejects at once.
+- A live query on an encrypted column waits for the upgrade with no time limit.
+- A write that waits is held in memory, and later writes queue behind it. They are lost if the
+  page closes first.
+- A `db.transaction` callback that touches an encrypted column can run twice: the thin client
+  can't finish it, so Jazz runs it again on the local-first client once that has loaded. Keep
+  side effects out of it.
 
-On Node, supply a private store for the device's keys. An encrypted app opened without one fails
-and names the missing option. In the browser, Jazz provides an
-[IndexedDB private store](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/browser-host.ts#L37-L47).
-
-```ts
-import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
-
-const session = await createJazzClient({
-  serverUrl,
-  app,
-  permissions,
-  store: accountStore,
-  initial: "device",
-  encryption: { store: privateStore },
-});
-```
-
-[Private store](/docs/e2ee/private-store) says what the store holds and gives a starting point.
+`await db.encryption.ready()` waits for the upgrade and for the device's keys.
 
 ## Read and write
 
-```ts
-await session.db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
-const tasks = await session.db.all(app.tasks.where({ projectId, title: "Call the venue" }));
-```
+Create a project, add a task to it and read the task back:
 
-An equality filter on an `equality` column works like any other. Other filters, ordering and joins on
-an encrypted column fail with an error that names the pattern. Queries that aggregate or group by
-an encrypted column fail as well, as do aggregates with a filter on an encrypted column.
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-read-write-ts
+</include>
 
-A write to a space whose key this device does not hold yet waits for it (up to ten seconds, for a
-member waiting on another member's delivery) before it fails with the reason `key-pending`.
+An equality filter works on an `equality` column when the query also names one space, as
+`projectId` does here. Other filters, ordering, grouping and aggregates on an encrypted column
+fail with an error that names the pattern. So does reading `tasks` as an include of `projects`:
+query the tasks of a project directly. [Encryption limits](/docs/e2ee/limits#queries-and-schema)
+lists every case.
+
+Until a space's key reaches this device, writes to that space fail with `key-pending`. See
+[When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
 
 ### Rows this device cannot read
 
-A row this device cannot decrypt (it holds no key for it, or the key is still on its way) is never read
-as empty: the read leaves it out and says so. `unreadableRows(result)` returns the rows a read left out,
-each with its `table`, `id`, the `column` that could not be opened and a `code` (`key-pending`,
-`key-unavailable`, `invalid-ciphertext`, ...). When key acquisition settles, Jazz updates provisional missing-key reasons
-to reflect the space’s state, such as `space-pending` when a member’s space has no valid
-root yet. A live result can update that reason even if its visible rows stay the same.
-See the [settled read reasons test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L57-L139).
+A read leaves out the rows this device can't decrypt and tells you which ones.
+`unreadableRows(result)` returns each with its `table`, `id`, `column` and a `code` such as
+`key-pending`, `key-unavailable` or `invalid-ciphertext`.
 
-An empty `unreadableRows(result)` list means the query left out no candidate rows at decryption.
-An online equality filter can still miss matches when Jazz knows about key versions it does not
-hold. Jazz reports the affected query as `type: "unreadable"` with `table` and `space`,
-`id` and `column` set to `null`, and a code such as `key-pending`. It reports that condition
-once while the keys are missing. See the [incomplete equality query test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L140).
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-unreadable-rows-ts
+</include>
+
+`limit` and `offset` count the rows left out, so a page can be short or empty without being the
+last one. A `key-pending` row appears once its key arrives. Read again, or use a subscription,
+which updates by itself and carries the list with every result.
+
+`unreadableRows` is exported from each framework's entry point and from `jazz-tools/client`.
+React's, Vue's and Solid's `useAll` and Svelte's `QuerySubscription` also return the list as
+`unreadable`, next to the data.
+
+A device that has never synced doesn't know yet which rows are encrypted. Its live queries on
+encrypted columns stay loading until its first sync. `db.encryption.readable()` resolves when
+the device can read.
+
+## Other platforms
+
+Everywhere outside the browser, you pass a private store that keeps the device's keys.
+
+### Node
+
+Node has no default store. Pass a [private store](#write-a-private-store). Without one, opening
+the app fails with `EncryptionStoreRequiredError`.
+
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/backend-client.ts#e2ee-node-setup-ts
+</include>
+
+### React Native and Expo
+
+Pass your generated app and a private store. The account store remembers the signed-in account.
+In Expo, import `createJazzClient` from `jazz-tools/expo` and leave the account store out.
 
 ```ts
-import { unreadableRows } from "jazz-tools/backend";
+import { createJazzClient } from "jazz-tools/react-native";
+import { app } from "./jazz.generated";
+import { accountStore, privateStore } from "./device-storage";
 
-const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
-const missing = unreadableRows(page);
-if (missing.length > 0) {
-  // This page is incomplete: `page.length + missing.length` rows matched.
-}
-```
-
-`limit` and `offset` count the rows left out, because they are applied before rows are decrypted. A page
-can come back shorter than its limit, or empty, and still not be the last one: the rows
-`unreadableRows` names make up the difference, and the next page starts after them. (For a query that
-filters on an encrypted column, they may include rows that would not have matched.) A `key-pending` row
-comes back once its key arrives; read again, or use a subscription, which updates by itself.
-
-A subscription's results say the same. Each result it delivers carries the rows it leaves out, and
-`unreadableRows` works on it as on a read's:
-
-```ts
-const stop = session.db.subscribe(app.tasks.where({ projectId }), (tasks) => {
-  render(tasks);
-  showIncomplete(unreadableRows(tasks));
+const session = await createJazzClient({
+  serverUrl: "https://app.example/jazz",
+  initial: "device",
+  store: accountStore,
+  encryption: { app, store: privateStore },
 });
+const status = await session.db.encryption.ready();
 ```
 
-The list stays current: a new row this device cannot open is named in the next result (even when the
-visible rows did not change), a row whose key arrives joins the result and leaves the list in the same
-update, and a row that leaves the query (deleted, or moved out of a page) is no longer named. A
-subscription with `limit` counts these rows toward its page, as a read does.
+### Rust, Swift, Kotlin and Go
 
-The framework hooks carry the list too, as `unreadable` beside `data`, and update it with every result.
-`unreadableRows` is exported from each framework's entry point (and from `jazz-tools/client`), and in
-React it also works on `data` itself.
+Pass a private store in the client's encryption config, then call `ready`.
 
-<Tabs groupId="client-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
-  <Tab value="React">
-    ```tsx title="Tasks.tsx"
-    import { useAll } from "jazz-tools/react";
-    import { app } from "./jazz.generated";
+<Tabs items={["Rust", "Swift", "Kotlin", "Go"]}>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/e2ee-rs/src/docs_snippets.rs#e2ee-open-rust
+    </include>
 
-    export function Tasks({ projectId }: { projectId: string }) {
-      const { data: tasks = [], unreadable } = useAll(app.tasks.where({ projectId }));
-      return (
-        <>
-          {tasks.map((task) => (
-            <p key={task.id}>{task.title}</p>
-          ))}
-          {unreadable.length > 0 && <p>{unreadable.length} tasks are still being decrypted</p>}
-        </>
-      );
-    }
+    `MyStore` implements `jazz_e2ee_client::PrivateStore`. Turn on the `e2ee-client` feature of
+    `jazz-app-support`.
+
+  </Tab>
+  <Tab value="Swift">
+    ```swift
+    let config = Config.client(
+        appId: appId, serverUrl: "https://app.example/jazz", auth: .deviceKey(key))
+    var withKeys = config
+    withKeys.encryption = EncryptionConfig(store: KeychainBackedStore(), environment: "production")
+    let client = try await Client.open(app: appJSON, config: withKeys)
+    let status = try await client.encryption.ready()
     ```
 
   </Tab>
-  <Tab value="Vue">
-    ```vue title="Tasks.vue"
-    <script setup lang="ts">
-    import { useAll } from "jazz-tools/vue";
-    import { app } from "./jazz.generated";
-
-    const props = defineProps<{ projectId: string }>();
-    const { data: tasks, unreadable } = useAll(() => app.tasks.where({ projectId: props.projectId }));
-    </script>
-
-    <template>
-      <p v-for="task in tasks ?? []" :key="task.id">{{ task.title }}</p>
-      <p v-if="unreadable.length > 0">{{ unreadable.length }} tasks are still being decrypted</p>
-    </template>
+  <Tab value="Kotlin">
+    ```kotlin
+    val jazz = Jazz.open(
+        appJson,
+        JazzConfig(
+            appId = appId, serverUrl = "https://app.example/jazz", auth = JazzAuth.DeviceAccount(key),
+            encryption = JazzEncryption(KeystoreBackedStore(context), environment = "production"),
+        ),
+    )
+    val status = jazz.encryption.ready()
     ```
 
   </Tab>
-  <Tab value="Svelte">
-    ```svelte title="Tasks.svelte"
-    <script lang="ts">
-      import { QuerySubscription } from "jazz-tools/svelte";
-      import { app } from "./jazz.generated";
-
-      let { projectId }: { projectId: string } = $props();
-      const tasks = new QuerySubscription(() => app.tasks.where({ projectId }));
-    </script>
-
-    {#each tasks.current ?? [] as task (task.id)}
-      <p>{task.title}</p>
-    {/each}
-    {#if tasks.unreadable.length > 0}
-      <p>{tasks.unreadable.length} tasks are still being decrypted</p>
-    {/if}
-    ```
-
-  </Tab>
-  <Tab value="Solid">
-    ```tsx title="Tasks.tsx"
-    import { For, Show } from "solid-js";
-    import { useAll } from "jazz-tools/solid";
-    import { app } from "./jazz.generated";
-
-    export function Tasks(props: { projectId: string }) {
-      const tasks = useAll(() => ({ query: app.tasks.where({ projectId: props.projectId }) }));
-      return (
-        <>
-          <For each={tasks.data ?? []}>{(task) => <p>{task.title}</p>}</For>
-          <Show when={tasks.unreadable.length > 0}>
-            <p>{tasks.unreadable.length} tasks are still being decrypted</p>
-          </Show>
-        </>
-      );
-    }
+  <Tab value="Go">
+    ```go
+    db, err := jazz.Open(ctx, jazz.Config{
+    	App: app, AppID: appID, ServerURL: "https://app.example/jazz", Auth: jazz.DeviceKey(key),
+    	Encryption: &jazz.EncryptionConfig{Store: keyringStore{}, Environment: "production"},
+    })
+    status, err := db.Encryption().Ready(ctx, 30*time.Second)
     ```
 
   </Tab>
 </Tabs>
 
-React Native's and Expo's `useAll` return the same fields as React's.
+`ready` returns the device's status. [Devices and recovery](/docs/e2ee/devices-and-recovery)
+explains each one.
 
-The runtime also reports unreadable rows, pending space keys and notices about rows it returned:
+## On the backend
 
-```ts
-session.db.encryption.onReport((report) => {
-  if (report.type === "unreadable") console.warn(report.code, report.table, report.id);
-  if (report.type === "reports-dropped") console.warn(report.count, "reports dropped");
-});
-```
+Your backend holds no keys. `createJazz` starts for an encrypted app and reads its plain columns
+as usual. Rows come back without their encrypted columns. A write, filter or ordering that names
+an encrypted column is refused. Query through `keyless(app)` so the types match:
 
-While no listener is registered, the runtime keeps up to 1,024 native reports and queues a
-`ready-failed` report if background verification fails. When the native queue fills, it drops the
-oldest report it can, giving device challenges priority. The next `onReport` listener receives a
-`reports-dropped` report with the count before the other native reports. Use `onUnreadable` to
-receive only reports of type `unreadable`, including space-level reports and notices about returned
-rows. Use `unreadableRows(result)` for the rows a particular read omitted. See the
-[report listener implementation](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/index.ts#L348-L368) and the
-[report overflow test](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/host/runtime.rs#L1598-L1625).
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/snippets.ts#e2ee-keyless-backend-ts
+</include>
 
-### Before a device can read
+<Accordions type="single">
+<Accordion id="write-a-private-store" title="Advanced: writing your own private store">
 
-A device reads its encrypted rows from its own store, offline too, once it has synced with the server
-once. A device that has never synced (a new store) cannot tell yet which of its rows are encrypted, so
-its live queries on encrypted columns stay loading until its first sync, however long that takes,
-rather than show an empty result. `db.encryption.readable()` resolves when the device can read: after
-its first sync, and in a browser that started thin, also once the encryption runtime has loaded and
-checked the account (a returning device waits only for those). Loading and the check share a
-30-second deadline. It rejects if the encryption runtime has not loaded by then or the Db closes; an
-account check that fails or is still running at the deadline does not stop it:
+The private store holds the device's keys. Jazz calls these operations:
 
-```ts
-let reading: "waiting" | "ready" | "failed" = "waiting";
-session.db.encryption.readable().then(
-  () => (reading = "ready"),
-  () => (reading = "failed"),
-);
-// While `reading` is "waiting", say that encrypted data is still loading rather than show it as empty.
-// If it is "failed", show that encrypted data could not load.
-```
+| Operation                                        | What it does                                                                                                                                                                             |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openScope(scope)`                               | Returns the scope's incarnation, a number chosen when the scope is created.                                                                                                              |
+| `load(scope, doc)`                               | Returns the saved document and its revision, or `null`.                                                                                                                                  |
+| `loadAll(scope, incarnation)`                    | Returns every document of the scope from one snapshot, or throws `PrivateStoreWipedError` if the incarnation doesn't match. Optional in JavaScript and Go, required in Swift and Kotlin. |
+| `save(scope, incarnation, doc, bytes, expected)` | Replaces a document if the incarnation and the document's revision match. Otherwise it throws `PrivateStoreWipedError` or `PrivateStoreConflictError`.                                   |
+| `list(scope)`, `delete(scope)`                   | Lists a scope's documents. Removes a scope.                                                                                                                                              |
+| `protect(secret)`, `unprotect(blob)`             | Encrypts a secret for storage, and decrypts it.                                                                                                                                          |
 
-## The backend holds no keys
+Keep the documents in files only your app can read. Have `protect` encrypt with a 32-byte key from
+the operating system's key store: the Keychain, the Android Keystore, Credential Manager or
+libsecret. Keep that key on the device, and keep the files out of backups and cloud sync. A copy
+of the files that comes with its key is a copy of the device.
 
-Your backend (`createJazz`) starts for an encrypted app and relays its clients as usual. It is not an
-encryption participant: it has no account, no identity and no keys. Its own database reads plain tables
-and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
-back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
-columns are written by clients") and refuses a filter, ordering or selection of one. A server
-that needs to compute on encrypted content cannot; do that on a client.
+Jazz calls the store one request at a time, so keep it fast and local. Throw on a real error.
+Only a missing document should read as absent, because an empty store looks like a new device.
 
-The generated types are the clients': they give an encrypted column its plaintext type. On the backend,
-query through `keyless(app)` from `jazz-tools/backend`, the same app typed as the backend reads it: an
-encrypted column is absent from its rows (`title?: undefined`), its inserts and its filters.
+This store for Node keeps its documents in a directory. Use one instance for a directory, and
+don't share the directory between processes.
 
-```ts
-import { keyless } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/directory-store.ts
+</include>
 
-const backendApp = keyless(app);
-// jazz = await createJazz({ app, ... }).ready()
-const tasks = await jazz.db.all(backendApp.tasks); // each task.title is undefined
-```
+For tests, `memoryPrivateStore()` keeps keys in memory and protects nothing. Don't ship it.
 
-`db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
-`EncryptionNotDeclaredError`.
+</Accordion>
+</Accordions>

@@ -349,7 +349,7 @@ async fn an_unknown_deployment_field_names_its_location_and_allowed_fields() {
                 && error.contains(key)
                 && error.contains("expected")
                 && error.contains(if column { "sealedType" } else { "equality" })
-                && !error.contains("docs/e2ee/encrypting-existing-data"),
+                && !error.contains("docs/e2ee/limits#queries-and-schema"),
             "{key}: {refusal}"
         );
     }
@@ -730,7 +730,7 @@ async fn only_encrypted_declarations_refuse_unknown_scalar_type_fields() {
                 && error.contains("title")
                 && error.contains("element")
                 && error.contains("expected `type`")
-                && !error.contains("docs/e2ee/encrypting-existing-data"),
+                && !error.contains("docs/e2ee/limits#queries-and-schema"),
             "{response}"
         );
     }

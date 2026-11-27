@@ -1,0 +1,18 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "4d9ffa0fcfa56897fc439c2a2e132aeaeeea2447de624c49ee383dd46070341a"
+  },
+  "tables": {
+    "projects": {
+      "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+      "insert": "$createdBy.account = session.user",
+      "update": "$createdBy = session.user"
+    },
+    "tasks": {
+      "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.projectId, accountId = session.user)",
+      "insert": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.projectId, accountId = session.user)"
+    }
+  }
+}
