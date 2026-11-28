@@ -738,6 +738,34 @@ impl Store {
         if !missed {
             return Ok(None);
         }
+        self.built_cell((table, row, key), built, column, &history)
+            .await
+    }
+
+    /// The value stored column `column` of a row had in the version
+    /// `built` names, as the writer whose chain it is saw it (see
+    /// [`Self::merge_base`]), without asking whether a merge needs it.
+    /// A write copied into a branch view's head reads its inherited base
+    /// through this: the version of the base's row it was built on.
+    pub(crate) async fn inherited_merge_base(
+        &self,
+        (table, row, key): (&str, RowUuid, &[u8]),
+        built: Built,
+        column: &str,
+    ) -> Result<Option<Sql>, Error> {
+        let history = self.accepted_versions(table, row, key).await?;
+        self.built_cell((table, row, key), built, column, &history)
+            .await
+    }
+
+    async fn built_cell(
+        &self,
+        (table, row, key): (&str, RowUuid, &[u8]),
+        built: Built,
+        column: &str,
+        history: &[Version],
+    ) -> Result<Option<Sql>, Error> {
+        let code = self.column_code(table, column).await?;
         let mut link = built;
         let (at, sent) = loop {
             match link {

@@ -23,6 +23,8 @@ mod band_chat_room_list_plan;
 mod binding_host;
 #[path = "../branch_column_evolution.rs"]
 mod branch_column_evolution;
+#[path = "../branch_view_partial_updates.rs"]
+mod branch_view_partial_updates;
 #[path = "../branch_view_sync.rs"]
 mod branch_view_sync;
 #[path = "../branch_views.rs"]

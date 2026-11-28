@@ -699,18 +699,34 @@ repeated diffs in one transaction compose into one version. The row read counts
 as a transaction point read, so a serializable transaction conflicts if the row
 changes before commit; in a mergeable transaction the diffed column is authored
 like any patched column: last-writer-wins at commit, or merged with concurrent
-edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). Branch views
-reject `applyDiffs` explicitly, as do React Native transactions until its
-foreground codec carries the descriptor.
+edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). React Native
+transactions reject `applyDiffs` explicitly until its foreground codec carries
+the descriptor.
+
+Through a branch view (ch. 11 §11.4), `applyDiffs` and `editedFrom` apply to
+the value the view shows for the row: the head's own value when the head has
+a version of it, else the base's (a live base's current value, a frozen
+base's value at its cut). Editing an inherited value copies the row on write
+into the head, exactly as a whole-value update does: its first version is an
+edit of the base's tree (§19.4, a branch's first divergent edit), whose
+chunked values travel as trees rather than deltas over the base's image, so
+a replica that never held the base reads it. From then on the head masks the
+base: later base edits do not flow into the head. A head deletion hides the
+row, so the edit fails rather than reading the base beneath it. A branched
+table needs a branch view for these edits; outside one a row id names no one
+branch-local row. React Native and the thin runtime refuse them in branch
+views explicitly, as not supported yet: neither carries a write target with
+the descriptor. Range reads, JSON pointer reads and deltas of branched tables
+remain unsupported.
 
 `update` also takes `editedFrom`, the value each text-merge column was
 edited from, lowered to a `text_edit` descriptor (`kind: "text_edit"`,
 `column`, `text`, `edited_from`) that the store merges over the value it
 holds (ch. 4 §4.3). It needs no coordinates, but travels the same
-partial-value path, with the same limits: branch views refuse it, as do
-React Native transactions and, in the native runtime, a session or
-attributed write outside a transaction, each explicitly as not supported
-yet. TypeScript refuses `editedFrom` on a column with its own transform,
+partial-value path, with the same limits: React Native transactions and,
+in the native runtime, a session or attributed write outside a transaction
+refuse it, each explicitly as not supported yet. Through a branch view it
+merges over the value the view shows, as above. TypeScript refuses `editedFrom` on a column with its own transform,
 and `upsert` and the streaming writes do not take it. A column left
 `undefined` in `editedFrom` is written as a plain value.
 

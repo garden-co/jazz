@@ -2243,6 +2243,7 @@ impl Db {
                 derived: RefCell::new(Vec::new()),
                 since_tick: RefCell::new(Vec::new()),
                 merge_bases: RefCell::new(HashMap::new()),
+                inherited_merge_bases: RefCell::new(HashMap::new()),
                 possession: RefCell::new(None),
                 own_order: RefCell::new(HashMap::new()),
                 bundles: RefCell::new(HashMap::new()),
@@ -8939,11 +8940,20 @@ impl Store {
             return Ok(None);
         };
         let version = (table.stored.clone(), row, key.to_vec());
-        let Some(built) = self.merge_bases.borrow().get(&version).copied() else {
-            return Ok(None);
+        let built = self.merge_bases.borrow().get(&version).copied();
+        let source = match built {
+            Some(built) => MergeSource::Chain(built),
+            None => match self.inherited_merge_bases.borrow().get(&version).cloned() {
+                Some((from, built, frozen)) => MergeSource::Inherited {
+                    from,
+                    built,
+                    frozen,
+                },
+                None => return Ok(None),
+            },
         };
         let merged = self
-            .text_merge(table, row, held, (key, seq), built, column, value)
+            .text_merge(table, row, held, (key, seq), source, column, value)
             .await?;
         let (merged, sent) = match merged {
             Some((merged, cell)) => (Some(merged), Some((value.clone(), cell))),
@@ -8955,6 +8965,85 @@ impl Store {
             .or_default()
             .insert(column.stored.clone(), sent);
         Ok(merged)
+    }
+
+    /// Note, for each branch-view write of an upload being applied whose
+    /// writer built the row on its base's version and not on a head
+    /// version, that base version as the head row's inherited merge base:
+    /// a copy into the head that lands over a head version another writer
+    /// made meanwhile, or over a base that moved, merges its text with
+    /// them as concurrent edits of one row do (SPEC 11 §11.4). A frozen
+    /// base's version is the one at its cut, which the writer copied.
+    pub(crate) async fn note_inherited_merge_bases(
+        &self,
+        ops: &[PreparedWrite],
+    ) -> Result<(), Error> {
+        let mut inherited = HashMap::new();
+        for prepared in ops {
+            let (row, target) = match &prepared.op {
+                StagedOp::Update(_, row, _, opts) => (*row, &opts.target),
+                StagedOp::Upsert(_, row, _, _, opts) => (*row, &opts.target),
+                _ => continue,
+            };
+            let WriteTarget::BranchView {
+                head,
+                base: Some(base),
+            } = target
+            else {
+                continue;
+            };
+            let table = &prepared.layout.table;
+            let (branch, snapshot) = match base {
+                BranchViewBase::Current(branch) => (branch, None),
+                BranchViewBase::Snapshot { branch, snapshot } => (branch, Some(snapshot)),
+            };
+            let (head_key, base_key) = (table.selector_key(head)?, table.selector_key(branch)?);
+            // A row only this view writes in the commit was built on its
+            // head or base row: a base named for any other branch key would
+            // steer the merge to another branch's text, so it is malformed.
+            let only_this_view = ops.iter().all(|other| match &other.op {
+                StagedOp::Update(t, r, _, opts) if *r == row && *t == prepared.op.table() => {
+                    opts.target == *target
+                }
+                StagedOp::Upsert(t, r, _, _, opts) if *r == row && *t == prepared.op.table() => {
+                    opts.target == *target
+                }
+                other => other.row() != Some(row) || other.table() != prepared.op.table(),
+            });
+            if only_this_view
+                && self.merge_bases.borrow().keys().any(|(t, r, key)| {
+                    *t == table.stored && *r == row && *key != head_key && *key != base_key
+                })
+            {
+                return Err(Error::new(
+                    ErrorCode::WriteRejected,
+                    "a branch-view write names a base version it cannot be merged over",
+                ));
+            }
+            let head_row = (table.stored.clone(), row, head_key);
+            if head_row.2 == base_key || self.merge_bases.borrow().contains_key(&head_row) {
+                continue;
+            }
+            let built = match snapshot {
+                None => self
+                    .merge_bases
+                    .borrow()
+                    .get(&(table.stored.clone(), row, base_key.clone()))
+                    .copied(),
+                Some(snapshot) => {
+                    let cut = self.resolve_snapshot(snapshot).await?;
+                    self.version_at(&table.stored, row, &base_key, &cut)
+                        .await?
+                        .filter(|(at, _)| at.accepted())
+                        .map(|(at, _)| sync::Built::Seq(at.seq))
+                }
+            };
+            if let Some(built) = built {
+                inherited.insert(head_row, (base_key, built, snapshot.is_some()));
+            }
+        }
+        self.inherited_merge_bases.replace(inherited);
+        Ok(())
     }
 
     /// [`Self::text_merged`]'s merge, with the write's value bound as its
@@ -8970,7 +9059,7 @@ impl Store {
         row: RowUuid,
         held: Option<&[u8]>,
         (key, seq): (&[u8], u64),
-        built: sync::Built,
+        source: MergeSource,
         column: &crate::values::Column,
         value: &Value,
     ) -> Result<Option<(String, Sql)>, Error> {
@@ -9006,10 +9095,33 @@ impl Store {
                 }
             }
             None => {
-                let Some(base) = self
-                    .merge_base((&table.stored, row, key), built, seq, &column.stored)
-                    .await?
-                else {
+                let base = match source {
+                    MergeSource::Chain(built) => {
+                        self.merge_base((&table.stored, row, key), built, seq, &column.stored)
+                            .await?
+                    }
+                    // The copy lands as the head's first version over a
+                    // frozen base: the authority copies the base as of the
+                    // cut, which is the version the writer edited, so there
+                    // is nothing to merge with. Merging over the held base
+                    // row would pull in its edits after the cut.
+                    MergeSource::Inherited {
+                        from, frozen: true, ..
+                    } if held == from.as_slice() => {
+                        return Ok(None);
+                    }
+                    // The head's first version, built on the base's: its
+                    // value is the merge base, whatever the head holds now.
+                    MergeSource::Inherited { from, built, .. } => {
+                        self.inherited_merge_base(
+                            (&table.stored, row, &from),
+                            built,
+                            &column.stored,
+                        )
+                        .await?
+                    }
+                };
+                let Some(base) = base else {
                     return Ok(None);
                 };
                 // A NULL base merges as "": additions to an empty optional
@@ -10473,6 +10585,25 @@ fn relation_is_monotone(rel: &crate::query::RelationExpr) -> bool {
     }
 }
 
+/// [`Store::inherited_merge_bases`]: per head row, the base row's branch
+/// key, the version of it the write was built on, and whether the base is
+/// frozen.
+type InheritedMergeBases = HashMap<(String, RowUuid, Vec<u8>), (Vec<u8>, sync::Built, bool)>;
+
+/// Where a text merge's base comes from.
+enum MergeSource {
+    /// The writer's chain of versions of the written row (SPEC 4 §4.6).
+    Chain(sync::Built),
+    /// The version of the base row, by its branch key (`from`), that a
+    /// branch-view write copied into the head (SPEC 11 §11.4); `frozen` when
+    /// the view's base is a snapshot.
+    Inherited {
+        from: Vec<u8>,
+        built: sync::Built,
+        frozen: bool,
+    },
+}
+
 /// Which branch a write addresses.
 enum Target {
     Root,
@@ -11149,6 +11280,17 @@ struct Store {
     /// built on (SPEC 4 §4.6), by (stored table, row, branch key): a text
     /// merge reads its base from it. Empty otherwise.
     merge_bases: RefCell<HashMap<(String, RowUuid, Vec<u8>), sync::Built>>,
+    /// On the authority, for each head row of the upload being applied that
+    /// a branch-view write copies from its base, the base row's branch key
+    /// and the version of it the write was built on: a text merge over the
+    /// head reads its base there (SPEC 11 §11.4). Empty otherwise.
+    ///
+    /// Deliberately never persisted (`_base` keeps head-key bases only): the
+    /// merge is computed within this one admission, and a merged version
+    /// keeps its as-sent copy (INV-HIST-24), so later chains resolve from
+    /// the head's own history. A cross-key base in `_base` would make the
+    /// head's history depend on the base's.
+    inherited_merge_bases: RefCell<InheritedMergeBases>,
     /// What the session whose commit is being applied holds (SPEC 19.4):
     /// set while a synced commit applies, `None` for local writes.
     pub(crate) possession: RefCell<Option<Rc<crate::large::Possession>>>,

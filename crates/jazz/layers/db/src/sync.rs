@@ -10219,6 +10219,85 @@ impl Db {
                 ));
             }
         }
+        // A branch-view write over a live base whose head row this replica
+        // held no version of copied the base's row: it was built on that
+        // version, which the authority merges its text over when the head
+        // has a version by then, or the base moved (SPEC 11 §11.4).
+        if relayed.is_none() {
+            for (index, op) in ops.iter().enumerate() {
+                let (name, row, target) = match op {
+                    StagedOp::Update(name, row, _, opts) => (name, row, &opts.target),
+                    StagedOp::Upsert(name, row, _, _, opts) => (name, row, &opts.target),
+                    _ => continue,
+                };
+                let WriteTarget::BranchView {
+                    head,
+                    base: Some(BranchViewBase::Current(base)),
+                } = target
+                else {
+                    continue;
+                };
+                if by_row
+                    .get(&(name.clone(), *row))
+                    .and_then(|ops| ops.first())
+                    != Some(&index)
+                {
+                    continue;
+                }
+                // Stored-name ops key their selectors as the write layout
+                // does (`Store::write_layout`), by the source's branch columns.
+                let owner = inner.owner();
+                let Some(source) = owner.by_stored(name) else {
+                    continue;
+                };
+                let mut table = source.physical();
+                if table.branch_key_names.is_empty() {
+                    table.branch_key_names = source.branch_by.clone();
+                }
+                let (head_key, base_key) = (table.selector_key(head)?, table.selector_key(base)?);
+                if head_key == base_key
+                    || bases.iter().any(|(at, base): &(usize, WireBase)| {
+                        *at == index && (base.key == head_key || base.key == base_key)
+                    })
+                {
+                    continue;
+                }
+                let base_row = (table.stored.clone(), *row, base_key.clone());
+                let newest = inner
+                    .client()
+                    .expect("client")
+                    .pending
+                    .borrow()
+                    .newest(&base_row);
+                let on = match newest {
+                    Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
+                    None => {
+                        let held = inner
+                            .client()
+                            .expect("client")
+                            .baselines
+                            .get(&base_row)
+                            .cloned();
+                        let image = match held {
+                            Some(image) => image,
+                            None => {
+                                inner
+                                    .upstream_baseline(&base_row.0, *row, &base_key)
+                                    .await?
+                            }
+                        };
+                        image.and_then(|image| match image.written {
+                            _ if image.at.accepted() => Some(BuiltOn::Seq(image.at.seq)),
+                            Some((_, node, tx)) => Some(BuiltOn::Commit { node, tx }),
+                            None => None,
+                        })
+                    }
+                };
+                if let Some(on) = on {
+                    bases.push((index, WireBase { key: base_key, on }));
+                }
+            }
+        }
         // A relayed commit is a session's, not this store's: its refusal is
         // that session's to report.
         let unreported = relayed.is_none().then(|| writer(&ops));
@@ -17586,6 +17665,7 @@ impl Db {
             .cover_commit_seq()
             .await
             .map_err(|e| (e, Vec::new()))?;
+        let inherit_policies = self.view_policies();
         let mut merged = HashSet::new();
         let landed_unit = conn
             .db_scope_then("upload", async || {
@@ -17601,6 +17681,10 @@ impl Db {
                 inner.merge_bases.replace(std::mem::take(&mut built));
                 inner.as_sent.borrow_mut().clear();
                 let applied = (async {
+                    inner.note_inherited_merge_bases(&prepared).await?;
+                    inner
+                        .check_inherited_merge_bases(&inherit_policies, identity)
+                        .await?;
                     for op in &prepared {
                         inner.apply_as(op, who, seq, None, Some(retention)).await?;
                     }
@@ -17611,6 +17695,7 @@ impl Db {
                 inner.possession.take();
                 inner.merging.set(false);
                 built = inner.merge_bases.take();
+                inner.inherited_merge_bases.take();
                 // Rows a text merge changed are not as their writer sent them
                 // (an unmerged text write notes no value as sent).
                 merged = inner
@@ -17895,6 +17980,49 @@ async fn readable_version(
 /// the commit rebases like any other (#5249). A version superseded before
 /// the grant stays unreadable. A relay judges "current" by its own store,
 /// which may lag; its upstream judges again.
+impl Store {
+    /// Check each inherited merge base noted for the upload being applied
+    /// ([`Store::note_inherited_merge_bases`]): it must be a version of the
+    /// base row this store holds and the writer may read (as an access proof
+    /// must, SPEC 19.4), or merging over it would disclose what it held.
+    /// Anything else rejects the commit, with one error whether the version
+    /// is absent or unreadable, and never falls back to writing the value as
+    /// sent: a store that cannot read the base's version (a shard that does
+    /// not hold the base key) fails the write closed. A trusted link
+    /// (`identity` `None`) is not checked.
+    pub(crate) async fn check_inherited_merge_bases(
+        &self,
+        policies: &Schema,
+        identity: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        let inherited: Vec<_> = self
+            .inherited_merge_bases
+            .borrow()
+            .iter()
+            .map(|((table, row, _), (from, built, _))| (table.clone(), *row, from.clone(), *built))
+            .collect();
+        for (table, row, from, built) in inherited {
+            let (crate::db::sync::Built::Seq(seq) | crate::db::sync::Built::On(seq)) = built;
+            let at = Pos::at(seq);
+            let held = self.version_image(&table, row, &from, at).await?.is_some();
+            let readable = match identity {
+                None => true,
+                Some(identity) => {
+                    still_readable_version(self, policies, &table, row, &from, at, Some(identity))
+                        .await?
+                }
+            };
+            if !held || !readable {
+                return Err(Error::new(
+                    ErrorCode::WriteRejected,
+                    "a branch-view write names a base version it cannot be merged over",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn still_readable_version(
     inner: &Store,
     policies: &Schema,

@@ -21,6 +21,15 @@ const texts = testApp({
   tables: { pages: { columns: { body: { type: "string", merge: "markdown" } } } },
 });
 
+const branchedTexts = testApp({
+  tables: {
+    pages: {
+      columns: { branch: "string", body: { type: "string", merge: "markdown" }, plain: "string" },
+      branchBy: ["branch"],
+    },
+  },
+});
+
 const optionalJson = testApp({
   tables: { jobs: { columns: { title: "string", meta: { json: true, optional: true } } } },
 });
@@ -152,6 +161,54 @@ describe("createDb in-memory driver", () => {
       .wait({ tier: "local" });
     const [again] = await db.all(texts.pages.where({ id: page.id }));
     expect(again?.body).toBe("Hi there world!");
+  });
+
+  it("applies partial-value updates through a branch view, copying the inherited row", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-branch-view-partial-updates-test")),
+      driver: { type: "memory" },
+    });
+    const pages = branchedTexts.pages;
+    const view = { branch: "draft", base: "main" } as const;
+    const { value: page } = db.insert(
+      pages,
+      { branch: "main", body: "Hello world", plain: "abcdef" },
+      { branch: "main" },
+    );
+    const main = () => db!.one(pages.where({ id: page.id }), { branch: "main" });
+    const draft = () => db!.one(pages.where({ id: page.id }), view);
+    // Main moves on before the draft's editor, still showing "Hello world", types "!".
+    await db
+      .update(pages, page.id, { body: "Hello there world" }, { branch: "main" })
+      .wait({ tier: "local" });
+    await db
+      .update(
+        pages,
+        page.id,
+        { body: "Hello world!" },
+        { ...view, editedFrom: { body: "Hello world" } },
+      )
+      .wait({ tier: "local" });
+    expect((await draft())?.body).toBe("Hello there world!");
+    expect((await main())?.body).toBe("Hello there world");
+
+    const splice = (from: number, to: number, insert: string) => ({
+      ...view,
+      applyDiffs: {
+        plain: { within: { from, to }, splices: [{ at: 0, delete: to - from, insert }] },
+      },
+    });
+    await db.update(pages, page.id, {}, splice(1, 3, "XY")).wait({ tier: "local" });
+    expect(await draft()).toMatchObject({ branch: "draft", plain: "aXYdef" });
+    expect((await main())?.plain).toBe("abcdef");
+
+    // A transaction's diffs through the view address the draft's own value.
+    const committed = await db.transaction((tx) => {
+      tx.update(pages, page.id, {}, splice(0, 0, ">"));
+    });
+    await committed.wait({ tier: "local" });
+    expect((await draft())?.plain).toBe(">aXYdef");
+    expect((await main())?.plain).toBe("abcdef");
   });
 
   it("merges a transaction's text edit over a value its editor had not shown yet", async () => {

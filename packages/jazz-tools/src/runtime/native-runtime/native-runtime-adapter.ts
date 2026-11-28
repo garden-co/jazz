@@ -555,6 +555,23 @@ type NativeDb = {
     descriptors: unknown,
     updatedAtMs?: number | null,
   ): void;
+  /** `updateLargeValues` with `{ head?, base?, updatedAtMs? }`: a branch view. */
+  updateLargeValuesWithOptions?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    options?: LargeValueUpdateOptions,
+  ): Write;
+  /** `updateLargeValuesInTransaction` with `{ head?, base?, updatedAtMs? }`. */
+  updateLargeValuesInTransactionWithOptions?(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    options?: LargeValueUpdateOptions,
+  ): void;
   connectUpstream(): Transport | Promise<Transport>;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -2655,13 +2672,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Update");
 
-    // Branch views have no partial-value coordinate space yet (#2087). Do not
-    // silently read or stage through the root instead.
+    // Through a branch view the edits apply to the value the view shows,
+    // copying an inherited row into the head (SPEC 11 §11.4). A runtime
+    // without the view-aware entrypoints refuses rather than writing the root.
     if (branchView) {
-      throw new Error(
-        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
-      );
+      rejectAttributedBranchWrite(this.backendAttribution(writeContext), branchView);
     }
+    const viewOptions = branchView
+      ? { head: branchView.head, base: branchView.base, updatedAtMs: updatedAtMs ?? undefined }
+      : undefined;
     if (tx) {
       // The transaction was opened with its identity, and the core stages the
       // splices against the transaction's own view of the row, so a session
@@ -2672,6 +2691,22 @@ export class NativeRuntimeAdapter implements Runtime {
       const attribution = this.backendAttribution(writeContext);
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const patch = encodeCellsForPatch(this.table(table), values);
+      if (viewOptions) {
+        const updateInView = this.db.updateLargeValuesInTransactionWithOptions;
+        if (!updateInView) {
+          throw writeError(
+            "Update",
+            "typed partial-value updates in branch views are not supported by this runtime",
+          );
+        }
+        updateInView.call(this.db, tx.id, table, rowId, patch, descriptors, viewOptions);
+        tx.hasStagedMutations = true;
+        return {
+          kind: "staged",
+          openTransactionId: txIdFromContext(writeContext)!,
+        };
+      }
       const updateInTransaction = this.db.updateLargeValuesInTransaction;
       if (!updateInTransaction) {
         throw writeError(
@@ -2679,7 +2714,6 @@ export class NativeRuntimeAdapter implements Runtime {
           "typed partial-value updates in transactions are not supported by this runtime",
         );
       }
-      const patch = encodeCellsForPatch(this.table(table), values);
       updateInTransaction.call(
         this.db,
         tx.id,
@@ -2702,11 +2736,23 @@ export class NativeRuntimeAdapter implements Runtime {
         "Partial-value updates (applyDiffs, editedFrom) do not yet support a session or attributed identity outside a transaction.",
       );
     }
+    const patch = encodeCellsForPatch(this.table(table), values);
+    if (viewOptions) {
+      const updateInView = this.db.updateLargeValuesWithOptions;
+      if (!updateInView) {
+        throw new Error(
+          "Partial-value updates (applyDiffs, editedFrom) in branch views are not supported by this runtime yet.",
+        );
+      }
+      const write = writeOrNormalizeRejection("Update", () =>
+        updateInView.call(this.db, table, rowId, patch, descriptors, viewOptions),
+      );
+      return this.finishMutation(write);
+    }
     const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }
-    const patch = encodeCellsForPatch(this.table(table), values);
     const write = writeOrNormalizeRejection("Update", () =>
       updateLargeValues.call(this.db, table, rowId, patch, descriptors, updatedAtMs ?? undefined),
     );
@@ -5669,6 +5715,13 @@ export function txIdFromContext(writeContext?: string | null): OpenTransactionId
 }
 
 export type EncodedBranchView = { head: unknown; base?: unknown };
+
+/** Options of a view-aware partial-value update (`updateLargeValuesWithOptions`). */
+export type LargeValueUpdateOptions = {
+  head?: unknown;
+  base?: unknown;
+  updatedAtMs?: number;
+};
 
 export function branchViewFromWriteContext(
   writeContext?: string | null,

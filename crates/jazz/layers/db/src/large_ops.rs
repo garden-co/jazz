@@ -204,21 +204,59 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
 pub(super) struct PreparedCell {
     query: PreparedQuery,
     column: crate::values::Column,
+    /// The branch view the cell is read through: the root for reads, the
+    /// write's own target for a partial edit (see [`Self::for_write`]).
+    target: WriteTarget,
 }
 
 impl PreparedCell {
+    /// One cell of `row`, read at the root. Range reads, JSON pointers and
+    /// deltas on branched tables are not supported yet.
     pub(super) fn new(
         schema: Rc<Schema>,
         table: &str,
         row: RowUuid,
         column: &str,
     ) -> Result<Self, Error> {
-        let t = schema.table(table)?;
-        if !t.branch_by.is_empty() {
+        if !schema.table(table)?.branch_by.is_empty() {
             return Err(unsupported(
                 "large-value range reads and edits on branched tables",
             ));
         }
+        Self::build(schema, table, row, column, WriteTarget::Root)
+    }
+
+    /// One cell of `row` as a partial edit written to `target` sees it: the
+    /// value the edit applies to. Through a branch view that is the head's
+    /// value when the head has a version of the row, else the base's (at its
+    /// snapshot cut when frozen), exactly the row the view reads; the
+    /// update then copies on write into the head (SPEC 11 §11.4). A head
+    /// deletion hides the row, so the edit fails rather than reading the
+    /// base beneath it. A branched table needs a branch view: at the root a
+    /// row id alone does not name one branch-local row's value.
+    pub(super) fn for_write(
+        schema: Rc<Schema>,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        target: &WriteTarget,
+    ) -> Result<Self, Error> {
+        if !schema.table(table)?.branch_by.is_empty() && matches!(target, WriteTarget::Root) {
+            return Err(unsupported(
+                "partial-value updates on a branched table outside a branch view",
+            ));
+        }
+        Self::build(schema, table, row, column, target.clone())
+    }
+
+    fn build(
+        schema: Rc<Schema>,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        target: WriteTarget,
+    ) -> Result<Self, Error> {
+        let t = schema.table(table)?;
         let col = t
             .column(column)
             .filter(|c| crate::large::large_capable(c))
@@ -244,6 +282,7 @@ impl PreparedCell {
         Ok(Self {
             query: prepared,
             column: col,
+            target,
         })
     }
 }
@@ -289,6 +328,28 @@ impl Store {
         (author != AuthorSubject::SYSTEM).then_some(author)
     }
 
+    /// The read view a write to `target` sees its row through: `None` at
+    /// the root, else the head over its live or frozen base, resolved as a
+    /// branch-view read resolves it.
+    async fn write_view(&self, target: &WriteTarget) -> Result<Option<View>, Error> {
+        let WriteTarget::BranchView { head, base } = target else {
+            return Ok(None);
+        };
+        let (base, base_cut) = match base {
+            None => (None, None),
+            Some(BranchViewBase::Current(base)) => (Some(base.clone()), None),
+            Some(BranchViewBase::Snapshot { branch, snapshot }) => (
+                Some(branch.clone()),
+                Some(self.resolve_snapshot(snapshot).await?),
+            ),
+        };
+        Ok(Some(View {
+            head: head.clone(),
+            base,
+            base_cut,
+        }))
+    }
+
     /// The stored cell of `column` in the row visible to `identity`, with
     /// its column. Errors when the row is not visible.
     async fn physical_cell(
@@ -297,10 +358,14 @@ impl Store {
         identity: Option<AuthorSubject>,
     ) -> Result<(crate::values::Column, Sql), Error> {
         whole_only(self, &cell.query.query.table, &cell.column.name)?;
+        let read = ReadSpec {
+            view: self.write_view(&cell.target).await?,
+            ..ReadSpec::default()
+        };
         let compiled = self.compile(
             &cell.query,
             identity,
-            &ReadSpec::default(),
+            &read,
             self.read_namespace(&cell.query).await?,
         )?;
         let value: Option<Sql> = (async {
@@ -1019,11 +1084,12 @@ impl Db {
             let edited = (async {
                 let (col, cell) = inner
                     .physical_cell(
-                        &PreparedCell::new(
+                        &PreparedCell::for_write(
                             self.execution_schema(&inner.owner()),
                             table,
                             row,
                             column,
+                            &opts.target,
                         )?,
                         identity_of(opts.identity),
                     )
@@ -1063,7 +1129,14 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        let mutations = prepare_mutations(self.operation_schema(), table, row, &patch, mutations)?;
+        let mutations = prepare_mutations(
+            self.operation_schema(),
+            table,
+            row,
+            &patch,
+            mutations,
+            &opts.target,
+        )?;
         self.fetching_with(
             &[],
             (patch, mutations, opts),
@@ -2078,6 +2151,7 @@ fn prepare_mutations(
     row: RowUuid,
     patch: &BTreeMap<String, Value>,
     mutations: Vec<LargeValueUpdate>,
+    target: &WriteTarget,
 ) -> Result<Vec<(PreparedCell, LargeValueUpdate)>, Error> {
     for mutation in &mutations {
         let column = mutation.column();
@@ -2090,7 +2164,8 @@ fn prepare_mutations(
     mutations
         .into_iter()
         .map(|mutation| {
-            let cell = PreparedCell::new(schema.clone(), table, row, mutation.column())?;
+            let cell =
+                PreparedCell::for_write(schema.clone(), table, row, mutation.column(), target)?;
             Ok((cell, mutation))
         })
         .collect()
@@ -2289,8 +2364,14 @@ impl TxRef<'_> {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let _operation = self.db.write_operation().await;
-        let mutations =
-            prepare_mutations(self.db.operation_schema(), table, row, &patch, mutations)?;
+        let mutations = prepare_mutations(
+            self.db.operation_schema(),
+            table,
+            row,
+            &patch,
+            mutations,
+            &opts.target,
+        )?;
         self.db
             .inner
             .without_overlay()
