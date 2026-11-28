@@ -3,6 +3,8 @@
 //!
 //! - [`model`]: the language-neutral [`App`] every back end reads.
 //! - [`ts`]: the TypeScript back end (`jazz.generated.ts`).
+//! - [`effect`]: the TS bindings' opt-in Effect Schemas companion
+//!   (`jazz.effect.generated.ts`).
 //! - [`rust`]: the Rust back end (`src/jazz_app.rs`).
 //! - [`swift`]: the Swift back end (`JazzApp.swift`).
 //! - [`go`]: the Go back end (`jazzapp/jazz_app.go`).
@@ -13,6 +15,7 @@
 //! and a [`Lang`] variant. Plain string writers, no templates.
 
 pub mod bindings;
+pub mod effect;
 pub mod go;
 mod json_schema;
 pub mod kotlin;

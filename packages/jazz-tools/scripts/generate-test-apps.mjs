@@ -3,7 +3,8 @@
  * Regenerate the `jazz.generated.ts` of every committed test app: each
  * directory under tests/ and src/ holding a `jazz.app.json` beside a
  * `jazz.generated.ts` (or under an `apps/` directory), as jazz-codegen
- * writes it from the JSON. These fixtures have no schema.ts, which
+ * writes it from the JSON, and its `jazz.effect.generated.ts` when it has
+ * one. These fixtures have no schema.ts, which
  * `jazz-tools generate` requires, so this script is their only writer
  * (test fixtures, not an authoring path). Browser and React
  * Native tests can't load jazz-napi, so their apps are committed with their
@@ -39,6 +40,18 @@ function* appDirs(dir, underApps = false) {
 let stale = 0;
 for (const base of ["tests"]) {
   for (const dir of appDirs(join(root, base))) {
+    if (existsSync(join(dir, "jazz.effect.generated.ts"))) {
+      // With Effect Schemas beside the bindings, the shared code checks (or
+      // rewrites) both, as `jazz-tools generate` does.
+      try {
+        const outcome = napi.generateForDir(dir, { lang: ["ts"], check });
+        for (const file of outcome.written) console.log(`wrote ${relative(root, join(dir, file))}`);
+      } catch (error) {
+        console.error(`stale: ${relative(root, dir)}: ${error.message}`);
+        stale++;
+      }
+      continue;
+    }
     const appJson = readFileSync(join(dir, "jazz.app.json"), "utf8");
     const target = join(dir, "jazz.generated.ts");
     const current = existsSync(target) ? readFileSync(target, "utf8") : null;

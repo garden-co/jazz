@@ -399,6 +399,11 @@ pub struct DirOptions {
     /// The language assumed when nothing in the directory names one and
     /// no other language's manifest is there (the npm CLI passes `"ts"`).
     pub fallback: Option<String>,
+    /// `generateForDir`: write (or, with `check`, require) the Effect
+    /// Schemas beside the TS bindings, `jazz.effect.generated.ts`, even
+    /// before there is one (`--effect-schema`). Once committed, it is kept
+    /// current either way.
+    pub effect_schema: Option<bool>,
 }
 
 fn dir_languages(
@@ -442,7 +447,11 @@ pub fn generate_for_dir(dir: String, options: Option<DirOptions>) -> js::Result<
     let dir = std::path::Path::new(&dir);
     let langs = dir_languages(dir, &options)?;
     let check = options.as_ref().and_then(|o| o.check).unwrap_or(false);
-    jazz_codegen::project::generate(dir, &langs, check)
+    let effect_schema = options
+        .as_ref()
+        .and_then(|o| o.effect_schema)
+        .unwrap_or(false);
+    jazz_codegen::project::generate_with(dir, &langs, check, effect_schema)
         .map(dir_outcome)
         .map_err(|error| napi::Error::from_reason(error).into())
 }

@@ -47,6 +47,37 @@ fn every_app_generates_its_committed_typescript_byte_for_byte() {
     }
 }
 
+/// The Effect Schemas companion, likewise: `jazz.effect.generated.ts`.
+#[test]
+fn every_app_generates_its_committed_effect_schemas_byte_for_byte() {
+    for dir in apps() {
+        let app = App::load(&std::fs::read(dir.join("jazz.app.json")).unwrap()).unwrap();
+        let generated = jazz_codegen::effect::generate(&app)
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+        let path = dir.join(jazz_codegen::effect::FILE);
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            committed,
+            "{} differs from what the generator writes",
+            path.display()
+        );
+        assert_eq!(
+            jazz_codegen::effect::staleness(&app, Some(&committed)),
+            None
+        );
+    }
+}
+
 #[test]
 fn committed_bindings_read_back_and_fit_their_app() {
     for dir in apps() {
