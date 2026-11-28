@@ -279,7 +279,9 @@ export async function signUp(page: Page, name: string, path = "/"): Promise<void
   );
   await page.getByLabel("Display name").fill(name);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Account", exact: true })).toBeVisible({ timeout: T });
+  await expect(page.getByRole("button", { name: "Account", exact: true })).toBeVisible({
+    timeout: T,
+  });
 }
 
 /** Signs in on the sign-in form, which shows on any page while signed out. */
