@@ -1,0 +1,140 @@
+/* Design tokens only (from @garden-co/design), no raw colours or sizes. */
+:root {
+  color-scheme: light dark;
+}
+body {
+  margin: 0;
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-body);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-family-heading);
+  margin: 0;
+}
+h1 {
+  font-size: var(--text-heading-3-size);
+}
+h2 {
+  font-size: var(--text-heading-5-size);
+}
+h3 {
+  font-size: var(--text-heading-6-size);
+}
+.shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--spacing-6) var(--spacing-4);
+  display: grid;
+  gap: var(--spacing-6);
+}
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-4);
+  align-items: center;
+  justify-content: space-between;
+}
+.card {
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  padding: var(--spacing-4);
+  display: grid;
+  gap: var(--spacing-3);
+}
+form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  align-items: end;
+}
+label {
+  display: grid;
+  gap: var(--spacing-1);
+  font-size: var(--text-label-size);
+  color: var(--color-text-secondary);
+}
+input,
+select,
+button {
+  font: inherit;
+  border-radius: var(--radius-element);
+  border: 1px solid var(--color-border-emphasized);
+  padding: var(--spacing-1-5) var(--spacing-2);
+  background: var(--color-background-surface);
+  color: var(--color-text-primary);
+}
+button {
+  cursor: pointer;
+}
+button.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-accent);
+}
+.secondary {
+  color: var(--color-text-secondary);
+}
+.error {
+  color: var(--color-error);
+}
+.shows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.shows button[aria-current="true"] {
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-inset-selected);
+}
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--spacing-3);
+}
+.column {
+  background: var(--color-background-muted);
+  border-radius: var(--radius-container);
+  padding: var(--spacing-3);
+  display: grid;
+  gap: var(--spacing-2);
+  align-content: start;
+}
+.column ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--spacing-2);
+}
+.task {
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-inner);
+  padding: var(--spacing-2);
+  display: grid;
+  gap: var(--spacing-1-5);
+}
+.status {
+  padding: var(--spacing-8);
+  text-align: center;
+}
+form.sign-in {
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 400px;
+  margin: 0 auto;
+}

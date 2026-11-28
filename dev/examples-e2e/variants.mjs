@@ -59,6 +59,13 @@ export const VARIANTS = Object.freeze([
     env: Object.freeze({}),
   }),
   Object.freeze({
+    name: "stage-plan-effect-ui",
+    dir: "examples/stage-plan/apps/ts-effect-ui-betterauth",
+    environment: "Effect UI in the browser, Effect in a Hono server, Better Auth",
+    publicPrefix: "VITE_",
+    env: Object.freeze({}),
+  }),
+  Object.freeze({
     name: "jamazon-warehouse",
     dir: "examples/jamazon-warehouse",
     environment: "Next.js, server-seeded warehouse operations, Better Auth",

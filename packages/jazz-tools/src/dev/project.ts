@@ -39,6 +39,13 @@ export interface GenerateOptions {
   force?: boolean;
   /** The bindings' languages (`--lang`); by default each the app's files name. */
   lang?: string[];
+  /**
+   * `--effect-schema`: write Effect Schemas for the app's rows,
+   * jazz.effect.generated.ts, beside jazz.generated.ts (with `check`,
+   * require them). Once the file is there, generate keeps it current and
+   * `check` checks it without this.
+   */
+  effectSchema?: boolean;
   /** Tests: load TS modules another way. */
   loadModule?: LoadModule;
 }
@@ -49,7 +56,7 @@ export interface GenerateResult {
   wroteFiles: boolean;
   /** Whether any bindings file was (re)written. */
   wrote: boolean;
-  /** The bindings files, relative to `dir`: one per language the app is written in. */
+  /** The bindings files, relative to `dir`: one per language the app is written in, and jazz.effect.generated.ts when there is one. */
   bindings: string[];
   warnings: string[];
 }
@@ -127,6 +134,7 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
   const bindingsOptions = {
     fallback: "ts",
     ...(options.lang?.length ? { lang: options.lang } : {}),
+    ...(options.effectSchema ? { effectSchema: true } : {}),
   };
   if (options.check) {
     // Running the npm CLI says the app is a Node one, unless the directory

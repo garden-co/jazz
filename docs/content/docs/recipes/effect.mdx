@@ -57,6 +57,9 @@ Waiting writes fail with `JazzWriteRejected` if the server rejects them, for exa
 permissions. Every other failure is a `JazzError`. Rejections of writes nobody waited for arrive on
 `jazz.mutationErrors`, a Stream.
 
+The error classes are `Schema.TaggedError`s, so they can also be part of a Schema: an RPC error, or an
+[Effect UI](/docs/recipes/effect-ui) message.
+
 ## Live queries
 
 `jazz.stream(query)` emits the complete result when it starts and again whenever it changes. Every

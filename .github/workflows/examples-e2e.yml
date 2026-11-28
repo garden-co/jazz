@@ -243,6 +243,7 @@ jobs:
           - jamazon
           - stage-plan-sveltekit
           - stage-plan-effect
+          - stage-plan-effect-ui
           - jamazon-warehouse
           - wequencer
           - band-book

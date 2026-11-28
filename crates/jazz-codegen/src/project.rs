@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::bindings::{self, Staleness};
-use crate::{App, Lang};
+use crate::{App, Lang, effect};
 use jazz::tools::deployment::artifact::{self, APP_FILE, PERMISSIONS_FILE};
 
 /// What a command did, for the caller to print.
@@ -149,8 +149,23 @@ pub fn languages_or(
 /// is one) and its bindings in each of `langs`. With `check`, refuse stale
 /// bindings; otherwise regenerate them, unless `tables` changed without a
 /// migration (the bindings hold the only copy of the version to migrate
-/// from), which is refused before any file is written.
+/// from), which is refused before any file is written. A committed
+/// `jazz.effect.generated.ts` is kept current (and checked) beside the TS
+/// bindings; [`generate_with`] creates it.
 pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, String> {
+    generate_with(dir, langs, check, false)
+}
+
+/// [`generate`], with `effect_schema` (`--effect-schema`) asking for the
+/// Effect Schemas beside the TS bindings ([`crate::effect`]) whether or not
+/// they are there yet: plain `generate` writes them the first time, and
+/// `--check` refuses their absence.
+pub fn generate_with(
+    dir: &Path,
+    langs: &[Selected],
+    check: bool,
+    effect_schema: bool,
+) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
     let app_json = read(&dir.join(APP_FILE))?;
     let app = App::load(&app_json).map_err(|error| error.to_string())?;
@@ -216,7 +231,7 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                 other => format!("{}: {}", shown(&path), other.message(selected.lang)),
             });
         }
-        generated.push((selected.lang, path, text));
+        generated.push((selected.lang.file(), path, text));
     }
     for (selected, path, committed) in refresh {
         let text = crate::generate_app(selected.lang, &app)
@@ -226,7 +241,7 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                 "{}: this jazz-tools generates it differently; rewriting it",
                 shown(&path)
             ));
-            generated.push((selected.lang, path, text));
+            generated.push((selected.lang.file(), path, text));
         } else {
             outcome.current.push(selected.lang.file().to_string());
             outcome
@@ -245,16 +260,90 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                 .map(|why| format!("skipped {why} (pass --lang to make this an error)")),
         );
     }
-    for (lang, path, text) in generated {
+    let ts = langs.iter().any(|s| s.lang == Lang::TypeScript);
+    if let Some(text) = effect_schemas(dir, &app, ts, check, effect_schema, &mut outcome)? {
+        generated.push((effect::FILE, dir.join(effect::FILE), text));
+    }
+    for (file, path, text) in generated {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("{}: {error}", shown(&parent)))?;
         }
         std::fs::write(&path, text).map_err(|error| format!("{}: {error}", shown(&path)))?;
-        outcome.written.push(lang.file().to_string());
+        outcome.written.push(file.to_string());
         outcome.notes.push(format!("wrote {}", shown(&path)));
     }
     Ok(outcome)
+}
+
+/// The Effect Schemas `generate` writes, if any: when asked for
+/// (`requested`) or committed, beside TS bindings (`ts`). With `check`, a
+/// stale or missing file is refused instead; a current one is noted in
+/// `outcome`.
+fn effect_schemas(
+    dir: &Path,
+    app: &App,
+    ts: bool,
+    check: bool,
+    requested: bool,
+    outcome: &mut Outcome,
+) -> Result<Option<String>, String> {
+    let path = dir.join(effect::FILE);
+    if !ts {
+        if requested {
+            return Err(format!(
+                "{}: --effect-schema writes Effect Schemas beside the TypeScript bindings, \
+                 and this app's aren't being generated; pass --lang ts",
+                shown(&path)
+            ));
+        }
+        // Another language's run (`--lang rust`) leaves them alone.
+        return Ok(None);
+    }
+    let committed = read_optional(&path)?;
+    if committed.is_none() && !requested {
+        return Ok(None);
+    }
+    let up_to_date = |outcome: &mut Outcome| {
+        outcome.current.push(effect::FILE.to_string());
+        outcome
+            .notes
+            .push(format!("{} is up to date", shown(&path)));
+    };
+    let staleness = effect::staleness(app, committed.as_deref());
+    if check {
+        return match staleness {
+            None => {
+                up_to_date(outcome);
+                Ok(None)
+            }
+            Some(Staleness::Missing) => Err(format!(
+                "no {}: run `npx jazz-tools generate --effect-schema`",
+                effect::FILE
+            )),
+            Some(Staleness::Unreadable(why)) => Err(format!("{}: {why}", shown(&path))),
+            Some(_) => Err(format!(
+                "{}: Effect Schemas out of date: run `npx jazz-tools generate`",
+                shown(&path)
+            )),
+        };
+    }
+    let text = effect::generate(app).map_err(|error| format!("{}: {error}", shown(&path)))?;
+    match (staleness, committed) {
+        (None, Some(committed)) if !effect::output_changed(&committed, &text) => {
+            up_to_date(outcome);
+            return Ok(None);
+        }
+        (None, _) => outcome.notes.push(format!(
+            "{}: this jazz-tools generates it differently; rewriting it",
+            shown(&path)
+        )),
+        (Some(Staleness::Unreadable(why)), _) => {
+            outcome.warnings.push(format!("{why}; regenerating it"));
+        }
+        _ => {}
+    }
+    Ok(Some(text))
 }
 
 /// Write the migration from the version `dir`'s committed bindings were
@@ -866,6 +955,93 @@ mod tests {
         .unwrap();
         let error = generate(&dir, &[ts.into()], true).unwrap_err();
         assert!(error.contains("did you mean `todos`?"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `--effect-schema` writes the Effect Schemas the first time; after that
+    /// their presence keeps them current and `--check` checks them.
+    #[test]
+    fn effect_schemas_are_opt_in_then_kept_current() {
+        let dir = dir();
+        std::fs::write(dir.join(APP_FILE), V1).unwrap();
+        let ts = [Lang::TypeScript.into()];
+        let path = dir.join(effect::FILE);
+        // Not asked for: not written, not checked.
+        generate(&dir, &ts, false).unwrap();
+        assert!(!path.exists());
+        generate(&dir, &ts, true).unwrap();
+        // Asked for: `--check` refuses their absence, `generate` writes them.
+        let error = generate_with(&dir, &ts, true, true).unwrap_err();
+        assert_eq!(
+            error,
+            "no jazz.effect.generated.ts: run `npx jazz-tools generate --effect-schema`"
+        );
+        let outcome = generate_with(&dir, &ts, false, true).unwrap();
+        assert_eq!(outcome.written, vec![effect::FILE.to_string()]);
+        assert_eq!(outcome.current, vec![Lang::TypeScript.file().to_string()]);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(effect::HEADER));
+        // From now on plain `generate` and `--check` see them.
+        let checked = generate(&dir, &ts, true).unwrap();
+        assert!(
+            checked.current.contains(&effect::FILE.to_string()),
+            "{checked:?}"
+        );
+        // Reformatted: kept.
+        let reformatted = written.replace("\n\n", "\n\n\n");
+        std::fs::write(&path, &reformatted).unwrap();
+        let outcome = generate(&dir, &ts, false).unwrap();
+        assert!(outcome.written.is_empty(), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reformatted);
+        // Another language's run leaves them alone, and can't ask for them.
+        std::fs::write(dir.join("Cargo.toml"), RUST_APP).unwrap();
+        let rust = [Lang::Rust.into()];
+        generate(&dir, &rust, false).unwrap();
+        generate(&dir, &rust, true).unwrap();
+        assert!(
+            generate_with(&dir, &rust, false, true)
+                .unwrap_err()
+                .contains("pass --lang ts")
+        );
+        // A schema edit without a migration is refused before they're touched.
+        std::fs::write(dir.join(APP_FILE), V2).unwrap();
+        assert!(
+            generate(&dir, &ts, false)
+                .unwrap_err()
+                .contains("migrations create")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reformatted);
+        // `migrations create` regenerates them with the bindings.
+        let outcome = migrations_create(&dir, &ts, "done-flag").unwrap();
+        assert!(
+            outcome.written.contains(&effect::FILE.to_string()),
+            "{outcome:?}"
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().contains("done: "));
+        generate(&dir, &ts, true).unwrap();
+        // Out of date (another app file): `--check` refuses, `generate` rewrites.
+        std::fs::write(&path, &written).unwrap();
+        let error = generate(&dir, &ts, true).unwrap_err();
+        assert!(error.contains("Effect Schemas out of date"), "{error}");
+        let outcome = generate(&dir, &ts, false).unwrap();
+        assert_eq!(outcome.written, vec![effect::FILE.to_string()]);
+        generate(&dir, &ts, true).unwrap();
+        // Edited past reading: `--check` refuses, `generate` replaces it.
+        std::fs::write(&path, "export const Todo = 1;\n").unwrap();
+        assert!(
+            generate(&dir, &ts, true)
+                .unwrap_err()
+                .contains("not a module jazz-tools generated")
+        );
+        let outcome = generate(&dir, &ts, false).unwrap();
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("regenerating it")),
+            "{outcome:?}"
+        );
+        generate(&dir, &ts, true).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

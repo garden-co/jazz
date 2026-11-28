@@ -1,4 +1,4 @@
-import { Data } from "effect";
+import { Schema } from "effect";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 
 /**
@@ -6,11 +6,12 @@ import { PersistedWriteRejectedError } from "../runtime/client.js";
  * write, a closed database, a storage or transport failure, or a terminal
  * subscription error. `cause` holds the error thrown by the core runtime.
  */
-export class JazzError extends Data.TaggedError("JazzError")<{
+export class JazzError extends Schema.TaggedError<JazzError>()("JazzError", {
   /** The Jazz operation that failed, such as `"all"` or `"insert"`. */
-  readonly operation: string;
-  readonly cause: unknown;
-}> {
+  operation: Schema.String,
+  /** Encoded like any defect: an `Error`'s name and message (no stack). */
+  cause: Schema.Defect(),
+}) {
   override get message(): string {
     return `Jazz ${this.operation} failed: ${describeCause(this.cause)}`;
   }
@@ -36,11 +37,14 @@ function describeCause(cause: unknown): string {
  * durability tier (for example by permissions or serializable-transaction
  * validation at the authority). The local write has already been undone.
  */
-export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{
-  readonly transactionId: string;
-  readonly code: string;
-  readonly reason: string;
-}> {
+export class JazzWriteRejected extends Schema.TaggedError<JazzWriteRejected>()(
+  "JazzWriteRejected",
+  {
+    transactionId: Schema.String,
+    code: Schema.String,
+    reason: Schema.String,
+  },
+) {
   override get message(): string {
     return `Jazz write ${this.transactionId} was rejected (${this.code}): ${this.reason}`;
   }
@@ -52,12 +56,12 @@ export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{
  * from a client, when a local-first guest links to them, or when the backend
  * calls `createAccountFor`.
  */
-export class JazzNoAccount extends Data.TaggedError("JazzNoAccount")<{
+export class JazzNoAccount extends Schema.TaggedError<JazzNoAccount>()("JazzNoAccount", {
   /** The user, as the app's `authenticate` names them. */
-  readonly userId: string;
+  userId: Schema.String,
   /** The operation that needed the account, such as `"forReqUser"`. */
-  readonly operation: string;
-}> {
+  operation: Schema.String,
+}) {
   override get message(): string {
     return `Jazz ${this.operation} failed: user ${JSON.stringify(this.userId)} has no Jazz account yet`;
   }

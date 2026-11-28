@@ -5,14 +5,14 @@ description: "Learn what the jazz-tools command line does, and how agents use yo
 
 `jazz-tools` is the command line that comes with Jazz. Run it with `npx jazz-tools <command>`:
 
-| Command                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| :-------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate`                        | Loads `schema.ts` and `migrations/`, and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts` (see [Defining Tables](/docs/schemas/defining-tables)). With `--check` it writes nothing and fails when any of them is missing or stale, for CI. An app whose `Cargo.toml` (beside `schema.ts`) is a crate depending on `jazz-app-support` gets `src/jazz_app.rs` instead of, or besides, `jazz.generated.ts`; `--lang ts` / `--lang rust` chooses explicitly |
-| `migrations create --name <name>` | Records a schema change: snapshots the previous version and writes a migration into `migrations/` for you to review (see [Migrations](/docs/schemas/migrations))                                                                                                                                                                                                                                                                                                               |
-| `migrations graph <appId>`        | Draws the graph of schema versions and migrations your server knows                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `schema compile`                  | Prints the compiled schema `jazz.generated.ts` embeds, as JSON                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `inspect <command>`               | Reads and changes your app's data through its backend, as the [Inspector](/docs/tooling/inspector) does                                                                                                                                                                                                                                                                                                                                                                        |
-| `inspect mcp`                     | Serves the same operations as an MCP server, for coding agents                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Command                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| :-------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate`                        | Loads `schema.ts` and `migrations/`, and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts` (see [Defining Tables](/docs/schemas/defining-tables)). With `--check` it writes nothing and fails when any of them is missing or stale, for CI. An app whose `Cargo.toml` (beside `schema.ts`) is a crate depending on `jazz-app-support` gets `src/jazz_app.rs` instead of, or besides, `jazz.generated.ts`; `--lang ts` / `--lang rust` chooses explicitly. `--effect-schema` also writes [Effect Schemas](#effect-schemas) for the rows |
+| `migrations create --name <name>` | Records a schema change: snapshots the previous version and writes a migration into `migrations/` for you to review (see [Migrations](/docs/schemas/migrations))                                                                                                                                                                                                                                                                                                                                                                                             |
+| `migrations graph <appId>`        | Draws the graph of schema versions and migrations your server knows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `schema compile`                  | Prints the compiled schema `jazz.generated.ts` embeds, as JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `inspect <command>`               | Reads and changes your app's data through its backend, as the [Inspector](/docs/tooling/inspector) does                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `inspect mcp`                     | Serves the same operations as an MCP server, for coding agents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 The commands look for `schema.ts` in the current directory, then in `./src` and `./src/lib`.
 Pass `--schema-dir <path>` to point them elsewhere.
@@ -31,6 +31,51 @@ The standalone `jazz-tools` binary can't read TypeScript, so it writes nothing: 
 checks the bindings, and the `$generated` checksum of the committed JSON files, against those files.
 Whether the JSON is up to date with `schema.ts` only `npx jazz-tools generate --check` can tell,
 since it runs the TypeScript.
+
+## Effect Schemas
+
+An app written with [Effect](https://effect.website) v4 can have Schemas for its rows, for example
+to carry them in Effect UI Messages:
+
+```bash title="Terminal"
+npx jazz-tools generate --effect-schema
+```
+
+This writes `jazz.effect.generated.ts` beside `jazz.generated.ts`. Commit it with the other files.
+After that, plain `generate` keeps it current and `generate --check` checks it, as long as the file
+is there; delete it to stop. It imports `Schema` from `effect` and nothing else, so your app needs
+`effect` (4.0 or later) as a dependency.
+
+For each table it exports a Schema of the row and one of the insert, with the names of the
+TypeScript types in `jazz.generated.ts`. Enum and typed JSON columns get named Schemas too:
+
+```ts title="jazz.effect.generated.ts"
+import { Schema } from "effect";
+
+export const TaskStatus = Schema.Literals(["todo", "done"]);
+
+export const Task = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  status: TaskStatus,
+  dueAt: Schema.NullOr(Schema.Date),
+  tags: Schema.mutable(Schema.Array(Schema.String)),
+});
+
+export const TaskInsert = Schema.Struct({
+  title: Schema.String,
+  status: Schema.optionalKey(TaskStatus),
+  dueAt: Schema.optionalKey(Schema.NullOr(Schema.Date)),
+  tags: Schema.mutable(Schema.Array(Schema.String)),
+});
+```
+
+Each Schema's `Type` is the TypeScript type of the same name, so a row from a query decodes as it
+is. Timestamps are `Schema.Date` and bytes `Schema.Uint8Array`; their JSON codec
+(`Schema.toCodecJson`) encodes them as ISO strings and base64. Columns with a transform get the
+Schema of the transform's `view` type, and computed fields are part of the row. A JSON Schema the
+generator can't express as an Effect Schema yet (`allOf`, object or array `const` values) makes
+`generate` fail with an error naming the column.
 
 `npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
 

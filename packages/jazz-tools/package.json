@@ -102,6 +102,10 @@
       "types": "./dist/effect/index.d.ts",
       "default": "./dist/effect/index.js"
     },
+    "./effect-ui": {
+      "types": "./dist/effect-ui/index.d.ts",
+      "default": "./dist/effect-ui/index.js"
+    },
     "./effect/backend": {
       "types": "./dist/effect/backend/index.d.ts",
       "default": "./dist/effect/backend/index.js"
@@ -244,6 +248,7 @@
   },
   "devDependencies": {
     "@better-auth/test-utils": "^1.7.22",
+    "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@19953fed5d778219dd9da2ce3b6611c07318159e",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
@@ -256,7 +261,7 @@
     "@vitest/browser-playwright": "catalog:default",
     "@vue/server-renderer": "^3.5.22",
     "better-auth": "1.7.22",
-    "effect": "4.0.0-rc.118",
+    "effect": "4.1.6",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
     "miniflare": "4.20260730.0",
@@ -281,6 +286,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "@effect/ui": ">=0.0.0",
     "@vercel/functions": ">=3.10.0",
     "@vercel/sandbox": ">=3.9.0",
     "better-auth": "~1.7.22",
@@ -301,6 +307,9 @@
   },
   "peerDependenciesMeta": {
     "better-auth": {
+      "optional": true
+    },
+    "@effect/ui": {
       "optional": true
     },
     "effect": {

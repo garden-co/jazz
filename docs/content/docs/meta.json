@@ -30,6 +30,7 @@
     "recipes/access-control",
     "recipes/data-patterns",
     "recipes/effect",
+    "recipes/effect-ui",
     "---Reference---",
     "reference/nextjs-better-auth",
     "reference/language-support",

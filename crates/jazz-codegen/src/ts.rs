@@ -105,25 +105,33 @@ impl Names {
 }
 
 /// The TS names of one table.
-struct TableNames {
-    row: String,
-    insert: String,
+pub(crate) struct TableNames {
+    pub(crate) row: String,
+    pub(crate) insert: String,
     /// Named types of columns and computed fields, by field.
-    fields: BTreeMap<String, String>,
+    pub(crate) fields: BTreeMap<String, String>,
 }
 
-/// `jazz.generated.ts` for `app`.
-pub fn generate(app: &App) -> Result<String, CodegenError> {
+/// The names the module gives `app`'s types: each table's, and the named
+/// field types (enums, typed JSON) with their types, in declared order.
+/// The Effect Schemas module ([`crate::effect`]) exports the same names.
+pub(crate) struct ModuleNames {
+    pub(crate) tables: BTreeMap<String, TableNames>,
+    /// `(name, type, the field it was derived from)`.
+    pub(crate) named: Vec<(String, ColumnType, String)>,
+}
+
+pub(crate) fn module_names(app: &App) -> Result<ModuleNames, CodegenError> {
     let mut names = Names::new();
-    let mut decls = String::new();
-    let mut table_names: BTreeMap<String, TableNames> = BTreeMap::new();
+    let mut named = Vec::new();
+    let mut tables: BTreeMap<String, TableNames> = BTreeMap::new();
     for table in &app.tables {
         let base = pascal(&singular(&table.name));
         let origin = format!("table `{}`", table.name);
         let row = names.claim(base.clone(), origin.clone())?;
         let insert = names.claim(format!("{base}Insert"), format!("{origin}'s insert type"))?;
         let mut fields = BTreeMap::new();
-        let named = table
+        let field_types = table
             .columns
             .iter()
             .map(|c| (c.name.as_str(), view_type(app, c)))
@@ -133,17 +141,17 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                     .iter()
                     .map(|f| (f.name.as_str(), f.ty.ty.clone())),
             );
-        for (field, ty) in named {
+        for (field, ty) in field_types {
             if !needs_name(&ty) {
                 continue;
             }
             let name = format!("{row}{}", pascal(field));
             let origin = format!("`{}.{field}`", table.name);
-            let name = names.claim(name, origin)?;
-            let _ = writeln!(decls, "export type {name} = {};", ts_type(&ty));
+            let name = names.claim(name, origin.clone())?;
+            named.push((name.clone(), ty, origin));
             fields.insert(field.to_string(), name);
         }
-        table_names.insert(
+        tables.insert(
             table.name.clone(),
             TableNames {
                 row,
@@ -151,6 +159,19 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                 fields,
             },
         );
+    }
+    Ok(ModuleNames { tables, named })
+}
+
+/// `jazz.generated.ts` for `app`.
+pub fn generate(app: &App) -> Result<String, CodegenError> {
+    let ModuleNames {
+        tables: table_names,
+        named,
+    } = module_names(app)?;
+    let mut decls = String::new();
+    for (name, ty, _) in &named {
+        let _ = writeln!(decls, "export type {name} = {};", ts_type(ty));
     }
 
     let has_computed = app.tables.iter().any(|t| !t.computed.is_empty());
@@ -511,7 +532,7 @@ fn inline_object(fields: &[String]) -> String {
 }
 
 /// The type code sees for `column`: its transform's view type, or its own.
-fn view_type(app: &App, column: &Column) -> ColumnType {
+pub(crate) fn view_type(app: &App, column: &Column) -> ColumnType {
     match column.transform.as_ref().and_then(|t| app.transform(t)) {
         Some(transform) => transform.view.clone(),
         None => column.ty.ty.clone(),
