@@ -5,11 +5,11 @@ const TIMEOUT = 60_000;
 test("a new designer gets a poster, adds a shape and it survives a reload", async ({ page }) => {
   const run = Date.now().toString(36);
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name").fill("Ada");
   await page.getByLabel("Email").fill(`ada-${run}@poster-shop.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
   const canvas = page.getByRole("application", { name: "Poster canvas" });
   await expect(canvas).toBeVisible({ timeout: TIMEOUT });

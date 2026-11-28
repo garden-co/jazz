@@ -23,11 +23,11 @@ test("a guest plans a show, signs up without losing it, and it survives a reload
   await expect(inProgress.getByText("Line check")).toBeVisible({ timeout: TIMEOUT });
 
   // Creating an account keeps the guest's board.
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Ada");
   await page.getByLabel("Email", { exact: true }).fill(`ada-${run}@stage-plan.test`);
   await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
   await expect(page.getByText(`Signed in as ada-${run}@stage-plan.test`)).toBeVisible({
     timeout: TIMEOUT,
   });

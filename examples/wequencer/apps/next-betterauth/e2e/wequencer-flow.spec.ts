@@ -52,11 +52,11 @@ async function patternOn(page: Page) {
 
 async function signUp(page: Page, credentials: Credentials) {
   await page.goto("http://localhost:3000/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name").fill(credentials.name);
   await page.getByLabel("Email").fill(credentials.email);
   await page.getByLabel("Password").fill(credentials.password);
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
   await expect(page).toHaveURL("/dashboard", { timeout: TIMEOUT });
 }
 

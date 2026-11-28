@@ -332,7 +332,14 @@ export async function runVariant(variant, opts) {
       await phase("e2e", () =>
         runChild("pnpm", ["test:e2e"], {
           cwd: appDir,
-          env: { ...env, JAZZ_E2E_PROD: "1", CI: process.env.CI ?? "1" },
+          env: {
+            ...env,
+            JAZZ_E2E_PROD: "1",
+            // The suite's browsers share one sign-in allowance on this test
+            // server; each app's Better Auth config reads this (test-only).
+            JAZZ_E2E_DISABLE_AUTH_RATE_LIMIT: "1",
+            CI: process.env.CI ?? "1",
+          },
           verbose,
           description: `pnpm test:e2e (${variant.name})`,
           timeoutMs: PHASE_TIMEOUT_MS.e2e,

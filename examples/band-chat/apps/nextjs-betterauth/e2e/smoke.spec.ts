@@ -7,15 +7,17 @@ test("a new member signs up, opens a room and their message survives a reload", 
 }) => {
   const run = Date.now().toString(36);
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name").fill("Ada");
   await page.getByLabel("Email").fill(`ada-${run}@band-chat.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
-  await expect(page.getByRole("heading", { name: "Set up your profile" })).toBeVisible({
-    timeout: TIMEOUT,
-  });
+  await expect(page.getByRole("heading", { name: "Set up your profile", exact: true })).toBeVisible(
+    {
+      timeout: TIMEOUT,
+    },
+  );
   await page.getByLabel("Display name").fill("Ada");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
 

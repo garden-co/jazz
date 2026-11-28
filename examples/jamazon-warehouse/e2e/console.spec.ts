@@ -14,11 +14,11 @@ function selector(page: Page, label: string, { hasSearch }: { hasSearch: boolean
 async function operator(browser: Browser, name: string): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an operator account" }).click();
+  await page.getByRole("button", { name: "Create an operator account", exact: true }).click();
   await page.getByLabel("Name").fill(name);
   await page.getByLabel("Email").fill(`${name.toLowerCase()}-${Date.now()}@example.com`);
   await page.getByLabel("Password").fill("warehouse-password");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Choose your warehouse" })).toBeVisible({
     timeout: TIMEOUT,
   });
