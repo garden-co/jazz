@@ -21,12 +21,12 @@ test("a guest's cart survives sign-up, and the paid order survives a reload", as
   await page.getByRole("button", { name: "Continue to review" }).click();
 
   // A guest signs up from checkout; the cart comes along.
-  await page.getByRole("link", { name: "Sign in to order" }).click();
+  await page.getByRole("link", { name: "Sign in to order", exact: true }).click();
   await page.getByText("Create account", { exact: true }).first().click();
   await page.getByLabel("Name").fill("Ada");
   await page.getByLabel("Email").fill(`ada-${run}@jamazon.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.locator("form").getByRole("button", { name: "Create account" }).click();
+  await page.locator("form").getByRole("button", { name: "Create account", exact: true }).click();
 
   await expect(page).toHaveURL(/\/checkout$/, { timeout: TIMEOUT });
   await page.getByRole("button", { name: "Place order" }).click();

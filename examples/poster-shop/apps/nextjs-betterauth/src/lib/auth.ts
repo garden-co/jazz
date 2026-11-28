@@ -9,6 +9,10 @@ const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
 export const auth = betterAuth({
   baseURL: appOrigin,
+  // Tests only: dev/examples-e2e/run.mjs sets this for the production server
+  // its Playwright suite starts, whose browsers all sign in from one address
+  // and share Better Auth's 3-per-10-s sign-in limit. Never set it in a deployment.
+  rateLimit: process.env.JAZZ_E2E_DISABLE_AUTH_RATE_LIMIT === "1" ? { enabled: false } : undefined,
   trustedOrigins: [appOrigin],
   secret: serverSecret(
     "BETTER_AUTH_SECRET",

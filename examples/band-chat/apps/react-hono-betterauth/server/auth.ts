@@ -9,6 +9,10 @@ const config = assertConfiguration();
 
 export const auth = betterAuth({
   baseURL: config.origin,
+  // Tests only: dev/examples-e2e/run.mjs sets this for the production server
+  // its Playwright suite starts, whose browsers all sign in from one address
+  // and share Better Auth's 3-per-10-s sign-in limit. Never set it in a deployment.
+  rateLimit: process.env.JAZZ_E2E_DISABLE_AUTH_RATE_LIMIT === "1" ? { enabled: false } : undefined,
   trustedOrigins: [config.origin],
   secret: config.betterAuthSecret,
   // Better Auth's tables live in BandChat's own Jazz, through the backend's

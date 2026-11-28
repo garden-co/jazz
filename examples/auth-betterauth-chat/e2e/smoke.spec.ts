@@ -6,7 +6,7 @@ const CHAT = process.env.NEXT_PUBLIC_CHAT_ID || "chat-01";
 test("a new account posts in the chat and the message survives a reload", async ({ page }) => {
   const run = Date.now().toString(36);
   await page.goto("/");
-  await page.getByRole("button", { name: "Sign up" }).click();
+  await page.getByRole("button", { name: "Sign up", exact: true }).click();
   await page.getByLabel("Email").fill(`ada-${run}@example.test`);
   await page.getByLabel("Password").fill("correct horse battery");
   await page.getByTestId("auth-submit").click();

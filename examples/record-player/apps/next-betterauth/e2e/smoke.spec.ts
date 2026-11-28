@@ -7,7 +7,7 @@ test("a new listener streams the demo library in and it survives a reload", asyn
   await page.goto("/");
   await page.getByLabel("Email").fill(`ada-${run}@record-player.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
   const albums = page.getByRole("listbox", { name: "Albums" }).getByRole("option");
   const addDemo = page.getByRole("button", { name: "Add demo library" });

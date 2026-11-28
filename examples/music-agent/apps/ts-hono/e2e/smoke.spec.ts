@@ -7,11 +7,11 @@ test("the agent answers the seeded request and a follow-up, and both survive a r
 }) => {
   const run = Date.now().toString(36);
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name").fill("Ada");
   await page.getByLabel("Email").fill(`ada-${run}@music-agent.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
   // The first conversation seeds itself and the scripted agent answers it on
   // the server; a finished reply offers "Regenerate".

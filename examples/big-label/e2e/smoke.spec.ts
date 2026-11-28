@@ -4,11 +4,11 @@ const TIMEOUT = 60_000;
 
 async function signUp(page: Page, run: string) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account instead" }).click();
+  await page.getByRole("button", { name: "Create an account instead", exact: true }).click();
   await page.getByLabel("Your name").fill("Ada");
   await page.getByLabel("Email").fill(`ada-${run}@big-label.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
   // The backend bootstraps a personal label with this account as its admin.
   const nav = page.getByRole("navigation");
