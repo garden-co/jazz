@@ -11,6 +11,10 @@ export const auth = betterAuth({
   baseURL: config.origin,
   trustedOrigins: [config.origin],
   secret: config.betterAuthSecret,
+  // Tests only: the e2e suite's browsers share one sign-in allowance, so
+  // playwright.config.ts turns the limit off. Never set this in a deployment.
+  rateLimit:
+    process.env.BANDCHAT_E2E_DISABLE_AUTH_RATE_LIMIT === "1" ? { enabled: false } : undefined,
   // Better Auth's tables live in BandChat's own Jazz, through the backend's
   // database; their client policies deny everything.
   database: jazzAdapter({

@@ -279,7 +279,9 @@ export async function signUp(page: Page, name: string, path = "/"): Promise<void
   );
   await page.getByLabel("Display name").fill(name);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Account" })).toBeVisible({ timeout: T });
+  await expect(page.getByRole("button", { name: "Account", exact: true })).toBeVisible({
+    timeout: T,
+  });
 }
 
 /** Signs in on the sign-in form, which shows on any page while signed out. */
@@ -288,27 +290,20 @@ export async function signIn(page: Page, name: string, path = "/"): Promise<void
   await expect(signInHeading(page)).toBeVisible({ timeout: T });
   await page.getByLabel("Email").fill(emailOf(name));
   await page.getByLabel("Password").fill(PASSWORD);
-  await submitAuth(page, "Sign in", page.getByRole("button", { name: "Account" }));
+  await submitAuth(page, "Sign in", page.getByRole("button", { name: "Account", exact: true }));
 }
 
 /**
- * Submits the sign-in or sign-up form. In production Better Auth allows three
- * sign-ins and sign-ups per ten seconds, and with no client IP forwarded every
- * browser shares that allowance, so a test that signs several browsers in
- * waits out a refusal and submits again.
+ * Submits the sign-in or sign-up form and waits for `done`. The e2e server runs
+ * with Better Auth's rate limit off (see playwright.config.ts), so a "too many
+ * requests" refusal is a harness bug: fail on it rather than wait it out.
  */
 async function submitAuth(page: Page, button: string, done: Locator): Promise<void> {
   const limited = page.getByText(/too many requests/i);
-  for (let attempt = 1; ; attempt++) {
-    await page.getByRole("button", { name: button, exact: true }).click();
-    await expect(done.or(limited).first()).toBeVisible({ timeout: T });
-    if (await done.isVisible()) return;
-    if (attempt === 4)
-      throw new Error("Better Auth kept refusing the sign-in as too many requests");
-    console.log(`[${button}] refused as too many requests; trying again in 10 s`);
-    await page.waitForTimeout(10_000);
-    if (await done.isVisible()) return;
-  }
+  await page.getByRole("button", { name: button, exact: true }).click();
+  await expect(done.or(limited).first()).toBeVisible({ timeout: T });
+  if (!(await done.isVisible()))
+    throw new Error(`Better Auth refused "${button}" as too many requests`);
 }
 
 export function signInHeading(page: Page): Locator {
@@ -319,7 +314,7 @@ export async function signOut(page: Page): Promise<void> {
   // The menu closes if the side bar re-renders while it is open; open it again.
   await expect(async () => {
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("button", { name: "Account", exact: true }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click({ timeout: 2000 });
   }).toPass({ timeout: T });
   await expect(signInHeading(page)).toBeVisible({ timeout: T });
@@ -380,7 +375,7 @@ export function waitingBanner(page: Page): Locator {
 export async function openDevices(page: Page): Promise<Locator> {
   await expect(async () => {
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("button", { name: "Account", exact: true }).click();
     await page.getByRole("menuitem", { name: "Edit profile" }).click({ timeout: 2000 });
   }).toPass({ timeout: T });
   const dialog = page.getByRole("dialog");
