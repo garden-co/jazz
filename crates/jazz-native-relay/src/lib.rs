@@ -72,6 +72,11 @@ const DIRECT_FOREGROUND_RUNTIME_TOKEN: u64 = u64::MAX;
 /// Trusted platform admission carries schema and validated claims, but must
 /// remain bounded independently of the generic peer-frame budget.
 const NATIVE_RELAY_ADMISSION_MAX_BYTES: usize = 1024 * 1024;
+/// A schema source (and a scope admission carrying one) also carries the
+/// app's migrations: every schema version the app ever shipped, so it grows
+/// with each migration (~80 KB per version for a 70-table app). Bounded on
+/// its own so a long-lived app does not outgrow the credential budget.
+pub(crate) const NATIVE_RELAY_SCHEMA_SOURCE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// Codec-owned commands accepted by the native relay C ABI.
 ///
@@ -2917,8 +2922,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_admit_scope_json(
     ffi_call(|| {
         unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
         let host = unsafe { live_arg(host)? };
-        let request =
-            unsafe { bounded_bytes_arg(request, request_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)? };
+        let request = unsafe {
+            bounded_bytes_arg(request, request_len, NATIVE_RELAY_SCHEMA_SOURCE_MAX_BYTES)?
+        };
         let request = serde_json::from_slice::<TrustedRelayScopeAdmissionJson>(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?
             .normalize()?;
@@ -2975,7 +2981,11 @@ pub unsafe extern "C" fn jazz_native_relay_host_attach_canonical_schema_json(
         let host = unsafe { live_arg(host)? };
         let capability = unsafe { capability_arg(session_capability, capability_len)? };
         let schema = unsafe {
-            bounded_bytes_arg(schema_json, schema_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)?
+            bounded_bytes_arg(
+                schema_json,
+                schema_len,
+                NATIVE_RELAY_SCHEMA_SOURCE_MAX_BYTES,
+            )?
         };
         let schema =
             std::str::from_utf8(schema).map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
