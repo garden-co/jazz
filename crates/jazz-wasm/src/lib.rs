@@ -1226,6 +1226,52 @@ impl WasmDb {
         ))
     }
 
+    /// `updateLargeValues` with `{ head?, base?, updatedAtMs? }`: through a
+    /// branch view, the edits apply to the value the view shows.
+    #[wasm_bindgen(js_name = updateLargeValuesWithOptions)]
+    pub fn update_large_values_with_options(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let mutations = large_value_updates(mutations)?;
+        let inner = self.open_inner()?;
+        inner.write(inner.binding.update_large_values_with_options(
+            &table,
+            &row_id,
+            &patch,
+            mutations,
+            &self::options(options),
+        ))
+    }
+
+    /// `updateLargeValuesInTransaction` with `{ head?, base?, updatedAtMs? }`.
+    #[wasm_bindgen(js_name = updateLargeValuesInTransactionWithOptions)]
+    pub fn update_large_values_in_transaction_with_options(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let mutations = large_value_updates(mutations)?;
+        self.binding()?
+            .update_large_values_in_transaction_with_options(
+                &open_transaction_id,
+                &table,
+                &row_id,
+                &patch,
+                mutations,
+                &self::options(options),
+            )
+            .map_err(host_error)
+    }
+
     #[wasm_bindgen(js_name = upsert)]
     pub fn upsert_with_options(
         &self,

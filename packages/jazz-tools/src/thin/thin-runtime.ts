@@ -1188,7 +1188,8 @@ export class ThinRuntime implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const context = this.writeTarget(writeContext, "Update");
-    // Branch views have no partial-value coordinate space yet (#2087).
+    // The thin protocol's `updateLargeValues` op carries no write target
+    // yet: refuse rather than edit the root.
     if (context.branchView) {
       throw new Error(
         "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",

@@ -278,6 +278,23 @@ fn update_options_as<O: HostObject>(
     })
 }
 
+/// `{ head?, base?, updatedAtMs? }` of a partial-value update. Its identity
+/// is the binding's (or the transaction's), so `author` and `attribution`
+/// are refused rather than ignored.
+fn large_value_update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
+    if options.has("author")? || options.has("attribution")? {
+        return Err(
+            "partial-value update options take no author or attribution: the write is the binding's own"
+                .into(),
+        );
+    }
+    Ok(UpdateOptions {
+        target: branch_view_target(options)?,
+        updated_at_ms: write_timestamp(options)?,
+        ..Default::default()
+    })
+}
+
 /// As [`update_options`]; the removed `branch` field is rejected even when
 /// `undefined`, so untyped callers cannot write to the root by accident.
 pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
@@ -1256,6 +1273,26 @@ impl Binding {
         )))
     }
 
+    /// [`Self::update_large_values`] with `{ head?, base?, updatedAtMs? }`:
+    /// through a branch view, the edits apply to the value the view shows
+    /// and copy an inherited row into the head (SPEC 11 §11.4). The write
+    /// is the binding's own, as [`Self::update_large_values`]'s is.
+    pub fn update_large_values_with_options<O: HostObject>(
+        &self,
+        table: &str,
+        row: &[u8],
+        patch: &[u8],
+        mutations: Vec<LargeValueUpdate>,
+        options: &O,
+    ) -> HostResult<Write> {
+        let row = row_uuid(row)?;
+        let patch = decode_cells(patch)?;
+        let options = large_value_update_options(options)?;
+        self.write(block_on(self.db.update_with_large_value_mutations(
+            table, row, patch, mutations, options,
+        )))
+    }
+
     /// Insert or update `row`.
     pub fn upsert<O: HostObject>(
         &self,
@@ -1510,6 +1547,34 @@ impl Binding {
                 .transpose()?,
             identity: self.staged_identity(id, WriteIdentity::Database)?,
             ..Default::default()
+        };
+        let staged = block_on(
+            self.db
+                .tx_ref(id)
+                .update_with_large_value_mutations(table, row, patch, mutations, options),
+        );
+        self.staged(id, staged)
+    }
+
+    /// [`Self::update_large_values_in_transaction`] with
+    /// `{ head?, base?, updatedAtMs? }` (see
+    /// [`Self::update_large_values_with_options`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_large_values_in_transaction_with_options<O: HostObject>(
+        &self,
+        id: &str,
+        table: &str,
+        row: &[u8],
+        patch: &[u8],
+        mutations: Vec<LargeValueUpdate>,
+        options: &O,
+    ) -> HostResult<()> {
+        let id = open_transaction(id)?;
+        let row = row_uuid(row)?;
+        let patch = decode_cells(patch)?;
+        let options = UpdateOptions {
+            identity: self.staged_identity(id, WriteIdentity::Database)?,
+            ..large_value_update_options(options)?
         };
         let staged = block_on(
             self.db

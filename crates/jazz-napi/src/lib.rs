@@ -2459,6 +2459,58 @@ impl NapiDb {
         Ok(inner.write(&env, write)?)
     }
 
+    /// Typed partial-value updates with `{ head?, base?, updatedAtMs? }`:
+    /// through a branch view, the edits apply to the value the view shows.
+    #[napi(js_name = "updateLargeValuesWithOptions")]
+    pub fn update_large_values_with_options(
+        &self,
+        env: Env,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        options: Option<UpdateOptions>,
+    ) -> js::Result<Write> {
+        let mutations = large_value_updates(mutations)?;
+        let inner = self.open_inner()?;
+        let write = inner.binding.update_large_values_with_options(
+            &table,
+            &row_id,
+            &patch,
+            mutations,
+            &update_options(options),
+        );
+        Ok(inner.write(&env, write)?)
+    }
+
+    /// Typed partial-value updates staged inside an open transaction, with
+    /// `{ head?, base?, updatedAtMs? }`.
+    #[napi(js_name = "updateLargeValuesInTransactionWithOptions")]
+    #[allow(clippy::too_many_arguments)] // The JS binding has six arguments plus the NAPI environment.
+    pub fn update_large_values_in_transaction_with_options(
+        &self,
+        env: &Env,
+        open_transaction_id: String,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        options: Option<UpdateOptions>,
+    ) -> js::Result<()> {
+        let mutations = large_value_updates(mutations)?;
+        Ok(self
+            .binding()?
+            .update_large_values_in_transaction_with_options(
+                &open_transaction_id,
+                &table,
+                &row_id,
+                &patch,
+                mutations,
+                &update_options(options),
+            )
+            .map_err(|error| sync_host_error(env, error))?)
+    }
+
     #[napi(js_name = "upsert")]
     pub fn upsert_with_options(
         &self,

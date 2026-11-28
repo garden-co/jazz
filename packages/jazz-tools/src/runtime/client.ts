@@ -2233,12 +2233,12 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (branch) {
-      throw new Error(
-        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
-      );
-    }
-    const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
+    // Through a branch view the runtime edits the value the view shows; a
+    // runtime that cannot (the thin runtime) refuses explicitly.
+    const writeContext = this.writeContext(session, attribution, openTransactionId, {
+      updatedAt,
+      branch,
+    });
     if (!this.runtime.updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }

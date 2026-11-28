@@ -101,9 +101,10 @@ the sync sets the field's text, the browser's own undo (Ctrl+Z) does not reach p
 value. An editor that mounted before the row loaded must not name `""`: it would add the whole
 text again.
 
-`editedFrom` is not supported yet in branch views, on a column with its own transform, or (on a
-backend) for a write as a user outside a transaction; those writes throw. `upsert` does not take
-it.
+`editedFrom` is not supported yet on a column with its own transform, in a branch view on React
+Native or the thin client, or (on a backend) for a write as a user outside a transaction; those
+writes throw. `upsert` does not take it. In a branch view it merges over the value the view shows,
+copying an inherited row into the draft (see [Drafts and branches](/docs/recipes/drafts-and-branches)).
 
 Queries, filters and permissions see the text itself. Large values work too: a long note is stored
 and synced like any other large string.

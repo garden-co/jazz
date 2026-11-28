@@ -203,6 +203,30 @@ db.delete(app.documents, inheritedDocumentId, {
 The main branch-local row remains unchanged. A deletion is branch-qualified too, so deleting the
 object from the draft does not delete it from main.
 
+### Collaborative edits in a draft
+
+Text-merge columns, `editedFrom`, `applyDiffs`, counters and sets work through a branch view as they
+do outside one. An edit of a row the draft still inherits applies to main's value (or the frozen
+base's value at its cut) and copies the row into the draft:
+
+```ts
+db.update(
+  app.documents,
+  inheritedDocumentId,
+  { body: editorText },
+  { branch: "draft", base: "main", editedFrom: { body: textTheEditorStartedFrom } },
+);
+```
+
+After the copy, the draft keeps its own value: later edits of main no longer show in the draft.
+When two people make the draft's first edit of the same inherited row at once, their edits merge as
+any concurrent edits do, so neither person's text is lost. An edit through the view of a row the
+draft has deleted throws, as for any row the view does not show; it never edits main's value
+underneath.
+
+On React Native and the thin client, `applyDiffs` and `editedFrom` in a branch view throw as not
+supported yet.
+
 ## Branch-column rules
 
 Every `branchBy` entry must name a non-null, key-encodable ordinary column. Branch columns are

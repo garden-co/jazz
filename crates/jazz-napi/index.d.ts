@@ -118,6 +118,16 @@ export declare class NapiDb {
    * reach this encoded boundary.
    */
   updateLargeValues(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
+  /**
+   * Typed partial-value updates with `{ head?, base?, updatedAtMs? }`:
+   * through a branch view, the edits apply to the value the view shows.
+   */
+  updateLargeValuesWithOptions(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, options?: UpdateOptions | undefined | null): Write
+  /**
+   * Typed partial-value updates staged inside an open transaction, with
+   * `{ head?, base?, updatedAtMs? }`.
+   */
+  updateLargeValuesInTransactionWithOptions(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, options?: UpdateOptions | undefined | null): void
   upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
   upsertInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
   delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write

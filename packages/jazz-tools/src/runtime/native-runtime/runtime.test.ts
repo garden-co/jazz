@@ -1762,7 +1762,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         descriptors,
         JSON.stringify({ branch_view: { head: { values: {} } } }),
       ),
-    ).toThrow("are not yet supported in branch views");
+    ).toThrow("in branch views are not supported by this runtime yet");
     expect(() =>
       runtime.updateLargeValues(
         "todos",
@@ -1773,6 +1773,58 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).toThrow("do not yet support a session or attributed identity outside a transaction");
     expect(calls).toHaveLength(1);
+  });
+
+  it("routes typed large-value updates in a branch view through the view-aware entrypoints", () => {
+    const calls: unknown[][] = [];
+    const staged: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => Uint8Array.from([0]),
+            updateLargeValues: () => {
+              throw new Error("a branch-view update must not write the root");
+            },
+            updateLargeValuesWithOptions: (...args: unknown[]) => {
+              calls.push(args);
+              return fakeWrite();
+            },
+            updateLargeValuesInTransactionWithOptions: (...args: unknown[]) => {
+              staged.push(args);
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const descriptors = [
+      { kind: "text_edit", column: "title", text: "draft", edited_from: "main" },
+    ];
+    const head = { values: { branch_id: [1] } };
+    const base = { values: { branch_id: [2] } };
+
+    const receipt = runtime.updateLargeValues(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      descriptors,
+      JSON.stringify({ branch_view: { head, base }, updated_at: 44_000 }),
+    );
+
+    expect(receipt.kind).toBe("committed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe("todos");
+    expect(calls[0]?.[3]).toBe(descriptors);
+    expect(calls[0]?.[4]).toEqual({ head, base, updatedAtMs: 44_000 });
+    expect(staged).toHaveLength(0);
   });
 
   it("accepts typed partial projections as ordinary carrier columns", async () => {
