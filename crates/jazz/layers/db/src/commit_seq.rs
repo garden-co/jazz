@@ -16,7 +16,7 @@
 //!   ever held. A store without the row never had one.
 //! - Two triggers on each such table, `<table>__seq_v1_ins` (AFTER INSERT)
 //!   and `<table>__seq_v1_upd` (AFTER UPDATE OF the seq column), raise `v`
-//!   to every accepted seq written there ([`trigger_ddl`]).
+//!   to every accepted seq written there ([`trigger_sql`]).
 //!
 //! Triggers, rather than a write in each commit path: a trigger runs inside
 //! the statement that writes the seq, so the row and the data commit or
@@ -31,7 +31,10 @@
 //! triggers (every table of a store that predates the row, or one an older
 //! core created) is scanned, and covered in the same transaction that gives
 //! it its triggers and raises `v` past what that scan found. If the row is
-//! missing, every table is scanned, as before.
+//! missing, every table is scanned, as before. A trigger counts only when
+//! its stored SQL is exactly the text this build writes; one under this
+//! encoding's name with any other SQL fails the open with a storage error
+//! naming it, as a foreign large-value trigger does (`large::triggers`).
 //!
 //! An open only reads: a store this build opens but never writes keeps its
 //! file as it was (the pinned client corpus checks that). So an open scans
@@ -45,7 +48,7 @@
 //! format is unchanged ([`crate::format::STORAGE_FORMAT`]); it ignores the
 //! row and the triggers, and still recovers its seq by the scan.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::db::sync::{PENDING, band_start};
 use crate::options::{Error, ErrorCode};
@@ -89,9 +92,12 @@ fn targets<'a>(tables: impl IntoIterator<Item = &'a String>) -> Vec<Target> {
 }
 
 /// The two triggers that raise the row to every accepted seq written to
-/// `table`'s `column`. Pinned byte for byte by a fixture: changing them is
-/// a new encoding, under new names.
-pub(crate) fn trigger_ddl(table: &str, column: &str) -> String {
+/// `table`'s `column`, each as its name and its SQL exactly as SQLite
+/// stores it in `sqlite_master.sql` (the statement without its `;`).
+/// Pinned byte for byte by a fixture: changing them is a new encoding,
+/// under new names. A trigger is only trusted when its stored SQL is this
+/// text ([`existing`]).
+pub(crate) fn trigger_sql(table: &str, column: &str) -> [(String, String); 2] {
     let accepted = format!(
         "NEW.{column} >= 0 AND NEW.{column} < {}",
         band_start(PENDING)
@@ -100,12 +106,24 @@ pub(crate) fn trigger_ddl(table: &str, column: &str) -> String {
         "UPDATE _jazz_meta SET v = NEW.{column} WHERE k = '{SEQ_META}' AND v < NEW.{column};"
     );
     let on = quote(table);
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {on} WHEN {accepted} BEGIN {raise} END;\n\
-         CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {column} ON {on} WHEN {accepted} BEGIN {raise} END;\n",
-        ins = quote(&format!("{table}{INSERT_TRIGGER}")),
-        upd = quote(&format!("{table}{UPDATE_TRIGGER}")),
-    )
+    let ins = format!("{table}{INSERT_TRIGGER}");
+    let upd = format!("{table}{UPDATE_TRIGGER}");
+    [
+        (
+            ins.clone(),
+            format!(
+                "CREATE TRIGGER {} AFTER INSERT ON {on} WHEN {accepted} BEGIN {raise} END",
+                quote(&ins)
+            ),
+        ),
+        (
+            upd.clone(),
+            format!(
+                "CREATE TRIGGER {} AFTER UPDATE OF {column} ON {on} WHEN {accepted} BEGIN {raise} END",
+                quote(&upd)
+            ),
+        ),
+    ]
 }
 
 /// What [`recover`] found.
@@ -135,17 +153,22 @@ pub(crate) async fn recover<'a>(
     cover: Cover,
 ) -> Result<Recovered, Error> {
     let row = read(conn).await?;
-    let covered = if row.is_some() {
-        covered(conn).await?
-    } else {
-        // Without the row no trigger kept anything: every table is read.
-        BTreeSet::new()
-    };
+    let existing = existing(conn).await?;
     let mut seq = row.unwrap_or(0);
     let mut scanned = Vec::new();
     let mut ddl = String::new();
     for target in targets(tables) {
-        if covered.contains(&target.table) {
+        let expected = trigger_sql(&target.table, target.column);
+        let mut missing = Vec::new();
+        for (name, sql) in expected {
+            match existing.get(&name) {
+                Some((on, stored)) if *on == target.table && *stored == sql => {}
+                Some((on, stored)) => return Err(foreign_trigger(&name, on, stored)),
+                None => missing.push(sql),
+            }
+        }
+        // Without the row no trigger kept anything: every table is read.
+        if row.is_some() && missing.is_empty() {
             continue;
         }
         let max: Option<i64> = conn
@@ -161,7 +184,10 @@ pub(crate) async fn recover<'a>(
             .await
             .map_err(storage)?;
         seq = seq.max(max.unwrap_or(0) as u64);
-        ddl.push_str(&trigger_ddl(&target.table, target.column));
+        for sql in missing {
+            ddl.push_str(&sql);
+            ddl.push_str(";\n");
+        }
         scanned.push(target.table);
     }
     if cover == Cover::Read {
@@ -203,23 +229,26 @@ async fn read(conn: &Storage) -> Result<Option<u64>, Error> {
             ErrorCode::Storage,
             format!(
                 "corrupt commit seq: _jazz_meta '{SEQ_META}' holds {other:?}, not an accepted \
-                 seq; refusing to resume numbering from it"
+                 seq; refusing to resume numbering from it. Deleting that row is safe \
+                 (DELETE FROM _jazz_meta WHERE k = '{SEQ_META}'): the next open recovers \
+                 the seq by scanning every table, and the next write records the row again"
             ),
         )),
     }
 }
 
-/// The tables that have both triggers.
-async fn covered(conn: &Storage) -> Result<BTreeSet<String>, Error> {
-    let names: Vec<(String, String)> = (async {
+/// Every trigger whose name ends in one of this encoding's suffixes: its
+/// name, its table and its stored SQL.
+async fn existing(conn: &Storage) -> Result<BTreeMap<String, (String, String)>, Error> {
+    let triggers: Vec<(String, String, Option<String>)> = (async {
         let mut statement = conn.prepare(
-            "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' \
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' \
              AND (name GLOB ('*' || ?1) OR name GLOB ('*' || ?2))",
         )?;
         {
             statement
                 .query_map([INSERT_TRIGGER, UPDATE_TRIGGER], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .await?
                 .collect::<_>()
@@ -228,14 +257,26 @@ async fn covered(conn: &Storage) -> Result<BTreeSet<String>, Error> {
     })
     .await
     .map_err(storage)?;
-    let has = |suffix: &str, table: &str| {
-        names
-            .iter()
-            .any(|(name, on)| on == table && *name == format!("{table}{suffix}"))
-    };
-    Ok(names
-        .iter()
-        .map(|(_, table)| table.clone())
-        .filter(|table| has(INSERT_TRIGGER, table) && has(UPDATE_TRIGGER, table))
+    Ok(triggers
+        .into_iter()
+        .map(|(name, on, sql)| (name, (on, sql.unwrap_or_default())))
         .collect())
+}
+
+/// The refusal for a trigger under one of this encoding's names that is
+/// not the one this build writes: it may not keep the row, so the row
+/// cannot be trusted for its table. Silently skipping it (or replacing it)
+/// would hide whatever wrote it.
+fn foreign_trigger(name: &str, on: &str, stored: &str) -> Error {
+    Error::new(
+        ErrorCode::Storage,
+        format!(
+            "commit seq trigger {} on {} is not the one this build writes (it holds `{stored}`); \
+             refusing to trust the commit seq row for that table. Dropping it is safe \
+             (DROP TRIGGER {}): the next open scans that table, and the next write recreates it",
+            quote(name),
+            quote(on),
+            quote(name),
+        ),
+    )
 }
