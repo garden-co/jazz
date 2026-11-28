@@ -73,10 +73,42 @@ expect_main_tree() {
   return 1
 }
 
+# A PR whose head is already in main was landed by an earlier PR of this group
+# that contains it (a stack's top): GitHub marks it merged itself, and merging
+# it again would 404. Only that case is skipped: the head must be an ancestor
+# of main *and* GitHub must report the PR merged.
+head_in_main() {
+  local status
+  status="$(gh api "repos/${REPO}/compare/${1}...main" --jq .status 2>/dev/null)" || return 1
+  [ "${status}" = ahead ] || [ "${status}" = identical ]
+}
+
+wait_merged() {
+  for _ in $(seq 1 30); do
+    [ "$(gh api "repos/${REPO}/pulls/${1}" --jq .merged 2>/dev/null)" = true ] && return 0
+    sleep "${LAND_TREE_POLL_SECONDS:-2}"
+  done
+  return 1
+}
+
 for ((i = start; i < ${#prs[@]}; i++)); do
   read -r pr sha tree <<<"${prs[$i]}"
   echo "::group::#${pr} at ${sha:0:8}"
+  # Before each PR main must be on the group's tree before it: the base, or
+  # the previous PR's post-merge tree.
+  if [ "${i}" -eq 0 ]; then prior="${base_tree}"; else read -r _ _ prior <<<"${prs[$((i - 1))]}"; fi
+  expect_main_tree "${prior}"
   pull="$(gh api "repos/${REPO}/pulls/${pr}")"
+  if [ "$(jq -r .head.sha <<<"${pull}")" = "${sha}" ] && head_in_main "${sha}"; then
+    if ! wait_merged "${pr}"; then
+      echo "::error::#${pr}'s head ${sha} is in main but GitHub does not mark the PR merged; stopping"
+      exit 1
+    fi
+    expect_main_tree "${tree}"
+    echo "#${pr} was landed by an earlier PR that contains it; main's tree is ${tree:0:8}"
+    echo "::endgroup::"
+    continue
+  fi
   if [ "$(jq -r .merged <<<"${pull}")" = true ]; then
     echo "::error::#${pr} is already merged but main's tree does not show it; stopping"
     exit 1
