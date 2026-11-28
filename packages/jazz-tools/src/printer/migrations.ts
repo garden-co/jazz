@@ -1,8 +1,11 @@
 /**
  * `jazz.app.json`'s `history` and `migrations` → `migrations/*.ts`
  * (`m.defineMigration`, the .64 stub shape) and `migrations/snapshots/*.json`
- * (the engine schema of each version, as `migrations create` writes them).
+ * (the engine schema of each version, as `migrations create` writes them),
+ * with `<snapshot>.encryption.json` beside the snapshot of each version that
+ * declares encryption: a snapshot holds only what is stored.
  */
+import { encryptionEntries, encryptionEntriesText } from "../dev/migrations.js";
 import type { AppJson, ColumnJson, MigrateOpJson, MigrationJson, TableJson } from "./app-json.js";
 import { jsLiteral, member, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
@@ -47,7 +50,13 @@ export async function printMigrations(
   const unsupported: Unsupported[] = [];
   const versions = app.history ?? {};
   const migrations = app.migrations ?? [];
-  if (Object.keys(versions).length === 0 && migrations.length === 0) return { files, unsupported };
+  const hasSealedType = Object.values(app.tables).some((table) =>
+    Object.values(table.encryption?.columns ?? {}).some(
+      (column) => typeof column === "object" && column.sealedType !== undefined,
+    ),
+  );
+  if (!hasSealedType && Object.keys(versions).length === 0 && migrations.length === 0)
+    return { files, unsupported };
 
   let time = (options.start ?? new Date()).getTime();
   const nextStamp = () => {
@@ -65,9 +74,11 @@ export async function printMigrations(
     version === undefined ? app.tables : versions[version]?.tables;
 
   for (const [name, snapshot] of [...snapshots, ["", current] as const]) {
-    void name;
-    files[`migrations/snapshots/${nextStamp()}-${shortHash(snapshot.hash)}.json`] =
-      JSON.stringify(snapshot.schema, null, 2) + "\n";
+    const file = `migrations/snapshots/${nextStamp()}-${shortHash(snapshot.hash)}`;
+    files[`${file}.json`] = JSON.stringify(snapshot.schema, null, 2) + "\n";
+    const entries = encryptionEntries(tablesOf(name || undefined)!);
+    if (Object.keys(entries).length > 0)
+      files[`${file}.encryption.json`] = encryptionEntriesText(entries);
   }
 
   migrations.forEach((migration, index) => {

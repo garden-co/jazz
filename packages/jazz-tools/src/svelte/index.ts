@@ -3,6 +3,7 @@ export { default as JazzSvelteClientProvider } from "./JazzSvelteClientProvider.
 export type { JazzClient } from "./create-jazz-client.js";
 export { getDb, getJazzContext, type JazzContext } from "./context.svelte.js";
 export { QuerySubscription, QuerySubscriptionOne } from "./query-subscription.svelte.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export { generateAuthSecret } from "../runtime/auth-secret-store.js";
 

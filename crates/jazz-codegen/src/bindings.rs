@@ -1,14 +1,21 @@
-//! Reading committed bindings back: the `source` and compiled schema a
-//! generated module embeds. Bindings are how `jazz validate` knows the
-//! schema the app last generated against, so it can tell an edit of
-//! `tables` that needs a migration from one that doesn't, and how
-//! `migrations create` finds the version to migrate from.
+//! Committed bindings record the source digest, schema history and
+//! encryption declarations an app generated against. Validation uses
+//! this record to distinguish a stale file from an unmigrated schema
+//! edit and to protect declarations that already shipped. Migration
+//! creation uses it to find the version to migrate from.
 
+use std::collections::{BTreeMap, HashMap};
+
+use jazz::tools::deployment::artifact::encryption::{
+    self, DeclaredEncryption, Entries, MigrationNames,
+};
 use jazz::tools::deployment::artifact::json::{self, Json};
-use jazz::tools::deployment::published::{PublishedSchema, parse_schema_hash};
+use jazz::tools::deployment::published::{
+    PublishMigrationRequest, PublishedSchema, parse_schema_hash,
+};
 use jazz::tools::public_schema::{Schema, SchemaHash};
 
-use crate::model::App;
+use crate::model::{App, Compiled};
 use crate::{CodegenError, Lang, ts};
 
 /// What committed bindings record of the app they were generated from.
@@ -21,6 +28,374 @@ pub struct Recorded {
     /// That file's current schema.
     pub current: SchemaHash,
     pub current_schema: Schema,
+    /// The current version's encryption entries, by table (empty when it
+    /// declares none): `migrations create` keeps them on the version it
+    /// moves into `history`.
+    pub encryption: Entries,
+    /// Includes versions that shipped with no encryption declarations.
+    history_encryption: BTreeMap<String, Entries>,
+}
+
+impl Recorded {
+    pub(crate) fn from_app(app: App, format: u32) -> Self {
+        let compiled = app.compiled;
+        let current_schema = compiled.current_schema().clone();
+        let (encryption, history_encryption) = recorded_entries(
+            compiled.schemas.iter().map(|(hash, _)| hash.to_string()),
+            compiled.current,
+            compiled.encryption,
+        );
+        Self {
+            source: app.source,
+            format,
+            current: compiled.current,
+            current_schema,
+            encryption,
+            history_encryption,
+        }
+    }
+}
+
+/// Check declarations for shared schema hashes and, if the bindings' schema
+/// is present, check its transition to the current version.
+pub(crate) fn check_recorded_version(
+    compiled: &Compiled,
+    recorded: &Recorded,
+) -> Result<bool, CodegenError> {
+    check_declarations_of(
+        compiled.schemas.iter().map(|(hash, _)| *hash),
+        compiled.encryption.as_ref(),
+        recorded,
+    )?;
+    let present = compiled
+        .schemas
+        .iter()
+        .any(|(hash, _)| *hash == recorded.current);
+    if present {
+        check_recorded_transition(recorded, compiled)?;
+    }
+    Ok(present)
+}
+
+/// Protect declarations even when the app file has not passed migration checks.
+pub(crate) fn check_declarations_of(
+    versions: impl IntoIterator<Item = SchemaHash>,
+    declared: Option<&DeclaredEncryption>,
+    recorded: &Recorded,
+) -> Result<(), CodegenError> {
+    let empty = Entries::new();
+    for version in versions {
+        let hash = version.to_string();
+        let before = if version == recorded.current {
+            &recorded.encryption
+        } else if let Some(entries) = recorded.history_encryption.get(&hash) {
+            entries
+        } else {
+            continue;
+        };
+        let after = declared
+            .and_then(|declared| declared.entries(&hash))
+            .unwrap_or(&empty);
+        check_unchanged(&hash, before, after)?;
+    }
+    Ok(())
+}
+
+/// With no migration, every table and column keeps its identity. A shipped
+/// hash keeps its declarations. A new hash is a sibling of the bindings'
+/// version to the deploy, since no migration leads to it.
+pub(crate) fn check_index_transition(
+    recorded: &Recorded,
+    to: &Schema,
+    entries: Option<&Entries>,
+) -> Result<(), CodegenError> {
+    if recorded.encryption.is_empty() && entries.is_none() {
+        return Ok(());
+    }
+    let target = SchemaHash::compute(to);
+    if target == recorded.current {
+        return check_unchanged(
+            &target.to_string(),
+            &recorded.encryption,
+            entries.unwrap_or(&Entries::new()),
+        );
+    }
+    encryption::check_index_transition(
+        (&recorded.current_schema, &recorded.encryption),
+        entries.unwrap_or(&Entries::new()),
+    )
+    .map_err(transition_error)
+}
+
+/// Check the current version against the bindings' one, which is in the
+/// file's history, as the deploy will. This takes the bindings' version as
+/// deployed (codegen can't tell which versions are). A migration from it,
+/// written or implied, was checked when the file loaded. Otherwise the
+/// deploy compares the declarations of the columns both versions store,
+/// as a descendant when migrations lead from it to the current version and
+/// as a sibling when they don't. Codegen follows the file's migrations
+/// through their nearest common version to find those columns, and checks
+/// nothing when no single path connects the two versions.
+fn check_recorded_transition(recorded: &Recorded, compiled: &Compiled) -> Result<(), CodegenError> {
+    let (from, to) = (recorded.current, compiled.current);
+    let entries = compiled.current_entries();
+    if from == to || recorded.encryption.is_empty() || entries.is_none() {
+        return Ok(());
+    }
+    if compiled
+        .migrations
+        .iter()
+        .any(|migration| ends(migration) == Some((from, to)))
+    {
+        return Ok(());
+    }
+    let Some(path) = only_path(compiled, from, to) else {
+        return Ok(());
+    };
+    let steps: Vec<(MigrationNames, bool)> = path
+        .iter()
+        .map(|(migration, forward)| {
+            let target = parse_schema_hash(&migration.to_hash).expect("loaded");
+            let schema = &compiled
+                .schemas
+                .iter()
+                .find(|(hash, _)| *hash == target)
+                .expect("loaded")
+                .1;
+            (
+                MigrationNames {
+                    migration,
+                    to: schema,
+                },
+                *forward,
+            )
+        })
+        .collect();
+    // Each step names a table and column in the next version along the path.
+    let step = |names: &MigrationNames, forward: bool, (table, column): (String, String)| {
+        if forward {
+            Some((names.new_table(&table)?, names.new_name(&table, &column)?))
+        } else {
+            Some((names.old_table(&table)?, names.old_name(&table, &column)?))
+        }
+    };
+    let forward = |at, (names, forward): &(MigrationNames, bool)| step(names, *forward, at);
+    let backward = |at, (names, forward): &(MigrationNames, bool)| step(names, !forward, at);
+    let table_only = |pair: Option<(String, String)>| pair.map(|(table, _)| table);
+    check_unlinked(
+        &recorded.encryption,
+        entries,
+        |table| {
+            table_only(
+                steps
+                    .iter()
+                    .rev()
+                    .try_fold((table.to_owned(), String::new()), backward),
+            )
+        },
+        |table| {
+            table_only(
+                steps
+                    .iter()
+                    .try_fold((table.to_owned(), String::new()), forward),
+            )
+        },
+        |table, name| {
+            steps
+                .iter()
+                .rev()
+                .try_fold((table.to_owned(), name.to_owned()), backward)
+                .map(|(_, name)| name)
+        },
+        |table, name| {
+            steps
+                .iter()
+                .try_fold((table.to_owned(), name.to_owned()), forward)
+                .map(|(_, name)| name)
+        },
+        path.iter().all(|(_, forward)| *forward),
+    )
+}
+
+/// The migrations from `from` to `to`, each with whether it runs that way,
+/// when exactly one path connects the two versions. With more, the
+/// deploy's stored identities depend on the order it admitted them in.
+fn only_path(
+    compiled: &Compiled,
+    from: SchemaHash,
+    to: SchemaHash,
+) -> Option<Vec<(&PublishMigrationRequest, bool)>> {
+    let mut adjacent = HashMap::<_, Vec<_>>::new();
+    for (index, migration) in compiled.migrations.iter().enumerate() {
+        let (source, target) = ends(migration)?;
+        adjacent
+            .entry(source)
+            .or_default()
+            .push((target, index, true));
+        adjacent
+            .entry(target)
+            .or_default()
+            .push((source, index, false));
+    }
+
+    let mut reached = vec![from];
+    let mut parent = HashMap::new();
+    let mut next = 0;
+    while let Some(&at) = reached.get(next) {
+        next += 1;
+        for &(other, index, forward) in adjacent.get(&at)? {
+            if other != from
+                && let std::collections::hash_map::Entry::Vacant(entry) = parent.entry(other)
+            {
+                entry.insert((at, index, forward));
+                reached.push(other);
+            }
+        }
+    }
+
+    let mut path = Vec::new();
+    let mut path_edges = std::collections::HashSet::new();
+    let mut anchor = HashMap::from([(from, from)]);
+    let mut at = to;
+    while at != from {
+        let &(previous, index, forward) = parent.get(&at)?;
+        path.push((&compiled.migrations[index], forward));
+        path_edges.insert(index);
+        anchor.insert(at, at);
+        at = previous;
+    }
+
+    // Removing the path's edges from the search tree leaves one subtree
+    // per path vertex. An extra edge gives a second simple path exactly
+    // when it connects two different subtrees.
+    for at in reached.into_iter().skip(1) {
+        let (previous, _, _) = parent[&at];
+        let nearest = anchor[&previous];
+        anchor.entry(at).or_insert(nearest);
+    }
+    for (at, edges) in &adjacent {
+        for &(other, edge, _) in edges {
+            if !path_edges.contains(&edge) && anchor.get(at) != anchor.get(&other) {
+                return None;
+            }
+        }
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn ends(migration: &PublishMigrationRequest) -> Option<(SchemaHash, SchemaHash)> {
+    Some((
+        parse_schema_hash(&migration.from_hash).ok()?,
+        parse_schema_hash(&migration.to_hash).ok()?,
+    ))
+}
+
+/// The deploy's check of a version that no migration leads to from the
+/// bindings' version, with `precedes` true when migrations lead to it.
+fn check_unlinked(
+    recorded: &Entries,
+    entries: Option<&Entries>,
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+    precedes: bool,
+) -> Result<(), CodegenError> {
+    let empty = Entries::new();
+    encryption::check_unlinked_columns(
+        recorded,
+        entries.unwrap_or(&empty),
+        old_table,
+        old_name,
+        |table, was, old, new| {
+            // A lens cannot resolve a name introduced independently on both
+            // branches. Only the catalogue can compare its stored identity.
+            encryption::check_space_matches(
+                table,
+                old,
+                new,
+                new_table(&old.scope).is_none_or(|scope| scope == new.scope),
+                new_name(was, &old.space).is_none_or(|space| space == new.space),
+            )
+        },
+        precedes,
+    )
+    .map_err(transition_error)
+}
+
+fn transition_error(reason: String) -> CodegenError {
+    CodegenError::new(format!(
+        "{}: {reason}",
+        jazz::tools::deployment::artifact::APP_FILE
+    ))
+}
+
+/// Refuse `after` as version `hash`'s declarations when they differ from
+/// what it shipped, `before`.
+fn check_unchanged(hash: &str, before: &Entries, after: &Entries) -> Result<(), CodegenError> {
+    let changed = changed_declarations(before, after);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(CodegenError::new(format!(
+        "{}: the encryption declarations of version {}, which your committed bindings were \
+         generated from, can't change, and its stored columns are the same: {} changed. \
+         Restore the declaration as that version shipped it. To change an encrypted column's \
+         type, copy the data into a new encrypted table (docs/e2ee/limits#queries-and-schema)",
+        jazz::tools::deployment::artifact::APP_FILE,
+        &hash[..12],
+        changed.join(", ")
+    )))
+}
+
+/// The tables and columns whose declarations differ between `before` and
+/// `after`: `table.column` for an encrypted column, `table` for the rest of
+/// an entry. The order of `equality` doesn't count.
+fn changed_declarations(before: &Entries, after: &Entries) -> Vec<String> {
+    let tables: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    let mut changed = Vec::new();
+    for table in tables {
+        let (Some(old), Some(new)) = (before.get(table), after.get(table)) else {
+            changed.push(table.clone());
+            continue;
+        };
+        let columns: std::collections::BTreeSet<&String> =
+            old.columns.keys().chain(new.columns.keys()).collect();
+        for column in columns {
+            if old.columns.get(column) != new.columns.get(column) {
+                changed.push(format!("{table}.{column}"));
+            }
+        }
+        let sorted = |list: &[String]| {
+            let mut list = list.to_vec();
+            list.sort();
+            list
+        };
+        if old.space != new.space
+            || old.scope != new.scope
+            || sorted(&old.equality) != sorted(&new.equality)
+        {
+            changed.push(table.clone());
+        }
+    }
+    changed
+}
+
+fn recorded_entries(
+    versions: impl Iterator<Item = String>,
+    current: SchemaHash,
+    encryption: Option<DeclaredEncryption>,
+) -> (Entries, BTreeMap<String, Entries>) {
+    let mut entries = encryption.unwrap_or_default().versions;
+    let current = current.to_string();
+    let mut history = BTreeMap::new();
+    for hash in versions.filter(|hash| hash != &current) {
+        history
+            .entry(hash)
+            .or_insert_with_key(|hash| entries.remove(hash).unwrap_or_default());
+    }
+    (entries.remove(&current).unwrap_or_default(), history)
 }
 
 /// The digest of what the generator wrote that `lang`'s bindings record,
@@ -119,6 +494,16 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
         .map(|s| serde_json::from_str(&json::print(s)))
         .ok_or_else(|| refuse("`schema.schemas` is missing"))?
         .map_err(|e| refuse(&format!("schema.schemas: {e}")))?;
+    let encryption = schema
+        .get("encryption")
+        .map(|e| serde_json::from_str::<DeclaredEncryption>(&json::print(e)))
+        .transpose()
+        .map_err(|e| refuse(&format!("schema.encryption: {e}")))?;
+    let (encryption, history_encryption) = recorded_entries(
+        schemas.iter().map(|schema| schema.hash.clone()),
+        current,
+        encryption,
+    );
     let current_schema = schemas
         .into_iter()
         .find(|s| parse_schema_hash(&s.hash).is_ok_and(|h| h == current))
@@ -132,6 +517,8 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
         source,
         current,
         current_schema,
+        encryption,
+        history_encryption,
     })
 }
 
@@ -304,15 +691,12 @@ pub fn staleness(
         Ok(recorded) => recorded,
         Err(error) => return Ok(Some(Staleness::Unreadable(error.message().to_string()))),
     };
-    if !app
-        .compiled
-        .schemas
-        .iter()
-        .any(|(h, _)| *h == recorded.current)
-    {
+    if !check_recorded_version(&app.compiled, &recorded)? {
         // A change of single-column indexes changes the schema's hash, not
         // its version or its rows (#5494): regenerating is enough.
-        if differs_only_in_indexes(&recorded.current_schema, app.compiled.current_schema()) {
+        let to = app.compiled.current_schema();
+        if differs_only_in_indexes(&recorded.current_schema, to) {
+            check_index_transition(&recorded, to, app.compiled.current_entries())?;
             return Ok(Some(Staleness::OutOfDate));
         }
         return Ok(Some(Staleness::SchemaChanged));

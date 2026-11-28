@@ -3,7 +3,7 @@
 export type ColumnJson = string | ColumnObject;
 
 export interface ColumnObject {
-  type?: string;
+  type?: ColumnJson;
   enum?: string[];
   json?: unknown;
   array?: ColumnJson;
@@ -22,6 +22,12 @@ export type RelationJson =
 export interface TableJson {
   columns: Record<string, ColumnJson>;
   relations?: Record<string, RelationJson>;
+  encryption?: {
+    space: string;
+    scope: string;
+    columns: Record<string, string | (ColumnObject & { sealedType?: ColumnJson })>;
+    equality?: string[];
+  };
   indexes?: (string | string[])[];
   branchBy?: string[];
   history?: "latest";
@@ -51,6 +57,8 @@ export interface AppJson {
   history?: Record<string, { tables: Record<string, TableJson>; $comment?: string }>;
   migrations?: MigrationJson[];
   transforms?: Record<string, { stored: ColumnJson; view: ColumnJson }>;
+  /** App-wide encryption settings from the app file. */
+  encryption?: Record<string, unknown>;
 }
 
 export type PolicyJson =
@@ -78,7 +86,7 @@ export interface PermissionsJson {
 export function columnKind(column: ColumnJson | undefined): string | undefined {
   if (column === undefined) return undefined;
   if (typeof column === "string") return column.replace(/\?$/, "");
-  if (column.type) return column.type;
+  if (column.type) return columnKind(column.type);
   if (column.enum) return "enum";
   if (column.json !== undefined) return "json";
   if (column.array !== undefined) return "array";

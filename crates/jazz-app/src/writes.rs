@@ -5,7 +5,7 @@ use jazz::tools::{DurabilityTier, JazzClient, ObjectId, TransactionId};
 
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
-use crate::table::{Insert, Table};
+use crate::table::{Insert, Table, Updatable};
 
 /// What a write does once committed locally: on a [`Jazz::durable`]
 /// handle, wait until it reached that tier.
@@ -157,12 +157,18 @@ impl Jazz {
 
     /// Writes the row with this id: inserts it if there is none, otherwise
     /// replaces the columns `new` sets. Returns the row as stored.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = new.into_cells(&implementations)?;
-            let written = client.upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
+            let written = crate::encryption::with_key_wait(&client, || {
+                client.upsert(<N::Row as Table>::NAME, *id.uuid(), cells.clone())
+            })
+            .await?;
             settle.settle(&client, written).await?;
             read_back::<N::Row>(&client, id, &implementations).await
         })
@@ -170,20 +176,23 @@ impl Jazz {
     }
 
     /// Brings back the deleted row of `T` with this id, as it was.
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.restore_cells::<T>(id, None).await
     }
 
     /// Brings back the deleted row with this id, with `new`'s values. A
     /// restore replaces the whole row, so it takes the full insert, as TS's
     /// `restore(table, id, data)` does.
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.info.implementations)?;
         self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
             .await
     }
 
-    async fn restore_cells<T: Table>(
+    async fn restore_cells<T: Updatable>(
         &self,
         id: ObjectId,
         cells: Option<Vec<(String, jazz::tools::Value)>>,
@@ -191,7 +200,10 @@ impl Jazz {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = client.restore(T::NAME, id, cells)?;
+            let written = crate::encryption::with_key_wait(&client, || {
+                client.restore(T::NAME, id, cells.clone())
+            })
+            .await?;
             settle.settle(&client, written).await?;
             read_back::<T>(&client, id, &implementations).await
         })

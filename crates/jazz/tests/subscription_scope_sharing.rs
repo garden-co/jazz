@@ -38,7 +38,7 @@ fn open() -> Db {
         },
     )))
     .unwrap();
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     jazz::db::block_on(db.insert(
         "notes",
         BTreeMap::from([("body".into(), Value::String("secret".into()))]),
@@ -177,7 +177,7 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             },
         )))
         .unwrap();
-        jazz::db::block_on(db.set_authority());
+        jazz::db::block_on(db.set_authority()).unwrap();
         jazz::db::block_on(db.insert(
             "notes",
             BTreeMap::from([("body".into(), Value::String("secret".into()))]),

@@ -132,8 +132,13 @@ if (route.endsWith("/branches/main")) {
   pr.merged = true;
   state.mainTree = pr.landsTree;
   state.merged.push(Number(m[1]));
+  // GitHub marks PRs whose heads the merge brought in as merged itself.
+  state.inMain = [...(state.inMain || []), pr.head.sha, ...(pr.contains || []).map((n) => state.pulls[n].head.sha)];
+  for (const n of pr.contains || []) state.pulls[n].merged = true;
   fs.writeFileSync(statePath, JSON.stringify(state));
   out({ merged: true, sha: "0".repeat(40) });
+} else if ((m = route.match(/compare\\/([0-9a-f]+)\\.\\.\\.main$/))) {
+  out({ status: (state.inMain || []).includes(m[1]) ? "ahead" : "diverged" });
 } else if ((m = route.match(/pulls\\/(\\d+)$/))) {
   out(state.pulls[m[1]]);
 } else if ((m = route.match(/issues\\/(\\d+)\\/comments$/))) {
@@ -259,4 +264,146 @@ test("land-group stops when a merge leaves main on an unexpected tree", () => {
   });
   assert.notEqual(result.status, 0);
   assert.deepEqual(state.merged, [21]);
+});
+
+test("land-group stops merging once a containing PR has landed the rest of the group", () => {
+  const { dir, git, commitFile, cut } = makeRepo();
+  const main = commitFile("base");
+  git("checkout", "-qb", "b", main);
+  const b = commitFile("b");
+  git("checkout", "-qb", "a", b);
+  const a = commitFile("a");
+  // #21's head contains #22's, as a stack's top does: landing #21 lands both.
+  const group = cut(main, "g8", [
+    [21, a],
+    [22, b],
+  ]);
+  assert.equal(group.trees[0], group.trees[1]);
+  const green = [
+    { context: "full-suite", state: "success", creator: { login: "github-actions[bot]" } },
+  ];
+  const approved = (sha) => [
+    { author_association: "OWNER", body: `Approved by Anselm (via project chat) at ${sha}` },
+  ];
+  const gh = fakeGh(dir, {
+    mainTree: git("rev-parse", `${main}^{tree}`),
+    merged: [],
+    pulls: {
+      21: { merged: false, head: { sha: a }, landsTree: group.trees[0], contains: [22] },
+      // GitHub marks #22 merged on its own once #21 lands; merging it again 404s.
+      22: { merged: false, head: { sha: b }, landsTree: "f".repeat(40) },
+    },
+    comments: { 21: approved(a), 22: approved(b) },
+    statuses: { [a]: green, [b]: green },
+  });
+  const result = run(landGroup, [group.final, "g8"], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: `${gh.bin}:${process.env.PATH}`,
+      REPO: "o/r",
+      GH_TOKEN: "x",
+      LAND_WAIT_SECONDS: "0",
+      LAND_TREE_POLL_SECONDS: "0",
+    },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /landed by an earlier PR that contains it/);
+  assert.deepEqual(gh.read().merged, [21]);
+});
+
+test("land-group still merges a no-op or reverting PR that no earlier PR contains", () => {
+  const { dir, git, commitFile, cut } = makeRepo();
+  const main = commitFile("base");
+  git("checkout", "-qb", "x", main);
+  const x = commitFile("x");
+  git("checkout", "-qb", "y", main);
+  const y = commitFile("y");
+  git("checkout", "-qb", "undo-y", y);
+  git("rm", "-q", "y");
+  git("commit", "-qm", "undo y");
+  const undo = git("rev-parse", "HEAD");
+  // [21 adds x, 22 adds y, 23 removes y]: 23's post-merge tree equals 21's.
+  const group = cut(main, "g9", [
+    [21, x],
+    [22, y],
+    [23, undo],
+  ]);
+  assert.equal(group.trees[0], group.trees[2]);
+  const green = [
+    { context: "full-suite", state: "success", creator: { login: "github-actions[bot]" } },
+  ];
+  const approved = (sha) => [
+    { author_association: "OWNER", body: `Approved by Anselm (via project chat) at ${sha}` },
+  ];
+  const state = {
+    mainTree: git("rev-parse", `${main}^{tree}`),
+    merged: [],
+    pulls: {
+      21: { merged: false, head: { sha: x }, landsTree: group.trees[0] },
+      22: { merged: false, head: { sha: y }, landsTree: group.trees[1] },
+      23: { merged: false, head: { sha: undo }, landsTree: group.trees[2] },
+    },
+    comments: { 21: approved(x), 22: approved(y), 23: approved(undo) },
+    statuses: { [x]: green, [y]: green, [undo]: green },
+  };
+  const env = (bin) => ({
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    REPO: "o/r",
+    GH_TOKEN: "x",
+    LAND_WAIT_SECONDS: "0",
+    LAND_TREE_POLL_SECONDS: "0",
+  });
+  const gh = fakeGh(dir, state);
+  const result = run(landGroup, [group.final, "g9"], { cwd: dir, env: env(gh.bin) });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(gh.read().merged, [21, 22, 23]);
+});
+
+test("land-group never skips an unapproved PR just because main already has its tree", () => {
+  const { dir, git, commitFile, cut } = makeRepo();
+  const main = commitFile("base");
+  git("checkout", "-qb", "a", main);
+  const a = commitFile("a");
+  // #22 has #21's content but is a different commit, and nothing approved it.
+  git("checkout", "-qb", "a2", main);
+  fs.writeFileSync(path.join(dir, "a"), "a\n");
+  git("add", "a");
+  git("commit", "-qm", "same content");
+  const a2 = git("rev-parse", "HEAD");
+  const group = cut(main, "g10", [
+    [21, a],
+    [22, a2],
+  ]);
+  assert.equal(group.trees[0], group.trees[1]);
+  const green = [
+    { context: "full-suite", state: "success", creator: { login: "github-actions[bot]" } },
+  ];
+  const gh = fakeGh(dir, {
+    mainTree: git("rev-parse", `${main}^{tree}`),
+    merged: [],
+    pulls: {
+      21: { merged: false, head: { sha: a }, landsTree: group.trees[0] },
+      22: { merged: false, head: { sha: a2 }, landsTree: group.trees[1] },
+    },
+    comments: {
+      21: [{ author_association: "OWNER", body: `Approved by Anselm (via project chat) at ${a}` }],
+    },
+    statuses: { [a]: green, [a2]: green },
+  });
+  const result = run(landGroup, [group.final, "g10"], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: `${gh.bin}:${process.env.PATH}`,
+      REPO: "o/r",
+      GH_TOKEN: "x",
+      LAND_WAIT_SECONDS: "0",
+      LAND_TREE_POLL_SECONDS: "0",
+    },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /no Review Loop approval comment/);
+  assert.deepEqual(gh.read().merged, [21]);
 });

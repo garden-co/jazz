@@ -1,9 +1,10 @@
 package tools.jazz
 
 /** Why a Jazz call failed. */
-public sealed class JazzException(message: String) : Exception(message) {
+public sealed class JazzException(message: String, public val encryptionCode: String? = null) : Exception(message) {
     /** Refused: invalid input, a permission denied, or not supported yet. */
-    public class Refused(message: String) : JazzException(message)
+    public class Refused @JvmOverloads constructor(message: String, encryptionCode: String? = null) :
+        JazzException(message, encryptionCode)
 
     /** A permission denied it. */
     public class Permission(message: String) : JazzException(message)
@@ -15,7 +16,8 @@ public sealed class JazzException(message: String) : Exception(message) {
     public class Conflict(message: String) : JazzException(message)
 
     /** Storage or network failed. */
-    public class Io(message: String) : JazzException(message)
+    public class Io @JvmOverloads constructor(message: String, encryptionCode: String? = null) :
+        JazzException(message, encryptionCode)
 
     /** A subscription failed after it started (its `Flow` ends with this). */
     public class Subscription(message: String) : JazzException(message)

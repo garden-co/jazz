@@ -1,0 +1,48 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+    "tasks": {
+      "columns": {
+        "projectId": "uuid",
+        "title": "bytes",
+        "__e2ee_eq_title": "bytes",
+        "label": "string?",
+        "done": "boolean"
+      },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": { "title": { "type": "string?", "sealedType": "string" } },
+        "equality": ["title"]
+      }
+    },
+    "notes": { "columns": { "text": "string" } }
+  },
+  "history": {
+    "v1": {
+      "tables": {
+        "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+        "tasks": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "title": "bytes",
+            "__e2ee_eq_title": "bytes",
+            "label": "string?"
+          },
+          "encryption": {
+            "space": "projectId",
+            "scope": "projects",
+            "columns": { "title": "string" },
+            "equality": ["title"]
+          }
+        },
+        "notes": { "columns": { "text": "string" } }
+      }
+    }
+  },
+  "migrations": [
+    { "from": "v1", "migrate": { "tasks": { "done": { "add": "boolean", "default": false } } } }
+  ]
+}

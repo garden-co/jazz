@@ -1,0 +1,174 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "325defded707790e1a56f5ae5631b9f381f0af13321e926ca0a00be4068419cd"
+  },
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "canvases": {
+      "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+      "insert": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+      "update": "false",
+      "delete": "false"
+    },
+    "joinRequests": {
+      "read": {
+        "anyOf": [
+          "requester = session.user",
+          "exists rooms(id = this.roomId, $createdBy.account = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "requester = session.user",
+          "exists profiles(id = this.profileId, author = session.user)"
+        ]
+      },
+      "update": "false",
+      "delete": {
+        "anyOf": [
+          "requester = session.user",
+          "exists rooms(id = this.roomId, $createdBy.account = session.user)"
+        ]
+      }
+    },
+    "messages": {
+      "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+      "insert": {
+        "allOf": [
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+          "exists profiles(id = this.senderId, author = session.user)",
+          {
+            "anyOf": [
+              "canvasId = null",
+              "exists canvases(id = this.canvasId, roomId = this.roomId)"
+            ]
+          }
+        ]
+      },
+      "update": "false",
+      "delete": "exists profiles(id = this.senderId, author = session.user)"
+    },
+    "profiles": {
+      "read": {
+        "anyOf": [
+          "author = session.user",
+          "allowedTo.read(messagesViaSender)",
+          "allowedTo.read(membershipsViaProfile)",
+          "allowedTo.read(joinRequestsViaProfile)"
+        ]
+      },
+      "insert": "author = session.user",
+      "update": "author = session.user",
+      "delete": "author = session.user"
+    },
+    "reactions": {
+      "read": "allowedTo.read(message)",
+      "insert": {
+        "allOf": [
+          "author = session.user",
+          "exists messages(id = this.messageId, roomId = this.roomId)",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+        ]
+      },
+      "update": "false",
+      "delete": {
+        "allOf": [
+          "author = session.user",
+          "exists messages(id = this.messageId, roomId = this.roomId)",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+        ]
+      }
+    },
+    "readMarkers": {
+      "read": {
+        "allOf": [
+          "reader = session.user",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "reader = session.user",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+        ]
+      },
+      "update": {
+        "old": "reader = session.user",
+        "new": {
+          "allOf": [
+            "reader = session.user",
+            "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+          ]
+        }
+      },
+      "delete": "reader = session.user"
+    },
+    "roomMembers": {
+      "read": "allowedTo.read(room)",
+      "insert": {
+        "allOf": [
+          "exists rooms(id = this.roomId, $createdBy.account = session.user)",
+          "memberProfileId != null",
+          "exists profiles(id = this.memberProfileId, author = this.memberAuthor)",
+          {
+            "anyOf": [
+              "memberAuthor = session.user",
+              "exists joinRequests(roomId = this.roomId, requester = this.memberAuthor)"
+            ]
+          }
+        ]
+      },
+      "update": "false",
+      "delete": {
+        "anyOf": [
+          "exists rooms(id = this.roomId, $createdBy.account = session.user)",
+          "memberAuthor = session.user"
+        ]
+      }
+    },
+    "rooms": {
+      "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)",
+      "insert": "true",
+      "update": "$createdBy.account = session.user",
+      "delete": "$createdBy.account = session.user"
+    },
+    "strokes": {
+      "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+      "insert": {
+        "allOf": [
+          "author = session.user",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+          "exists canvases(id = this.canvasId, roomId = this.roomId)"
+        ]
+      },
+      "update": "false",
+      "delete": {
+        "allOf": [
+          "author = session.user",
+          "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)"
+        ]
+      }
+    }
+  }
+}

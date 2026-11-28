@@ -23,6 +23,7 @@ import {
   handOffThinWrites,
 } from "../thin/index.js";
 import {
+  isThinDb,
   setLocalFirstUpgrader,
   type LocalFirstLoader,
   type LocalFirstModule,
@@ -44,7 +45,7 @@ import {
   ownJazzSession,
   type JazzSession,
 } from "./jazz-session.js";
-import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
+import { clientScope, DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
   backendAnswered,
@@ -127,8 +128,9 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     onNewerBuild?: NewerBuildHandler;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
-     * storage instead of keeping it for that user's next sign-in. For shared
-     * devices. Jazz first waits up to 5 seconds for pending writes to upload;
+     * storage instead of keeping it for that user's next sign-in, and, in an
+     * app with end-to-end encryption, its keys in the private store. For
+     * shared devices. Jazz first waits up to 5 seconds for pending writes to upload;
      * writes still unsynced then are lost. A sign-out the page doesn't see
      * (on your server, or another user signing in, before a reload) is
      * wiped on the next page load, once your backend names someone else or
@@ -143,6 +145,13 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * upgrades to local-first in the background once the page has loaded; a
      * browser that upgraded this account before opens local-first straight
      * away, so it works offline.
+     *
+     * The thin client holds no keys. In an app with end-to-end encryption,
+     * an operation that touches an encrypted column waits (up to 30 seconds)
+     * for the local-first client and starts loading it; without this loader
+     * it fails with `EncryptionNeedsLocalFirstError`. A transaction callback
+     * that touches one may run twice before the local-first client has
+     * loaded, so keep its side effects outside it.
      */
     client?: LocalFirstLoader;
     /**
@@ -152,7 +161,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      *   The first paint needs no WASM.
      * - `"now"`: open the local-first client straight away, for every
      *   account. For apps that must work offline from the first render, or
-     *   that use `db.transaction`, which only the local-first client has.
+     *   that need encrypted columns from the first operation.
      *   If the local-first client can't load, the session fails (`retry()`
      *   tries again) rather than running thin.
      *
@@ -189,6 +198,7 @@ const BROWSER_SESSION_OPTIONS = {
   store: true,
   fetch: true,
   bearer: true,
+  encryption: true,
 } as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
 
 /** @internal A browser session's core, which follows your auth's signed-in user. */
@@ -201,6 +211,9 @@ export type BrowserJazzSession = UserFollowingSession<JazzClient>;
  */
 function refuseUnkeptOptions(clientConfig: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(clientConfig)) {
+    // The encryption option carries the app's own store: a live handle the
+    // client uses and does not keep as configuration.
+    if (key === "encryption") continue;
     let kept = value;
     if (key === "runtimeSources" && value && typeof value === "object") {
       // Live handles the Db leaves out of its config.
@@ -259,8 +272,7 @@ export async function openBrowserSessionCore(
   // upgrade to local-first.
   const page = (globalThis as { window?: Window }).window;
   if (page && typeof page.document !== "undefined") warnWindowJazzConflict(page);
-  if (config.serverUrl === null) return createDeviceOnlySession(config);
-  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
+  const deviceOnly = config.serverUrl === null;
   const {
     initial,
     clearOnSignOut,
@@ -274,10 +286,25 @@ export async function openBrowserSessionCore(
     store: _store,
     fetch: _fetch,
     bearer,
-    ...clientConfig
-  } = { ...config, serverUrl };
+    serverUrl = DEFAULT_SERVER_URL,
+    ...rest
+  } = config;
+  const clientConfig = serverUrl === null ? rest : { ...rest, serverUrl };
   refuseUnkeptOptions(clientConfig);
-  refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  if (deviceOnly) {
+    if (!loadLocalFirst) {
+      throw new Error(
+        'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
+      );
+    }
+    if (coreInitial(initial) === "signed-out") {
+      throw new Error(
+        'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
+      );
+    }
+  } else {
+    refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  }
   setNewerBuildHandler(onNewerBuild);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
@@ -287,22 +314,39 @@ export async function openBrowserSessionCore(
   );
   const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);
-  // A memory-only client has no storage to wipe.
-  const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
+  const persistentReplica = config.driver?.type !== "memory";
+  const keepsDataOnDevice = persistentReplica || !!clientConfig.encryption;
+  const wipesOnSignOut = !!clearOnSignOut && keepsDataOnDevice;
   // Accounts this page is opening a local-first client for.
   const opening = new Set<string>();
   /** Delete `account`'s store through its worker, without opening it. */
   const deleteStore = async (account: string) => {
-    // `jazz-tools/local-first` brings it in the app's own chunk; a loader
-    // that gives only `createClient` gets it loaded here.
-    const deleteLocalFirstStore =
-      (await loadLocalFirst!()).deleteLocalFirstStore ??
-      (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
-    return deleteLocalFirstStore({
-      ...clientConfig,
-      accountId: account,
-      accountRegistryAuthority: registry,
-    });
+    if (persistentReplica) {
+      // `jazz-tools/local-first` brings it in the app's own chunk; a loader
+      // that gives only `createClient` gets it loaded here.
+      const deleteLocalFirstStore =
+        (await loadLocalFirst!()).deleteLocalFirstStore ??
+        (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
+      const outcome = await deleteLocalFirstStore({
+        ...clientConfig,
+        accountId: account,
+        accountRegistryAuthority: registry,
+      });
+      if (outcome === "held") return outcome;
+    }
+    // The account's encryption keys go with its data: on a shared device the
+    // next user, or any script on the origin, could otherwise still use them.
+    // Only once the store is gone: a tab that still holds it keeps its keys.
+    if (clientConfig.encryption) {
+      const { wipeEncryptionKeys } = await import("../encryption/wipe-keys.js");
+      await wipeEncryptionKeys({
+        store: clientConfig.encryption.store,
+        appId: clientScope(clientConfig),
+        environment: clientConfig.env ?? "dev",
+        accountId: account,
+      });
+    }
+    return "deleted" as const;
   };
   // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
   const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;
@@ -319,6 +363,7 @@ export async function openBrowserSessionCore(
       },
       deleteStore,
       backendUser: async () => {
+        if (deviceOnly) return null;
         const user = await signedInIdentity(registry, fetcher);
         return user ? { issuer: user.issuer, subject: user.subject } : null;
       },
@@ -385,6 +430,26 @@ export async function openBrowserSessionCore(
   const openLocalFirst = (createDb: CreateAccountDb, account: AccountHandle) =>
     createRegisteredJazzClient("web", { ...clientConfig, account }, createDb);
 
+  if (deviceOnly) {
+    const missing = deviceAccountStoreMissing(accounts, "serverUrl: null (a device-only client)");
+    if (missing) throw missing;
+    const { createClient } = await loadLocalFirst!();
+    session = await createJazzSessionOwner({
+      accounts,
+      initial: "local-first",
+      clearOnSignOut: wipesOnSignOut,
+      wipeSignedOut: replicas ? wipeSignedOut : undefined,
+      openClient: (account) =>
+        keepsDataOnDevice
+          ? openReplica(createClient, account)
+          : openLocalFirst(createClient, account),
+      // No backend says who is signed in: there is nothing to ask again.
+      decorate: () => ({ reauthenticate: async () => {} }),
+    });
+    if (replicas) watchReplicas(session, replicas);
+    return session;
+  }
+
   const upgrade = async (loader: LocalFirstLoader) => {
     let upgraded: AccountHandle | undefined;
     await replaceJazzSessionClient<JazzClient>(
@@ -430,12 +495,21 @@ export async function openBrowserSessionCore(
       createThinDb,
     );
     let pending: Promise<void> | undefined;
-    setLocalFirstUpgrader(thin.db, (loader) => {
-      pending ??= upgrade(loader).finally(() => {
-        pending = undefined;
-      });
-      return pending;
-    });
+    // With the app's loader, an operation on an encrypted column waits for
+    // the upgrade, and starts it if it hasn't started.
+    setLocalFirstUpgrader(
+      thin.db,
+      (loader) => {
+        // Already handed over: a late call (a refusal's deferred start, or a
+        // wait that began before the hand-over) has nothing left to upgrade.
+        if (!isThinDb(thin.db)) return Promise.resolve();
+        pending ??= upgrade(loader).finally(() => {
+          pending = undefined;
+        });
+        return pending;
+      },
+      loadLocalFirst,
+    );
     return upgradableClient(thin);
   };
 
@@ -473,7 +547,6 @@ export async function openBrowserSessionCore(
   session = await createJazzSessionOwner({
     accounts,
     initial: coreInitial(initial),
-    // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
     ...(replicas
       ? {
@@ -608,53 +681,6 @@ function upgradableClient(thin: JazzClient): JazzClient {
     inner = next;
   });
   return client;
-}
-
-/**
- * `serverUrl: null`: Jazz on this device only. There is no backend to name a
- * user or to run a thin client against, so the session opens the local-first
- * client straight away, on this browser's local-first account.
- */
-async function createDeviceOnlySession(config: JazzClientConfig): Promise<BrowserJazzSession> {
-  const {
-    initial,
-    clearOnSignOut,
-    linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
-    localFirst: _localFirst,
-    onSignedOut: _onSignedOut,
-    onNewerBuild,
-    client: loadLocalFirst,
-    store: _store,
-    fetch: _fetch,
-    ...rest
-  } = config;
-  setNewerBuildHandler(onNewerBuild);
-  if (!loadLocalFirst) {
-    throw new Error(
-      'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
-    );
-  }
-  if (coreInitial(initial) === "signed-out") {
-    throw new Error(
-      'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
-    );
-  }
-  const { serverUrl: _serverUrl, ...clientConfig } = rest;
-  refuseUnkeptOptions(clientConfig);
-  const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
-  // Its one account is a device account: a host with nowhere to keep its key refuses.
-  const missing = deviceAccountStoreMissing(accounts, "serverUrl: null (a device-only client)");
-  if (missing) throw missing;
-  const { createClient } = await loadLocalFirst();
-  return createJazzSessionOwner({
-    accounts,
-    initial: "local-first",
-    clearOnSignOut: clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent",
-    openClient: (account) =>
-      createRegisteredJazzClient("web", { ...clientConfig, account }, createClient),
-    // No backend says who is signed in: there is nothing to ask again.
-    decorate: () => ({ reauthenticate: async () => {} }),
-  });
 }
 
 /**

@@ -424,6 +424,7 @@ fn incompatible_open_creates_no_relay_or_sqlite_store() {
             node: NodeUuid::from_bytes([0xa1; 16]),
             author: AuthorSubject::for_test_bytes([0xa2; 16]),
         },
+        declarations: None,
     };
     assert!(matches!(
         registry.open_admitted(config),
@@ -767,6 +768,155 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
 }
 
 #[test]
+fn unreadable_delta_event_has_pinned_bytes() {
+    // Appended event: ordinals 0-3 keep their bytes. The same bytes are
+    // decoded in crates/jazz-rn/src/__tests__/index.test.tsx.
+    let json = r#"[{"table":"t","id":"i","column":null,"code":"key-pending"}]"#;
+    let mut expected = vec![
+        4, // SubscriptionEvents
+        1, // one event
+        4, // UnreadableDelta
+        1, // reset
+        0, // settled
+        5,
+        b'L',
+        b'o',
+        b'c',
+        b'a',
+        b'l', // tier
+        2,
+        9,
+        8, // delta
+        json.len() as u8,
+    ];
+    expected.extend_from_slice(json.as_bytes());
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SubscriptionEvents {
+            events: vec![ForegroundSubscriptionEvent::UnreadableDelta {
+                reset: true,
+                settled: false,
+                tier: "Local".to_owned(),
+                delta: vec![9, 8],
+                unreadable_json: json.to_owned(),
+            }],
+        })
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn reported_rows_answer_has_pinned_bytes() {
+    // Appended answer: existing ordinals stay fixed, and a read that left
+    // no row out still answers `Rows` (ordinal 2).
+    let json = r#"[{"table":"t","id":"i","column":null,"code":"key-pending"}]"#;
+    let mut expected = vec![38, 2, 9, 8, json.len() as u8];
+    expected.extend_from_slice(json.as_bytes());
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::ReportedRows {
+            rows: vec![9, 8],
+            unreadable_json: json.to_owned(),
+        })
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::Rows { rows: vec![9, 8] }).unwrap(),
+        vec![2, 2, 9, 8]
+    );
+}
+
+#[test]
+fn a_read_names_the_rows_it_left_out_only_when_it_left_some_out() {
+    use crate::relay::rows_response;
+    use jazz::db::UnreadableRow;
+    assert_eq!(
+        rows_response(vec![9, 8], &[]),
+        ForegroundDbCommandResponse::Rows { rows: vec![9, 8] }
+    );
+    let left_out = UnreadableRow {
+        table: "notes".to_owned(),
+        id: RowUuid::from_bytes([0xab; 16]),
+        column: Some("body".to_owned()),
+        code: "key-unavailable",
+    };
+    let ForegroundDbCommandResponse::ReportedRows {
+        rows,
+        unreadable_json,
+    } = rows_response(vec![9, 8], std::slice::from_ref(&left_out))
+    else {
+        panic!("a read that left a row out reports it");
+    };
+    assert_eq!(rows, vec![9, 8]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&unreadable_json).unwrap(),
+        serde_json::json!([{
+            "table": "notes",
+            "id": RowUuid::from_bytes([0xab; 16]).0.to_string(),
+            "column": "body",
+            "code": "key-unavailable",
+        }])
+    );
+}
+
+#[test]
+fn a_delta_names_its_unreadable_rows_only_when_the_list_is_told() {
+    use crate::relay::foreground_subscription_event;
+    use jazz::binding_host::EventChunk;
+    let chunk_with = |reset: bool, unreadable: Option<&str>| EventChunk::Delta {
+        delta: vec![9, 8],
+        reset,
+        coalesced: false,
+        settled: true,
+        tier: "Local".to_owned(),
+        unreadable: unreadable.map(str::to_owned),
+    };
+    let chunk = |unreadable: Option<&str>| chunk_with(false, unreadable);
+    let json = r#"[{"table":"todos","id":"x","column":"title","code":"key-pending"}]"#;
+    assert_eq!(
+        foreground_subscription_event(chunk(Some(json))),
+        ForegroundSubscriptionEvent::UnreadableDelta {
+            reset: false,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+            unreadable_json: json.to_owned(),
+        }
+    );
+    // An emptied list is still told, so the reader drops the old one.
+    assert!(matches!(
+        foreground_subscription_event(chunk(Some("[]"))),
+        ForegroundSubscriptionEvent::UnreadableDelta { unreadable_json, .. } if unreadable_json == "[]"
+    ));
+    // A reset restates a non-empty list; with none left out it is a plain
+    // reset, which the reader takes as an empty list (an app without
+    // encryption keeps event 0).
+    assert!(matches!(
+        foreground_subscription_event(chunk_with(true, Some(json))),
+        ForegroundSubscriptionEvent::UnreadableDelta { reset: true, .. }
+    ));
+    assert_eq!(
+        foreground_subscription_event(chunk_with(true, Some("[]"))),
+        ForegroundSubscriptionEvent::Delta {
+            reset: true,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+        }
+    );
+    // Unchanged: the plain delta, with its bytes as before.
+    assert_eq!(
+        foreground_subscription_event(chunk(None)),
+        ForegroundSubscriptionEvent::Delta {
+            reset: false,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+        }
+    );
+}
+
+#[test]
 fn upload_status_has_pinned_bytes_and_answers() {
     // Appended command and answer: existing ordinals stay fixed.
     assert_eq!(
@@ -1047,21 +1197,12 @@ fn a_relay_refuses_a_client_of_another_identity() {
         node: NodeUuid::from_bytes([byte; 16]),
         author: AuthorSubject::for_test_bytes([0x5a; 16]),
     };
-    let relay = NativeRelay::spawn(RelayOpenConfig {
-        supported_abi: NativeRelayAbiRange {
-            minimum: NATIVE_RELAY_ABI_V1,
-            maximum: NATIVE_RELAY_ABI_V1,
-        },
-        scope: RelayScope {
-            app_namespace: "app".to_owned(),
-            storage_namespace: "default".to_owned(),
-            auth_scope: Some("alice".to_owned()),
-        },
-        sqlite_path: directory.path().join("alice.sqlite"),
-        schema: schema(),
-        migrations: Default::default(),
-        identity: identity(0x01),
-    })
+    let relay = NativeRelay::spawn(super::relay_config(
+        schema(),
+        directory.path().join("alice.sqlite"),
+        Default::default(),
+        identity(0x01),
+    ))
     .unwrap();
     let other = DbIdentity {
         author: AuthorSubject::for_test_bytes([0x5b; 16]),
@@ -1094,7 +1235,7 @@ fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Bindi
         DbConfig::new(head.clone(), server_identity).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    jazz::db::block_on(server_db.set_authority());
+    jazz::db::block_on(server_db.set_authority()).unwrap();
     let server = jazz::db::block_on(jazz::binding_host::Binding::new(
         server_db,
         server_identity,
@@ -1344,21 +1485,12 @@ fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
         author,
     };
     let open = |migrations: Migrations| {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
             migrations,
-            identity: identity(0x01),
-        })
+            identity(0x01),
+        ))
         .unwrap()
     };
     // As alpha.60 did: the head schema alone.
@@ -1447,21 +1579,12 @@ fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() 
         author,
     };
     let open = |migrations: Migrations| {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
             migrations,
-            identity: identity(0x01),
-        })
+            identity(0x01),
+        ))
         .unwrap()
     };
     {
@@ -1601,21 +1724,12 @@ fn a_store_is_rebuilt_once_per_schema_version() {
     // Without the app's migrations, as a bundle that disagrees with the
     // server would open it: every store it makes is refused.
     let open = || {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
-            migrations: Migrations::default(),
-            identity: identity(0x01),
-        })
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
+            Migrations::default(),
+            identity(0x01),
+        ))
         .unwrap()
     };
     // Carry the upstream until it stops changing; returns how many

@@ -17,6 +17,9 @@ internal actual fun platformOpener(): Native.Opener = object : Native.Opener {
 
     override fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
         openReflectively("tools.jazz.UniffiNative", configJson, tokens)
+
+    override fun openWithStore(configJson: String, store: PrivateStore, tokens: ((String) -> String?)?): Native =
+        openReflectively("tools.jazz.UniffiNative", configJson, tokens, store)
 }
 
 /**
@@ -25,10 +28,18 @@ internal actual fun platformOpener(): Native.Opener = object : Native.Opener {
  * the rest of the library builds without them. What `open` throws is
  * rethrown as it is, not wrapped.
  */
-internal fun openReflectively(className: String, config: String, tokens: ((String) -> String?)? = null): Native {
+internal fun openReflectively(
+    className: String,
+    config: String,
+    tokens: ((String) -> String?)? = null,
+    store: PrivateStore? = null,
+): Native {
     val native = Class.forName(className)
     return try {
-        if (tokens == null) {
+        if (store != null) {
+            native.getMethod("openWithStore", String::class.java, PrivateStore::class.java, Function1::class.java)
+                .invoke(null, config, store, tokens) as Native
+        } else if (tokens == null) {
             native.getMethod("open", String::class.java).invoke(null, config) as Native
         } else {
             native.getMethod("openWithTokens", String::class.java, Function1::class.java).invoke(null, config, tokens) as Native

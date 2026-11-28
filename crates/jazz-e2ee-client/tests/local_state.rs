@@ -1,0 +1,1011 @@
+//! One device's private state across restarts (`E2EE_PROTOCOL.md` §2.1,
+//! §6): the device is generated once and its secrets are stored only
+//! protected; held keys and floors survive a restart and are checked when
+//! loaded; a damaged record is skipped and reported, an unknown format is
+//! refused and never overwritten, and a wiped store is never recreated.
+
+mod common;
+#[allow(dead_code)]
+#[path = "../../jazz-e2ee/tests/common/mechanisms.rs"]
+mod mechanisms;
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use common::*;
+use jazz::db::block_on;
+use jazz::e2ee::EncryptionSettings;
+use jazz::query::{Query, col, eq, lit};
+use jazz::records::Value;
+use jazz_e2ee::OsRandom;
+use jazz_e2ee::protocol::account::AccountFloor;
+use jazz_e2ee::protocol::records::KeyColumns;
+use jazz_e2ee::protocol::{Position, ProtocolError};
+use jazz_e2ee::registry::Registry;
+use jazz_e2ee_client::host::bridge::{JsStore, serve};
+use jazz_e2ee_client::testing::StoreWithSaveHook;
+use jazz_e2ee_client::{ClientConfig, ClientError, E2eeClient, MemoryStore, PrivateStore, Report};
+
+fn scope() -> String {
+    format!(
+        r#"["{}","{ENVIRONMENT}","{ALICE}"]"#,
+        app_id().as_object_id().uuid()
+    )
+}
+
+fn try_open(
+    store: Rc<dyn PrivateStore>,
+    declarations: jazz::e2ee::E2eeDeclarations,
+) -> Result<E2eeClient, ClientError> {
+    block_on(E2eeClient::open(ClientConfig {
+        store,
+        declarations,
+        account_id: ALICE.to_owned(),
+        registry: Registry::builtin(),
+        random: Box::new(OsRandom),
+        device_account: None,
+    }))
+}
+
+fn skipped(client: &E2eeClient) -> Vec<String> {
+    let reports = observe_reports(client);
+    client.flush_reports();
+    std::mem::take(&mut *reports.borrow_mut())
+        .into_iter()
+        .filter_map(|report| match report {
+            Report::SkippedRecord { document, .. } => Some(document),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Contract: alice's device is generated on first use and stored, so every
+/// later open is the same device with its unspent approval nonce; its
+/// private keys and nonce are written only through the platform's
+/// protection, and a copy of the store without that protection does not
+/// open.
+#[test]
+fn the_device_is_generated_once_and_stored_only_protected() {
+    let inner = MemoryStore::new();
+    let store = |key| -> Rc<dyn PrivateStore> {
+        Rc::new(ProtectedStore {
+            inner: inner.clone(),
+            key,
+        })
+    };
+    let first = open_client(store(0x5a));
+    let (id, sealing, signing, nonce) = {
+        let device = first.device().unwrap();
+        (
+            device.id.clone(),
+            device.sealing.secret.as_bytes().to_vec(),
+            device.signing.secret.as_bytes().to_vec(),
+            device.approval_nonce.as_ref().unwrap().0.to_vec(),
+        )
+    };
+    drop(first);
+    let again = open_client(store(0x5a));
+    assert_eq!(again.device().unwrap().id, id);
+    assert_eq!(again.device().unwrap().signing.secret.as_bytes(), signing);
+    assert!(again.device().unwrap().approval_nonce.is_some());
+
+    let files = documents(&inner);
+    assert_eq!(files.len(), 1, "one device document");
+    let document: serde_json::Value = serde_json::from_slice(&files[0]).unwrap();
+    for (name, secret) in [
+        ("sealing key", sealing),
+        ("signing key", signing),
+        ("nonce", nonce),
+    ] {
+        let secret = secret
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect::<Vec<_>>();
+        assert!(
+            !contains_byte_array(&document, &secret),
+            "{name} stored in the clear"
+        );
+    }
+    assert!(contains(&files[0], b"jazz-e2ee-local-devices-v3"));
+
+    let copied = try_open(store(0x33), declarations());
+    assert!(copied.is_err(), "a copy without the protection opens");
+    assert_eq!(documents(&inner), files, "and it changes nothing");
+}
+
+fn contains_byte_array(value: &serde_json::Value, secret: &[serde_json::Value]) -> bool {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.windows(secret.len()).any(|window| window == secret)
+                || values
+                    .iter()
+                    .any(|value| contains_byte_array(value, secret))
+        }
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .any(|value| contains_byte_array(value, secret)),
+        _ => false,
+    }
+}
+
+/// The bytes of every document the store holds.
+fn documents(store: &MemoryStore) -> Vec<Vec<u8>> {
+    let scope = scope();
+    block_on(store.list(&scope))
+        .unwrap()
+        .iter()
+        .map(|name| block_on(store.load(&scope, name)).unwrap().unwrap().bytes)
+        .collect()
+}
+
+/// Contract: a device document of a format this runtime does not read
+/// (an older one without the approval nonce's state, say) fails the open
+/// and is never overwritten.
+#[test]
+fn an_unknown_device_document_is_refused_and_left_alone() {
+    let store = MemoryStore::new();
+    let old = br#"{"devices":[],"format":"jazz-e2ee-local-devices-v2"}"#.to_vec();
+    let at = block_on(store.open_scope(&scope())).unwrap();
+    block_on(store.save(&scope(), at, "device", &old, None)).unwrap();
+    let opened = try_open(Rc::new(store.clone()), declarations());
+    assert!(matches!(opened, Err(ClientError::UnrecognisedDocument(_))));
+    assert_eq!(
+        block_on(store.load(&scope(), "device"))
+            .unwrap()
+            .unwrap()
+            .bytes,
+        old
+    );
+}
+
+/// Contract: alice's held keys and her encrypted rows survive a restart:
+/// reopened offline from her files, the runtime holds the same keys, knows
+/// the catalogue identities from the database, reads her rows and writes
+/// new ones.
+///
+/// ```text
+/// alice ──write──► server     (restart, no server)
+///   │                         alice ──open files──► reads, writes
+///   └── keys in her private store, rows in her database
+/// ```
+#[test]
+fn held_keys_and_rows_survive_a_restart_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let keys = MemoryStore::new();
+    let store = || -> Rc<dyn PrivateStore> { Rc::new(keys.clone()) };
+    let server = authority();
+    let space = {
+        let client = open_client(store());
+        let (db, _link, _) = online(&client, &server, Some(&path));
+        let space = project(&db, "plans");
+        hold_new_space(&client, &db, space);
+        block_on(db.insert("notes", note(space, SECRET), Default::default())).unwrap();
+        pump(&server, &db);
+        space
+    };
+
+    let client = open_client(store());
+    let reports = observe_reports(&client);
+    let db = client_db(&client, Some(&path));
+    client.set_online(false);
+    assert!(
+        jazz::db::block_on(client.prepare(&db)).unwrap(),
+        "identities are known offline"
+    );
+    block_on(db.insert("notes", note(space, "offline"), Default::default())).unwrap();
+    let mut bodies: Vec<Value> = all(
+        &db,
+        Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space)))),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|row| row.cell("body").unwrap())
+    .collect();
+    bodies.sort_by_key(|value| format!("{value:?}"));
+    assert_eq!(bodies, [text("PLAINTEXT-SECRET"), text("offline")]);
+    client.flush_reports();
+    assert!(reports.borrow().is_empty());
+}
+
+/// Contract: a held-key record that fails its load checks is skipped and
+/// reported, and the device keeps reading with its other keys; a held-key
+/// document of a format this runtime does not read is reported and never
+/// overwritten, even when a key of its root is kept again.
+#[test]
+fn a_damaged_held_key_record_is_skipped_and_reported() {
+    let server = authority();
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let (db, _link, _) = online(&client, &server, None);
+    let (damaged, intact) = (project(&db, "damaged"), project(&db, "intact"));
+    let damaged_records = new_root(&client.device().unwrap(), &address(&db, damaged));
+    let damaged_root = damaged_records.root.id.clone();
+    block_on(client.keep(common::held(&damaged_records))).unwrap();
+    hold_new_space(&client, &db, intact);
+    let name = format!("held-{damaged_root}");
+    let stored = block_on(store.load(&scope(), &name)).unwrap().unwrap();
+    let text_form = String::from_utf8(stored.bytes).unwrap();
+    assert!(text_form.contains(r#""depth":"0""#));
+    store.overwrite(
+        &scope(),
+        &name,
+        text_form
+            .replace(r#""depth":"0""#, r#""depth":"1""#)
+            .into_bytes(),
+    );
+    drop((db, client));
+
+    let client = open_client(Rc::new(store.clone()));
+    let heard = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    client.on_report(move |report| {
+        if let Report::SkippedRecord { document, .. } = report {
+            sink.borrow_mut().push(document.clone());
+        }
+    });
+    client.flush_reports();
+    assert_eq!(*heard.borrow(), std::slice::from_ref(&name));
+    let (db, _link, _) = online(&client, &server, None);
+    client.record_fixture_rotation_check(&address(&db, intact));
+    block_on(db.insert("notes", note(intact, "fine"), Default::default())).unwrap();
+    let refused = block_on(db.insert("notes", note(damaged, "no key"), Default::default()));
+    assert!(refused.is_err());
+
+    let unknown = br#"{"format":"jazz-e2ee-held-space-v9"}"#.to_vec();
+    store.overwrite(&scope(), &name, unknown.clone());
+    drop((db, client));
+    let client = open_client(Rc::new(store.clone()));
+    assert_eq!(skipped(&client), std::slice::from_ref(&name));
+    assert!(matches!(
+        block_on(client.keep(common::held(&damaged_records))),
+        Err(ClientError::UnrecognisedDocument(_))
+    ));
+    assert_eq!(
+        block_on(store.load(&scope(), &name))
+            .unwrap()
+            .unwrap()
+            .bytes,
+        unknown
+    );
+}
+
+fn floor(through: u64, generation: u64, keys: KeyColumns) -> AccountFloor {
+    AccountFloor {
+        through: Position(through),
+        generation,
+        root_id: "10000000-0000-4000-8000-000000000001".into(),
+        root_keys: keys,
+        epoch_id: "e0000000-0000-4000-8000-000000000000".into(),
+        epoch_position: Position(2),
+        active_device: None,
+    }
+}
+
+/// Contract: a floor survives a restart and only moves forward: a floor of
+/// an earlier cut, a lower generation or an earlier epoch position is
+/// `stale-state` and changes nothing; a floor record that fails its signature check is skipped and
+/// reported, never used.
+#[test]
+fn floors_only_move_forward_and_survive_a_restart() {
+    const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let keys = {
+        let device = client.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    block_on(client.advance_floor(BOB, &floor(5, 0, keys.clone()))).unwrap();
+    let older = block_on(client.advance_floor(BOB, &floor(4, 0, keys.clone())));
+    assert!(matches!(
+        older,
+        Err(ClientError::Protocol(ProtocolError::StaleState))
+    ));
+    block_on(client.advance_floor(BOB, &floor(9, 1, keys.clone()))).unwrap();
+    let lower = block_on(client.advance_floor(BOB, &floor(10, 0, keys.clone())));
+    assert!(matches!(
+        lower,
+        Err(ClientError::Protocol(ProtocolError::StaleState))
+    ));
+    let earlier_epoch = AccountFloor {
+        epoch_position: Position(1),
+        ..floor(10, 1, keys.clone())
+    };
+    let earlier_epoch = block_on(client.advance_floor(BOB, &earlier_epoch));
+    assert!(matches!(
+        earlier_epoch,
+        Err(ClientError::Protocol(ProtocolError::StaleState))
+    ));
+    drop(client);
+
+    let client = open_client(Rc::new(store.clone()));
+    assert_eq!(block_on(client.floor(BOB)), Some(floor(9, 1, keys.clone())));
+    assert_eq!(block_on(client.floor(ALICE)), None);
+    drop(client);
+
+    let name = format!("floor-{BOB}");
+    let stored = String::from_utf8(
+        block_on(store.load(&scope(), &name))
+            .unwrap()
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    store.overwrite(
+        &scope(),
+        &name,
+        stored
+            .replace(r#""through":"9""#, r#""through":"1""#)
+            .into_bytes(),
+    );
+    let client = open_client(Rc::new(store));
+    assert_eq!(skipped(&client), [name]);
+    assert_eq!(block_on(client.floor(BOB)), None);
+}
+
+/// Alice reopens the same store with individual reads and with a snapshot.
+/// Both retain Bob's authentic floor and the held keys, and report Mallory's
+/// floor whose signed cut was changed. The snapshot preserves the revision.
+#[test]
+fn bulk_and_individual_reopens_authenticate_the_same_documents() {
+    const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
+    const MALLORY: &str = "aaaaaaaa-0000-5000-8000-000000000001";
+    let memory = Rc::new(MemoryStore::new());
+    let client = open_client(memory.clone());
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    let keys = {
+        let device = client.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    let original = floor(9, 0, keys.clone());
+    block_on(client.advance_floor(BOB, &floor(5, 0, keys.clone()))).unwrap();
+    block_on(client.advance_floor(BOB, &original)).unwrap();
+    block_on(client.advance_floor(MALLORY, &original)).unwrap();
+    drop(client);
+    let damaged = format!("floor-{MALLORY}");
+    let stored = block_on(memory.load(&scope(), &damaged)).unwrap().unwrap();
+    memory.overwrite(
+        &scope(),
+        &damaged,
+        String::from_utf8(stored.bytes)
+            .unwrap()
+            .replace(r#""through":"9""#, r#""through":"1""#)
+            .into_bytes(),
+    );
+
+    let single = open_client(memory.clone());
+    let bulk_reads = Rc::new(Cell::new(0));
+    let bulk = open_client(Rc::new(JsStore::served_by(Rc::new({
+        let memory = memory.clone();
+        let single_store = serve(memory.clone());
+        let bulk_reads = bulk_reads.clone();
+        move |request| {
+            let memory = memory.clone();
+            let single_store = single_store.clone();
+            let bulk_reads = bulk_reads.clone();
+            Box::pin(async move {
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") if command["loadAll"] == "v1" => {
+                        let incarnation = memory.open_scope(scope).await.unwrap().to_string();
+                        (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        )
+                    }
+                    Some("loadAllV1") => {
+                        bulk_reads.set(bulk_reads.get() + 1);
+                        let mut documents = Vec::new();
+                        for doc in memory.list(scope).await.unwrap() {
+                            let stored = memory.load(scope, &doc).await.unwrap().unwrap();
+                            documents.push(serde_json::json!({
+                                "doc": doc,
+                                "bytes": STANDARD.encode(stored.bytes),
+                                "revision": stored.revision.to_string(),
+                            }));
+                        }
+                        (true, serde_json::to_string(&documents).unwrap())
+                    }
+                    _ => single_store(request).await,
+                }
+            })
+        }
+    }))));
+    assert_eq!(bulk_reads.get(), 1);
+    for client in [single, bulk] {
+        assert!(client.with_held(|held| held.space(&root).is_some()));
+        assert_eq!(block_on(client.floor(BOB)), Some(original.clone()));
+        assert_eq!(block_on(client.floor(MALLORY)), None);
+        assert_eq!(skipped(&client), [damaged.clone()]);
+    }
+}
+
+/// Alice's opener retries with a fresh incarnation if another tab wipes
+/// the store between opening the scope and reading its snapshot.
+///
+/// ```text
+/// opener ──open scope──► store ◄──wipe── other tab
+/// opener ◄────wiped───── load snapshot
+/// opener ──open scope──► new incarnation
+/// ```
+///
+#[test]
+fn a_wipe_during_the_snapshot_retries_open() {
+    let memory = Rc::new(MemoryStore::new());
+    let previous = open_client(memory.clone()).device().unwrap().id.clone();
+    let retired = Rc::new(Cell::new(None));
+    let store = JsStore::served_by(Rc::new({
+        let memory = memory.clone();
+        let single = serve(memory.clone());
+        let retired = retired.clone();
+        move |request| {
+            let (memory, single, retired) = (memory.clone(), single.clone(), retired.clone());
+            Box::pin(async move {
+                YieldOnce(false).await;
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") => {
+                        let incarnation = memory.open_scope(scope).await.unwrap().to_string();
+                        (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        )
+                    }
+                    Some("loadAllV1") => {
+                        let incarnation: u64 =
+                            command["incarnation"].as_str().unwrap().parse().unwrap();
+                        if let Some(old) = retired.get() {
+                            assert_ne!(incarnation, old, "the retry opened a fresh scope");
+                            assert!(memory.snapshot(scope, incarnation).unwrap().is_empty());
+                            (true, "[]".to_owned())
+                        } else {
+                            retired.set(Some(incarnation));
+                            memory.delete(scope).await.unwrap();
+                            assert_eq!(
+                                memory.snapshot(scope, incarnation),
+                                Err(jazz_e2ee_client::StoreError::Wiped)
+                            );
+                            (false, "wiped".to_owned())
+                        }
+                    }
+                    _ => single(request).await,
+                }
+            })
+        }
+    }));
+
+    let client = try_open(Rc::new(store), declarations()).unwrap();
+    assert!(retired.get().is_some());
+    let fresh = client.device().unwrap().id.clone();
+    assert_ne!(fresh, previous);
+    assert_eq!(open_client(memory).device().unwrap().id, fresh);
+}
+
+/// Contract: a wipe removes alice's device, held keys and floors from the
+/// store and closes the runtime: the device's secrets leave memory too
+/// (`device()` fails), a later keep, floor or encrypted write fails and
+/// writes nothing, so the store is never recreated; the next runtime
+/// starts as a new device.
+#[test]
+fn a_wipe_removes_everything_and_nothing_recreates_it() {
+    let server = authority();
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    let root = hold_new_space(&client, &db, space);
+    drop(open_client(Rc::new(store.clone())));
+    assert_eq!(stored_verified_depth(&store, &root), Some(0));
+    let keys = {
+        let device = client.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    block_on(client.advance_floor(ALICE, &floor(3, 0, keys.clone()))).unwrap();
+    let old_device = client.device().unwrap().id.clone();
+    let late = new_space_key(&client.device().unwrap(), &address(&db, space));
+
+    block_on(client.wipe()).unwrap();
+    assert!(store.scopes().is_empty());
+    // The device's secrets and approval nonce are dropped with the store.
+    assert!(matches!(client.device(), Err(ClientError::Closed)));
+    assert!(matches!(
+        block_on(client.keep(late)),
+        Err(ClientError::Closed)
+    ));
+    assert!(matches!(
+        block_on(client.advance_floor(ALICE, &floor(4, 0, keys))),
+        Err(ClientError::Closed)
+    ));
+    // Refused as closed, not merely for want of the cleared key.
+    let late = block_on(db.insert("notes", note(space, "late"), Default::default())).unwrap_err();
+    assert_eq!(late.code, jazz::db::ErrorCode::Protocol, "{late:?}");
+    assert!(
+        store.scopes().is_empty(),
+        "a late operation recreated the store"
+    );
+
+    let fresh = open_client(Rc::new(store.clone()));
+    assert_ne!(fresh.device().unwrap().id, old_device);
+    assert_eq!(stored_verified_depth(&store, &root), None);
+}
+
+/// Contract: two runtimes on one store (two tabs) that keep keys of the
+/// same space root do not overwrite each other: the later save meets the
+/// first one's revision, reads it, merges and saves both.
+#[test]
+fn two_writers_of_one_document_merge() {
+    let server = authority();
+    let store = MemoryStore::new();
+    let first = open_client(Rc::new(store.clone()));
+    let second = open_client(Rc::new(store.clone()));
+    let (db, _link, _) = online(&first, &server, None);
+    let space = project(&db, "plans");
+    let address = address(&db, space);
+    let root = new_root(&first.device().unwrap(), &address);
+    let (held, twin) = (common::held(&root), common::held(&root));
+    let root = root.root.id.clone();
+    block_on(first.keep(held)).unwrap();
+    block_on(second.keep(twin)).unwrap();
+    let stored = block_on(store.load(&scope(), &format!("held-{root}")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.revision, 2);
+    let third = open_client(Rc::new(store));
+    assert!(third.with_held(|held| held.space(&root).is_some()));
+    assert!(skipped(&third).is_empty());
+}
+
+/// Alice's reopen verifies a stored key while a second writer replaces
+/// its document. A losing metadata save cannot mark the replacement,
+/// so the next reopen checks and reports its damaged key.
+#[test]
+fn a_lost_verification_save_leaves_the_concurrent_document_alone() {
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    drop((db, client));
+    let name = format!("held-{root}");
+    let scope = scope();
+    let original = block_on(store.load(&scope, &name)).unwrap().unwrap();
+    let damaged = String::from_utf8(original.bytes)
+        .unwrap()
+        .replace(r#""depth":"0""#, r#""depth":"1""#)
+        .into_bytes();
+    let racing = Rc::new(Cell::new(false));
+    let wrapped = StoreWithSaveHook::new(store.clone(), {
+        let (store, racing, damaged, name) =
+            (store.clone(), racing.clone(), damaged.clone(), name.clone());
+        move |scope, doc, _, expected| {
+            let (store, damaged) = (store.clone(), damaged.clone());
+            let replace = doc == name && !racing.replace(true);
+            Box::pin(async move {
+                if replace {
+                    let incarnation = store.open_scope(scope).await.unwrap();
+                    store
+                        .save(scope, incarnation, doc, &damaged, expected)
+                        .await
+                        .unwrap();
+                }
+                Ok(())
+            })
+        }
+    });
+
+    let reopened = open_client(Rc::new(wrapped));
+    assert!(racing.get());
+    assert!(reopened.with_held(|held| held.space(&root).is_some()));
+    drop(reopened);
+    let winner = block_on(store.load(&scope, &name)).unwrap().unwrap();
+    assert_eq!(winner.revision, original.revision + 1);
+    assert_eq!(winner.bytes, damaged);
+    let reopened = open_client(Rc::new(store));
+    assert_eq!(skipped(&reopened), [name]);
+    assert!(reopened.with_held(|held| held.space(&root).is_none()));
+}
+
+/// Alice reopens a snapshot containing a held key while her other tab
+/// wipes the scope. The stale opener fails without making the key usable.
+///
+/// ```text
+/// opener ──load snapshot──► store ◄──wipe── other tab
+/// opener ──save verification marker──► store ──wiped──► opener
+/// ```
+#[test]
+fn a_wipe_before_the_verification_save_aborts_open() {
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let server = authority();
+    let (db, _link, _) = online(&client, &server, None);
+    let root = hold_new_space(&client, &db, project(&db, "plans"));
+    drop((db, client));
+    let name = format!("held-{root}");
+    let saw_snapshot = Rc::new(Cell::new(false));
+    let wrapped = JsStore::served_by(Rc::new({
+        let store = store.clone();
+        let serve = serve(Rc::new(store.clone()));
+        let saw_snapshot = saw_snapshot.clone();
+        move |request| {
+            let (store, serve, name, saw_snapshot) = (
+                store.clone(),
+                serve.clone(),
+                name.clone(),
+                saw_snapshot.clone(),
+            );
+            Box::pin(async move {
+                let command: serde_json::Value = serde_json::from_str(&request).unwrap();
+                let scope = command["scope"].as_str().unwrap_or_default();
+                match command["op"].as_str() {
+                    Some("openScope") => {
+                        let incarnation = store.open_scope(scope).await.unwrap().to_string();
+                        return (
+                            true,
+                            serde_json::json!({ "incarnation": incarnation, "loadAll": "v1" })
+                                .to_string(),
+                        );
+                    }
+                    Some("loadAllV1") => {
+                        let mut documents = Vec::new();
+                        for doc in ["device", &name] {
+                            let stored = store.load(scope, doc).await.unwrap().unwrap();
+                            documents.push(serde_json::json!({
+                                "doc": doc,
+                                "bytes": STANDARD.encode(stored.bytes),
+                                "revision": stored.revision.to_string(),
+                            }));
+                        }
+                        saw_snapshot.set(true);
+                        return (true, serde_json::to_string(&documents).unwrap());
+                    }
+                    Some("save") if command["doc"] == name => {
+                        assert!(saw_snapshot.get());
+                        store.delete(scope).await.unwrap();
+                    }
+                    _ => {}
+                }
+                serve(request).await
+            })
+        }
+    }));
+
+    match try_open(Rc::new(wrapped), declarations()) {
+        Err(ClientError::Closed) => {}
+        Err(error) => panic!("expected a wiped open, got {error}"),
+        Ok(client) => panic!(
+            "the wiped scope opened with held key: {}",
+            client.with_held(|held| held.space(&root).is_some())
+        ),
+    }
+    assert!(store.scopes().is_empty());
+}
+
+/// Contract: the runtime refuses at open what it cannot honour: mechanism
+/// settings that name an unknown role, a mechanism this build lacks, or a
+/// selection outside the allow-list. The explicit built-in settings open.
+#[test]
+fn unusable_mechanism_settings_are_refused_at_open() {
+    let with = |mechanisms: serde_json::Value| {
+        try_open(
+            Rc::new(MemoryStore::new()),
+            declarations_with(EncryptionSettings {
+                allow_account_reset: false,
+                mechanisms: Some(mechanisms),
+            }),
+        )
+    };
+    let builtin = serde_json::json!({ "id": "jazz.wrap.hpke-x25519", "version": 1 });
+    assert!(with(serde_json::json!({ "allowed": { "keySeal": [builtin] }, "selected": { "keySeal": builtin } })).is_ok());
+    for refused in [
+        serde_json::json!({ "allowed": { "sealing": [builtin] } }),
+        serde_json::json!({ "allowed": { "keySeal": [{ "id": "jazz.seal.future", "version": 1 }] } }),
+        serde_json::json!({ "selected": { "keySeal": { "id": "jazz.wrap.hpke-x25519", "version": 2 } } }),
+        serde_json::json!({ "allowed": { "keySeal": [] } }),
+        serde_json::json!({ "preferred": {} }),
+    ] {
+        assert!(
+            matches!(with(refused.clone()), Err(ClientError::Settings(_))),
+            "{refused}"
+        );
+    }
+}
+
+/// Contract: a key whose document the store fails to save is not held: it
+/// seals no write, so the device never writes rows under a key it would
+/// lose on a restart. The save's error is returned.
+#[test]
+fn a_key_whose_save_fails_is_not_usable() {
+    let server = authority();
+    let store = FaultyStore::default();
+    let client = open_client(store.store());
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    let held = new_space_key(&client.device().unwrap(), &address(&db, space));
+    store.failing.set(true);
+    assert!(matches!(
+        block_on(client.keep(held)),
+        Err(ClientError::Store(jazz_e2ee_client::StoreError::Failed(_)))
+    ));
+    let refused = block_on(db.insert("notes", note(space, SECRET), Default::default()));
+    assert!(matches!(
+        refused.map_err(|error| jazz::e2ee::E2eeRefusal::of(&error)),
+        Err(Some(jazz::e2ee::E2eeRefusal::NeedsKey { .. }))
+    ));
+}
+
+/// Contract: a wipe that starts while a keep waits on its save wins: the
+/// keep fails with the runtime closed instead of panicking or holding the
+/// key, and the store ends wiped.
+///
+/// ```text
+/// keep ──save (yields)──┐            ┌── conflict ──✗ closed
+/// wipe ──close, clear ──┴── waits ───┴── delete scope
+/// ```
+#[test]
+fn a_wipe_during_a_keep_closes_it() {
+    let server = authority();
+    let store = FaultyStore::default();
+    let client = open_client(store.store());
+    let (db, _link, _) = online(&client, &server, None);
+    let held = new_space_key(
+        &client.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
+    store.contended.set(true);
+    let (kept, wiped) = block_on(async { futures::join!(client.keep(held), client.wipe()) });
+    assert!(matches!(kept, Err(ClientError::Closed)), "{kept:?}");
+    wiped.unwrap();
+    assert!(store.inner.scopes().is_empty());
+}
+
+/// Alice keeps her unpublished creation, then its acceptance changes the
+/// mark. The second save seals the new mark and it survives reopening.
+#[test]
+fn a_changed_held_key_mark_is_resealed() {
+    use jazz_e2ee::protocol::content::{CreationFate, HeldSpace, KeyMark};
+    use jazz_e2ee::protocol::domain::AppDomain;
+
+    let server = authority();
+    let store = Rc::new(MemoryStore::new());
+    let alice = open_client(store.clone());
+    let (db, _link, _) = online(&alice, &server, None);
+    let root = new_root(
+        &alice.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
+    let domain = AppDomain::new(
+        &app_id().as_object_id().uuid().to_string(),
+        Some(ENVIRONMENT),
+    )
+    .unwrap();
+    let mut held =
+        HeldSpace::from_creation(&Registry::builtin(), &domain, &root, "creation").unwrap();
+    let name = format!("held-{}", held.root_id());
+    block_on(alice.keep(held.clone())).unwrap();
+    let first = block_on(store.load(&scope(), &name)).unwrap().unwrap();
+    held.settle(CreationFate::Accepted, Some(&root.root.id));
+    block_on(alice.keep(held)).unwrap();
+    let second = block_on(store.load(&scope(), &name)).unwrap().unwrap();
+    assert_eq!(second.revision, first.revision + 1);
+    assert!(second.bytes != first.bytes);
+    drop(alice);
+    let reopened = open_client(store);
+    assert!(reopened.with_held(|keys| {
+        keys.space(&root.root.id)
+            .unwrap()
+            .held()
+            .eq([(0, &KeyMark::Published)])
+    }));
+}
+
+/// Alice's persisted device is valid; a failing key provider during its
+/// reopen check reaches the caller with the provider's error.
+#[test]
+fn a_device_reopen_preserves_a_crypto_provider_failure() {
+    use mechanisms::{FLAKY_SEAL, custom_registry};
+    let (registry, fails) = custom_registry(FLAKY_SEAL);
+    let store = Rc::new(MemoryStore::new());
+    let seal = serde_json::json!({ "id": FLAKY_SEAL.id, "version": FLAKY_SEAL.version });
+    let mut declarations = declarations();
+    declarations.settings.mechanisms = Some(serde_json::json!({
+        "selected": { "keySeal": seal }, "allowed": { "keySeal": [seal] }
+    }));
+    let open = || {
+        block_on(E2eeClient::open(ClientConfig {
+            store: store.clone(),
+            declarations: declarations.clone(),
+            account_id: ALICE.into(),
+            registry: registry.clone(),
+            random: Box::new(OsRandom),
+            device_account: None,
+        }))
+    };
+    drop(open().unwrap());
+    drop(open().unwrap());
+    fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        open(),
+        Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+    ));
+}
+
+/// Alice's stored device passes its local check until her signature provider
+/// fails verification. Reopening returns that provider error to Alice.
+#[test]
+fn a_device_reopen_preserves_a_signature_provider_failure() {
+    use mechanisms::{FLAKY_SIGN, FlakySigner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fails = Arc::new(AtomicBool::new(false));
+    let mut registry = Registry::builtin();
+    registry
+        .register_signer(Arc::new(FlakySigner {
+            fails: fails.clone(),
+            record_marker: Some(b"jazz.e2ee.local-device-check.v1"),
+        }))
+        .unwrap();
+    let store = Rc::new(MemoryStore::new());
+    let signing = serde_json::json!({ "id": FLAKY_SIGN.id, "version": FLAKY_SIGN.version });
+    let mut declarations = declarations();
+    declarations.settings.mechanisms = Some(serde_json::json!({
+        "selected": { "signature": signing }, "allowed": { "signature": [signing] }
+    }));
+    let open = || {
+        block_on(E2eeClient::open(ClientConfig {
+            store: store.clone(),
+            declarations: declarations.clone(),
+            account_id: ALICE.into(),
+            registry: registry.clone(),
+            random: Box::new(OsRandom),
+            device_account: None,
+        }))
+    };
+    drop(open().unwrap());
+    drop(open().unwrap());
+    fails.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        open(),
+        Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+    ));
+}
+
+/// Alice sees the store's original failure when opening her private scope.
+#[test]
+fn a_scope_open_failure_retains_the_store_error() {
+    use jazz_e2ee_client::host::bridge::JsStore;
+    let store = JsStore::served_by(Rc::new(|request| {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request).unwrap()["op"],
+            "openScope"
+        );
+        Box::pin(async { (false, "scope unavailable".into()) })
+    }));
+    assert!(matches!(try_open(Rc::new(store), declarations()),
+        Err(ClientError::Store(jazz_e2ee_client::StoreError::Failed(message))) if message == "scope unavailable"));
+}
+
+/// Contract: a stored device whose private key is not the pair of its
+/// public key (a damaged or tampered document) fails its local check at
+/// open, rather than seal to keys it cannot open with.
+#[test]
+fn a_device_whose_keys_do_not_match_fails_to_open() {
+    let store = MemoryStore::new();
+    drop(open_client(Rc::new(store.clone())));
+    let other = MemoryStore::new();
+    drop(open_client(Rc::new(other.clone())));
+    let field = |bytes: &str| {
+        let start = bytes.find(r#""privateKey":["#).unwrap();
+        let end = start + bytes[start..].find(']').unwrap() + 1;
+        bytes[start..end].to_owned()
+    };
+    let document = |store: &MemoryStore| {
+        String::from_utf8(
+            block_on(store.load(&scope(), "device"))
+                .unwrap()
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
+    };
+    let mine = document(&store);
+    let tampered = mine.replace(&field(&mine), &field(&document(&other)));
+    assert_ne!(tampered, mine);
+    store.overwrite(&scope(), "device", tampered.into_bytes());
+    assert!(try_open(Rc::new(store), declarations()).is_err());
+}
+
+/// Contract: when one tab wipes alice's private state, another tab's
+/// runtime that opened it earlier never recreates it: its next keep or
+/// floor fails with the runtime closed, its device's secrets are dropped,
+/// and the store stays wiped.
+///
+/// ```text
+/// tab 1 ──open──┐            tab 2 ──open──┐
+///               └── wipe                    └── keep ──✗ closed (store stays empty)
+/// ```
+#[test]
+fn another_runtime_never_recreates_a_wiped_store() {
+    let server = authority();
+    let store = MemoryStore::new();
+    let first = open_client(Rc::new(store.clone()));
+    let second = open_client(Rc::new(store.clone()));
+    let (db, _link, _) = online(&first, &server, None);
+    let held = new_space_key(
+        &second.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
+    let keys = {
+        let device = second.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    block_on(first.wipe()).unwrap();
+    assert!(matches!(
+        block_on(second.keep(held)),
+        Err(ClientError::Closed)
+    ));
+    assert!(matches!(
+        block_on(second.advance_floor(ALICE, &floor(1, 0, keys))),
+        Err(ClientError::Closed)
+    ));
+    assert!(store.scopes().is_empty(), "the wiped store was recreated");
+    // Finding the store wiped dropped its device's secrets as well.
+    assert!(matches!(second.device(), Err(ClientError::Closed)));
+}
+
+/// Contract: a floor record of a format this runtime does not read is
+/// reported, and never overwritten: advancing that account's floor fails
+/// and leaves the record as it was.
+#[test]
+fn an_unknown_floor_format_is_never_overwritten() {
+    const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
+    let store = MemoryStore::new();
+    let client = open_client(Rc::new(store.clone()));
+    let keys = {
+        let device = client.device().unwrap();
+        KeyColumns::new(&device.sealing.public, &device.signing.public)
+    };
+    drop(client);
+    let name = format!("floor-{BOB}");
+    let newer = br#"{"format":"jazz-e2ee-floor-v9"}"#.to_vec();
+    store.overwrite(&scope(), &name, newer.clone());
+    let client = open_client(Rc::new(store.clone()));
+    assert_eq!(skipped(&client), std::slice::from_ref(&name));
+    assert!(matches!(
+        block_on(client.advance_floor(BOB, &floor(5, 0, keys))),
+        Err(ClientError::UnrecognisedDocument(_))
+    ));
+    assert_eq!(
+        block_on(store.load(&scope(), &name))
+            .unwrap()
+            .unwrap()
+            .bytes,
+        newer
+    );
+}
+
+/// Contract: a runtime that opens while another tab wipes the store does
+/// not fail as closed: it opens the store again, as a new device of a new
+/// scope, and the store holds that device.
+#[test]
+fn opening_during_a_wipe_starts_afresh() {
+    let store = FaultyStore::default();
+    let before = open_client(store.store());
+    let old_device = before.device().unwrap().id.clone();
+    drop(before);
+    block_on(store.inner.delete(&scope())).unwrap();
+    store.wiped_first.set(true);
+    let fresh = open_client(store.store());
+    assert_ne!(fresh.device().unwrap().id, old_device);
+    assert_eq!(store.inner.scopes(), [scope()]);
+    let reopened = open_client(store.store());
+    assert_eq!(reopened.device().unwrap().id, fresh.device().unwrap().id);
+}

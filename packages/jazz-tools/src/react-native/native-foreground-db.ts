@@ -24,6 +24,7 @@ type ForegroundMutationOptions = {
   head?: unknown;
   base?: unknown;
   updatedAtMs?: number;
+  addCreatorAsMember?: boolean;
   author?: Uint8Array;
   attribution?: Uint8Array;
 };
@@ -77,25 +78,62 @@ export class NativeForegroundDb {
   private pendingUploadCountUnsupported = false;
   private uploadStatusUnsupported = false;
   private pendingUploadRowsUnsupported = false;
+  /**
+   * A tick failure met while an encryption call waited. The call is not its
+   * owner, so the next `tick()` (the core's own driver) throws it, or the
+   * next tick of an operation that was already pending when it happened
+   * (`at`): one admitted after it never sees it.
+   */
+  private heldTickFailure: { error: unknown; at: number } | undefined;
+  /** Counts held tick failures; an operation notes it when admitted. */
+  private tickFailures = 0;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
     private readonly commands: NativeForegroundModule,
   ) {}
 
+  private tickScheduler: ((first: Error | string | null, second?: string) => void) | undefined;
+  private storeWake: ((wake: string) => void) | null = null;
+  private wakeRegistered = false;
+  private encryptionOpening: Promise<void> | undefined;
+  private advanceEncryptionOpen: (() => void) | undefined;
+
   setTickScheduler(callback: (first: Error | string | null, second?: string) => void): void {
+    this.tickScheduler = callback;
+    this.registerWakeScheduler();
+  }
+
+  get supportsEncryptionStateWake(): boolean {
+    return this.runtime.supportsEncryptionStateWake === true;
+  }
+
+  get setStoreWake(): ((callback: ((wake: string) => void) | null) => void) | undefined {
+    if (this.runtime.supportsStoreWake !== true || !this.runtime.setTickScheduler) return undefined;
+    return (callback) => {
+      this.storeWake = callback;
+      if (callback) this.registerWakeScheduler();
+    };
+  }
+
+  private registerWakeScheduler(): void {
+    if (this.wakeRegistered) return;
     if (!this.runtime.setTickScheduler) {
       throw new Error(
         "React Native native foreground runtime does not expose owner wake scheduling",
       );
     }
     this.runtime.setTickScheduler((urgency) => {
-      // Native invalidation clears the JSI registration first, but a
-      // CallInvoker task may already have crossed into JS when close races
-      // teardown. Do not let that stale task re-enter the adapter after its
-      // foreground facade has become unusable.
-      if (!this.closed) callback(urgency);
+      // A CallInvoker task can already have crossed into JS at teardown.
+      if (this.closed) return;
+      if (urgency === "encryption-state") {
+        this.storeWake?.(urgency);
+        return;
+      }
+      if (urgency === "immediate") this.storeWake?.(urgency);
+      this.tickScheduler?.(urgency);
     });
+    this.wakeRegistered = true;
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -128,7 +166,7 @@ export class NativeForegroundDb {
     query: Uint8Array,
     opts: unknown,
     openTransactionId?: string,
-  ): Uint8Array | { poll(): Uint8Array | null; cancel(): void } {
+  ): Uint8Array | PendingForegroundRows {
     const transaction =
       openTransactionId === undefined
         ? undefined
@@ -142,7 +180,13 @@ export class NativeForegroundDb {
       optionsJson: JSON.stringify(opts ?? {}),
       transaction,
     });
-    if (response.type === "rows") return response.rows;
+    if (response.type === "rows") {
+      if (response.unreadable === undefined) return response.rows;
+      // Answered as a done read, so the rows it left out reach the runtime
+      // (as a pending napi read carries them).
+      const { rows, unreadable } = response;
+      return { poll: () => rows, cancel: () => {}, unreadable: () => unreadable };
+    }
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
@@ -184,7 +228,25 @@ export class NativeForegroundDb {
   }
 
   tick(): void {
+    this.tickSince(-1);
+  }
+
+  /**
+   * A tick for an operation admitted when `since` tick failures had been
+   * held: a held failure is thrown only if it happened after that, while
+   * the operation was pending. One from before it began stays held.
+   */
+  private tickSince(since: number): void {
     this.assertOpen();
+    const held = this.heldTickFailure;
+    if (held && held.at > since) {
+      this.heldTickFailure = undefined;
+      throw held.error;
+    }
+    this.driveTick();
+  }
+
+  private driveTick(): void {
     this.runtime.tick();
     if (!this.mutationErrorCallback && !this.authRejectedCallback && !this.upstreamFailureCallback)
       return;
@@ -232,6 +294,7 @@ export class NativeForegroundDb {
     if (this.phase === "closed") return false;
     const storeDeleted = this.phase === "storeDeleted";
     this.phase = "closed";
+    this.advanceEncryptionOpen?.();
     this.transactions.clear();
     if (storeDeleted) {
       // The relay already closed this foreground with its store: only the
@@ -379,6 +442,103 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
+  openEncryption(): Promise<void> {
+    return (this.encryptionOpening ??= new Promise((resolve, reject) => {
+      this.advanceEncryptionOpen = () => {
+        try {
+          const response = this.execute({ type: "encryptionOpen" });
+          if (response.type === "operationError") throw foregroundOperationError(response);
+          if (response.type !== "encryptionOpen")
+            return unexpected("encryptionOpen", response.type);
+          if (!response.ready) return;
+          this.advanceEncryptionOpen = undefined;
+          resolve();
+        } catch (error) {
+          this.advanceEncryptionOpen = undefined;
+          reject(error);
+        }
+      };
+      this.advanceEncryptionOpen();
+    }));
+  }
+
+  takeStoreRequests(): string[] {
+    if (this.closed || this.runtime.isClosed?.()) {
+      this.advanceEncryptionOpen?.();
+      return [];
+    }
+    const response = this.execute({ type: "takeStoreRequests" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "storeRequests") return unexpected("takeStoreRequests", response.type);
+    return response.requests;
+  }
+
+  replyStore(id: string, ok: boolean, payload: string): boolean {
+    if (this.closed || this.runtime.isClosed?.()) {
+      this.advanceEncryptionOpen?.();
+      return false;
+    }
+    const response = this.execute({ type: "replyStore", id, ok, payload });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "storeReply") return unexpected("replyStore", response.type);
+    if (response.accepted) this.advanceEncryptionOpen?.();
+    return response.accepted;
+  }
+
+  async encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string> {
+    // The relay drives readiness even while its owner is busy. Polling that
+    // operation must leave JS free to answer private store requests.
+    const response = await this.completeOperation(
+      this.encryptionCommand(op, args),
+      op === "ready" ? "pollOnly" : "sharedTick",
+    );
+    return this.encryptionResult(op, response);
+  }
+
+  encryptionState(): string {
+    return this.encryptionResult("state", this.encryptionCommand("state"));
+  }
+
+  tableIdentity(table: string): string {
+    const result = this.encryptionCommand("spaceRow", {
+      table,
+      id: "00000000-0000-0000-0000-000000000000",
+    });
+    return (JSON.parse(this.encryptionResult("spaceRow", result)) as { scopeId: string }).scopeId;
+  }
+
+  encryptionSpaces(): string {
+    return this.encryptionResult("spaces", this.encryptionCommand("spaces"));
+  }
+
+  encryptionUseSpace(table: string, id: string, open: boolean): void {
+    this.encryptionResult("useSpace", this.encryptionCommand("useSpace", { table, id, open }));
+  }
+
+  encryptionSetOnline(online: boolean): void {
+    this.encryptionResult("setOnline", this.encryptionCommand("setOnline", { online }));
+  }
+
+  takeEncryptionReports(): string[] {
+    if (this.closed || this.runtime.isClosed?.()) return [];
+    const response = this.execute({ type: "takeEncryptionReports" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "encryptionReports") {
+      return unexpected("takeEncryptionReports", response.type);
+    }
+    return response.reports;
+  }
+
+  private encryptionCommand(op: string, args?: Record<string, unknown> | null): ForegroundResponse {
+    return this.execute({ type: "encryptionCall", op, argsJson: JSON.stringify(args ?? {}) });
+  }
+
+  private encryptionResult(op: string, response: ForegroundResponse): string {
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "encryptionResult") return unexpected(op, response.type);
+    return response.json;
+  }
+
   nativeSessionMetadata(): {
     node: Uint8Array;
     registryAuthority: string;
@@ -449,7 +609,7 @@ export class NativeForegroundDb {
     // its core cleanup for the following ordinary turn. Drive that turn here:
     // after the JS reader stops polling there may be no unrelated operation
     // to do it for us.
-    if (response.closed) this.tick();
+    if (response.closed) this.tickSince(this.tickFailures);
     return response.closed;
   }
 
@@ -470,6 +630,7 @@ export class NativeForegroundDb {
   }
 
   private requestPermissionAdvice(action: Relay.NativeForegroundPermissionAdviceAction) {
+    const since = this.tickFailures;
     let response = this.execute({ type: "permissionAdvice", action });
     if (response.type === "permissionAdvice") return response.advice;
     if (response.type === "operationError") throw foregroundOperationError(response);
@@ -479,7 +640,7 @@ export class NativeForegroundDb {
     return {
       poll: (): string | null => {
         if (completed || this.closed) return "unknown";
-        this.tick();
+        this.tickSince(since);
         response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -507,6 +668,7 @@ export class NativeForegroundDb {
   waitForPendingWrites(
     tier: string,
   ): Uint8Array | { poll(): Uint8Array | null; cancel(): boolean } {
+    const since = this.tickFailures;
     let response = this.execute({ type: "waitForPendingWrites", tier });
     const settle = (): Uint8Array => {
       if (response.type === "operationError") throw foregroundOperationError(response);
@@ -520,7 +682,7 @@ export class NativeForegroundDb {
     return {
       poll: (): Uint8Array | null => {
         if (completed || this.closed) throw new Error("waitForPendingWrites was cancelled");
-        this.tick();
+        this.tickSince(since);
         response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -541,11 +703,12 @@ export class NativeForegroundDb {
     if (!["local", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
+    const since = this.tickFailures;
     let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });
     while (response.type === "pending") {
       const operation = response.operation;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
+      this.tickSince(since);
       response = this.execute({ type: "poll", operation });
     }
     if (response.type === "operationError") throw foregroundOperationError(response);
@@ -558,12 +721,16 @@ export class NativeForegroundDb {
     return this.executeAllowClosed(command);
   }
 
-  private pendingRows(operation: number): { poll(): Uint8Array | null; cancel(): void } {
+  private pendingRows(operation: number): PendingForegroundRows {
+    // Admitted just now, by the caller's `execute`.
+    const since = this.tickFailures;
     let completed = false;
+    let unreadable: string | null = null;
     return {
+      unreadable: () => unreadable,
       poll: () => {
         if (completed) throw new Error("Native foreground read is already complete");
-        this.tick();
+        this.tickSince(since);
         const response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -574,6 +741,7 @@ export class NativeForegroundDb {
           });
         }
         if (response.type !== "rows") return unexpected("poll", response.type);
+        unreadable = response.unreadable ?? null;
         return response.rows;
       },
       cancel: () => {
@@ -813,6 +981,7 @@ export class NativeForegroundDb {
     head?: unknown,
     base?: unknown,
     transaction?: string,
+    addCreatorAsMember?: boolean,
   ) {
     if (updatedAtMs !== undefined && (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0)) {
       throw new Error("updatedAtMs must be a non-negative safe integer");
@@ -824,7 +993,7 @@ export class NativeForegroundDb {
       rowId,
       cells,
       column,
-      optionsJson: JSON.stringify({ updatedAtMs, head, base, transaction }),
+      optionsJson: JSON.stringify({ updatedAtMs, head, base, transaction, addCreatorAsMember }),
     });
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "streamingMutationOpened")
@@ -838,7 +1007,7 @@ export class NativeForegroundDb {
     return {
       push: async (chunk: Uint8Array): Promise<void> => {
         assertOpen();
-        const pushed = await this.completeMutationOperation(
+        const pushed = await this.completeOperation(
           this.execute({ type: "pushStreamingMutation", upload, chunk }),
         );
         if (pushed.type === "operationError") throw foregroundOperationError(pushed);
@@ -847,7 +1016,7 @@ export class NativeForegroundDb {
       },
       finishInTransaction: async (): Promise<void> => {
         assertOpen();
-        const finished = await this.completeMutationOperation(
+        const finished = await this.completeOperation(
           this.execute({ type: "finishStreamingMutation", upload }),
         );
         closed = true;
@@ -857,13 +1026,14 @@ export class NativeForegroundDb {
       },
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();
+        const since = this.tickFailures;
         let finished = this.execute({ type: "finishStreamingMutation", upload });
         if (finished.type === "operationError") throw foregroundOperationError(finished);
         closed = true;
         while (finished.type === "pending") {
           const operation = finished.operation;
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          this.tick();
+          this.tickSince(since);
           finished = this.execute({ type: "poll", operation });
         }
         if (finished.type === "operationError") throw foregroundOperationError(finished);
@@ -876,7 +1046,7 @@ export class NativeForegroundDb {
         const admitted = this.execute({ type: "abortStreamingMutation", upload });
         if (admitted.type === "operationError") throw foregroundOperationError(admitted);
         closed = true;
-        const aborted = await this.completeMutationOperation(admitted);
+        const aborted = await this.completeOperation(admitted);
         if (aborted.type === "operationError") throw foregroundOperationError(aborted);
         if (aborted.type !== "streamingMutationAborted")
           return unexpected("abortStreamingMutation", aborted.type);
@@ -885,16 +1055,66 @@ export class NativeForegroundDb {
     };
   }
 
-  private async completeMutationOperation(
+  /**
+   * Polls an admitted operation to its result. `drive` says how the wait
+   * treats the core tick:
+   * - `ownTick`: ticks, and a tick failure is the operation's (streaming
+   *   mutations run through the core), so it cancels the operation; a held
+   *   failure is its own only if it happened while the operation was
+   *   pending (the response was admitted just before this call);
+   * - `sharedTick`: ticks, but the relay runs the operation (encryption
+   *   calls), so a tick failure is not its own. Cancelling would drop work
+   *   that may not be repeatable (a spent approval). The operation keeps
+   *   polling to its own result and the first failure is held for the next
+   *   `tick()`, whose caller owns core failures;
+   * - `pollOnly`: never ticks (readiness, which must not wait for the owner).
+   * Only the operation's own poll failure, or closing, cancels it otherwise.
+   */
+  private async completeOperation(
     response: ForegroundResponse,
+    drive: "ownTick" | "sharedTick" | "pollOnly" = "ownTick",
   ): Promise<ForegroundResponse> {
+    const since = this.tickFailures;
     while (response.type === "pending") {
       const operation = response.operation;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
-      response = this.execute({ type: "poll", operation });
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (drive === "ownTick") this.tickSince(since);
+        if (drive === "sharedTick") this.tickAlongside();
+        response = this.execute({ type: "poll", operation });
+      } catch (error) {
+        this.cancelInterruptedOperation(operation, drive !== "pollOnly");
+        throw error;
+      }
     }
     return response;
+  }
+
+  private tickAlongside(): void {
+    this.assertOpen();
+    try {
+      this.driveTick();
+    } catch (error) {
+      this.heldTickFailure ??= { error, at: ++this.tickFailures };
+    }
+  }
+
+  private cancelInterruptedOperation(operation: number, probe: boolean): void {
+    if (this.closed) return;
+    // A probe can ask the owner to drive. Readiness uses its nonblocking
+    // cancel directly and lets the native handle check its own liveness.
+    if (probe) {
+      try {
+        if (this.isNativeForegroundClosed()) return;
+      } catch {
+        // A failed probe leaves native cancellation to validate the handle.
+      }
+    }
+    try {
+      this.execute({ type: "cancel", operation });
+    } catch {
+      // Preserve the error that interrupted the wait.
+    }
   }
 
   private directMutation(
@@ -1067,10 +1287,12 @@ function foregroundOperationError(response: {
   reason: string;
   code?: string;
   reasonName?: string;
+  space?: { scopeId: string; identifier: string };
 }): Error {
   const error = new Error(response.reason);
   if (response.code !== undefined) Object.assign(error, { code: response.code });
   if (response.reasonName !== undefined) Object.assign(error, { reason: response.reasonName });
+  if (response.space !== undefined) Object.assign(error, { space: response.space });
   return error;
 }
 
@@ -1105,3 +1327,14 @@ function rejectsCommand(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("runtime failed during execute");
 }
+
+/**
+ * A foreground read still to finish (or finished with rows left out). Once it
+ * is done, `unreadable` names the rows it left out because they could not be
+ * decrypted, as JSON; `null` when none.
+ */
+type PendingForegroundRows = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  unreadable(): string | null;
+};

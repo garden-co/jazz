@@ -61,6 +61,15 @@ pub enum JazzError {
         queued: bool,
         reason: String,
     },
+    /// Contract 2: encryption refused the operation (`code` names the
+    /// refusal), or hit an I/O failure (`io`). Last, so the variants before
+    /// it keep their indexes.
+    #[error("{reason}")]
+    Encryption {
+        code: String,
+        reason: String,
+        io: bool,
+    },
 }
 
 impl JazzError {
@@ -79,6 +88,10 @@ impl JazzError {
             Self::Replaced { .. } => Self::Closed,
             Self::NoUser { reason, .. } => Self::Refused { reason },
             Self::BundleMismatch { reason, .. } => Self::Refused { reason },
+            Self::Encryption {
+                reason, io: true, ..
+            } => Self::Io { reason },
+            Self::Encryption { reason, .. } => Self::Refused { reason },
             other => other,
         }
     }
@@ -87,7 +100,8 @@ impl JazzError {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Refused { .. } => "refused",
-            Self::Io { .. } => "io",
+            Self::Io { .. } | Self::Encryption { io: true, .. } => "io",
+            Self::Encryption { .. } => "refused",
             Self::Closed => "closed",
             Self::Permission { .. } => "permission",
             Self::NotSupported { .. } => "notSupported",
@@ -118,6 +132,11 @@ pub(crate) type FfiError = JazzErrorKind;
 pub(crate) enum JazzErrorKind {
     Refused(String),
     Io(String),
+    Encryption {
+        code: String,
+        reason: String,
+        io: bool,
+    },
     Closed,
     Permission(String),
     NotSupported(String),
@@ -152,6 +171,7 @@ impl From<JazzErrorKind> for JazzError {
         match kind {
             JazzErrorKind::Refused(reason) => Self::Refused { reason },
             JazzErrorKind::Io(reason) => Self::Io { reason },
+            JazzErrorKind::Encryption { code, reason, io } => Self::Encryption { code, reason, io },
             JazzErrorKind::Closed => Self::Closed,
             JazzErrorKind::Permission(reason) => Self::Permission { reason },
             JazzErrorKind::NotSupported(reason) => Self::NotSupported { reason },
@@ -238,6 +258,14 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 _ => Self::Refused(message),
             },
             E::Unsupported(what) => unsupported(what),
+            E::EncryptedSessionUnsupported => {
+                Self::NotSupported(format!("encryptedSessionUnsupported: {message}"))
+            }
+            E::Encryption { code, .. } => Self::Encryption {
+                io: matches!(code.as_str(), "store" | "database"),
+                code,
+                reason: message,
+            },
             // E::Refused: the backend refused who the client is (a credential
             // trusted neither way, a refused link); `for_user` reports its
             // 403 as `Permission` itself.
@@ -285,6 +313,11 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 rejection(&reason, message)
             }
             E::Jazz(J::Write(reason)) => rejection(&reason, message),
+            E::Jazz(J::QueryFailed(error)) => Self::Refused(format!(
+                "query ({}): {}",
+                error.code.as_str(),
+                error.message
+            )),
             E::Jazz(J::Query(_) | J::Schema(_) | J::Json(_) | J::Identity(_)) => {
                 Self::Refused(message)
             }
@@ -303,6 +336,117 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
 /// message shape is checked directly.
 #[cfg(test)]
 mod tests {
+    use super::{JazzError, JazzErrorKind};
+
+    /// The mapping is checked here because a foreign store's failure is
+    /// already exercised through the runtime in jazz-app's tests.
+    #[test]
+    fn a_private_store_failure_reaches_the_host_as_coded_io() {
+        let error = jazz_app_support::Error::Encryption {
+            code: "store".into(),
+            message: "cannot save the recovery nonce".into(),
+        };
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "io");
+        assert!(matches!(error, JazzError::Encryption { code, .. } if code == "store"));
+    }
+
+    /// Alice's query cannot observe this catalogue version. The conversion
+    /// is tested directly to pin the FFI kind and code without catalogue timing.
+    #[test]
+    fn unobserved_catalogue_is_a_query_refusal() {
+        use jazz_app_support::jazz::{db, tools};
+
+        let error = db::Error::new(db::ErrorCode::NotObserved, "catalogue unavailable");
+        let error = jazz_app_support::Error::Jazz(tools::JazzError::QueryFailed(error));
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "refused");
+        assert_eq!(
+            error.to_string(),
+            "query (not_observed): catalogue unavailable"
+        );
+    }
+
+    /// Alice cannot open an encrypted app as a JazzSession. Test the mapping
+    /// directly so both native FFI contracts are covered by one conversion.
+    #[test]
+    fn encrypted_session_is_unsupported() {
+        let error = jazz_app_support::Error::EncryptedSessionUnsupported;
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "notSupported");
+        assert!(
+            error
+                .to_string()
+                .starts_with("encryptedSessionUnsupported: ")
+        );
+        assert_eq!(error.for_contract(1).kind(), "refused");
+    }
+
+    /// A contract 1 host doesn't know the encryption kind: it gets the
+    /// refusal or I/O failure it does know, with the same reason.
+    #[test]
+    fn an_encryption_error_maps_down_for_contract_1() {
+        let encryption = |io| JazzError::Encryption {
+            code: "key-pending".into(),
+            reason: "waiting for a key".into(),
+            io,
+        };
+        assert_eq!(
+            encryption(false).for_contract(1),
+            JazzError::Refused {
+                reason: "waiting for a key".into()
+            }
+        );
+        assert_eq!(
+            encryption(true).for_contract(1),
+            JazzError::Io {
+                reason: "waiting for a key".into()
+            }
+        );
+        assert_eq!(encryption(false).for_contract(2), encryption(false));
+    }
+
+    /// UniFFI hosts read a variant by its index: `Encryption` was added
+    /// last, so every earlier variant keeps the index it had.
+    #[test]
+    fn variant_indexes_are_pinned() {
+        let index = |error: JazzError| {
+            let mut bytes = Vec::new();
+            <JazzError as uniffi::Lower<crate::UniFfiTag>>::write(error, &mut bytes);
+            i32::from_be_bytes(bytes[..4].try_into().unwrap())
+        };
+        let reason = || "r".to_owned();
+        assert_eq!(index(JazzError::Refused { reason: reason() }), 1);
+        assert_eq!(index(JazzError::Io { reason: reason() }), 2);
+        assert_eq!(index(JazzError::Closed), 3);
+        assert_eq!(index(JazzError::Permission { reason: reason() }), 4);
+        assert_eq!(
+            index(JazzError::BundleMismatch {
+                own: reason(),
+                served: reason(),
+                reason: reason()
+            }),
+            11
+        );
+        // Interrupted shipped in 2.0.0-beta.2 at 12; Encryption follows it.
+        assert_eq!(
+            index(JazzError::Interrupted {
+                interruption: reason(),
+                queued: false,
+                reason: reason()
+            }),
+            12
+        );
+        assert_eq!(
+            index(JazzError::Encryption {
+                code: reason(),
+                reason: reason(),
+                io: false
+            }),
+            13
+        );
+    }
+
     #[test]
     fn not_found_messages_are_recognised() {
         assert!(super::is_not_found(

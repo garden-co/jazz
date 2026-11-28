@@ -1,0 +1,40 @@
+[package]
+name = "jazz-e2ee-client"
+version.workspace = true
+edition = "2024"
+description = "Jazz's end-to-end encryption client runtime: the private store, held keys and the database's encryption hooks."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+include = ["src/**"]
+
+[features]
+# Test-only hooks (a stepped settle clock); the crate's own tests enable it.
+testing = []
+
+[dependencies]
+base64 = "0.22"
+futures = "0.3"
+jazz = { workspace = true, features = ["e2ee-client"] }
+jazz-e2ee.workspace = true
+serde_json = "1.0.145"
+thiserror = "2"
+uuid = { version = "1.18.1", features = ["v4"] }
+# Elapsed time that works in browsers too, as jazz-core uses (the host loop's clock).
+web-time = "1.1"
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
+
+# The browser's random source for the crates Jazz uses, as in jazz-wasm.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+uuid = { version = "1.18.1", features = ["v4", "js"] }
+
+[dev-dependencies]
+jazz-e2ee-client = { path = ".", features = ["testing"] }
+jazz = { workspace = true, features = ["e2ee-client", "testing"] }
+# Lets tests wrap a built-in mechanism (`Registry::replace_key_sealer`).
+jazz-e2ee = { workspace = true, features = ["conformance"] }
+postcard = { version = "1.1", features = ["alloc"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3.27.0"

@@ -240,7 +240,7 @@ fn open_server(path: &Path) -> Result<Db, jazz::db::Error> {
         path,
         FileOptions::default(),
     ))?;
-    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_authority()).unwrap();
     Ok(db)
 }
 
@@ -394,7 +394,7 @@ fn produce_sqlite_storage_corpus_v1() {
             FileOptions::default(),
         ))
         .unwrap();
-        jazz::db::block_on(server.set_authority());
+        jazz::db::block_on(server.set_authority()).unwrap();
         let client = open_client(&client_path);
 
         // Two authors (interned), history (updates), a soft delete, a large
@@ -1045,8 +1045,6 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     );
 }
 
-/// The server stores `documents.status` as tags in the order the variants
-/// were declared, and the client mirrored the same tags.
 /// A store written before the commit seq row (jazz#6367) upgrades: an
 /// open still recovers its seq by scanning every table, history table and
 /// `_jazz_transactions`, and writes nothing (a store only read keeps its
@@ -1156,6 +1154,8 @@ fn pinned_server_corpus_gains_its_commit_seq_row_on_first_write() {
     assert!(server.seq_high_water() >= recorded as u64);
 }
 
+/// The server stores `documents.status` as tags in the order the variants
+/// were declared, and the client mirrored the same tags.
 #[test]
 fn pinned_corpus_stores_enum_tags() {
     let dir = scratch("enum-tags");

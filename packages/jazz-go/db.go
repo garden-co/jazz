@@ -42,6 +42,10 @@ type Config struct {
 	// Auth signs an end user in (Token, DeviceAccount, DeviceKey): with
 	// ServerURL set to the app's Jazz endpoint (its backend's /jazz).
 	Auth Auth `json:"-"`
+	// Encryption is where this device keeps its encryption keys, for an app
+	// that declares end-to-end encryption (an app that does is refused
+	// without it). Not for a backend: it holds no keys.
+	Encryption *EncryptionConfig `json:"-"`
 	// AllowPlaintext lets ServerURL be http:// or ws:// to a host other than
 	// this machine (passed to the core as allowInsecureHttp). Credentials
 	// then cross the network unencrypted: only for a private network you
@@ -108,6 +112,7 @@ type DB struct {
 	closed   chan struct{}  // made as closing begins, closed as it ends
 	app      any
 	provider uint64 // the TokenProvider's id, if any
+	store    uint64 // the private store's id, if any
 
 	// streams are the DB's open subscriptions and watches, by id: each
 	// stops its jazz-ffi side at once; its channel closes once what was
@@ -184,6 +189,11 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err := loadFFI(); err != nil {
 		return nil, err
 	}
+	return open(ctx, cfg)
+}
+
+// open opens the app once the FFI is loaded and transport is checked.
+func open(ctx context.Context, cfg Config) (*DB, error) {
 	var auth map[string]any
 	if cfg.Auth != nil {
 		var err error
@@ -191,18 +201,37 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 			return nil, err
 		}
 	}
+	var environment string
+	var addCreatorAsMember *bool
+	if cfg.Encryption != nil {
+		if cfg.Encryption.Store == nil {
+			return nil, &Error{Kind: KindRefused, Message: "Config.Encryption needs a Store"}
+		}
+		environment = cfg.Encryption.Environment
+		if option := cfg.Encryption.AddCreatorAsMember; option != nil && !*option {
+			addCreatorAsMember = option
+		}
+	}
 	config, err := json.Marshal(struct {
 		Config
-		Contract int            `json:"contract"`
-		AuthJSON map[string]any `json:"auth,omitempty"`
-	}{cfg, 2, auth})
+		Contract           int            `json:"contract"`
+		AuthJSON           map[string]any `json:"auth,omitempty"`
+		Environment        string         `json:"environment,omitempty"`
+		AddCreatorAsMember *bool          `json:"addCreatorAsMember,omitempty"`
+	}{cfg, 2, auth, environment, addCreatorAsMember})
 	if err != nil {
+		return nil, err
+	}
+	// A ctx that has already ended opens nothing: there is no native open
+	// to wait for, and no callback to register.
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	type opened struct {
 		h        uintptr
 		err      error
 		provider uint64
+		store    uint64
 	}
 	done := make(chan opened, 1)
 	var id uint64
@@ -210,32 +239,66 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if withTokens {
 		id = nextProvider.Add(1)
 	}
+	var store PrivateStore
+	if cfg.Encryption != nil {
+		store = cfg.Encryption.Store
+	}
 	go func() {
-		if withTokens {
-			h, provider, err := openUser(string(config), id, t.provider)
-			done <- opened{h, err, provider}
-			return
-		}
-		var cerr uintptr
-		h := ffi.open(cstr(string(config)), &cerr)
-		done <- opened{h: h, err: takeError(cerr)}
+		h, storeID, err := openNative(string(config), id, t.provider, store)
+		done <- opened{h: h, err: err, provider: id, store: storeID}
 	}()
 	select {
 	case o := <-done:
 		if o.err != nil {
 			return nil, o.err
 		}
-		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
+		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider, store: o.store}, nil
 	case <-ctx.Done():
 		// Stop asking the provider, and close what the open still gives
 		// before answering, so the store is free again when Open returns.
 		cancelFetches(id)
-		if o := <-done; o.h != 0 {
+		o := <-done
+		if o.h != 0 {
 			ffi.close(o.h)
 		}
-		releaseProvider(id)
+		releaseCallbacks(id, o.store)
 		return nil, ctx.Err()
 	}
+}
+
+// openNative registers callbacks before opening and releases them if open
+// fails: the token provider under id (when tokens is set), the private store
+// under an id of its own, which it returns.
+func openNative(config string, id uint64, tokens TokenProvider, store PrivateStore) (uintptr, uint64, error) {
+	if store != nil && ffi.openEncrypted == nil {
+		return 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
+	}
+	var storeID uint64
+	var tokenCB uintptr
+	if tokens != nil {
+		providers.Store(id, tokens)
+		tokenCB = ffi.tokenCallback
+	}
+	var h, cerr uintptr
+	input := cstr(config)
+	switch {
+	case store != nil:
+		storeID = nextStore.Add(1)
+		stores.Store(storeID, store)
+		h = ffi.openEncrypted(input, tokenCB, uintptr(id), ffi.storeCallback, uintptr(storeID), &cerr)
+	case tokens != nil:
+		h = ffi.openUser(input, tokenCB, uintptr(id), &cerr)
+	default:
+		h = ffi.open(input, &cerr)
+	}
+	if err := takeError(cerr); err != nil || h == 0 {
+		releaseCallbacks(id, storeID)
+		if err == nil {
+			err = &Error{Kind: KindRefused, Message: "open failed"}
+		}
+		return 0, 0, err
+	}
+	return h, storeID, nil
 }
 
 // Close closes the app without waiting for its writes to reach the server
@@ -256,6 +319,12 @@ func (db *DB) Close() error {
 	return db.closeAndFree(0,
 		func(h uintptr) error { return callClose(ffi.call, h, "{}") },
 		ffi.close)
+}
+
+// releaseCallbacks runs after native close so both callbacks remain valid until it returns.
+func releaseCallbacks(provider, store uint64) {
+	releaseProvider(provider)
+	stores.Delete(store)
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.

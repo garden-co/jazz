@@ -67,3 +67,7 @@ macOS and on an iPhone simulator against the prebuilt XCFramework, builds
 simulator. See `examples/stage-plan/apps/swift-cli` for a complete
 command-line tool, and the docs' Swift setup page for what's not supported
 yet.
+
+## Encryption
+
+An app that declares end-to-end encryption opens with a private store your app supplies; see [Getting started: Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/getting-started.mdx#rust-swift-kotlin-and-go).

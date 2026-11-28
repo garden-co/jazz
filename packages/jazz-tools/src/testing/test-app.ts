@@ -20,6 +20,7 @@
  */
 import { createRequire } from "node:module";
 import { assertNoEnumCases } from "../app-file-enums.js";
+import type { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { bindApp, boundApp, type App, type AppTypes, type BindAppOptions } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
@@ -171,7 +172,26 @@ type ViewOf<TApp, S> = S extends { readonly transform: infer N extends keyof Tra
     : never
   : ParseColumn<S>;
 
-type ColumnsOfSpec<T> = T extends { readonly columns: infer C extends object } ? FieldsOf<C> : {};
+/** An encrypted table's declared columns (`encryption.columns`): their plaintext types. */
+type EncryptedOfSpec<T> = T extends {
+  readonly encryption: { readonly columns: infer C extends object };
+}
+  ? FieldsOf<C>
+  : {};
+
+/**
+ * The columns code reads and writes: an encrypted column with its plaintext
+ * type, and an encrypted table's equality columns left out (`model.rs`).
+ */
+type ColumnsOfSpec<T> = T extends { readonly columns: infer C extends object }
+  ? keyof EncryptedOfSpec<T> extends never
+    ? FieldsOf<C>
+    : {
+        [
+          K in keyof FieldsOf<C> as K extends `${typeof EQUALITY_PREFIX}${string}` ? never : K
+        ]: K extends keyof EncryptedOfSpec<T> ? EncryptedOfSpec<T>[K] : FieldsOf<C>[K];
+      }
+  : {};
 type ComputedOfSpec<T> = T extends { readonly computed: infer C extends object } ? FieldsOf<C> : {};
 type RelationsOfSpec<T> = T extends { readonly relations: infer R extends object }
   ? FieldsOf<R>
@@ -225,11 +245,13 @@ type InferTable<TApp, TTable> = Flat<
       }
     >;
     columns: {
-      -readonly [K in keyof ColumnsOfSpec<TTable>]: {
-        kind: ParseColumn<ColumnsOfSpec<TTable>[K]>["kind"];
-        nullable: ParseColumn<ColumnsOfSpec<TTable>[K]>["nullable"];
-        value: ParseColumn<ColumnsOfSpec<TTable>[K]>["value"];
-      };
+      -readonly [K in keyof ColumnsOfSpec<TTable>]: Flat<
+        {
+          kind: ParseColumn<ColumnsOfSpec<TTable>[K]>["kind"];
+          nullable: ParseColumn<ColumnsOfSpec<TTable>[K]>["nullable"];
+          value: ParseColumn<ColumnsOfSpec<TTable>[K]>["value"];
+        } & (K extends keyof EncryptedOfSpec<TTable> ? { encrypted: true } : {})
+      >;
     };
     relations: {
       -readonly [K in keyof RelationsOfSpec<TTable>]: Flat<

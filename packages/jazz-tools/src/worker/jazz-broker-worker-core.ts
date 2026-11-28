@@ -1266,17 +1266,42 @@ async function initialize(context: RuntimeContext): Promise<void> {
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
       );
     }
-    unownedDb = proof
-      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+    const keyless = options.keyless;
+    if (keyless && typeof wasmModule.WasmDb.openBrowserKeyless !== "function") {
+      throw new Error(
+        "WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
+      );
+    }
+    // The keyless open takes one app id for both its encryption domain and the
+    // proof's check: a proof minted for another app must not be checked
+    // against this one (nor this app's rows sealed under the proof's).
+    if (keyless && proof && proof.appId !== options.appId) {
+      throw new Error(
+        `The encrypted app's id (${options.appId}) is not the one its client proof names (${proof.appId})`,
+      );
+    }
+    unownedDb = keyless
+      ? await wasmModule.WasmDb.openBrowserKeyless(
           context.pageStore,
           schema,
           config,
-          proof.token,
-          proof.appId,
-          proof.claimedAuthor,
           options.dbName,
+          keyless.bindings,
+          options.appId,
+          keyless.environment,
+          proof ?? null,
         )
-      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
+      : proof
+        ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+            context.pageStore,
+            schema,
+            config,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+            options.dbName,
+          )
+        : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,

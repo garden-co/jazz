@@ -700,3 +700,149 @@ fn running_again_over_an_unresolved_stub_names_its_todos() {
     assert!(error.contains("TODO"), "{error}");
     assert!(!error.contains("already has a version"), "{error}");
 }
+
+/// Alice supplies a default in her migration, but its enum downgrade is
+/// invalid. Creating a migration reports the load error and leaves her files alone.
+#[test]
+fn an_invalid_authored_migration_keeps_the_app_file_and_bindings() {
+    let shipped = serde_json::json!({
+        "format": 1,
+        "tables": {
+            "notes": {
+                "columns": { "status": "bytes" },
+                "encryption": {
+                    "space": "id", "scope": "notes",
+                    "columns": {
+                        "status": { "type": { "enum": ["a", "b"] }, "sealedType": { "enum": ["a"] } }
+                    }
+                }
+            }
+        }
+    });
+    let lang = Lang::Rust;
+    let bindings = generate(lang, shipped.to_string().as_bytes()).unwrap();
+    let mut edited = shipped.clone();
+    edited["history"]["shipped"]["tables"] = shipped["tables"].clone();
+    edited["tables"]["notes"]["encryption"]["columns"]["status"]["type"]["enum"] =
+        serde_json::json!(["a"]);
+    edited["tables"]["notes"]["columns"]["rank"] = serde_json::json!("int");
+    edited["migrations"] = serde_json::json!([{
+        "from": "shipped", "migrate": { "notes": { "rank": { "add": "int", "default": 0 } } }
+    }]);
+    let edited = edited.to_string();
+    let load_error = App::load(edited.as_bytes()).unwrap_err().to_string();
+    assert!(
+        load_error.contains("notes.status: only appending enum variants"),
+        "{load_error}"
+    );
+
+    let dir = std::env::temp_dir().join(format!("jazz-invalid-migration-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let app_path = dir.join(artifact::APP_FILE);
+    let bindings_path = dir.join(lang.file());
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, &edited).unwrap();
+    std::fs::write(&bindings_path, &bindings).unwrap();
+    let result = jazz_codegen::project::migrations_create(&dir, &[lang.into()], "retry");
+    let app_after = std::fs::read_to_string(app_path).unwrap();
+    let bindings_after = std::fs::read_to_string(bindings_path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    assert_eq!(
+        result.expect_err("the authored migration is invalid"),
+        load_error
+    );
+    assert_eq!(app_after, edited);
+    assert_eq!(bindings_after, bindings);
+}
+
+/// Alice tries to replace a required encrypted string with a required
+/// encrypted boolean. Neither a rename nor an add and drop works.
+#[test]
+fn an_impossible_encrypted_rename_leaves_the_project_unchanged() {
+    let shipped = file(
+        r#"{ "messages": {
+            "columns": { "text": "bytes" },
+            "encryption": { "space": "id", "scope": "messages", "columns": { "text": "string" } }
+        } }"#,
+    );
+    let edited = shipped
+        .replace(r#""text""#, r#""subject""#)
+        .replace(r#""string""#, r#""boolean""#);
+    let lang = Lang::Rust;
+    let bindings = generate(lang, shipped.as_bytes()).unwrap();
+    let dir = std::env::temp_dir().join(format!("jazz-impossible-rename-{}", std::process::id()));
+    let migrations_dir = dir.join("migrations");
+    std::fs::create_dir_all(&migrations_dir).unwrap();
+    let files = || {
+        std::fs::read_dir(&migrations_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    };
+    let before = files();
+    let app_path = dir.join(artifact::APP_FILE);
+    let bindings_path = dir.join(lang.file());
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, &edited).unwrap();
+    std::fs::write(&bindings_path, &bindings).unwrap();
+
+    let result = jazz_codegen::project::migrations_create(&dir, &[lang.into()], "replace-text");
+    let after = files();
+    let app_after = std::fs::read_to_string(app_path).unwrap();
+    let bindings_after = std::fs::read_to_string(bindings_path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    let error = result.expect_err("neither interpretation is valid");
+    assert!(
+        error.contains("messages.subject: the migration adds a required encrypted column"),
+        "{error}"
+    );
+    assert_eq!(after, before);
+    assert_eq!(app_after, edited);
+    assert_eq!(bindings_after, bindings);
+}
+
+/// Alice replaces one required encrypted string with two. Creating the
+/// migration refuses because the two targets cannot share a rename source.
+#[test]
+fn encrypted_renames_cannot_share_a_source() {
+    let shipped = file(
+        r#"{ "messages": {
+            "columns": { "text": "bytes" },
+            "encryption": { "space": "id", "scope": "messages", "columns": { "text": "string" } }
+        } }"#,
+    );
+    let edited = file(
+        r#"{ "messages": {
+            "columns": { "body": "bytes", "subject": "bytes" },
+            "encryption": {
+                "space": "id", "scope": "messages", "columns": { "body": "string", "subject": "string" }
+            }
+        } }"#,
+    );
+    let lang = Lang::Rust;
+    let bindings = generate(lang, shipped.as_bytes()).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("jazz-shared-rename-source-{}", std::process::id()));
+    let app_path = dir.join(artifact::APP_FILE);
+    let bindings_path = dir.join(lang.file());
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, &edited).unwrap();
+    std::fs::write(&bindings_path, &bindings).unwrap();
+
+    let result = jazz_codegen::project::migrations_create(&dir, &[lang.into()], "replace-text");
+    let app_after = std::fs::read_to_string(app_path).unwrap();
+    let bindings_after = std::fs::read_to_string(bindings_path).unwrap();
+    let migration_written = dir.join("migrations").exists();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    let error = result.expect_err("one source cannot supply both required columns");
+    assert!(
+        error.contains("the migration adds a required encrypted column"),
+        "{error}"
+    );
+    assert!(!migration_written);
+    assert_eq!(app_after, edited);
+    assert_eq!(bindings_after, bindings);
+}

@@ -1,0 +1,1767 @@
+{
+  "__e2ee_account_identities": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "ledgerVersion",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "generation",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "envelope",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["deviceId"]
+  },
+  "__e2ee_account_keys": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "publicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_account_roots": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "ledgerVersion",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "generation",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "kind",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "deviceAccountPublicKey",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "deviceAccountSignature",
+        "nullable": true
+      }
+    ],
+    "indexed_columns": ["accountId", "deviceId"]
+  },
+  "__e2ee_account_successors": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "predecessor",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "action",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "removedDeviceId",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "retiredRecoveryRootIds",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "membership",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "revision",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "history",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "deliveries",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_commitments": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "subjectKind",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "subjectId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "commitment",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_device_approvals": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "challengeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ]
+  },
+  "__e2ee_device_challenges": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "envelope",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "nonce",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["deviceId"]
+  },
+  "__e2ee_device_deliveries": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "challengeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "envelope",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      }
+    ]
+  },
+  "__e2ee_device_keys": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "publicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signingPublicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "signingMechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "signingVersion",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["deviceId"]
+  },
+  "__e2ee_device_proofs": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "challengeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "proof",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "nonce",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ]
+  },
+  "__e2ee_device_removal_requests": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId", "deviceId"]
+  },
+  "__e2ee_device_requests": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "publicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signingPublicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "signingMechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "signingVersion",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "nonceCommitment",
+        "nullable": false
+      }
+    ]
+  },
+  "__e2ee_members": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "scopeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "identifier",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      }
+    ],
+    "composite_indexes": [["scopeId", "identifier", "accountId"]],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_public_account_successors": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "predecessor",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "action",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "removedDeviceId",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "retiredRecoveryRootIds",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "membership",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "revision",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_public_device_approvals": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "recoveryRootId",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "recoverySignature",
+        "nullable": true
+      }
+    ],
+    "indexed_columns": ["accountId", "deviceId"]
+  },
+  "__e2ee_recovery_deliveries": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "rootId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "envelope",
+        "nullable": false
+      }
+    ]
+  },
+  "__e2ee_recovery_roots": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "signerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "publicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signingPublicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "signingMechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "signingVersion",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "indexed_columns": ["accountId"]
+  },
+  "__e2ee_space_deliveries": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "scopeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "identifier",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "keyEpochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "senderAccountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "recipientAccountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "recipientAccountEpochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "envelope",
+        "nullable": false
+      }
+    ],
+    "composite_indexes": [
+      ["scopeId", "identifier", "keyEpochId"],
+      ["scopeId", "identifier", "recipientAccountId", "keyEpochId"]
+    ],
+    "indexed_columns": ["recipientAccountId"]
+  },
+  "__e2ee_space_successors": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "scopeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "identifier",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "predecessor",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "historyEpochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "authorAccountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "authorDeviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "authorEpochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "history",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "accountEnvelope",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "composite_indexes": [["scopeId", "identifier", "predecessor"]]
+  },
+  "__e2ee_spaces": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "scopeId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "identifier",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "creatorAccountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "deviceId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "accountEpochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "epochId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "mechanism",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "BigInt"
+        },
+        "name": "version",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "verification",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "accountEnvelope",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "signature",
+        "nullable": false
+      }
+    ],
+    "composite_indexes": [["scopeId", "identifier"]]
+  },
+  "better_auth_account": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "accountId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "providerId",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "userId",
+        "nullable": false,
+        "references": "better_auth_user"
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "password",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "createdAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "updatedAt",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "user": {
+        "kind": "forward",
+        "table": "better_auth_user",
+        "column": "userId"
+      }
+    }
+  },
+  "better_auth_jwks": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "publicKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "privateKey",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "createdAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "expiresAt",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "alg",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "crv",
+        "nullable": true
+      }
+    ]
+  },
+  "better_auth_session": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "expiresAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "token",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "createdAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "updatedAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "ipAddress",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "userAgent",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "userId",
+        "nullable": false,
+        "references": "better_auth_user"
+      }
+    ],
+    "relations": {
+      "user": {
+        "kind": "forward",
+        "table": "better_auth_user",
+        "column": "userId"
+      }
+    }
+  },
+  "better_auth_user": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "email",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Boolean"
+        },
+        "name": "emailVerified",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "image",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "createdAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "updatedAt",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "better_auth_sessionViaUser": {
+        "kind": "reverse",
+        "table": "better_auth_session",
+        "relation": "user"
+      },
+      "better_auth_accountViaUser": {
+        "kind": "reverse",
+        "table": "better_auth_account",
+        "relation": "user"
+      }
+    }
+  },
+  "better_auth_verification": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "identifier",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "value",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "expiresAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "createdAt",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "name": "updatedAt",
+        "nullable": false
+      }
+    ]
+  },
+  "canvases": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      },
+      "strokesViaCanvas": {
+        "kind": "reverse",
+        "table": "strokes",
+        "relation": "canvas"
+      },
+      "messagesViaCanvas": {
+        "kind": "reverse",
+        "table": "messages",
+        "relation": "canvas"
+      }
+    }
+  },
+  "joinRequests": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "requester",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "profileId",
+        "nullable": false,
+        "references": "profiles"
+      }
+    ],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      },
+      "profile": {
+        "kind": "forward",
+        "table": "profiles",
+        "column": "profileId"
+      }
+    }
+  },
+  "messages": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "senderId",
+        "nullable": false,
+        "references": "profiles"
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "text",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "attachment",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "attachmentName",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "attachmentType",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Integer"
+        },
+        "name": "attachmentSize",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "canvasId",
+        "nullable": true,
+        "references": "canvases"
+      }
+    ],
+    "composite_indexes": [["roomId", "$createdAt"]],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      },
+      "sender": {
+        "kind": "forward",
+        "table": "profiles",
+        "column": "senderId"
+      },
+      "canvas": {
+        "kind": "forward",
+        "table": "canvases",
+        "column": "canvasId"
+      },
+      "reactionsViaMessage": {
+        "kind": "reverse",
+        "table": "reactions",
+        "relation": "message"
+      }
+    }
+  },
+  "profiles": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "author",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "displayName",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "avatar",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "avatarType",
+        "nullable": true
+      }
+    ],
+    "relations": {
+      "messagesViaSender": {
+        "kind": "reverse",
+        "table": "messages",
+        "relation": "sender"
+      },
+      "membershipsViaProfile": {
+        "kind": "reverse",
+        "table": "roomMembers",
+        "relation": "memberProfile"
+      },
+      "joinRequestsViaProfile": {
+        "kind": "reverse",
+        "table": "joinRequests",
+        "relation": "profile"
+      }
+    }
+  },
+  "reactions": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "messageId",
+        "nullable": false,
+        "references": "messages"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "author",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "emoji",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      },
+      "message": {
+        "kind": "forward",
+        "table": "messages",
+        "column": "messageId"
+      }
+    }
+  },
+  "readMarkers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "reader",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Bytea"
+        },
+        "name": "lastReadAt",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      }
+    }
+  },
+  "roomMembers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "memberAuthor",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "memberProfileId",
+        "nullable": true,
+        "references": "profiles"
+      }
+    ],
+    "relations": {
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      },
+      "memberProfile": {
+        "kind": "forward",
+        "table": "profiles",
+        "column": "memberProfileId"
+      }
+    }
+  },
+  "rooms": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "roomMembersViaRoom": {
+        "kind": "reverse",
+        "table": "roomMembers",
+        "relation": "room"
+      },
+      "messagesViaRoom": {
+        "kind": "reverse",
+        "table": "messages",
+        "relation": "room"
+      },
+      "reactionsViaRoom": {
+        "kind": "reverse",
+        "table": "reactions",
+        "relation": "room"
+      },
+      "joinRequestsViaRoom": {
+        "kind": "reverse",
+        "table": "joinRequests",
+        "relation": "room"
+      },
+      "readMarkersViaRoom": {
+        "kind": "reverse",
+        "table": "readMarkers",
+        "relation": "room"
+      },
+      "canvasesViaRoom": {
+        "kind": "reverse",
+        "table": "canvases",
+        "relation": "room"
+      }
+    }
+  },
+  "strokes": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "canvasId",
+        "nullable": false,
+        "references": "canvases"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "roomId",
+        "nullable": false,
+        "references": "rooms"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "author",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "color",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Integer"
+        },
+        "name": "width",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "element": {
+            "type": "Integer"
+          },
+          "type": "Array"
+        },
+        "name": "points",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "canvas": {
+        "kind": "forward",
+        "table": "canvases",
+        "column": "canvasId"
+      },
+      "room": {
+        "kind": "forward",
+        "table": "rooms",
+        "column": "roomId"
+      }
+    }
+  }
+}

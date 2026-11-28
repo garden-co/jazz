@@ -17,6 +17,10 @@ import { prepareAccountManager, type AccountStore } from "../accounts/persistenc
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import { declaredEntries } from "../encryption/plain-schema.js";
+import { Encryption } from "../encryption/index.js";
+import { buildNodeEncryption, type NodeEncryptionConfig } from "../encryption/node-host.js";
+import { deviceAccountSecretOf, deviceAccountSecretReader } from "../accounts/enrollment.js";
 import {
   enginePermissions,
   isPermissionsFile,
@@ -90,6 +94,12 @@ export type JazzClientConfig = Omit<
    * backend trusts the token as neither. Not with `initial`.
    */
   credential?: BackendClientCredential;
+  /**
+   * For an app that declares end-to-end encryption: where this device keeps
+   * its private keys. Required for such an app; there is no default, since
+   * protecting the keys is the app's decision (see the encryption docs).
+   */
+  encryption?: NodeEncryptionConfig;
 };
 
 /** @internal `createJazz`'s own session config: it may admit itself with the core's backend secret. */
@@ -176,11 +186,22 @@ class NodeUserRuntimeSource extends RuntimeSource {
   flush(): void {
     // Native writes already cross the local durability boundary when committed.
   }
+  private adapter: NativeRuntimeAdapter | undefined;
+
   constructor(
     private readonly host: OpenJazzSessionConfig & { webSocket?: WebSocketConstructor },
     private readonly account: AccountHandle,
+    /** The encryption runtime built for this account, for an app that declares encryption. */
+    private readonly encryption?: {
+      runtime: import("../encryption/private-store.js").StoreTarget;
+      store: import("../encryption/private-store.js").PrivateStore;
+    },
   ) {
     super();
+  }
+
+  override encryptionHandle(): Encryption | undefined {
+    return this.adapter?.encryptionHandle();
   }
   override createClient({
     config,
@@ -230,8 +251,22 @@ class NodeUserRuntimeSource extends RuntimeSource {
         webSocket: this.host.webSocket,
         slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
         migrations,
+        plainEntries: declaredEntries(resolveSchemaSource(this.host.app)),
+        ...(this.encryption
+          ? {
+              encryption: {
+                ...this.encryption,
+                createHandle: (native, stateChanges) =>
+                  new Encryption(native, {
+                    stateChanges,
+                    accountSecret: deviceAccountSecretReader(this.account),
+                  }),
+              },
+            }
+          : {}),
       },
     );
+    this.adapter = runtime;
     const context: AppContext = { ...config, appId: clientScope(config), schema: runtimeSchema };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
@@ -296,6 +331,7 @@ const BACKEND_SESSION_OPTIONS = {
   bundle: true,
   slowQueryThresholdMs: true,
   subscriptionBacklogRows: true,
+  encryption: true,
 } as const satisfies Record<keyof JazzClientConfig, true>;
 
 /**
@@ -530,7 +566,15 @@ export async function openJazzSession(
     openClient: async (account) => {
       const backend = getBackendAuth(account, registry);
       if (!backend) {
-        const source = new NodeUserRuntimeSource(config, account);
+        const encryption = await buildNodeEncryption({
+          app: config.app,
+          appId: clientScope(config),
+          environment: config.env ?? "dev",
+          accountId: account.id,
+          deviceAccountSecret: deviceAccountSecretOf(account),
+          encryption: config.encryption,
+        });
+        const source = new NodeUserRuntimeSource(config, account, encryption);
         const db = await createAccountDbWithRuntimeSource(
           {
             appId: clientScope(config),
@@ -538,11 +582,18 @@ export async function openJazzSession(
             env: config.env,
             driver: { type: config.driver.type },
             account,
+            // Which live queries read encrypted columns, so that they wait
+            // until this client can open them.
+            ...(encryption && config.encryption
+              ? { encryption: { app: config.app, store: config.encryption.store } }
+              : {}),
           },
           source,
         );
         let client: SharedJazzClient;
         try {
+          // An encrypted app starts verifying its account at open, not at its first query.
+          if (encryption) db.openClientFor(resolveSchemaSource(config.app));
           client = await createJazzClientFromDb(db);
         } catch (error) {
           await db.shutdown();

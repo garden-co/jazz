@@ -245,6 +245,8 @@ export interface DeploymentBody {
   migrations: Array<{ fromHash: string; toHash: string; forward: unknown[] }>;
   permissions: unknown;
   allowDroppingHistory?: boolean;
+  /** The app's encryption declarations, as Jazz's Rust loader builds them. */
+  encryption?: unknown;
 }
 
 export async function publishDeployment(

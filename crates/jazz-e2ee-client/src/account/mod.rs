@@ -1,0 +1,844 @@
+//! This device in its account (`E2EE_PROTOCOL.md` §2.1–§2.7, §2.12, §6.3a;
+//! core hooks note H6, H8): the device request, the bootstrap of the
+//! account's first device, and the verification of the account at each
+//! read: replay of its public rows, the floor that refuses older evidence,
+//! the private evidence and the account key.
+//!
+//! Every step reads the account's rows in one serializable transaction, at
+//! one cut (`ledger_read`), so that the authority refuses a publication
+//! whose evidence changed before it commits; a conflict reads again. A
+//! publication waits until the authority accepts it.
+
+mod devices;
+pub(crate) mod rows;
+
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
+
+use jazz::db::{Db, ErrorCode, InsertOptions, SubscriptionStream};
+use jazz::ids::RowUuid;
+use jazz::query::{Operand, Predicate, Query, col, eq, lit};
+use jazz::records::Value;
+use jazz::tools::OpenTransactionId;
+use jazz::tx::DurabilityTier;
+use jazz_e2ee::protocol::account::build::{
+    ResetPolicy, RootAuthority, RootRecords, RotationRecords, account_root, check_bootstrap,
+    check_reset,
+};
+use jazz_e2ee::protocol::account::{
+    AccountEpochKeys, AccountKey, AccountKeyEvidence, AccountReplay, AccountState,
+    PrivateAccountLedger, PublicAccountLedger, verify_private,
+};
+use jazz_e2ee::protocol::records::account::{
+    AccountRoot, AccountSealingKey, DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor,
+    PublicDeviceApproval, RecoveryRoot,
+};
+use jazz_e2ee::protocol::{Accepted, Position, ProtocolError};
+
+pub use devices::{ApprovedBy, DeviceInfo, DeviceStatus, PendingApproval};
+
+use crate::client::E2eeClient;
+use crate::error::ClientError;
+use crate::state::Report;
+use rows::{Row, account_id_cell, uuid_cell};
+
+/// Reads and publications that keep meeting concurrent writes give up
+/// after this many attempts.
+const ATTEMPTS: usize = 5;
+
+const PUBLIC_ACCOUNT_TABLES: [&str; 6] = [
+    AccountRoot::TABLE,
+    PublicDeviceApproval::TABLE,
+    PublicAccountSuccessor::TABLE,
+    RecoveryRoot::TABLE,
+    AccountSealingKey::TABLE,
+    DeviceRemovalRequest::TABLE,
+];
+
+trait PublicAccountRow: Sized {
+    fn account_id(&self) -> &str;
+    fn named_devices(&self) -> Vec<String>;
+    fn add_to(row: Accepted<Self>, ledger: &mut PublicAccountLedger);
+}
+
+macro_rules! public_account_row {
+    ($record:ty, $field:ident, $($account:ident).+, $devices:expr) => {
+        impl PublicAccountRow for $record {
+            fn account_id(&self) -> &str {
+                &self.$($account).+
+            }
+
+            fn named_devices(&self) -> Vec<String> {
+                ($devices)(self)
+            }
+
+            fn add_to(row: Accepted<Self>, ledger: &mut PublicAccountLedger) {
+                ledger.$field.push(row);
+            }
+        }
+    };
+}
+
+public_account_row!(AccountRoot, roots, account_id, |row: &AccountRoot| vec![
+    row.device_id.clone()
+]);
+public_account_row!(
+    PublicDeviceApproval,
+    approvals,
+    account_id,
+    |row: &PublicDeviceApproval| vec![row.device_id.clone(), row.signer_id.clone()]
+);
+public_account_row!(
+    PublicAccountSuccessor,
+    successors,
+    columns.account_id,
+    |row: &PublicAccountSuccessor| {
+        let mut devices = vec![row.columns.signer_id.clone()];
+        devices.extend(row.columns.removed_device_id.clone());
+        devices
+    }
+);
+public_account_row!(
+    RecoveryRoot,
+    recovery_roots,
+    account_id,
+    |row: &RecoveryRoot| vec![row.signer_id.clone()]
+);
+public_account_row!(
+    AccountSealingKey,
+    account_keys,
+    account_id,
+    |_: &AccountSealingKey| Vec::new()
+);
+public_account_row!(
+    DeviceRemovalRequest,
+    removal_requests,
+    account_id,
+    |row: &DeviceRemovalRequest| vec![row.device_id.clone()]
+);
+
+type PublicAccounts = BTreeMap<String, (PublicAccountLedger, BTreeSet<String>)>;
+
+fn group_public_rows<T: PublicAccountRow>(rows: Vec<Accepted<T>>, accounts: &mut PublicAccounts) {
+    for row in rows {
+        if let Some((ledger, devices)) = accounts.get_mut(row.row.account_id()) {
+            devices.extend(row.row.named_devices());
+            T::add_to(row, ledger);
+        }
+    }
+}
+
+/// Where this device stands in its account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountStatus {
+    /// The device is active, and holds the account key.
+    Active,
+    /// The device's request is published; another device of the account
+    /// has to approve it (or the account is recovered on it).
+    AwaitingApproval,
+    /// The account no longer has this device (it was removed, or the
+    /// account was reset): its private state was wiped and it enrolled
+    /// again as a new device, which awaits approval.
+    Reenrolled,
+}
+
+/// The account as this device last verified it: its state, the
+/// authenticated account key and every account epoch key it reaches, and
+/// the public rows the state was replayed from. Keys are cleared on drop
+/// and never printed.
+pub struct OwnAccount {
+    pub state: AccountState,
+    pub key: AccountKey,
+    pub epoch_keys: AccountEpochKeys,
+    pub public: PublicAccountLedger,
+}
+
+impl std::fmt::Debug for OwnAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnAccount")
+            .field("account", &self.state.account_id)
+            .field("epoch", &self.state.epoch_id())
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn has_removed_devices(state: &AccountState) -> bool {
+    !state.removed.is_empty() || state.generation > 0
+}
+
+/// The account's rows of one read.
+struct AccountRead {
+    public: PublicAccountLedger,
+    private: PrivateAccountLedger,
+    /// Rows of the account that are not records of their tables: evidence
+    /// all the same, so an account with any is not empty.
+    skipped: usize,
+}
+
+/// Runs `step` in a serializable transaction of `db` and abandons its
+/// handle afterwards; a conflict reads again, `attempts` times in all, and
+/// the last one is the error. Every other outcome is returned as it is.
+pub(crate) async fn serializable<T>(
+    db: &Db,
+    attempts: usize,
+    mut step: impl AsyncFnMut(OpenTransactionId) -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    let mut last = None;
+    for _ in 0..attempts {
+        let tx = OpenTransactionId::new();
+        db.begin_serializable(tx).await?;
+        // Boxed: the step's state stays off the stack of the loop that
+        // polls it.
+        let outcome = Box::pin(step(tx)).await;
+        let _ = db.abandon_transaction_handle(tx);
+        let retry = match &outcome {
+            Err(ClientError::Database(error)) => error.is_conflict(),
+            Err(ClientError::AccountResetPublication { source, .. }) => {
+                matches!(source.as_ref(), ClientError::Database(error) if error.is_conflict())
+            }
+            _ => false,
+        };
+        if retry {
+            last = outcome.err();
+        } else {
+            return outcome;
+        }
+    }
+    Err(last.expect("an attempt was made"))
+}
+
+fn by_account(table: &str, account: &Value) -> Query {
+    Query::from(table).filter(eq(col("accountId"), lit(account.clone())))
+}
+
+impl E2eeClient {
+    /// Reads `query` in transaction `tx`, as records with their positions;
+    /// rows that are not records of their table are left out and reported.
+    pub(crate) async fn read_rows<R: Row>(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        query: Query,
+    ) -> Result<(Vec<Accepted<R>>, u64), ClientError> {
+        let read = db.tx_ref(tx).ledger_read_query(&query).await?;
+        #[cfg(any(test, feature = "testing"))]
+        if R::TABLE == rows::SPACE_DELIVERIES {
+            let bounded = query.filters.iter().any(|filter| matches!(filter,
+                Predicate::Eq(Operand::Column(name), _) | Predicate::In(Operand::Column(name), _) if name == "keyEpochId"));
+            let mut watch = self.shared.member_watch.borrow_mut();
+            watch.delivery_reads.0 += read.rows.len();
+            watch.delivery_reads.1 += usize::from(!bounded);
+            watch.delivery_reads.2 += 1;
+        }
+        let mut rows = Vec::with_capacity(read.rows.len());
+        for (row, at) in &read.rows {
+            match R::decode(row) {
+                Some(record) => rows.push(Accepted::new(Position(*at), record)),
+                None => {
+                    skipped.set(skipped.get() + 1);
+                    self.shared.report(Report::SkippedRecord {
+                        document: format!("{}/{}", R::TABLE, row.row_uuid().0),
+                        reason: "a row that is not a record of its table".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok((rows, read.through))
+    }
+
+    /// The public rows of every account in `account_ids` at the cut of
+    /// `tx`: one query per table over all of them, then the device keys
+    /// those rows name.
+    pub(crate) async fn read_public_many(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        account_ids: &[String],
+    ) -> Result<Vec<PublicAccountLedger>, ClientError> {
+        let mut accounts = self.read_public_rows(db, tx, skipped, account_ids).await?;
+        self.read_public_device_keys(db, tx, skipped, &mut accounts)
+            .await?;
+        Ok(account_ids
+            .iter()
+            .map(|id| accounts.remove(id).expect("every account has a ledger").0)
+            .collect())
+    }
+
+    async fn read_public_rows(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        account_ids: &[String],
+    ) -> Result<PublicAccounts, ClientError> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.shared.member_watch.borrow_mut().public_account_reads += account_ids.len();
+        }
+        let accounts: Vec<Operand> = account_ids
+            .iter()
+            .map(|id| account_id_cell(id).map(Operand::Literal))
+            .collect::<Result<_, _>>()?;
+        let of = |table: &str| {
+            Query::from(table).filter(Predicate::In(
+                Operand::Column("accountId".to_owned()),
+                accounts.clone(),
+            ))
+        };
+        let (
+            (roots, through),
+            (approvals, _),
+            (successors, _),
+            (recovery_roots, _),
+            (account_keys, _),
+            (removal_requests, _),
+        ) = futures::try_join!(
+            self.read_rows::<AccountRoot>(db, tx, skipped, of(AccountRoot::TABLE)),
+            self.read_rows::<PublicDeviceApproval>(
+                db,
+                tx,
+                skipped,
+                of(PublicDeviceApproval::TABLE)
+            ),
+            self.read_rows::<PublicAccountSuccessor>(
+                db,
+                tx,
+                skipped,
+                of(PublicAccountSuccessor::TABLE)
+            ),
+            self.read_rows::<RecoveryRoot>(db, tx, skipped, of(RecoveryRoot::TABLE)),
+            self.read_rows::<AccountSealingKey>(db, tx, skipped, of(AccountSealingKey::TABLE)),
+            self.read_rows::<DeviceRemovalRequest>(
+                db,
+                tx,
+                skipped,
+                of(DeviceRemovalRequest::TABLE)
+            ),
+        )?;
+        let mut accounts: PublicAccounts = account_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    (
+                        PublicAccountLedger::new(id, Position(through)),
+                        BTreeSet::new(),
+                    ),
+                )
+            })
+            .collect();
+        group_public_rows(roots, &mut accounts);
+        group_public_rows(approvals, &mut accounts);
+        group_public_rows(successors, &mut accounts);
+        group_public_rows(recovery_roots, &mut accounts);
+        group_public_rows(account_keys, &mut accounts);
+        group_public_rows(removal_requests, &mut accounts);
+        Ok(accounts)
+    }
+
+    async fn read_public_device_keys(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        skipped: &Cell<usize>,
+        accounts: &mut PublicAccounts,
+    ) -> Result<(), ClientError> {
+        let wanted: BTreeSet<_> = accounts.values().flat_map(|(_, devices)| devices).collect();
+        if !wanted.is_empty() {
+            let ids = wanted
+                .iter()
+                .filter_map(|id| uuid_cell(id))
+                .map(Operand::Literal)
+                .collect();
+            let query = Query::from(rows::DEVICE_KEYS)
+                .filter(Predicate::In(Operand::Column("deviceId".to_owned()), ids));
+            let (keys, _) = self
+                .read_rows::<jazz_e2ee::protocol::records::account::DeviceKeysRow>(
+                    db, tx, skipped, query,
+                )
+                .await?;
+            for key in keys {
+                for (ledger, named) in accounts.values_mut() {
+                    if named.contains(&key.row.device_id) {
+                        ledger.keys.push(key.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The account's public and private rows at the cut of `tx`.
+    async fn read_account(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+    ) -> Result<AccountRead, ClientError> {
+        let skipped = Cell::new(0);
+        let account_id = self.shared.account_id.clone();
+        // The private tables hold only the account's own rows for its own
+        // sessions (R4–R9).
+        let (identities, _) = self
+            .read_rows(db, tx, &skipped, Query::from(rows::ACCOUNT_IDENTITIES))
+            .await?;
+        // Identity pins the cut. The remaining account rows are independent
+        // until their device IDs are needed by the device key query.
+        let private = async {
+            futures::try_join!(
+                self.read_rows::<DeviceRequest>(
+                    db,
+                    tx,
+                    &skipped,
+                    Query::from(rows::DEVICE_REQUESTS)
+                ),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_CHALLENGES)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_PROOFS)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_APPROVALS)),
+                self.read_rows(db, tx, &skipped, Query::from(rows::DEVICE_DELIVERIES)),
+            )
+        };
+        let account = match account_id_cell(&account_id) {
+            Ok(account) => account,
+            Err(error) => {
+                // These private reads precede the invalid account ID error.
+                private.await?;
+                return Err(error.into());
+            }
+        };
+        let (
+            ((requests, _), (challenges, _), (proofs, _), (private_approvals, _), (deliveries, _)),
+            (private_successors, _),
+            (recovery_deliveries, _),
+            mut accounts,
+        ) = futures::try_join!(
+            private,
+            self.read_rows(
+                db,
+                tx,
+                &skipped,
+                by_account(rows::ACCOUNT_SUCCESSORS, &account)
+            ),
+            self.read_rows(db, tx, &skipped, Query::from(rows::RECOVERY_DELIVERIES)),
+            self.read_public_rows(db, tx, &skipped, std::slice::from_ref(&account_id)),
+        )?;
+        accounts
+            .get_mut(&account_id)
+            .expect("own account has a ledger")
+            .1
+            .extend(requests.iter().map(|r| r.row.id.clone()));
+        self.read_public_device_keys(db, tx, &skipped, &mut accounts)
+            .await?;
+        let (public, _) = accounts
+            .remove(&account_id)
+            .expect("own account has a ledger");
+        let through = public.through;
+        Ok(AccountRead {
+            public,
+            private: PrivateAccountLedger {
+                through,
+                identities,
+                requests,
+                challenges,
+                proofs,
+                approvals: private_approvals,
+                deliveries,
+                successors: private_successors,
+                recovery_deliveries,
+            },
+            skipped: skipped.get(),
+        })
+    }
+
+    /// Stages `record` in transaction `tx`.
+    pub(crate) async fn stage<R: Row>(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        record: &R,
+    ) -> Result<(), ClientError> {
+        let cells = record.cells().ok_or(ProtocolError::InvalidRecord(
+            "a record with an ID that is not a UUID",
+        ))?;
+        let row = uuid::Uuid::parse_str(record.id())
+            .map_err(|_| ProtocolError::InvalidRecord("a record with an ID that is not a UUID"))?;
+        db.tx_ref(tx)
+            .insert(
+                R::TABLE,
+                cells,
+                InsertOptions {
+                    row_id: Some(RowUuid(row)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn stage_root(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        records: &RootRecords,
+    ) -> Result<(), ClientError> {
+        self.stage(db, tx, &records.identity).await?;
+        self.stage(db, tx, &records.root).await?;
+        self.stage(db, tx, &records.account_key).await
+    }
+
+    pub(super) async fn stage_rotation(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        records: &RotationRecords,
+    ) -> Result<(), ClientError> {
+        self.stage(db, tx, &records.private).await?;
+        self.stage(db, tx, &records.public).await?;
+        for delivery in &records.recovery_deliveries {
+            self.stage(db, tx, delivery).await?;
+        }
+        self.stage(db, tx, &records.account_key).await
+    }
+
+    /// Commits `tx` and waits until the authority accepts it.
+    pub(crate) async fn publish(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+    ) -> Result<(), jazz::db::Error> {
+        let receipt = db.commit_serializable_handle(tx).await?;
+        db.wait_for_transaction(receipt.0, DurabilityTier::Global)
+            .await?;
+        Ok(())
+    }
+
+    /// Brings this device into its account and verifies the account:
+    ///
+    /// - without a request of this device, publishes one, with its public
+    ///   key projection (§2.2);
+    /// - in an account with no evidence at all, bootstraps it with this
+    ///   device (§2.3): its identity, public root (signed by the device-account
+    ///   identity for a device-account account) and the sealing key record of
+    ///   the first epoch, in one transaction;
+    /// - otherwise replays the account at one cut and checks it against the
+    ///   floor this device stored (§2.4, "Floors"): an older read is
+    ///   `stale-state`, a replaced root `root-not-mine` (both errors); a
+    ///   device the account no longer has wipes this account's private state
+    ///   and enrols again as a new device ([`AccountStatus::Reenrolled`]).
+    ///   An active device then verifies the private evidence, acquires the
+    ///   account key (§2.6, §2.7) and advances its floor.
+    ///
+    /// If the protocol refuses the account evidence the server returns,
+    /// [`E2eeClient::with_account`] returns `None` until a read verifies
+    /// the account again. Refused actions, local cryptographic failures
+    /// and database errors preserve the last verified account.
+    ///
+    /// Needs the authority: every read is a ledger read.
+    pub async fn ensure_account(&self, db: &Db) -> Result<AccountStatus, ClientError> {
+        let mut reenrolled = false;
+        for _ in 0..ATTEMPTS {
+            self.ensure_open()?;
+            let tx = OpenTransactionId::new();
+            db.begin_serializable(tx).await?;
+            let outcome = Box::pin(self.step(db, tx)).await;
+            let _ = db.abandon_transaction_handle(tx);
+            match outcome {
+                Ok(Step::Again) => continue,
+                Ok(Step::Done(status))
+                    if reenrolled && status == AccountStatus::AwaitingApproval =>
+                {
+                    return Ok(AccountStatus::Reenrolled);
+                }
+                Ok(Step::Done(status)) => return Ok(status),
+                Ok(Step::Reenrolled) => {
+                    reenrolled = true;
+                    continue;
+                }
+                Err(ClientError::Database(error)) if error.is_conflict() => continue,
+                Err(error) => return Err(self.forget_account_on(error)),
+            }
+        }
+        Err(ClientError::Database(jazz::db::Error::new(
+            ErrorCode::TransactionConflict,
+            "the account kept changing while this device read it",
+        )))
+    }
+
+    async fn step(&self, db: &Db, tx: OpenTransactionId) -> Result<Step, ClientError> {
+        let read = self.read_account(db, tx).await?;
+        let device = self.shared.device()?.clone();
+        let writer = self.writer()?;
+        // A device that verified this account before checks every read
+        // against its floor before it stages anything: a server that shows
+        // it less (an empty account, an older state, no request of its own)
+        // gets nothing published.
+        if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
+            self.reenrol().await?;
+            return Ok(Step::Reenrolled);
+        }
+        let requested = read
+            .private
+            .requests
+            .iter()
+            .any(|request| request.row.id == device.id);
+        if !requested {
+            self.stage(db, tx, &device.request()).await?;
+            let keys = device.keys_row(&mut **self.shared.random.borrow_mut())?;
+            self.stage(db, tx, &keys).await?;
+            self.publish(db, tx).await?;
+            return Ok(Step::Again);
+        }
+        if read.public.is_empty() && !read.private.has_history() && read.skipped == 0 {
+            let permit = check_bootstrap(&writer, &device, &read.public, &read.private)?;
+            let records = account_root(
+                &writer,
+                &device,
+                &permit,
+                self.device_account
+                    .borrow()
+                    .as_ref()
+                    .map_or(RootAuthority::App, RootAuthority::DeviceAccount),
+                &mut **self.shared.random.borrow_mut(),
+            )?;
+            self.stage_root(db, tx, &records).await?;
+            self.publish(db, tx).await?;
+            return Ok(Step::Again);
+        }
+
+        let replay = AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
+        let Some(state) = replay.current()? else {
+            // Evidence without a counting root: nothing this device can
+            // verify or bootstrap over.
+            return Err(ProtocolError::InconsistentEvidence.into());
+        };
+        let through = read.public.through;
+        if let Some(identity) = self.device_account.borrow().as_ref() {
+            state.check_device_account(identity)?;
+        }
+        let floor = state.floor(through, Some(&device.id));
+        if !state.is_active(&device.id) {
+            self.advance_floor(&self.shared.account_id, &floor).await?;
+            return Ok(Step::Done(AccountStatus::AwaitingApproval));
+        }
+        let evidence = verify_private(&replay, &state, &read.private)?;
+        let keys = AccountKeyEvidence::new(&replay, &state, &evidence)?;
+        let (key, epoch_keys) =
+            keys.acquire_with_epoch_keys(&device.id, std::slice::from_ref(&device.sealing))?;
+        self.advance_floor(&self.shared.account_id, &floor).await?;
+        {
+            // A new account epoch (a device removed, wherever that was
+            // done) may supersede the epoch a space's current version was
+            // sealed to: each space's mark is evaluated again before this
+            // runtime's next write to it.
+            let mut keys = self.shared.keys.borrow_mut();
+            let removals = has_removed_devices(&state);
+            if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
+                keys.rotation_evaluated.clear();
+                keys.evaluated_epoch = Some(state.epoch_id().to_owned());
+                // A removal of this account's own makes every space one
+                // with a member that removed a device.
+                if removals {
+                    keys.space_removals.clear();
+                }
+            }
+        }
+        let conflicts = epoch_keys.non_derived_sealing_keys().to_vec();
+        let unsupported = epoch_keys.unsupported_sealing_keys().to_vec();
+        *self.account.borrow_mut() = Some(OwnAccount {
+            state,
+            key,
+            epoch_keys,
+            public: read.public.clone(),
+        });
+        for conflict in &conflicts {
+            self.shared.conflicting_account_key(conflict);
+        }
+        for record in unsupported {
+            self.shared.event(
+                format!("unsupported-account-key:{}", record.record_id),
+                Report::UnsupportedAccountKey {
+                    record_id: record.record_id,
+                    signer_id: record.signer_id,
+                    capability: record.capability,
+                },
+            );
+        }
+        Ok(Step::Done(AccountStatus::Active))
+    }
+
+    /// Resets the account on this device (§2.11): a new generation whose
+    /// only device is this one, for an account of the application's own
+    /// sign-in that lost every device and recovery, where the application
+    /// allows resets. The account's other devices are no longer active in
+    /// it: each wipes its private state and enrolls again when it next
+    /// verifies the account. Earlier space keys are not carried over.
+    /// Needs the authority.
+    pub async fn reset_account(&self, db: &Db) -> Result<AccountStatus, ClientError> {
+        self.serializable(db, async |tx| self.reset_step(db, tx).await)
+            .await?;
+        self.ensure_account(db).await
+    }
+
+    async fn reset_step(&self, db: &Db, tx: OpenTransactionId) -> Result<(), ClientError> {
+        let read = self.read_account(db, tx).await?;
+        let (_, state, device) = self.account_state_and_device(&read).await?;
+        let writer = self.writer()?;
+        let policy = ResetPolicy {
+            device_account: self.device_account.borrow().is_some(),
+            allow_account_reset: self.allow_account_reset(),
+        };
+        let permit = check_reset(
+            &writer,
+            policy,
+            &state,
+            &device,
+            &read.public,
+            &read.private,
+        )?;
+        let records = account_root(
+            &writer,
+            &device,
+            &permit,
+            RootAuthority::App,
+            &mut **self.shared.random.borrow_mut(),
+        )?;
+        let publication_error = |source, refused| ClientError::AccountResetPublication {
+            record_ids: Box::new([
+                records.identity.id.clone(),
+                records.root.id.clone(),
+                records.account_key.id.clone(),
+            ]),
+            refused,
+            source: Box::new(source),
+        };
+        self.clear_verified_history().await?;
+        async { self.stage_root(db, tx, &records).await }
+            .await
+            .map_err(|error| publication_error(error, true))?;
+        self.publish(db, tx).await.map_err(|error| {
+            let refused = error.code == ErrorCode::WriteRejected || error.is_conflict();
+            publication_error(error.into(), refused)
+        })
+    }
+
+    /// Checks `read` against this device's floor for its account, if it has
+    /// one (§2.4, "Floors"). The floor was stored once the device had
+    /// published its request and verified the account, so a read that
+    /// shows less (no counting root, an earlier cut or generation, a
+    /// chain without the floor's epoch, or no request of this device) is
+    /// `stale-state`, and a replaced root `root-not-mine`; nothing is
+    /// staged on such a read.
+    async fn check_floor_first(
+        &self,
+        read: &AccountRead,
+        device_id: &str,
+    ) -> Result<FloorCheck, ClientError> {
+        let Some(floor) = self.floor(&self.shared.account_id).await else {
+            return Ok(FloorCheck::NoFloor);
+        };
+        let replay = AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
+        let Some(state) = replay.current()? else {
+            return Err(ProtocolError::StaleState.into());
+        };
+        match state.check_floor(read.public.through, &floor) {
+            Ok(()) => {}
+            Err(ProtocolError::DeviceNoLongerActive) => return Ok(FloorCheck::NoLongerActive),
+            Err(error) => return Err(error.into()),
+        }
+        if !read
+            .private
+            .requests
+            .iter()
+            .any(|request| request.row.id == device_id)
+        {
+            return Err(ProtocolError::StaleState.into());
+        }
+        Ok(FloorCheck::Passed)
+    }
+
+    /// Forgets the last verified account when the protocol refuses the
+    /// evidence returned by a later read or the read shows this device is
+    /// no longer active. All other errors keep the account by default, so
+    /// new error kinds must be explicitly identified as reasons to
+    /// invalidate verified state.
+    pub(crate) fn forget_account_on(&self, error: ClientError) -> ClientError {
+        if matches!(
+            &error,
+            ClientError::Protocol(
+                ProtocolError::StaleState
+                    | ProtocolError::RootNotMine
+                    | ProtocolError::DeviceNoLongerActive
+                    | ProtocolError::Intrinsic(_)
+                    | ProtocolError::InconsistentEvidence
+                    | ProtocolError::InvalidRecord(_)
+                    | ProtocolError::AccountKeyUnavailable
+                    | ProtocolError::Unsupported(_),
+            )
+        ) {
+            *self.account.borrow_mut() = None;
+        }
+        error
+    }
+
+    /// Calls `f` with the last verified account while this device is active
+    /// in it. The verified account is cleared when a later read is refused
+    /// or shows this device is no longer active. Refused actions, local
+    /// cryptographic failures and database errors preserve it.
+    pub fn with_account<T>(&self, f: impl FnOnce(&OwnAccount) -> T) -> Option<T> {
+        self.account.borrow().as_ref().map(f)
+    }
+
+    /// Subscriptions to this account's public rows that change its state:
+    /// roots, approvals, successors, recovery roots, sealing keys and
+    /// removal requests (core hooks note H6). When one changes, the caller
+    /// verifies the account again ([`E2eeClient::ensure_account`]).
+    pub async fn watch_account(&self, db: &Db) -> Result<AccountWatch, ClientError> {
+        let account = account_id_cell(&self.shared.account_id)?;
+        let mut streams = Vec::new();
+        for table in PUBLIC_ACCOUNT_TABLES {
+            let prepared = db.prepare_query(&by_account(table, &account))?;
+            streams.push(db.subscribe(&prepared, Default::default()).await?);
+        }
+        Ok(AccountWatch { streams })
+    }
+}
+
+/// How a read compares with this device's floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorCheck {
+    /// The device has no floor for the account yet.
+    NoFloor,
+    Passed,
+    /// The account no longer has this device.
+    NoLongerActive,
+}
+
+/// What one pass of [`E2eeClient::ensure_account`] did.
+enum Step {
+    /// It published something: read again.
+    Again,
+    /// It wiped the account's state and enrolled a new device.
+    Reenrolled,
+    Done(AccountStatus),
+}
+
+/// Live subscriptions to the rows that change this device's account.
+pub struct AccountWatch {
+    streams: Vec<SubscriptionStream>,
+}
+
+impl AccountWatch {
+    /// Whether any of the account's rows changed since the last call; the
+    /// first call reports the rows already there.
+    pub fn changed(&mut self) -> bool {
+        let mut changed = false;
+        for stream in &mut self.streams {
+            while stream.try_next_event().is_some() {
+                changed = true;
+            }
+        }
+        changed
+    }
+}

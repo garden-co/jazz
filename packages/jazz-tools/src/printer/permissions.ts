@@ -99,6 +99,7 @@ const PLACEHOLDER_RE = /(\d+)/g;
 
 const TOOL_ORDER = [
   "exists",
+  "isMember",
   "allowedTo",
   "session",
   "anyOf",
@@ -774,6 +775,42 @@ class Printer {
         nested: true,
       });
     }
+    if (
+      ast.table === "__e2ee_members" &&
+      !ast.alias &&
+      !ast.hops.length &&
+      ast.conditions.length === 3
+    ) {
+      // The three equalities in any order, as deploy recognises the members
+      // rule (protocol R13): each of the members table's columns exactly once.
+      const equalities = new Map<string, Operand>();
+      for (const condition of ast.conditions)
+        if (
+          condition.kind === "cmp" &&
+          condition.op === "=" &&
+          condition.left.kind === "column" &&
+          condition.left.qual.kind === "none"
+        )
+          equalities.set(condition.left.name, condition.right);
+      const scopeId = equalities.get("scopeId");
+      const identifier = equalities.get("identifier");
+      const accountId = equalities.get("accountId");
+      if (
+        equalities.size === 3 &&
+        scopeId?.kind === "tableId" &&
+        identifier?.kind === "column" &&
+        identifier.qual.kind === "this" &&
+        accountId?.kind === "session" &&
+        accountId.path.length === 1 &&
+        accountId.path[0] === "user"
+      ) {
+        return {
+          text: this.fn("isMember", `${JSON.stringify(scopeId.table)}, ${PLACEHOLDER(0)}`),
+          args: [this.columnArg(ctx, identifier.name)],
+          occ: [],
+        };
+      }
+    }
     const inner: Scope = { table: ast.table, alias: ast.alias, inExists: true };
     /** The checked row's column that `c` compares `col` of `t` with. */
     const outerOf = (c: Ast | undefined, col: string): string | undefined => {
@@ -1305,6 +1342,8 @@ class Printer {
         return lit(this.sessionText(op.path));
       case "typed":
         return lit(this.typed(op.value));
+      case "tableId":
+        throw new Unprintable("", "Printing table_id outside isMember is not supported yet");
       case "column": {
         if (!scope.inExists || scope.nested) return undefined;
         if (this.isInnerColumn(op, scope)) return undefined;

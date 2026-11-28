@@ -59,6 +59,18 @@ pub struct TablePolicies {
 }
 
 impl TablePolicies {
+    /// The declared clauses an inheritance check reads, in evaluation order.
+    /// For updates the slots are USING and WITH CHECK. Other operations
+    /// have one clause and leave the second slot empty.
+    pub fn inherited_clauses(&self, operation: Operation) -> [Option<&PolicyExpr>; 2] {
+        match operation {
+            Operation::Select => [self.select.using.as_ref(), None],
+            Operation::Insert => [self.insert.with_check.as_ref(), None],
+            Operation::Update => [self.update.using.as_ref(), self.update.with_check.as_ref()],
+            Operation::Delete => [self.delete.using.as_ref(), None],
+        }
+    }
+
     /// Create empty policies.
     ///
     /// Permissive-local mode accepts missing clauses; enforcing mode treats
@@ -310,6 +322,8 @@ pub mod policy_expr {
     pub enum PolicyValueInput {
         Literal(Value),
         Session(Vec<String>),
+        /// A table's catalogue identity ([`PolicyValue::TableIdentity`]).
+        TableIdentity(String),
     }
 
     impl From<PolicyValueInput> for PolicyValue {
@@ -317,6 +331,7 @@ pub mod policy_expr {
             match value {
                 PolicyValueInput::Literal(value) => PolicyValue::Literal(value),
                 PolicyValueInput::Session(path) => PolicyValue::SessionRef(path),
+                PolicyValueInput::TableIdentity(table) => PolicyValue::TableIdentity { table },
             }
         }
     }
@@ -326,6 +341,7 @@ pub mod policy_expr {
             match value {
                 PolicyValue::Literal(value) => PolicyValueInput::Literal(value),
                 PolicyValue::SessionRef(path) => PolicyValueInput::Session(path),
+                PolicyValue::TableIdentity { table } => PolicyValueInput::TableIdentity(table),
             }
         }
     }

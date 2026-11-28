@@ -17,6 +17,7 @@ ed25519-dalek = "2"
 futures-util = "0.3.31"
 futures-channel = "0.3.31"
 jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["sqlite"] }
+jazz-e2ee-client = { path = "../jazz-e2ee-client", optional = true }
 jazz-text = { path = "../jazz-text", features = ["serde"] }
 jazz-server = { path = "../jazz-server", default-features = false, optional = true }
 js-sys = "0.3.82"
@@ -47,7 +48,11 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["console_error_panic_hook", "transport-compression-ruzstd"]
+default = ["console_error_panic_hook", "transport-compression-ruzstd", "e2ee-client"]
+# The end-to-end encryption runtime of an app that declares encryption (a
+# client's: keys in the page). Not in the Durable Object build, whose core is an
+# authority and holds no keys.
+e2ee-client = ["dep:jazz-e2ee-client", "jazz/e2ee-client"]
 bench-probes = []
 # A Durable Object's SQL (`ctx.storage.sql`) as a store
 # (`WasmDb.openDurableObject`), and the Jazz core a Durable Object hosts

@@ -13,7 +13,12 @@
 import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { Db } from "../runtime/db.js";
-import { isThinDb, markThinDb } from "../runtime/local-first-upgrade.js";
+import {
+  hasLocalFirstUpgrader,
+  isThinDb,
+  markThinDb,
+  reviewThinRefusal,
+} from "../runtime/local-first-upgrade.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntimeSource } from "./thin-runtime-source.js";
 import { ThinRuntime, type ThinRuntimeOptions, type WrittenRow } from "./thin-runtime.js";
@@ -34,6 +39,10 @@ export {
 export * from "../accounts/exports.js";
 export type { Db } from "../runtime/db.js";
 export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
+export {
+  EncryptionNeedsLocalFirstError,
+  type EncryptionNeedsLocalFirstReason,
+} from "../runtime/encryption-needs-local-first.js";
 
 export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
 
@@ -44,10 +53,19 @@ export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
  */
 export async function createClient(config: ThinDbConfig): Promise<Db> {
   const { thin, ...dbConfig } = config;
+  let opened: Db | undefined;
   const db = await createAccountDbWithRuntimeSource(
     { ...dbConfig, driver: { type: "memory" } },
-    new ThinRuntimeSource(thin),
+    // A session upgrades the Db it opened; one opened directly upgrades
+    // with this entry's `upgradeToLocalFirst`.
+    new ThinRuntimeSource(
+      thin,
+      () => (opened && !hasLocalFirstUpgrader(opened) ? "direct-thin" : "no-loader"),
+      (refusal, inTransaction) =>
+        opened ? reviewThinRefusal(opened, refusal, inTransaction) : refusal,
+    ),
   );
+  opened = db;
   markThinDb(db);
   return db;
 }

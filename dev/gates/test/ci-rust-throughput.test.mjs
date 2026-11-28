@@ -123,6 +123,8 @@ const rnNativeArtifactPushPaths = [
   "Cargo.toml",
   "crates/jazz/**",
   "crates/jazz-compression/**",
+  "crates/jazz-e2ee/**",
+  "crates/jazz-e2ee-client/**",
   "crates/jazz-native-relay/**",
   "crates/jazz-native-transport/**",
   "crates/jazz-rn/**",
@@ -680,7 +682,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     ["cargo-nextest@0.9.143", "cargo-nextest", "0.9.143", true],
     // cargo-zigbuild is needed only for hosted Linux package cross-builds;
     // the provisioned bundle intentionally does not include Zig.
-    ["cargo-zigbuild@0.20.1", "cargo-zigbuild", "0.20.1", false],
+    ["cargo-zigbuild@0.24.1", "cargo-zigbuild", "0.24.1", false],
     ["wasm-pack@0.13.1", "wasm-pack", "0.13.1", true],
   ]) {
     if (provisioned)
@@ -716,7 +718,7 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
   assert.doesNotMatch(installRustToolScript, /rm -rf/);
   assert.match(installRustToolScript, /echo "\$\{install_root\}\/bin" >> "\$\{GITHUB_PATH/);
   assert.match(setupBuildAction, /tool: sccache@0\.15\.0/);
-  assert.match(packageBuild, /tool: cargo-zigbuild@0\.20\.1/);
+  assert.match(packageBuild, /tool: cargo-zigbuild@0\.24\.1/);
   assert.throws(
     () => assert.match(installRustToolScript.replace(" --locked", ""), / --locked/),
     /--locked/,
@@ -778,13 +780,13 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   assert.match(setupBuildAction, /steps\.provisioned-tools\.outputs\.active != 'true'/);
   assert.match(installRustTool, /steps\.provisioned-tool\.outputs\.active != 'true'/);
   assert.match(toolBundleValidator, /BUNDLE_ROOT = "\/opt\/jazz-ci\/toolchains\/v1"/);
-  for (const value of ["1.93.1", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
+  for (const value of ["1.100.0", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
     assert.match(toolBundleValidator, new RegExp(value.replaceAll(".", "\\.")));
   }
   assert.match(setupBuildAction, /sccache --show-stats/);
   assert.match(
     setupBuildAction,
-    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
+    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.100\.0-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
   );
   assert.match(setupBuildAction, /Jobs are clients only/);
   assert.match(

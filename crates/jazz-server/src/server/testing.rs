@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::middleware::AuthConfig;
 use jazz::tools::AppId;
+use jazz::tools::deployment::artifact::DeclaredEncryption;
 use jazz::tools::public_schema::Schema;
 
 use super::{BuiltServer, ServerBuilder, ServerState, ShutdownPhase, StorageBackend};
@@ -24,6 +25,7 @@ pub struct JazzServerBuilder {
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
+    encryption: Option<DeclaredEncryption>,
     persistent_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
@@ -64,6 +66,17 @@ impl JazzServerBuilder {
 
     pub fn with_schema(mut self, schema: Schema) -> Self {
         self.schema = Some(schema);
+        self
+    }
+
+    /// The app's encryption declarations, which the server boots the
+    /// schema with as a backend's deployment sends them
+    /// ([`jazz::tools::deployment::artifact::LoadedApp::encryption`]): an
+    /// app that declares encryption needs them: its schema carries Jazz's
+    /// system tables, which the server refuses without declarations.
+    /// Ignored without [`Self::with_schema`].
+    pub fn with_encryption(mut self, encryption: DeclaredEncryption) -> Self {
+        self.encryption = Some(encryption);
         self
     }
 
@@ -139,6 +152,7 @@ impl JazzServer {
             app_id,
             data_dir,
             schema,
+            encryption,
             persistent_storage,
             admin_secret,
             backend_secret,
@@ -197,9 +211,16 @@ impl JazzServer {
         .await?;
         server.auth_clock = auth_clock;
         // As createJazz does on boot: the schema's permissions go out as a
-        // bundle, which the clients this server makes pin their sessions to.
+        // bundle, which the clients this server makes pin their sessions to;
+        // with the app's encryption declarations, as its deployment sends
+        // them.
         if let Some(schema) = &schema {
-            crate::server::deployment::publish_source_bundle(server.state.clone(), schema).await?;
+            crate::server::deployment::publish_source_bundle(
+                server.state.clone(),
+                schema,
+                encryption,
+            )
+            .await?;
         }
         Ok(server)
     }

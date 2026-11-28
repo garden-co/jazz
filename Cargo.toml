@@ -8,6 +8,8 @@ members = [
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
   "crates/jazz-compression",
+  "crates/jazz-e2ee",
+  "crates/jazz-e2ee-client",
   "crates/jazz-text",
   "crates/wasm-tracing",
   "crates/jazz-wasm",
@@ -30,6 +32,8 @@ members = [
   "examples/docs/todo-server-rs",
   # The docs' backend-client snippets.
   "examples/docs/backend-client-rs",
+  # The encryption docs' Rust snippets.
+  "examples/docs/e2ee-rs",
   # Probes the backend-client contract against a TS main backend.
   "examples/rust-backend-clients/probe",
   "examples/stage-plan/benchmarks",
@@ -69,7 +73,7 @@ version = "2.0.0-beta.5"
 license = "MIT"
 repository = "https://github.com/garden-co/jazz"
 homepage = "https://jazz.tools"
-rust-version = "1.93"
+rust-version = "1.100"
 
 [workspace.dependencies]
 jazz = { package = "jazz-core", version = "=2.0.0-beta.5", path = "crates/jazz", default-features = false }
@@ -79,6 +83,8 @@ jazz-protocol = { version = "=2.0.0-beta.5", path = "crates/jazz/layers/protocol
 jazz-types = { version = "=2.0.0-beta.5", path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { version = "=2.0.0-beta.5", path = "crates/jazz-compression", default-features = false }
 jazz-text = { version = "=2.0.0-beta.5", path = "crates/jazz-text" }
+jazz-e2ee = { version = "=2.0.0-beta.5", path = "crates/jazz-e2ee" }
+jazz-e2ee-client = { version = "=2.0.0-beta.5", path = "crates/jazz-e2ee-client" }
 jazz-codegen = { version = "=2.0.0-beta.5", path = "crates/jazz-codegen" }
 jazz-otel = { version = "=2.0.0-beta.5", path = "crates/jazz-otel" }
 jazz-native-transport = { version = "=2.0.0-beta.5", path = "crates/jazz-native-transport" }
@@ -94,6 +100,13 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# The browser SQLite is C built by sqlite-wasm-rs. At -O0 its VDBE loop
+# (sqlite3VdbeExec) needs over 50,000 wasm locals, more than wasm-bindgen's
+# parser and V8 accept, so a dev-profile wasm test build cannot load. cc-rs
+# follows this opt-level.
+[profile.dev.package.sqlite-wasm-rs]
+opt-level = 1
 
 # Opt into full debugger metadata with `--profile debugging`.
 [profile.debugging]

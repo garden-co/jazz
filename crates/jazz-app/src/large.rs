@@ -23,7 +23,7 @@ use jazz::tools::{ObjectId, StreamingUpload, Value};
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
 use crate::query::Column;
-use crate::table::{Insert, Table, Update};
+use crate::table::{Insert, Table, Updatable, Update};
 use crate::value::{ColumnValue, Json};
 use crate::writes::read_back;
 
@@ -58,7 +58,7 @@ impl Jazz {
     ///     Splice::text(5, 0, " wörld"),
     /// ]).await?;
     /// ```
-    pub async fn splice<T: Table, V: LargeColumn>(
+    pub async fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -166,6 +166,7 @@ impl Jazz {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,
@@ -197,11 +198,18 @@ impl Jazz {
     {
         streamed_column::<T>(&mut cells, column)?;
         let settle = self.settler()?;
-        let upload = self
+        let (id, upload) = self
             .with_client(move |client| async move {
-                let upload =
-                    client.begin_streaming_upload(T::NAME, cells.into_iter().collect(), column)?;
-                Ok(park(upload))
+                let (id, upload) = client
+                    .begin_streaming_upload_for(
+                        kind.core(),
+                        T::NAME,
+                        id,
+                        cells.into_iter().collect(),
+                        column,
+                    )
+                    .await?;
+                Ok((id, park(upload)))
             })
             .await?;
         let guard = self.feed(upload, chunks).await?;
@@ -210,7 +218,7 @@ impl Jazz {
             .with_client(move |client| async move {
                 let parked = unpark(upload).ok_or(Error::Stopped)?;
                 let (id, written) = client
-                    .finish_streaming_upload(parked, kind.core(), id)
+                    .finish_streaming_upload(parked, kind.core(), Some(id))
                     .await?;
                 settle.settle(&client, written).await?;
                 read_back::<T>(&client, id, &implementations).await
@@ -335,6 +343,7 @@ impl crate::transaction::Transaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]>,
@@ -370,8 +379,15 @@ impl crate::transaction::Transaction {
     {
         streamed_column::<T>(&mut cells, column)?;
         let client = self.client();
-        let mut upload =
-            client.begin_streaming_upload(T::NAME, cells.into_iter().collect(), column)?;
+        let (id, mut upload) = client
+            .begin_streaming_upload_for(
+                kind.core(),
+                T::NAME,
+                id,
+                cells.into_iter().collect(),
+                column,
+            )
+            .await?;
         let mut chunks = std::pin::pin!(chunks);
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
@@ -387,7 +403,7 @@ impl crate::transaction::Transaction {
             }
         }
         let (id, _) = client
-            .finish_streaming_upload(upload, kind.core(), id)
+            .finish_streaming_upload(upload, kind.core(), Some(id))
             .await?;
         self.wrote();
         self.read_back(id).await
@@ -395,7 +411,7 @@ impl crate::transaction::Transaction {
 
     /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
     /// bytes on a text column).
-    pub fn splice<T: Table, V: LargeColumn>(
+    pub fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -497,6 +513,7 @@ impl crate::transaction::OpenTransaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,
@@ -527,14 +544,19 @@ impl crate::transaction::OpenTransaction {
         E: std::fmt::Display,
     {
         streamed_column::<T>(&mut cells, column)?;
-        let upload = self
+        let (id, upload) = self
             .on(move |tx| async move {
-                let upload = tx.client().begin_streaming_upload(
-                    T::NAME,
-                    cells.into_iter().collect(),
-                    column,
-                )?;
-                Ok(park(upload))
+                let (id, upload) = tx
+                    .client()
+                    .begin_streaming_upload_for(
+                        kind.core(),
+                        T::NAME,
+                        id,
+                        cells.into_iter().collect(),
+                        column,
+                    )
+                    .await?;
+                Ok((id, park(upload)))
             })
             .await?;
         let guard = self.jazz.feed(upload, chunks).await?;
@@ -545,7 +567,7 @@ impl crate::transaction::OpenTransaction {
                 let parked = unpark(upload).ok_or(Error::Stopped)?;
                 let (id, _) = tx
                     .client()
-                    .finish_streaming_upload(parked, kind.core(), id)
+                    .finish_streaming_upload(parked, kind.core(), Some(id))
                     .await?;
                 tx.wrote();
                 tx.read_back(id).await

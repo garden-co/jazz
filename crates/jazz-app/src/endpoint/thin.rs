@@ -47,6 +47,11 @@ pub(crate) struct SessionTarget {
     pub backend_secret: String,
     pub bundle: String,
     pub auth: SessionAuth,
+    /// The backend's own encryption declarations: an app that declares
+    /// encryption opens the session's client with keyless hooks built from
+    /// them, as the backend's own client is, so it holds no keys and
+    /// refuses encrypted writes.
+    pub declarations: Option<Arc<jazz::tools::public_schema::E2eeDeclarations>>,
 }
 
 impl SessionTarget {
@@ -161,9 +166,11 @@ fn run(
         };
         let opened = match serde_json::from_slice::<Schema>(&schema) {
             Ok(schema) => {
-                JazzClient::connect_with_native_transport(
+                JazzClient::connect_with(
                     target.context(schema),
-                    Arc::new(jazz_native_transport::NativeWebSocketConnector),
+                    Some(Arc::new(jazz_native_transport::NativeWebSocketConnector)),
+                    None,
+                    crate::encryption::keyless(target.declarations.as_deref().cloned()),
                 )
                 .await
             }

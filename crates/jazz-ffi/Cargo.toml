@@ -24,7 +24,7 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-jazz-app-support.workspace = true
+jazz-app-support = { workspace = true, features = ["e2ee-client"] }
 base64 = "0.22"
 futures-executor = "0.3"
 futures-util = "0.3"
@@ -32,12 +32,14 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 uuid = "1"
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
 # Pinned exactly: the generated Swift and Kotlin sources must match the
 # scaffolding this crate is built with. Only this crate depends on UniFFI;
 # jazz-wasm, jazz-napi and jazz-rn never see it.
 uniffi = { version = "=0.32.2", default-features = false }
 
 [dev-dependencies]
+jazz-e2ee-client = { workspace = true, features = ["testing"] }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

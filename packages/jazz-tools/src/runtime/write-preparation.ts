@@ -59,11 +59,18 @@ export function ownerPreparation(
 
 /** Ordinary synchronous operations need no preparation object. */
 export function runAfterPreparation<T>(
-  client: object & { preparationOwner?: () => object },
+  client: object & {
+    preparationOwner?: () => object;
+    retryAfterKey?: <R>(operation: () => R) => R | Promise<R>;
+  },
   operation: () => T | Promise<T>,
 ): T | Promise<T> {
+  // A write to an encrypted space waits for its key (see `retryAfterKey`).
+  const attempt = client.retryAfterKey
+    ? () => client.retryAfterKey!(operation) as T | Promise<T>
+    : operation;
   const preparation = getOwnerPreparation(client);
-  if (preparation?.pending) return preparation.run(operation);
-  const result = operation();
+  if (preparation?.pending) return preparation.run(attempt);
+  const result = attempt();
   return result instanceof Promise ? ownerPreparation(client).run(() => result) : result;
 }

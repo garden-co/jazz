@@ -1,12 +1,9 @@
 import { createAccountManagerWithRuntime } from "../../accounts/enrollment.js";
-import { accountRegistryUrl, type AccountDbConfig } from "../../accounts/context.js";
+import { accountRegistryUrl } from "../../accounts/context.js";
 
 /** Unit tests substitute only the backend sign-in response, obtaining a
  * real opaque handle without loading a platform crypto or database runtime. */
-export async function enrolledAccountConfig(
-  appId: string,
-  subject = "unit-user",
-): Promise<AccountDbConfig> {
+export async function enrolledAccountConfig(appId: string, subject = "unit-user") {
   const issuer = "https://issuer.example";
   const registry = accountRegistryUrl("https://core.example", appId);
   const manager = createAccountManagerWithRuntime({

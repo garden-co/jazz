@@ -29,6 +29,9 @@ import {
   resolveNativeSession,
 } from "./account-session.js";
 import { serializeSchemaSource } from "../drivers/schema-wire.js";
+import type { WasmSchema } from "../drivers/types.js";
+import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
+import { resolveSchemaSource } from "../schema-source.js";
 import {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
@@ -40,6 +43,10 @@ import {
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
 import { importNativeRelay } from "./native-relay.js";
+import { compiledBindings } from "../encryption/build.js";
+import { declaresEncryption } from "../encryption/plain-schema.js";
+import { Encryption, EncryptionStoreRequiredError } from "../encryption/index.js";
+import { servePrivateStore } from "../encryption/private-store.js";
 
 /**
  * Opaque authority supplied by trusted native platform admission.  It is
@@ -69,6 +76,9 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
   private lifecycleForeground: NativeForegroundDb | null = null;
+  private encryptionSchema?: WasmSchema;
+  private encryptionStore?: Pick<ReturnType<typeof servePrivateStore>, "stop" | "onStateChange">;
+  private adapter?: NativeRuntimeAdapter;
   private pendingCapability: Uint8Array | null = null;
   private ownsAdmission = false;
   private explicitlyOffline = false;
@@ -89,6 +99,15 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (shouldRequireSqliteDriver(config)) {
+      const encryption =
+        config.encryption && declaresEncryption(config.encryption.app)
+          ? config.encryption
+          : undefined;
+      const store = encryption?.store;
+      if (encryption && !store) throw new EncryptionStoreRequiredError();
+      if (encryption && config.nativeRelay) {
+        throw new Error("React Native encryption requires an account opened by this client");
+      }
       if (!config.nativeRelay && config.accountId && config.accountRegistryAuthority) {
         if (this.pendingCapability || this.admittedCapability) return;
         assertAccountConfig(config);
@@ -99,7 +118,13 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const bearer = config.cookieSession
           ? ((await accountConfigBearer(config)?.()) ?? undefined)
           : undefined;
-        this.pendingCapability = beginNativeAccountSession(factory, config, session, bearer);
+        this.pendingCapability = beginNativeAccountSession(
+          factory,
+          config,
+          session,
+          bearer,
+          encryption !== undefined,
+        );
         this.foregroundFactory = factory;
         this.foregroundModule = module;
         this.ownsAdmission = true;
@@ -115,6 +140,28 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           },
           reconnect: () => this.reconnectOwnedUpstream(config),
         };
+        if (encryption && store) {
+          const schema = resolveSchemaSource(encryption.app);
+          this.encryptionSchema = schema;
+          this.attachSchema(
+            schema,
+            shippedMigrations(schema),
+            compiledBindings(encryption.app),
+            encryption.addCreatorAsMember,
+          );
+          const foreground = new NativeForegroundDb(
+            factory.openAttached(this.admittedCapability!),
+            module,
+          );
+          this.lifecycleForeground = foreground;
+          this.assertForegroundIdentity(foreground, config, session);
+          const serving = servePrivateStore(foreground, store);
+          this.encryptionStore = {
+            stop: () => serving.stop({ cancelPending: true }),
+            onStateChange: serving.onStateChange,
+          };
+          await foreground.openEncryption();
+        }
         return;
       }
       if (config.nativeRelay) {
@@ -146,19 +193,8 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           foreground,
         );
         try {
-          const metadata = opened.nativeSessionMetadata();
           const selected = resolveNativeSession(config);
-          if (
-            metadata.accountId !== (config.accountId ?? null) ||
-            (config.accountRegistryAuthority !== undefined &&
-              metadata.registryAuthority !== config.accountRegistryAuthority) ||
-            metadata.issuer !== selected.issuer ||
-            metadata.userId !== selected.user_id
-          ) {
-            throw new Error(
-              "React Native admitted session does not match the selected account identity",
-            );
-          }
+          const metadata = this.assertForegroundIdentity(opened, config, selected);
           const configured = opened.nativeConnectionStatus().configured;
           // The admitted scope's transport configuration is immutable. Lifecycle
           // actions use the application owner, rather than opening a recovery
@@ -212,19 +248,51 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     setTrustedReservedSession(config, this.admittedSession);
   }
 
-  override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
-    if (this.pendingCapability) {
-      const pending = this.pendingCapability;
-      try {
-        this.admittedCapability = attachNativeAccountSchema(
-          this.foregroundFactory!,
-          pending,
-          serializeSchemaSource(context.schema, context.migrations),
-        );
-      } finally {
-        this.pendingCapability = null;
-      }
+  private attachSchema(
+    schema: WasmSchema,
+    migrations?: ClientMigrations,
+    bindings?: string,
+    addCreatorAsMember?: boolean,
+  ): void {
+    const pending = this.pendingCapability!;
+    const serialized = serializeSchemaSource(schema, migrations, bindings, addCreatorAsMember);
+    try {
+      this.admittedCapability = attachNativeAccountSchema(
+        this.foregroundFactory!,
+        pending,
+        serialized,
+      );
+    } finally {
+      this.pendingCapability = null;
     }
+  }
+
+  private assertForegroundIdentity(
+    foreground: NativeForegroundDb,
+    config: ReactNativeDbConfig,
+    session: Session,
+  ): ReturnType<NativeForegroundDb["nativeSessionMetadata"]> {
+    const metadata = foreground.nativeSessionMetadata();
+    if (
+      metadata.accountId !== (config.accountId ?? null) ||
+      metadata.issuer !== session.issuer ||
+      metadata.userId !== session.user_id ||
+      (config.accountRegistryAuthority !== undefined &&
+        metadata.registryAuthority !== config.accountRegistryAuthority)
+    ) {
+      throw new Error("React Native admitted session does not match the selected account identity");
+    }
+    return metadata;
+  }
+
+  override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
+    if (this.encryptionSchema && context.schema !== this.encryptionSchema) {
+      throw new Error("React Native encrypted client was opened with a different generated app");
+    }
+    if (!this.encryptionSchema && declaresEncryption(context.schema)) {
+      throw new EncryptionStoreRequiredError();
+    }
+    if (this.pendingCapability) this.attachSchema(context.schema, context.migrations);
     if (this.admittedCapability) {
       const factory = this.foregroundFactory;
       const module = this.foregroundModule;
@@ -232,20 +300,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       if (!factory || !module)
         throw new Error("React Native native foreground runtime is not loaded");
       const session = resolveNativeSession(context.config);
-      const foreground = new NativeForegroundDb(factory.openAttached(capability), module);
+      const foreground = this.encryptionSchema
+        ? this.lifecycleForeground
+        : new NativeForegroundDb(factory.openAttached(capability), module);
+      if (!foreground) throw new Error("React Native encrypted foreground runtime is not loaded");
       try {
-        const metadata = foreground.nativeSessionMetadata();
-        if (
-          metadata.accountId !== (context.config.accountId ?? null) ||
-          metadata.issuer !== session.issuer ||
-          metadata.userId !== session.user_id ||
-          (context.config.accountRegistryAuthority !== undefined &&
-            metadata.registryAuthority !== context.config.accountRegistryAuthority)
-        ) {
-          throw new Error(
-            "React Native admitted session does not match the selected account identity",
-          );
-        }
+        const metadata = this.assertForegroundIdentity(foreground, context.config, session);
         if (this.explicitlyOffline) foreground.disconnectNativeUpstream();
         this.lifecycleForeground = foreground;
         const runtime = NativeRuntimeAdapter.fromDb(
@@ -262,6 +322,16 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             },
           },
         );
+        if (this.encryptionStore) {
+          this.adapter = runtime;
+          const deviceAccount = session.authMode === "device-account";
+          runtime.attachEncryption(
+            foreground,
+            this.encryptionStore,
+            (native, stateChanges) =>
+              new Encryption(native, { nativeReadiness: true, deviceAccount, stateChanges }),
+          );
+        }
         const appContext: AppContext = {
           appId: clientScope(context.config),
           accountId: context.config.accountId,
@@ -286,14 +356,36 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   }
 
+  override encryptionHandle(): Encryption | undefined {
+    return this.adapter?.encryptionHandle();
+  }
+
   override async shutdown(): Promise<void> {
     if (!this.ownsAdmission) return;
     const capability = this.admittedCapability ?? this.pendingCapability;
-    if (capability) this.foregroundFactory!.releaseAccountSession!(capability);
+    const foreground = this.lifecycleForeground;
+    const adapter = this.adapter;
+    const store = this.encryptionStore;
+    const encrypted = this.encryptionSchema !== undefined;
     this.admittedCapability = null;
     this.pendingCapability = null;
     this.lifecycleForeground = null;
+    this.adapter = undefined;
+    this.encryptionSchema = undefined;
+    this.encryptionStore = undefined;
     this.ownsAdmission = false;
+    try {
+      if (encrypted) {
+        store?.stop();
+        try {
+          await adapter?.close();
+        } finally {
+          foreground?.close();
+        }
+      }
+    } finally {
+      if (capability) this.foregroundFactory!.releaseAccountSession!(capability);
+    }
   }
 
   /**

@@ -45,6 +45,11 @@ pub struct DbConfig {
     /// The node SYSTEM provenance names, when it is not this replica's own:
     /// a backend that draws a fresh node per open keeps one stable subject.
     pub system_node: Option<NodeUuid>,
+    /// The client's encryption hooks (see [`DbConfig::with_e2ee`]).
+    #[cfg(feature = "e2ee-client")]
+    pub e2ee: Option<std::rc::Rc<dyn crate::e2ee::E2eeHooks>>,
+    /// Add the signed-in creator to a new encryption space.
+    pub add_creator_as_member: bool,
 }
 
 /// Schema versions and the lenses between them (see
@@ -67,7 +72,28 @@ impl DbConfig {
             clock: None,
             migrations: Migrations::default(),
             system_node: None,
+            #[cfg(feature = "e2ee-client")]
+            e2ee: None,
+            add_creator_as_member: false,
         }
+    }
+
+    /// Seal writes and open reads with `hooks`, the client's end-to-end
+    /// encryption ([`crate::e2ee`]), from the moment the database opens.
+    /// A database with hooks never serves as the authority.
+    ///
+    /// The hooks must be built from the app's own declarations, the ones
+    /// its files declare for the schema this configuration opens: the
+    /// database cannot compare them (the schema carries none), and hooks
+    /// built from other declarations would leave declared columns unsealed.
+    /// Opening an encrypted app ([`crate::binding_host::refuse_encrypted_app`])
+    /// checks only that the hooks say they were built from an encrypted app's
+    /// declarations ([`crate::e2ee::E2eeHooks::built_from_encrypted_app`]), which may
+    /// be empty for a version that declares no encrypted column.
+    #[cfg(feature = "e2ee-client")]
+    pub fn with_e2ee(mut self, hooks: std::rc::Rc<dyn crate::e2ee::E2eeHooks>) -> Self {
+        self.e2ee = Some(hooks);
+        self
     }
 
     /// Stamp SYSTEM provenance as `node` instead of this replica's node.
@@ -359,6 +385,8 @@ pub struct InsertOptions {
     pub target: ExactWriteTarget,
     /// Explicit provenance timestamp, or the database clock when omitted.
     pub updated_at_ms: Option<u64>,
+    /// Disable automatic creator membership for this insert.
+    pub add_creator_as_member: Option<bool>,
 }
 
 /// Options for updates.
@@ -416,6 +444,20 @@ pub struct Error {
     pub reason: Option<Reason>,
     /// Human-readable detail.
     pub message: String,
+    /// The encrypted space a call needs a key for, when it was refused for
+    /// that (reasons [`Reason::KeyPending`] and [`Reason::SpacePending`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<SpaceAddress>,
+}
+
+/// An encrypted space's address: the catalogue identity of its space table
+/// and the space row's ID, both as UUID strings (E2EE protocol §1.3).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub struct SpaceAddress {
+    pub scope_id: String,
+    pub identifier: String,
 }
 
 impl std::fmt::Display for Error {
@@ -438,6 +480,7 @@ impl Error {
             code,
             reason: None,
             message: message.into(),
+            space: None,
         }
     }
 
@@ -448,6 +491,7 @@ impl Error {
             code,
             reason: Some(reason),
             message: message.into(),
+            space: None,
         }
     }
 
@@ -523,11 +567,22 @@ pub enum Reason {
     /// skipped and the store keeps syncing the versions it knows (code
     /// `Schema`).
     SchemaVersionUnsupported,
+    /// A write, query or strict read needs the key of an encrypted space
+    /// that this device does not hold (code `NotObserved`, E2EE protocol
+    /// §7). Nothing of the call was applied; [`Error::space`] names the
+    /// space.
+    #[serde(rename = "key-pending")]
+    KeyPending,
+    /// An encrypted write to a space that has no valid root, which this
+    /// device may not create (code `WriteRejected`, E2EE protocol §3.2,
+    /// §7). [`Error::space`] names the space.
+    #[serde(rename = "space-pending")]
+    SpacePending,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 15] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -541,9 +596,13 @@ impl Reason {
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
         Reason::SchemaVersionUnsupported,
+        Reason::KeyPending,
+        Reason::SpacePending,
     ];
 
-    /// The stable, snake_case name of this reason.
+    /// The stable name of this reason: snake_case, except the E2EE
+    /// reasons, which keep the protocol's kebab-case names (`key-pending`,
+    /// `space-pending`).
     ///
     /// Like [`ErrorCode::as_str`], a durable contract: bindings expose it to
     /// JavaScript as `error.reason`, and the sync wire carries it by this
@@ -564,6 +623,8 @@ impl Reason {
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
             Reason::SchemaVersionUnsupported => "schema_version_unsupported",
+            Reason::KeyPending => "key-pending",
+            Reason::SpacePending => "space-pending",
         }
     }
 

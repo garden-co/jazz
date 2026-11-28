@@ -106,6 +106,8 @@ impl From<&Error> for SessionError {
             Error::Replaced => "replaced",
             Error::Unsynced { .. } => "unsynced",
             Error::Unsupported(_) => "unsupported",
+            Error::EncryptedSessionUnsupported => "encryptedSessionUnsupported",
+            Error::Encryption { .. } => "encryption",
             Error::Upload(_) => "upload",
             Error::Panicked(_) => "panicked",
             Error::StoreHeld(_) => "storeHeld",
@@ -339,12 +341,20 @@ impl JazzSession {
     /// Opens the session as `config.initial` says. A failure to sign in is
     /// the snapshot's `error`, not this call's: the session is still there
     /// to [`JazzSession::retry`].
+    ///
+    /// Returns [`Error::EncryptedSessionUnsupported`] for encrypted apps.
+    /// Use [`Jazz::open`] with a private store for those apps.
     pub async fn open(files: AppFiles, config: SessionConfig) -> Result<Self> {
         if config.server_url.is_none() {
             return Err(Error::Config(
                 "a session needs the app's Jazz endpoint (SessionConfig::server)".into(),
             ));
         }
+        // Leave other app-file errors to the client open, as with sign-in errors.
+        if files.declares_encryption(config.app_id, "dev") {
+            return Err(Error::EncryptedSessionUnsupported);
+        }
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("jazz-session")
@@ -1167,6 +1177,32 @@ fn is_absent(path: &Path) -> bool {
 
 fn key_file_error(path: &Path, error: std::io::Error) -> Error {
     Error::Config(format!("device key at {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Alice gets a typed refusal when opening an encrypted app, even
+    /// when she starts signed out.
+    #[tokio::test]
+    async fn encrypted_app_is_refused_when_opening_a_session() {
+        let files = AppFiles::new(
+            include_bytes!("../tests/fixtures/encrypted/jazz.app.json").to_vec(),
+            None,
+        );
+        let config = SessionConfig::new(AppId::random())
+            .server("http://127.0.0.1:9/jazz")
+            .initial(Initial::SignedOut);
+
+        let error = JazzSession::open(files, config).await.unwrap_err();
+        assert!(matches!(error, Error::EncryptedSessionUnsupported));
+        assert!(
+            error
+                .to_string()
+                .contains("Use Jazz::open with Config::encryption and a private store.")
+        );
+    }
 }
 
 /// Android's device-key lock through sessions, run on Linux: the lib's own

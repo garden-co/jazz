@@ -819,6 +819,33 @@ pub async fn revoke_sessions_route(
     })
 }
 
+/// Treat an unreadable encryption status as encrypting so account checks
+/// still require a registry and refuse foreign founding where applicable.
+pub fn encrypts_or_unknown<E>(status: Result<bool, E>) -> bool {
+    status.unwrap_or(true)
+}
+
+/// The rule that an encrypting app serves only device accounts founded
+/// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
+/// of which namespace founded an account, so an account founded for another
+/// audience could not be told from the app's own, and no account record is
+/// accepted for it. Founding one in `founding` (the namespace the founding
+/// names; `own` is the app's) is refused at the first point a host sees it,
+/// and the registry view refuses its records (`founded_for_another_audience`)
+/// for any that exist already. `encrypts` says whether the app has Jazz's
+/// system tables, asked only for a foreign namespace; a host that cannot tell
+/// answers true.
+pub fn refuse_foreign_founding(
+    own: Uuid,
+    founding: Uuid,
+    encrypts: impl FnOnce() -> bool,
+) -> Result<(), &'static str> {
+    if founding == own || !encrypts() {
+        return Ok(());
+    }
+    Err("an app that encrypts columns serves device accounts founded for its own app id only")
+}
+
 /// What a host needs besides the store to [`serve`] an account route.
 pub struct RouteContext<'a> {
     /// The app the core serves: where a local-first guest is founded when
@@ -829,6 +856,9 @@ pub struct RouteContext<'a> {
     /// A fresh random id: a new account, or a link nonce the request doesn't
     /// name.
     pub fresh_id: &'a mut dyn FnMut() -> Uuid,
+    /// Whether the app has Jazz's system tables ([`refuse_foreign_founding`]):
+    /// true when the host cannot tell.
+    pub encrypts: &'a dyn Fn() -> bool,
 }
 
 /// An account route's answer.
@@ -893,7 +923,15 @@ pub async fn serve(
                 json(result)
             }
             AccountRoute::FoundDeviceAccount => {
-                let result = found_device_account(storage, parse(body)?, context.app_id).await;
+                let request: FoundDeviceAccountRequest = parse(body)?;
+                let result = match founding_app(request.audience.as_deref(), context.app_id)
+                    .and_then(|app| {
+                        refuse_foreign_founding(context.app_id, app, context.encrypts)
+                            .map_err(|body| refuse(400, body))
+                    }) {
+                    Ok(()) => found_device_account(storage, request, context.app_id).await,
+                    Err(failure) => Err(failure),
+                };
                 effects.assignments_changed = changed(&result);
                 json(result)
             }
@@ -973,6 +1011,108 @@ fn failed(failure: RouteFailure) -> RouteReply {
     }
 }
 
+/// The registry as core's checks beside the account tables' policies read
+/// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
+/// inside the write's transaction: a second connection to a shared
+/// in-memory database, which has no write-ahead log, is locked out while
+/// the store's connection holds a write, and a Durable Object has one
+/// connection only. Every host installs this one view.
+pub struct RegistryFounders {
+    app: Uuid,
+}
+
+/// The identities of `account` in the registry's tables on `conn`, or none
+/// for a store whose registry never opened.
+async fn identities_of(
+    conn: &Storage,
+    account: AccountId,
+) -> Result<Vec<(String, String)>, jazz::db::Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
+        )
+        .map_err(storage_error)?;
+    statement
+        .query_map([account.0.as_bytes()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await
+        .map_err(storage_error)?
+        .collect::<Vec<_>>()
+        .await
+        .map_err(storage_error)
+}
+
+impl RegistryFounders {
+    pub fn new(app: Uuid) -> Self {
+        Self { app }
+    }
+
+    /// An account was founded by a device-account identity when one of its
+    /// device-account identities derives its id: linking a device-account
+    /// identity into another account keeps that account's id.
+    fn founded(
+        &self,
+        account: AccountId,
+        identities: Result<Vec<(String, String)>, jazz::db::Error>,
+    ) -> Result<Option<bool>, String> {
+        // A registry that cannot be read, a missing table included, is an
+        // error that refuses the write: never "an account nobody founded",
+        // which would let the session's issuer decide.
+        let identities =
+            identities.map_err(|error| format!("the account registry cannot be read: {error}"))?;
+        if identities.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(identities.iter().any(|(issuer, subject)| {
+            issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
+                && jazz::account_registry::device_account_id(self.app, subject) == account
+        })))
+    }
+}
+
+impl jazz::db::AccountRegistryView for RegistryFounders {
+    fn founded_by_device_account<'a>(
+        &'a self,
+        store: &'a Storage,
+        account: AccountId,
+    ) -> futures::future::LocalBoxFuture<'a, Result<Option<bool>, String>> {
+        Box::pin(async move { self.founded(account, identities_of(store, account).await) })
+    }
+
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in this app's namespace was founded for
+    /// another audience (`found-local-first` and a guest's first admission
+    /// may name one). An encrypting app does not serve such accounts: this rule is
+    /// the documented one (E2EE protocol R5, R6), and the founding routes
+    /// refuse to create them. An account with an external identity is not
+    /// told apart from one the app founded, so it reads as the app's.
+    fn founded_for_another_audience<'a>(
+        &'a self,
+        store: &'a Storage,
+        account: AccountId,
+    ) -> futures::future::LocalBoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let identities = identities_of(store, account)
+                .await
+                .map_err(|error| format!("the account registry cannot be read: {error}"))?;
+            if identities.is_empty() {
+                return Ok(false);
+            }
+            let founded = identities.iter().any(|(issuer, subject)| {
+                issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
+                    && jazz::account_registry::device_account_id(self.app, subject) == account
+            });
+            if founded {
+                return Ok(false);
+            }
+            Ok(!identities
+                .iter()
+                .any(|(issuer, _)| issuer != jazz::identity::DEVICE_ACCOUNT_ISSUER))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The registry over the store any host gives it: the native SQLite
@@ -981,6 +1121,20 @@ mod tests {
     //! serves.
 
     use super::*;
+
+    /// A host that cannot read its encryption status refuses Mallory's
+    /// foreign founding. Inject the error here to exercise the shared policy.
+    #[test]
+    fn unreadable_encryption_status_refuses_foreign_founding() {
+        let own = Uuid::from_u128(1);
+        let foreign = Uuid::from_u128(2);
+
+        assert!(refuse_foreign_founding(own, foreign, || encrypts_or_unknown(Err(()))).is_err());
+        assert!(
+            refuse_foreign_founding(own, foreign, || encrypts_or_unknown(Ok::<_, ()>(false)))
+                .is_ok()
+        );
+    }
 
     fn principal(subject: &str) -> Principal {
         Principal {
@@ -1029,6 +1183,7 @@ mod tests {
                 app_id: Uuid::from_u128(0xa11),
                 now_ms,
                 fresh_id,
+                encrypts: &|| false,
             },
         ))
     }
@@ -1042,6 +1197,7 @@ mod tests {
             app_id: Uuid::nil(),
             now_ms: 0,
             fresh_id,
+            encrypts: &|| false,
         };
         jazz::db::block_on(serve(storage, AccountRoute::Resolve, body, context))
     }
@@ -1434,5 +1590,52 @@ mod tests {
             AccountRoute::RevokeSessions.authority(),
             RouteAuthority::Admin
         );
+    }
+
+    /// `found-local-first` for another audience is refused by an encrypting
+    /// app (E2EE protocol R5, R6), whether the audience is named or is
+    /// another namespace's app id; the app's own namespace, and any
+    /// namespace of an app that does not encrypt, are founded.
+    #[test]
+    fn found_device_account_in_another_namespace_is_refused_by_an_encrypting_app() {
+        let storage = Storage::open_in_memory().unwrap();
+        jazz::db::block_on(open(&storage)).unwrap();
+        let identity = |byte: u8| serde_json::json!({ "issuer": jazz::identity::DEVICE_ACCOUNT_ISSUER, "subject": Uuid::from_bytes([byte; 16]).to_string() });
+        let found = |body: serde_json::Value, encrypts: bool| {
+            let mut ids = Uuid::new_v4;
+            let (reply, _) = jazz::db::block_on(serve(
+                &storage,
+                AccountRoute::FoundDeviceAccount,
+                body.to_string().as_bytes(),
+                RouteContext {
+                    app_id: Uuid::from_u128(0xa11),
+                    now_ms: 0,
+                    fresh_id: &mut ids,
+                    encrypts: &|| encrypts,
+                },
+            ));
+            reply
+        };
+        let foreign =
+            serde_json::json!({ "identity": identity(1), "audience": "https://other.example" });
+        let refused = found(foreign.clone(), true);
+        assert_eq!(refused.status, 400, "{refused:?}");
+        assert!(
+            matches!(&refused.body, RouteBody::Text(text) if text.contains("its own app id only")),
+            "{refused:?}"
+        );
+        jazz::db::block_on(login(
+            &storage,
+            &serde_json::from_value(identity(1)).unwrap(),
+        ))
+        .expect_err("nothing was founded");
+
+        assert_eq!(
+            found(foreign, false).status,
+            200,
+            "an app without encryption"
+        );
+        let own = serde_json::json!({ "identity": identity(2) });
+        assert_eq!(found(own, true).status, 200, "the app's own namespace");
     }
 }

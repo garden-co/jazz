@@ -318,6 +318,7 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
             None,
             None,
             None,
+            None,
         )
         .expect("begin text upload");
     await_promise(text_upload.push(text.as_bytes().to_vec())).await;
@@ -336,6 +337,7 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
             None,
             None,
             None,
+            None,
         )
         .expect("begin bytea upload");
     await_promise(bytes_upload.push(bytes.clone())).await;
@@ -348,6 +350,7 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
             cells,
             "json".to_owned(),
             Some("update".to_owned()),
+            None,
             None,
             None,
             None,

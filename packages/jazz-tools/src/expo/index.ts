@@ -24,6 +24,22 @@ export {
 export { JazzProvider, type JazzProviderProps } from "./provider.js";
 export { useDb, useJazzClient } from "../react-native/provider.js";
 export { useAll, useAllSuspense } from "../react-native/use-all.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
+
+export {
+  memoryPrivateStore,
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+  EncryptionError,
+  EncryptionNotDeclaredError,
+  EncryptionStoreRequiredError,
+} from "../encryption/index.js";
+export type {
+  Encryption,
+  EncryptionReport,
+  PrivateStore,
+  StoredDocument,
+} from "../encryption/index.js";

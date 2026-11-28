@@ -161,6 +161,43 @@ jobs:
       # give the same checksum.
       reproduce: ${{ needs.resolve.outputs.release == 'true' }}
 
+  # A plain Vercel Function importing createJazz from jazz-tools/backend,
+  # traced from the uploaded release-npm tarballs as Vercel traces it, must
+  # stay under budget (200 MB; Vercel refuses 250 MB; beta.3 traced to 414 MB,
+  # beta.6 with E2EE to about 170 MB).
+  # A test beside the manifest, not a build step: it fails the run (and so
+  # the RC's artifacts-complete) without delaying the manifest.
+  backend-function-size:
+    name: Budget a jazz-tools/backend function (linux-x64)
+    needs: [resolve, packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          sparse-checkout: |
+            dev/artifacts
+            .nvmrc
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          # npm installs fresh; nothing restores a cache off a trusted ref.
+          package-manager-cache: ${{ env.JAZZ_TRUSTED_CACHE == 'true' }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        timeout-minutes: 8
+        with:
+          name: release-npm
+          path: release-npm
+      - name: Budget a jazz-tools/backend function (linux-x64)
+        run: node dev/artifacts/verify-backend-function-size.mjs release-npm "${VERSION}"
+
   # Collects the release-* artifacts, writes manifest.json and, for release
   # runs, attests every file's build provenance.
   manifest:

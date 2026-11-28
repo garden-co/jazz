@@ -45,6 +45,9 @@ var ffi struct {
 	malloc      func(n uintptr) uintptr
 	threadSelf  func() uintptr
 
+	// End-to-end encryption, nil with a libjazz_ffi that predates it.
+	openEncrypted func(config *byte, tokenCb uintptr, tokenCtx uintptr, storeCb uintptr, storeCtx uintptr, err *uintptr) uintptr
+
 	// Backend-client calls, nil with a libjazz_ffi that predates them.
 	forUser func(h uintptr, userID, claims *byte, err *uintptr) uintptr
 
@@ -56,7 +59,7 @@ var ffi struct {
 	sessionClose func(s uintptr)
 
 	// The C callbacks, made once: each gets a Go id as its ctx.
-	subscriptionCallback, tokenCallback uintptr
+	subscriptionCallback, tokenCallback, storeCallback uintptr
 }
 
 // loadFFI loads the library and binds the C ABI, once.
@@ -91,8 +94,9 @@ func bind() error {
 		purego.RegisterFunc(fn, sym)
 	}
 	for name, fn := range map[string]any{
-		"jazz_for_user":     &ffi.forUser,
-		"jazz_session_open": &ffi.sessionOpen, "jazz_session_call": &ffi.sessionCall,
+		"jazz_for_user":       &ffi.forUser,
+		"jazz_open_encrypted": &ffi.openEncrypted,
+		"jazz_session_open":   &ffi.sessionOpen, "jazz_session_call": &ffi.sessionCall,
 		"jazz_session_jazz": &ffi.sessionJazz, "jazz_session_watch": &ffi.sessionWatch,
 		"jazz_session_close": &ffi.sessionClose,
 	} {
@@ -104,6 +108,7 @@ func bind() error {
 	purego.RegisterLibFunc(&ffi.threadSelf, libc, "pthread_self")
 	ffi.subscriptionCallback = purego.NewCallback(onSubscription)
 	ffi.tokenCallback = purego.NewCallback(onToken)
+	ffi.storeCallback = purego.NewCallback(onStore)
 	return nil
 }
 

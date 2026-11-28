@@ -35,7 +35,7 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const identity = {
   source: "a".repeat(40),
   run: "12345",
-  compiler: "rustc 1.93.1 (fixture)\nhost: aarch64-unknown-linux-gnu",
+  compiler: "rustc 1.100.0 (fixture)\nhost: aarch64-unknown-linux-gnu",
 };
 
 test("benchmark artifact handoff fails closed on stale or corrupted executables", async (t) => {
@@ -442,7 +442,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   ]) {
     assert.ok(!oldKey.startsWith(render(prefix, change)), "incompatible cache must not restore");
   }
-  assert.match(prefix, /ubuntu2204-rust1\.93\.1-codspeed5\.0\.1-per-workload-absolute-remap/);
+  assert.match(prefix, /ubuntu2204-rust1\.100\.0-codspeed5\.0\.1-per-workload-absolute-remap/);
   assert.match(cache, /path: target\/release/);
   assert.match(workflow, /key: \$\{\{ steps.native-build-cache.outputs.cache-primary-key \}\}/);
   assert.doesNotMatch(workflow, /JAZZ_BENCHMARK_SOURCE/);

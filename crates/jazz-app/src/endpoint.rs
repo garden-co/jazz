@@ -1229,6 +1229,7 @@ impl Endpoint {
             backend_secret: core.backend_secret.clone(),
             bundle: self.inner.bundle.clone(),
             auth,
+            declarations: self.inner.jazz.info.declarations.clone(),
         };
         // A thin client (its Hello asks for thin results) has its
         // transaction requests served here, not by the core (SPEC 8.14).
@@ -1526,7 +1527,7 @@ struct SocketSlot(Arc<std::sync::atomic::AtomicUsize>);
 impl SocketSlot {
     fn take(open: &Arc<std::sync::atomic::AtomicUsize>, max: usize) -> Option<Self> {
         use std::sync::atomic::Ordering;
-        open.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        open.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < max).then_some(n + 1)
         })
         .ok()

@@ -1,5 +1,4 @@
 import { execFile, spawn } from "node:child_process";
-import { createServer, type AddressInfo } from "node:net";
 import { createRequire } from "node:module";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import ts from "typescript";
@@ -23,17 +22,6 @@ const repo = join(here, "../../../..");
 const app = join(repo, "target", `turbopack-no-ws-${randomUUID()}`);
 const require = createRequire(import.meta.url);
 const packageDir = (name: string) => dirname(require.resolve(`${name}/package.json`));
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address() as AddressInfo;
-      server.close(() => resolve(port));
-    });
-  });
-}
 
 afterAll(() => rmSync(app, { recursive: true, force: true }));
 
@@ -101,13 +89,25 @@ it("builds with Turbopack where ws isn't installed, and fails only at runtime", 
   expect(build.stdout).toMatch(/Turbopack/);
 
   // The built route loads the module, and says at runtime what's missing.
-  const port = await freePort();
-  const server = spawn(process.execPath, [next, "start", "-p", String(port)], { cwd: app, env });
+  // Port 0: Next binds a free port and logs which ("- Local: http://…:<port>").
+  const server = spawn(process.execPath, [next, "start", "-p", "0", "-H", "127.0.0.1"], {
+    cwd: app,
+    env,
+  });
+  let stdout = "";
+  server.stdout.on("data", (chunk) => (stdout += chunk));
   try {
-    const response = await vi.waitFor(() => fetch(`http://127.0.0.1:${port}/ws`), {
-      timeout: 60_000,
-      interval: 250,
-    });
+    const response = await vi.waitFor(
+      () => {
+        const port = /Local:\s+https?:\/\/[^\s]+:(\d+)/.exec(stdout)?.[1];
+        if (!port) throw new Error(`next start hasn't said its port yet: ${stdout}`);
+        return fetch(`http://127.0.0.1:${port}/ws`);
+      },
+      {
+        timeout: 60_000,
+        interval: 250,
+      },
+    );
     expect(response.status).toBe(501);
     expect(await response.text()).toMatch(/this route needs the ws package: npm install ws/);
   } finally {

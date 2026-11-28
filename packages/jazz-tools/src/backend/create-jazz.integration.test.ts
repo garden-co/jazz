@@ -75,6 +75,7 @@ import {
   userSession,
   watchWhile,
 } from "./fixtures/create-jazz.js";
+import { closedLoopbackPort } from "./fixtures/ports.js";
 
 runCleanupsAfterEach();
 
@@ -3339,10 +3340,7 @@ describe("createJazz", () => {
   // route's 503 says why the store did not open (and only there).
   it("says why its store did not open in a 503, in development only", async () => {
     const appId = randomUUID();
-    const probe = createServer();
-    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-    const corePort = (probe.address() as AddressInfo).port;
-    await new Promise((resolve) => probe.close(resolve));
+    const corePort = await closedLoopbackPort();
     const coreUrl = `http://127.0.0.1:${corePort}`;
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     cleanups.push(async () => errors.mockRestore());
@@ -3384,10 +3382,7 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const adminSecret = `down-admin-${randomUUID().slice(0, 8)}`;
     // A port nothing listens on yet: the core starts there later.
-    const probe = createServer();
-    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-    const corePort = (probe.address() as AddressInfo).port;
-    await new Promise((resolve) => probe.close(resolve));
+    const corePort = await closedLoopbackPort();
     const coreUrl = `http://127.0.0.1:${corePort}`;
     const jazz = createJazz({
       app,

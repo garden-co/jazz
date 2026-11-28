@@ -21,7 +21,7 @@ runs:
         echo "JAZZ_TEST_ARTIFACT_LOCK_PATH=${RUNNER_TEMP}/jazz-test-artifacts.lock" >> "${GITHUB_ENV}"
         test "$(node --version)" = "v24.13.0"
         test "$(pnpm --version)" = "10.14.0"
-        rustc --version | grep -F "1.93.1"
+        rustc --version | grep -F "1.100.0"
         cargo clippy --version
         cargo fmt --version
         rustup target list --installed | grep -Fx "wasm32-unknown-unknown"

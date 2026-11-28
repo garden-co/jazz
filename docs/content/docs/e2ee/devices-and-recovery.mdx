@@ -1,0 +1,105 @@
+---
+title: Devices and Recovery
+description: "Approve a new device, remove one, and recover an account when every device is gone."
+languageTabs: backend
+---
+
+Each device has its own keys, and an account's devices share the account's keys. A browser
+profile, an app install and a Node process with its own private store are each one device.
+
+`await db.encryption.ready()` returns the device's status:
+
+- `"active"`: the device belongs to the account and can open every space key sent to the
+  account. A key the account hasn't been sent yet, such as for a space it has just joined, still
+  has to arrive first. See [When members get the key](/docs/e2ee/sharing-and-keys#when-members-get-the-key).
+- `"awaiting-approval"`: the device is new and needs approval or recovery.
+- `"reenrolled"`: the device was removed from the account and has signed up again as a new one.
+
+The first device to use encryption on an account becomes active by itself. What a later device
+needs depends on the kind of account.
+
+## Device accounts
+
+For a [device account](/docs/setup/auth/device-accounts), the account secret is also the recovery secret. The
+secret is the account's 24-word phrase, passkey or exported key. A device that signs in with it
+becomes active by itself, so there is nothing to set up. The calls below that create or restore
+a recovery key throw on a device account.
+
+Whoever holds the secret controls the account, including its encrypted data. Removing a device
+doesn't lock out someone who has the secret, because the device signs up again at its next start.
+If the secret may have leaked, move to a new account.
+
+## Approve a device
+
+On an account your own sign-in manages, a new device starts as `"awaiting-approval"`. An active
+device approves it. Both devices show a six-digit code, and the user confirms that the codes
+match.
+
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-approve-device-ts
+</include>
+
+`confirmMatchingCodes` is your own prompt. Show the code on the trusted device and ask the user
+whether the new device shows the same one. A wrong code approves nothing. The new device learns of
+a challenge within about 30 seconds.
+
+The native clients have the same calls on their encryption handle: `devices`, `challenge`,
+`answer`, `approvalCode`, `approve` and `removeDevice`.
+
+## Set up recovery
+
+A user who loses every device needs a recovery key to get back in. In the browser, when the
+device is active and `db.encryption.recovery.list()` is empty, offer a backup from a button.
+Creating a passkey needs a click.
+
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-enable-ts
+</include>
+
+`enable` saves the recovery key in a passkey where the browser offers one. Otherwise, or if the
+user declines the passkey, it returns a 24-word phrase to show once. A passkey provider may sync
+the passkey to the user's other devices, and the recovery key goes with it.
+
+On a new device, the user signs in and recovers with the passkey or the phrase:
+
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-restore-ts
+</include>
+
+Outside the browser, use a phrase:
+
+<include cwd lang="ts">
+  ../examples/docs/e2ee-ts/src/devices.ts#e2ee-recovery-phrase-ts
+</include>
+
+The native clients call these `recoveryCreate`, `recoveryRegister` and `recoveryRestore`.
+`recovery.list()` shows the registered recovery keys and `recovery.retire(id)` retires one. A
+retired phrase can't be registered again.
+
+## Remove a device
+
+`db.encryption.devices.remove(id)` removes a device and changes the account's keys. The removed
+device keeps the keys it already has and gets no new ones. On an account your own sign-in manages,
+removal also retires the recovery keys that device registered or used. If the device may have
+seen another recovery phrase, retire that one too and register a new one.
+
+A device can ask to be removed with `devices.requestRemoval()`. Another active device of the
+account completes the removal when it is next online. An account's only device can't leave. The
+call fails with `no-other-device`.
+
+## Sign out
+
+Signing out of a browser keeps the saved keys, so the next sign-in there can read at once. On a
+shared computer, open the client with `clearOnSignOut: true`. Sign-out then wipes the account's
+local data and its saved keys. When the user signs in again, the browser is a new device.
+
+## Reset an account
+
+A user who has lost every device and has no recovery key can start over. Allow this in
+`schema.ts` by passing `{ encryption: { allowAccountReset: true } }` as the second argument of
+`s.defineSchema`, then generate and deploy. The new device, while it is awaiting approval, calls
+`await db.encryption.resetAccount()`. Device accounts can't reset.
+
+After a reset, the account's earlier devices lose access. Other members' devices send the new
+device the keys of the spaces the account still belongs to. Anyone who can sign in as the user can
+do this, so turn it on only if your sign-in is strong enough to grant that access.

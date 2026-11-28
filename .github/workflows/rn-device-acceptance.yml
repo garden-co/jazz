@@ -31,6 +31,8 @@ on:
       - "crates/jazz-native-relay/**"
       - "crates/jazz/**"
       - "crates/jazz-compression/**"
+      - "crates/jazz-e2ee/**"
+      - "crates/jazz-e2ee-client/**"
       - "crates/jazz-native-transport/**"
       - "crates/jazz-napi/**"
       - "crates/jazz-wasm/**"
@@ -120,13 +122,13 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-e2ee/**', 'crates/jazz-e2ee-client/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       # pod install's downloads: React Native's prebuilt tarballs (which
       # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
       # Its version is pinned by the lockfile; an older entry is harmless,
@@ -305,13 +307,13 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: 1.93.1
+          toolchain: 1.100.0
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-e2ee/**', 'crates/jazz-e2ee-client/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       # Sticky disks, not actions/cache: those are per branch, and this job
       # never runs on main, so every RC on a fresh branch started cold and
       # then spent ~50 s saving. A sticky disk is shared by every branch and

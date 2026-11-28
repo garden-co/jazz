@@ -52,10 +52,10 @@ impl ExecutableSymbols {
             section_headers_offset,
             section_header_count * SECTION_HEADER_LEN,
         )?;
-        let sections: Vec<&[u8]> = section_headers.chunks_exact(SECTION_HEADER_LEN).collect();
+        let sections = section_headers.as_chunks::<SECTION_HEADER_LEN>().0;
         let symtab = sections
             .iter()
-            .find(|section| u32_at(section, 4) == SHT_SYMTAB)
+            .find(|section| u32_at(*section, 4) == SHT_SYMTAB)
             .ok_or_else(|| unsupported("the executable has no symbol table"))?;
         let strtab = sections
             .get(u32_at(symtab, 40) as usize)
@@ -68,7 +68,7 @@ impl ExecutableSymbols {
         while position < symtab_size {
             let len = CHUNK.min(symtab_size - position);
             let chunk = read_vec(&file, symtab_offset + position, len as usize)?;
-            for symbol in chunk.chunks_exact(SYMBOL_LEN) {
+            for symbol in chunk.as_chunks::<SYMBOL_LEN>().0 {
                 let (name, info, section) = (u32_at(symbol, 0), symbol[4], u16_at(symbol, 6));
                 let (value, size) = (u64_at(symbol, 8), u64_at(symbol, 16));
                 if info & 0xf != STT_FUNC || section == 0 || size == 0 {

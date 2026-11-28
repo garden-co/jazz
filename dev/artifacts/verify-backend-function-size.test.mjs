@@ -24,9 +24,10 @@ test("beta.3's shape fails: over budget, and every platform's binary bundled", (
     [linux, 63_000_000],
     ["node_modules/jazz-napi/jazz-napi.darwin-arm64.node", 51_000_000],
     ["node_modules/jazz-napi/jazz-napi.linux-x64-gnu.node", 63_000_000],
+    ["node_modules/jazz-napi/jazz-napi.win32-x64-msvc.node", 60_000_000],
   ]);
   assert.equal(receipt.problems.length, 2);
-  assert.match(receipt.problems[0], /over the 150 MB budget/);
+  assert.match(receipt.problems[0], /over the 200 MB budget/);
   assert.match(receipt.problems[1], /jazz-napi\/jazz-napi\.darwin-arm64\.node/);
 });
 
@@ -61,4 +62,22 @@ test("a jazz-napi tarball with a .node file is refused by publish and the packed
     () => verifyPackedNapi(join(dir, "bundled.tgz")),
     /must not contain native binaries/,
   );
+});
+
+test("only network failures count as retryable", async () => {
+  const { isNetworkFailure } = await import("./verify-backend-function-size.mjs");
+  assert.ok(isNetworkFailure("npm error code ECONNRESET\nnpm error network aborted"));
+  assert.ok(isNetworkFailure("npm error code EAI_AGAIN"));
+  assert.ok(
+    isNetworkFailure(
+      "npm error 503 Service Unavailable - GET https://registry.npmjs.org/x\nnpm error code E503",
+    ),
+  );
+  assert.ok(
+    !isNetworkFailure("npm error code ETARGET\nnpm error notarget No matching version found"),
+  );
+  assert.ok(
+    !isNetworkFailure("npm error code ENOENT\nnpm error enoent Could not read package.json"),
+  );
+  assert.ok(!isNetworkFailure("npm error code E404\nnpm error 404 Not Found"));
 });

@@ -19,9 +19,11 @@ import {
   claimRecycleScript,
   coreStateScript,
   newerVersion,
+  releaseRecycleScript,
   startScript,
 } from "./vercel-store.js";
 import { VERSION_ORDER } from "./fixtures/version-order.js";
+import { closedLoopbackPort } from "./fixtures/ports.js";
 
 // The start script's own version order, run in bash: it decides which core
 // a Drive runs, so it must agree with newerVersion.
@@ -83,11 +85,7 @@ describe("vercel() core download", () => {
         kind: "transient",
         stderr: "HTTP 429",
       });
-      const closed = createServer();
-      await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
-      const port = (closed.address() as AddressInfo).port;
-      await new Promise((resolve) => closed.close(resolve));
-      const refused = await download(`http://127.0.0.1:${port}/core.tgz`);
+      const refused = await download(`http://127.0.0.1:${await closedLoopbackPort()}/core.tgz`);
       expect(refused).toMatchObject({ code: 1, kind: "transient" });
       // The cause, not just "fetch failed".
       expect(refused.stderr).toContain("ECONNREFUSED");
@@ -382,12 +380,8 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   }
 
   it("tells a core that opens its store from one that listens, a start under way, and nothing", async () => {
-    const port = await new Promise<number>((resolve) => {
-      const probe = createNetServer().listen(0, "127.0.0.1", () => {
-        const { port } = probe.address() as AddressInfo;
-        probe.close(() => resolve(port));
-      });
-    });
+    // Closed until the test itself listens there, as the core would.
+    const port = await closedLoopbackPort();
     const state = () =>
       spawnSync("bash", ["-c", coreStateScript(root, port), "jazz-core-state"], {
         encoding: "utf8",
@@ -438,6 +432,29 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await claim("2000")).toBe(0);
     expect(await claim("2000")).toBe(1);
     expect(existsSync(join(root, "tmp/jazz-recycled-1000"))).toBe(false);
+    // A claim given back after a failed stop can be claimed again.
+    spawnSync("bash", ["-c", releaseRecycleScript(root), "jazz-release-recycle", "2000"]);
+    expect(await claim("2000")).toBe(0);
+  });
+
+  // uutils' mkdir (Ubuntu's coreutils since 25.10) exits 0 when it loses the
+  // race to a concurrent mkdir of the same path, as if it had made it: a claim
+  // must not rest on mkdir failing. This mkdir does what that race does, every time.
+  it("keeps a recycle claim exclusive with a mkdir that succeeds on an existing directory", () => {
+    writeFileSync(join(root, "fakebin/mkdir"), '#!/bin/bash\nexec /bin/mkdir -p "$@"\n');
+    chmodSync(join(root, "fakebin/mkdir"), 0o755);
+    const env = { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}` };
+    const claim = (session: string) =>
+      spawnSync("bash", ["-c", claimRecycleScript(root), "jazz-claim-recycle", session], { env })
+        .status;
+    expect(claim("1000")).toBe(0);
+    expect(claim("1000")).toBe(1);
+    // A claim an earlier release made as a directory still holds its session.
+    mkdirSync(join(root, "tmp/jazz-recycled-3000"));
+    expect(claim("3000")).toBe(1);
+    // And is dropped, like any other, once the next session is claimed.
+    expect(claim("4000")).toBe(0);
+    expect(existsSync(join(root, "tmp/jazz-recycled-3000"))).toBe(false);
   });
 });
 

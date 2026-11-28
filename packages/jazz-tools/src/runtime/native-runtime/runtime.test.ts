@@ -49,6 +49,10 @@ import {
   markTrustedReservedSession,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { relayWorkerLink } from "../default-runtime-source.js";
+import { CONNECTED } from "../sync-status.js";
+import { Encryption } from "../../encryption/index.js";
+import { memoryPrivateStore, servePrivateStore } from "../../encryption/private-store.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -8774,5 +8778,88 @@ describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
     await expect(wait).rejects.toThrow("gave up");
     await expect(cancelled).resolves.toBeUndefined();
     await runtime.close();
+  });
+});
+
+it("closes an encrypted database when its private store never answers", async () => {
+  vi.useFakeTimers();
+  const close = vi.fn();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, close }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const requests: string[] = [];
+  const native = {
+    encryptionCall: vi.fn((op: string) => {
+      expect(op).toBe("shutdown");
+      requests.push(JSON.stringify({ id: "1", op: "load", scope: "device", doc: "keys" }));
+      return new Promise<string>(() => {});
+    }),
+    takeStoreRequests: () => requests.splice(0),
+    replyStore: vi.fn(() => true),
+    encryptionSetOnline: vi.fn(),
+    encryptionSpaces: () => "{}",
+  };
+  const load = vi.fn(() => new Promise<never>(() => {}));
+  const serving = servePrivateStore(native, { ...memoryPrivateStore(), load });
+  const stop = vi.spyOn(serving, "stop");
+  runtime.attachEncryption(native as never, serving, (adapter) => new Encryption(adapter));
+  const retained = runtime.encryptionHandle()!;
+  try {
+    const closing = runtime.close();
+    await expect(retained.deviceId()).rejects.toMatchObject({ code: "closed" });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(load).toHaveBeenCalledWith("device", "keys");
+    expect(close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(close).toHaveBeenCalledOnce();
+    await closing;
+    expect(stop).toHaveBeenCalledWith({ cancelPending: true });
+  } finally {
+    serving.stop({ cancelPending: true });
+    vi.useRealTimers();
+  }
+});
+
+describe("a tab's encryption follows its worker's server link", () => {
+  it("goes offline when the connection that replaced the worker's fails before relaying a link", async () => {
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ tick: () => undefined }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const encryptionSetOnline = vi.fn();
+    runtime.attachEncryption(
+      {
+        encryptionSetOnline,
+        encryptionSpaces: () => "{}",
+        encryptionCall: async () => "null",
+      } as never,
+      { stop: () => undefined },
+      () => ({}) as never,
+    );
+    const online = () => encryptionSetOnline.mock.calls.at(-1)?.[0];
+    try {
+      const first = relayWorkerLink(runtime, undefined, () => undefined);
+      first.onRemoteLinkChange?.("connected" as never, CONNECTED);
+      expect(online()).toBe(true);
+      // A new connection to the worker replaces the first, then fails
+      // before it relayed anything: the tab can no longer reach the server.
+      const replacement = relayWorkerLink(runtime, undefined, () => undefined);
+      replacement.onFailure(new Error("the worker went away"));
+      expect(online()).toBe(false);
+      // The first connection failing late changes nothing more.
+      first.onFailure(new Error("the old connection closed"));
+      expect(online()).toBe(false);
+    } finally {
+      await runtime.close();
+    }
   });
 });

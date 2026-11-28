@@ -1,0 +1,105 @@
+---
+title: Encryption Limits
+description: "What encrypted columns don't do, and what encryption doesn't protect."
+languageTabs: backend
+---
+
+The [protocol spec](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_PROTOCOL.md#8-security-properties-and-limits)
+has the full list and the reasons.
+
+## Queries and schema
+
+- You can filter an encrypted column by equality only, and only if it was declared with
+  `equality: true`. Equality is opt-in because it lets the server tell which rows share a value,
+  though not what the value is. Leave it off for columns you don't need to filter. The query must
+  also filter the space column by one exact value, such as `where({ projectId, title })`.
+  Ordering, ranges, text search and grouping on an encrypted column fail with an error that names
+  the pattern.
+- Every aggregate (`count`, `sum`, `avg`, `min` and `max`, with or without `group_by`) works on
+  the plain columns of an encrypted table. An aggregate fails if it's over or grouped by an
+  encrypted column, or if the query also filters an encrypted column. Aggregates include rows this
+  device can't decrypt yet, so a count can be higher than `all().length` for the same filter.
+- Reading an encrypted table through a relation isn't supported yet, even when the relation uses
+  plain columns. Reading `projects` with its `tasks` included fails when `tasks` is encrypted, so
+  query the tasks of each project on their own. Joins and history reads of an encrypted table
+  aren't supported yet either.
+- Encrypted columns only support last-writer-wins: when two devices change the same encrypted
+  column at once, one write replaces the other. A column with a
+  [merge strategy](/docs/recipes/local-first/how-sync-works), such as a counter or
+  `.merge("text")`, can't be encrypted yet. We plan to support other merge strategies on encrypted
+  columns soon.
+- Jazz doesn't encrypt a plain column that already holds data. To encrypt existing data, copy it
+  into a new table that declares the encrypted columns. Clients write the copies, because only
+  they hold the keys.
+- `equality` can't be added to a table that already exists. Copy the column into a new table
+  that declares it.
+- The deploy restricts schema changes to encrypted tables and names the column it refuses.
+  `generate` and `migrations create` can accept a change that the deploy then refuses. The
+  [schema change rules](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_SCHEMA_CHANGES.md)
+  list what is allowed.
+- Don't change the space column of an encrypted row: its encrypted values belong to the space
+  they were written in. A client that has loaded the row refuses the change, but a client or
+  backend that hasn't, such as one that upserts by ID, can't check, so its write goes through. The
+  row's encrypted values then read as `stale-space` until the original space is written back, for
+  example from your backend.
+
+## What the server can do
+
+- The server sees everything that isn't an encrypted column: row IDs, plain columns, who is a
+  member of which space, and who wrote each row and when. It needs these to check your
+  permissions, which run on the server, so they can't be encrypted.
+- Permissions decide who gets the keys. Anyone who can update a space row can add any account as
+  a member, and members' devices then send that account the keys. Your backend can add members
+  too, and so can a bug in your permissions or a server that doesn't enforce them. This doesn't
+  add anyone new to trust: your server already enforces your permissions for all your other data,
+  and whoever serves your front end could change the code that holds the keys. Encryption
+  protects your stored data, not your app from the people who run it.
+- Extra conditions in a space table's read rule decide which members Jazz sends rows to. Every
+  member still gets the keys and can decrypt any encrypted value of the space they get hold of.
+- The backend can't read or compute on encrypted columns. Do that on a client.
+- Your backend doesn't need keys to serve an encrypted app. It stores and relays the encrypted
+  values as they are, whether it runs on Node or in a Cloudflare Worker. A backend client that
+  holds keys runs on Node, but isn't supported in a Cloudflare Worker yet.
+
+## Members and keys
+
+- As a space grows, so does the time it takes to open it and to rotate its key. We benchmark
+  spaces of up to 1,000 member accounts, but that isn't a hard limit. If you need larger spaces,
+  get in touch on [Discord](https://discord.gg/RN9UKh52be).
+- A new member can read what was written to the space before they joined.
+- A new member waits for the key until a device that holds it is online.
+- Removing a member can't take back what they already read.
+- After a removal, writes use the old key until the key changes. That includes writes made
+  offline and writes from a device that hasn't heard of the removal yet. The server stops
+  sending the removed member rows, but the removed member holds the key those rows use.
+- A member row written offline before a removal and synced after it makes the account a member
+  again. Check the member list after a removal has synced.
+
+## Devices
+
+- Whoever holds a device account's secret controls the account, and removing a device doesn't
+  lock them out. See [Devices and recovery](/docs/e2ee/devices-and-recovery#device-accounts).
+- A script on your page can use the device's keys. An injected script can read what the device
+  reads and act as the device until the device is removed. Changing a space's key doesn't stop
+  it. After a suspected injection, use a trusted device to remove the affected device and any
+  device you don't recognise.
+- Saved keys stay in the browser after sign-out unless you set `clearOnSignOut`. A later user of
+  the same browser profile can use them.
+- A copy of a private store that comes with its key can act as the device. A restored backup or
+  a VM snapshot can be such a copy. Keep the key in the operating system's key store and out of
+  backups.
+- A new or wiped device can't tell if the server shows it an outdated list of another account's
+  devices. A device detects that only for accounts it has seen before.
+- Jazz wipes the key material it owns in memory. It can't wipe JavaScript strings, and in React
+  Native keys cross the JavaScript bridge as strings. Keep tools that log the bridge or inspect
+  the heap away from real accounts.
+
+## Rust, Swift, Kotlin and Go
+
+- Keys are delivered when the app starts, after a read that left rows out, and when you call
+  `keysDeliver`. A subscription alone doesn't deliver keys.
+- Only `insert`, `update`, `delete`, `upsert` and `restore` wait for a key. Transactions, partial
+  edits and branch writes fail with `key-pending` at once. Call `ready` or `keysDeliver`, then
+  write again.
+- The session APIs don't take a private store, so open an encrypted app with a client. In Rust,
+  use `Jazz::open`. `JazzSession::open` returns `Error::EncryptedSessionUnsupported`.

@@ -723,6 +723,9 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     .unwrap();
 }
 
+/// A file whose version this Jazz can't read (a newer `$schema` or legacy
+/// `format`, another `$schema` URL, or none) is refused for that before any
+/// other check.
 #[test]
 fn an_unknown_version_is_refused_before_anything_else() {
     // `$schema` carries the version.
@@ -1355,6 +1358,10 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
         }
         PolicyExpr::Inherits { .. } => "Inherits",
         PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
+        // Jazz derives these for its system tables; the file has no
+        // spelling for them, so they are not among the variants above.
+        PolicyExpr::InheritsFrom { .. } => "InheritsFrom",
+        PolicyExpr::InsertedByThisTransaction => "InsertedByThisTransaction",
         PolicyExpr::And(all) => {
             all.iter().for_each(|e| policy_variants(e, seen));
             "And"
@@ -1438,6 +1445,70 @@ fn only_strings(file: &json::Json, text: &str) {
             };
             ops.iter().for_each(|(_, p)| policy(p, text));
         }
+    }
+}
+
+/// `table_id('T')` reads as table `T`'s catalogue identity, compared with
+/// a `uuid` column, and the file writes it back so; a table the schema lacks,
+/// or a column that is no `uuid`, is refused where it is written.
+#[test]
+fn a_table_identity_reads_and_writes_as_table_id() {
+    let expr = read_policy("todos", "owner = table_id('shares')").unwrap();
+    assert_eq!(
+        expr,
+        PolicyExpr::Cmp {
+            column: "owner".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::TableIdentity {
+                table: "shares".into(),
+            },
+        }
+    );
+    assert_eq!(printed("todos", &expr), "owner = table_id('shares')");
+    through_the_permissions_file(&expr);
+
+    let error = read_policy("todos", "owner = table_id('notes')").unwrap_err();
+    assert!(
+        error.contains("`table_id('notes')` names no table"),
+        "{error}"
+    );
+    let error = read_policy("todos", "name = table_id('shares')").unwrap_err();
+    assert!(error.contains("a table identity is a uuid"), "{error}");
+}
+
+/// The nodes Jazz derives for its system tables have no spelling in the
+/// file: writing one is refused, naming it, rather than written as text that
+/// would read back as something else.
+#[test]
+fn derived_policy_nodes_are_not_written_to_the_file() {
+    let codegen = shared_todos().codegen;
+    let relations = codegen.relations();
+    let loaded = loaded(shared_todos());
+    let context = expr::Context {
+        schema: loaded.current_schema(),
+        relations: &relations,
+        computed: &expr::ComputedNames::new(),
+    };
+    for (expr, name) in [
+        (
+            PolicyExpr::InheritsFrom {
+                operation: Operation::Select,
+                table_column: "owner".into(),
+                id_column: "owner".into(),
+                tables: vec!["shares".into()],
+            },
+            "InheritsFrom",
+        ),
+        (
+            PolicyExpr::Exists {
+                table: "shares".into(),
+                condition: Box::new(PolicyExpr::InsertedByThisTransaction),
+            },
+            "InsertedByThisTransaction",
+        ),
+    ] {
+        let error = expr::print(&expr, &context, "todos").unwrap_err();
+        assert!(error.contains(&format!("`{name}`")), "{error}");
     }
 }
 
@@ -2470,6 +2541,31 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
     assert_eq!(again, policy, "{printed}");
 }
 
+/// A migration can't make a kept column optional: the deploy's lens check
+/// refuses it, as `migrations create` does. So an app whose old reference
+/// column is required can't loosen it before switching to a new reference
+/// column (the encryption guide's copy recipe relies on this).
+#[test]
+fn a_migration_cannot_make_a_kept_required_reference_optional() {
+    let file = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks","optional":true}}}},
+        "history":{"v1":{"tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks"}}}}}},
+        "migrations":[{"from":"v1","migrate":{}}]}"#;
+    let permissions =
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
+    let error = load(file.as_bytes(), permissions)
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        error.contains("\"taskId\" comes out required but is optional")
+            && error.contains("must keep its type and optionality"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_migration_may_not_move_a_reference_to_another_table() {
     let file = r#"{ "format": 1,
@@ -3286,4 +3382,235 @@ fn the_removed_local_first_auth_mode_is_refused_by_name() {
     );
     // A claim may still hold the text: only `session.authMode` changed.
     read_policy("todos", "session.claims.mode = 'local-first'").unwrap();
+}
+
+/// An enum whose cases carry fields may stay in a `history` version, plain
+/// or encrypted, so that a migration can drop it: the JSON Schema takes
+/// such a file as the reader does, and refuses the same enum in the current
+/// tables as the reader does.
+#[test]
+fn the_json_schema_takes_enum_cases_with_fields_in_history_only() {
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
+    let permissions = br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let encrypted = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"notes":{"columns":{"summary":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"summary":"string?"}}}},
+        "history":{"old":{"tables":{"notes":{"columns":{"detail":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"detail":{"enum":{"pending":{"reason":"string"}}}}}}}}},
+        "migrations":[{"from":"old","migrate":{"notes":{"detail":{"drop":"bytes","backwardsDefault":""},"summary":{"add":"bytes","default":""}}}}]}"#;
+    let plain = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"todos":{"columns":{"title":"string"}}},
+        "history":{"v1":{"tables":{"todos":{"columns":{"title":"string","status":{"enum":{"open":{},"done":{"at":"timestamp"}},"optional":true}}}}}},
+        "migrations":[{"from":"v1","migrate":{"todos":{"status":{"drop":{"enum":{"open":{},"done":{"at":"timestamp"}}}}}}}]}"#;
+    let plain_permissions =
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
+    let current = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"todos":{"columns":{"title":"string","status":{"enum":{"open":{},"done":{"at":"timestamp"}},"optional":true}}}}}"#;
+    // A case's field takes what a column's type takes (a type string with
+    // `?`, or a type object), not an empty object.
+    let field = |spec: &str| {
+        plain.replace(
+            r#""done":{"at":"timestamp"}"#,
+            &format!(r#""done":{{"at":{spec}}}"#),
+        )
+    };
+    let (optional_field, empty_field) = (field(r#"{"type":"string?"}"#), field("{}"));
+    for (text, permissions, expected) in [
+        (encrypted, &permissions[..], true),
+        (plain, &plain_permissions[..], true),
+        (current, &plain_permissions[..], false),
+        (optional_field.as_str(), &plain_permissions[..], true),
+        (empty_field.as_str(), &plain_permissions[..], false),
+    ] {
+        let instance: serde_json::Value = serde_json::from_str(text).unwrap();
+        let by_schema = validator.is_valid(&instance);
+        let by_reader = load(text.as_bytes(), permissions);
+        assert_eq!(
+            (by_schema, by_reader.is_ok()),
+            (expected, expected),
+            "{text}: schema {by_schema}, reader {:?}",
+            by_reader.err().map(|e| e.to_string())
+        );
+    }
+}
+
+/// The app file's JSON Schema takes an encrypted column's declaration
+/// exactly when the reader does (`load`, what `loadAppArtifact` calls): each
+/// declaration below sits in an otherwise valid encrypted app, and the 2020-12
+/// validator and the reader must both accept it or both refuse it.
+#[test]
+fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
+    let permissions = br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = |declaration: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "title": "bytes" }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": {declaration} }} }} }} }} }}"#
+        )
+    };
+    let accepted = [
+        r#""string""#,
+        r#""string?""#,
+        r#"{ "type": "string" }"#,
+        r#"{ "type": "string", "default": "untitled" }"#,
+        r#"{ "type": "string", "optional": true }"#,
+        r#"{ "enum": ["low", "high"] }"#,
+        r#"{ "enum": ["low", "high"], "default": "low" }"#,
+        r#"{ "json": true }"#,
+        r#"{ "array": "string" }"#,
+        r#"{ "array": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": { "enum": ["low", "high"] }, "default": "low" }"#,
+        r#"{ "type": { "enum": ["low", "high", "top"] }, "sealedType": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": "string", "$comment": "a note" }"#,
+        r#"{ "array": { "type": "string", "$comment": "a note" } }"#,
+        r#"{ "type": { "array": { "enum": ["low"], "$comment": "a note" } } }"#,
+        r#"{ "json": { "type": "integer", "minimum": 1, "maximum": 10 } }"#,
+        r#"{ "array": { "json": { "enum": [1, "two", null, true] } } }"#,
+        r#"{ "json": { "minimum": -9223372036854775808, "maximum": 18446744073709551615 } }"#,
+    ];
+    let refused = [
+        r#"42"#,
+        r#"{}"#,
+        r#""strng""#,
+        r#"{ "type": "string", "from": "etc" }"#,
+        r#"{ "type": "string", "anything": 1 }"#,
+        r#"{ "type": "string", "enum": ["low"] }"#,
+        r#"{ "type": "string", "merge": "counter" }"#,
+        r#"{ "type": "string", "references": "notes" }"#,
+        r#"{ "type": "string", "transform": "upper" }"#,
+        r#"{ "sealedType": "string" }"#,
+        r#"{ "type": "string", "sealedType": {} }"#,
+        r#"{ "type": "string", "sealedType": { "enum": ["low"], "anything": 1 } }"#,
+        r#"{ "type": "string", "sealedType": { "type": "string", "enum": ["low"] } }"#,
+        r#"{ "type": { "enum": ["low"] }, "optional": true }"#,
+        r#"{ "type": { "enum": ["low"], "default": "low" }, "sealedType": { "enum": ["low"] } }"#,
+        r#"{ "type": { "enum": ["low"] }, "sealedType": { "enum": ["low"] }, "from": "etc" }"#,
+        r#"{ "array": { "type": "string", "from": "etc" } }"#,
+        r#"{ "type": { "array": { "type": "string", "reverse": "etc" } } }"#,
+        r#"{ "type": { "enum": ["low"], "from": "etc" } }"#,
+        r#"{ "array": { "type": "string", "$comment": 1 } }"#,
+        // The current version may not hold what a client can't seal.
+        r#"{ "json": { "minimum": 0.5 } }"#,
+        r#"{ "type": { "array": { "json": { "multipleOf": 0.25 } } } }"#,
+        r#"{ "enum": { "pending": { "reason": "string" } } }"#,
+        r#"{ "array": { "enum": { "pending": { "reason": "string" } } } }"#,
+        // Just past the largest unsigned 64-bit integer: this validator
+        // compares it exactly (a JavaScript editor reads it as the nearest
+        // double, which is the bound itself).
+        r#"{ "json": { "maximum": 18446744073709551616 } }"#,
+        r#"{ "json": { "maximum": 100000000000000000000000000000 } }"#,
+        r#"{ "json": { "minimum": -100000000000000000000000000000 } }"#,
+    ];
+    // The known differences, where the JSON Schema takes what the reader
+    // refuses:
+    // - JSON Schema compares numbers by value, so it takes `1.0` (or `1e2`)
+    //   as an integer; the reader goes by how the number is written and
+    //   refuses it, as a client could not encode it.
+    // - A number just below the smallest signed 64-bit integer is read as the
+    //   nearest double, which is that bound, so it passes the JSON Schema's
+    //   `minimum`; the reader refuses it.
+    let schema_only = [
+        r#"{ "json": { "minimum": 1.0 } }"#,
+        r#"{ "json": { "minimum": -9223372036854775809 } }"#,
+    ];
+    for declaration in schema_only {
+        let text = app(declaration);
+        let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(validator.is_valid(&instance), "{declaration}");
+        assert!(load(text.as_bytes(), permissions).is_err(), "{declaration}");
+    }
+    for (declarations, expected) in [(&accepted[..], true), (&refused[..], false)] {
+        for declaration in declarations {
+            let text = app(declaration);
+            let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let by_schema = validator.is_valid(&instance);
+            let by_reader = load(text.as_bytes(), permissions);
+            assert_eq!(
+                (by_schema, by_reader.is_ok()),
+                (expected, expected),
+                "{declaration}: schema {by_schema}, reader {:?}",
+                by_reader.err().map(|e| e.to_string())
+            );
+        }
+    }
+}
+
+/// A space table missing from a version is refused in words that fit
+/// whose entries name it: the version's own (a backstop behind its entry
+/// checks) or the nearest earlier ones it follows.
+#[test]
+fn a_missing_space_table_is_worded_for_own_or_inherited_entries() {
+    let schema = SchemaBuilder::new().build();
+    let entries: encryption::Entries = [(
+        "messages".to_owned(),
+        crate::tools::public_schema::EncryptionEntry {
+            space: "roomId".to_owned(),
+            scope: "rooms".to_owned(),
+            columns: Default::default(),
+            equality: Vec::new(),
+        },
+    )]
+    .into();
+    let own = encryption::check_space_tables(&schema, &entries, false).unwrap_err();
+    assert_eq!(
+        own,
+        "space table rooms is not in this version: its encryption entries name rooms as a \
+         space table. Keep rooms, or declare its entries with a space table this version has."
+    );
+    let inherited = encryption::check_space_tables(&schema, &entries, true).unwrap_err();
+    assert!(
+        inherited.starts_with(
+            "space table rooms is not in this version (dropped or renamed). This version \
+             declares no encryption entries"
+        ),
+        "{inherited}"
+    );
+    assert!(encryption::check_space_tables(&schema, &encryption::Entries::new(), false).is_ok());
+}
+
+/// A retyped encrypted column is refused naming both types as the app
+/// file writes them, the sealed one first, never their Rust debug form.
+#[test]
+fn a_retyped_encrypted_column_names_both_types_as_the_file_writes_them() {
+    use crate::tools::public_schema::{EncryptedColumn, PlainType};
+    let column = |column_type, nullable| EncryptedColumn {
+        plain: PlainType {
+            column_type,
+            nullable,
+            default: None,
+        },
+        sealed_type: None,
+    };
+    let refusal = |from: &EncryptedColumn, to: &EncryptedColumn| {
+        encryption::check_stored_column_type("messages.text", from, to, false).unwrap_err()
+    };
+    assert_eq!(
+        refusal(
+            &column(ColumnType::Text, false),
+            &column(ColumnType::Integer, false)
+        ),
+        "messages.text: the encrypted column's type changes from \"string\", which its cells \
+         were sealed under, to \"int\"; only append-only enum widening can pin the old type \
+         with sealedType; to encrypt existing data, copy it into a new encrypted table \
+         (docs/e2ee/limits#queries-and-schema)"
+    );
+    let retyped = refusal(
+        &column(ColumnType::Text, true),
+        &column(
+            ColumnType::Enum {
+                variants: vec!["a".to_owned(), "b".to_owned()],
+            },
+            true,
+        ),
+    );
+    assert!(
+        retyped.starts_with(
+            "messages.text: the encrypted column's type changes from \"string?\", which its \
+             cells were sealed under, to { \"enum\": [\"a\", \"b\"] } (nullable);"
+        ),
+        "{retyped}"
+    );
+    assert!(!retyped.contains("PlainType"), "{retyped}");
 }

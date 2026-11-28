@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, expectTypeOf, it, vi } from "vitest";
 import {
   PostcardWriter,
   createRecord,
@@ -12,9 +12,11 @@ import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { parseSnapshotRef, UnsupportedSnapshotError } from "../snapshot-ref.js";
 import {
   createOpenTransactionId,
+  StreamingPublicationTimeoutError,
   type TxId,
   type MutationErrorEvent,
   type OpenTransactionId,
+  type StreamingInsertResult,
 } from "../client.js";
 
 function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenTransactionId {
@@ -322,6 +324,108 @@ it("drains an already admitted streaming mutation before returning its foregroun
   expect(await handoff).toBe(42n);
   await runtime.close();
 });
+
+it.each(["standalone", "transaction"])(
+  "gives %s stream publication a fresh deadline after a slow source",
+  async (mode) => {
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const stuck = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const finish = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise<void>((resolve) => setTimeout(resolve, 9_999)))
+        .mockImplementationOnce(() => stuck);
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              beginStreamingMutation: () => ({
+                push: () => undefined,
+                finish: async () => {
+                  await finish();
+                  return fakeWrite();
+                },
+                finishInTransaction: finish,
+                abort: () => true,
+              }),
+              tick: () => undefined,
+            }),
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const tx = mode === "transaction" ? beginTestBatch(runtime) : undefined;
+      const context = tx && JSON.stringify({ transaction_id: tx });
+      const write = (id?: string) =>
+        runtime.streamingMutation(
+          "insert",
+          "todos",
+          {},
+          "title",
+          (async function* () {
+            await new Promise((resolve) => setTimeout(resolve, 15_000));
+            yield "slow source";
+          })(),
+          context,
+          id,
+        );
+      const first = write();
+      await vi.advanceTimersByTimeAsync(24_999);
+      await expect(first).resolves.toBeDefined();
+
+      const refused = vi.fn<(error: unknown) => void>();
+      const id = "00000000-0000-7000-8000-000000000002";
+      const second = write(id).catch(refused);
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(finish).toHaveBeenCalledTimes(2);
+      expect(refused).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "TimeoutError",
+          message: expect.stringContaining("may still complete"),
+          rowId: id,
+          settled: expect.any(Promise),
+        }),
+      );
+      const error = refused.mock.calls[0]![0];
+      expect(error).toBeInstanceOf(StreamingPublicationTimeoutError);
+      if (!(error instanceof StreamingPublicationTimeoutError)) throw error;
+      expectTypeOf(error.rowId).toEqualTypeOf<string>();
+      expectTypeOf(error.settled).toEqualTypeOf<Promise<StreamingInsertResult>>();
+
+      const queuedId = "00000000-0000-7000-8000-000000000003";
+      const queued = write(queuedId).catch(refused);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(refused).toHaveBeenCalledTimes(2);
+      expect(refused.mock.calls[1]![0]).toMatchObject({
+        name: "TimeoutError",
+        message: "Streaming write timed out before publication started",
+      });
+      expect(refused.mock.calls[1]![0]).not.toBeInstanceOf(StreamingPublicationTimeoutError);
+      release();
+      await expect(error.settled).resolves.toMatchObject({ id, kind: tx ? "staged" : "committed" });
+      await Promise.all([second, queued]);
+
+      const retry = write(queuedId);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(retry).resolves.toMatchObject({
+        id: queuedId,
+        kind: tx ? "staged" : "committed",
+      });
+      await runtime.close();
+      expect(finish).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
 
 it("waits for a failed stream's native abort before foreground handoff", async () => {
   let releaseSource!: () => void;

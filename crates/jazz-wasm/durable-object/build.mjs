@@ -10,7 +10,9 @@ import { root, sizeTunedBuild, wasmOptLevelFromArgs } from "../size-build.mjs";
 const wasmOptLevel = wasmOptLevelFromArgs();
 sizeTunedBuild({
   label: "build:durable-object",
-  features: "durable-object",
+  // Not the default `e2ee-client`: the core is an authority and holds no keys.
+  noDefaultFeatures: true,
+  features: "durable-object,console_error_panic_hook,transport-compression-ruzstd",
   outDir: join(root, "durable-object/pkg"),
   outName: "jazz_wasm_do",
   wasmOptLevel,

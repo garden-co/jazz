@@ -31,6 +31,8 @@ export async function startDurableObjectCore(
     backend?: boolean;
     /** More bindings for the Worker (test switches). */
     bindings?: Record<string, string>;
+    /** An R2 bucket for large values, bound as `JAZZ_BLOBS` (in memory). */
+    blobs?: boolean;
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
@@ -49,6 +51,7 @@ export async function startDurableObjectCore(
     },
     compatibilityFlags: ["nodejs_compat"],
     ...(options.persist ? { durableObjectsPersist: options.persist } : {}),
+    ...(options.blobs ? { r2Buckets: ["JAZZ_BLOBS"] } : {}),
     bindings: { ...options.bindings, ...(secret && { JAZZ_CORE_SECRET: secret }) },
     host: "127.0.0.1",
     port: 0,
@@ -73,7 +76,7 @@ export async function startDurableObjectCore(
 }
 
 /** The Worker's modules: `script` first, then the other modules beside it. */
-function workerModules(script: string) {
+export function workerModules(script: string) {
   const dir = dirname(script);
   const others = readdirSync(dir, { recursive: true }) as string[];
   const modules = [{ type: "ESModule" as const, path: script }];

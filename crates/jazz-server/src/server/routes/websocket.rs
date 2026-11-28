@@ -3443,7 +3443,7 @@ mod tests {
     /// Publish `source` with its own policies as a bundle, as createJazz
     /// does on boot (`/bundles`, activating nothing); its hex id.
     async fn publish_source_bundle(state: &Arc<ServerState>, source: &Schema) -> String {
-        use crate::server::deployment::{DeployRequest, DeploySchema, deploy};
+        use crate::server::deployment::{DeployRequest, DeploySchema, deploy_body};
         let mut structural = source.clone();
         for table in structural.values_mut() {
             table.policies = TablePolicies::default();
@@ -3453,7 +3453,7 @@ mod tests {
             .iter()
             .map(|(name, table)| (name.clone(), table.policies.clone()))
             .collect();
-        let response = deploy(
+        let response = deploy_body(
             state.clone(),
             DeployRequest {
                 target_schema_hash: hash.clone(),
@@ -3464,7 +3464,8 @@ mod tests {
                 migrations: Vec::new(),
                 permissions,
                 allow_dropping_history: false,
-            },
+            }
+            .into(),
         )
         .await
         .unwrap_or_else(|error| panic!("publish bundle: {}", error.body));

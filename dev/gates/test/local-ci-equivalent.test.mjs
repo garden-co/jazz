@@ -323,6 +323,52 @@ test("CI-equivalent partitions cannot silently substitute their Rust or TypeScri
   );
 });
 
+test("Rust partition runs the NAPI and wasm encryption tests", () => {
+  const rust = planFor({ partition: "rust-workspace" });
+  const napi = rust.find(({ label }) => label === "jazz-napi encryption tests");
+  assert.ok(napi);
+  assert.equal(napi.executable, "bash");
+  assert.match(
+    napi.args.join(" "),
+    /unset RUSTC_WRAPPER;.*cargo test -p jazz-napi --lib --features rn-test-bridge/,
+  );
+
+  const wasm = rust.find(({ label }) => label === "jazz-wasm encryption tests");
+  assert.ok(wasm);
+  assert.equal(wasm.executable, "bash");
+  assert.match(
+    wasm.args.join(" "),
+    /unset RUSTC_WRAPPER;.*dev\/ci\/wasm-pack-test.sh --node crates\/jazz-wasm/,
+  );
+});
+
+test("Rust partition runs jazz-e2ee's SLH-DSA vectors on wasm32", () => {
+  const rust = planFor({ partition: "rust-workspace" });
+  const vectors = rust.find(({ label }) => label === "jazz-e2ee SLH-DSA vectors on wasm32");
+  assert.ok(vectors, "the partition must run the SLH-DSA vectors on wasm32");
+  assert.equal(vectors.executable, "bash");
+  assert.match(
+    vectors.args.join(" "),
+    /unset RUSTC_WRAPPER;.*dev\/ci\/wasm-cargo-test.sh -p jazz-e2ee --lib --test slh_dsa$/,
+  );
+  // The runner only runs #[wasm_bindgen_test] functions: each vector must
+  // carry it on wasm32, or the command above passes without running it.
+  for (const file of [
+    "crates/jazz-e2ee/src/primitives/slh_dsa.rs",
+    "crates/jazz-e2ee/tests/slh_dsa.rs",
+  ]) {
+    const source = fs.readFileSync(path.join(root, file), "utf8");
+    const tests = source.match(/#\[cfg_attr\(not\(target_arch = "wasm32"\), test\)\]/g) ?? [];
+    const wasm =
+      source.match(
+        /#\[cfg_attr\(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test\)\]/g,
+      ) ?? [];
+    assert.ok(tests.length > 0, `${file} has SLH-DSA vectors`);
+    assert.equal(wasm.length, tests.length, `every vector in ${file} runs on wasm32`);
+    assert.doesNotMatch(source, /^\s*#\[test\]/m, `${file} has no native-only test`);
+  }
+});
+
 test("the shared TypeScript runner rejects inherited suite overrides under the CI guard", () => {
   const result = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
     cwd: root,

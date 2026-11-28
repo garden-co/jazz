@@ -106,6 +106,17 @@ public interface Native : AutoCloseable {
     /** Signs the end user out, and closes the app. */
     public fun signOut(): Unit = close()
 
+    public fun memberAdd(table: String, id: String, accountId: String, tier: String?): String =
+        throw JazzException.NotSupported("adding space members")
+    public fun memberList(table: String, id: String): String =
+        throw JazzException.NotSupported("listing space members")
+    public fun memberRemove(table: String, id: String, accountId: String): ULong =
+        throw JazzException.NotSupported("removing space members")
+
+    /** One end-to-end encryption operation by name (see the README), its arguments and result as JSON. */
+    public fun encryptionCall(op: String, argsJson: String): String =
+        throw JazzException.NotSupported("end-to-end encryption through this native core")
+
     /**
      * A call whose waits [NativeCall.cancel] can end, or `null` where calls
      * can't be cut short. Calls made inside [NativeCall.run], on that
@@ -121,6 +132,13 @@ public interface Native : AutoCloseable {
         /** Opens as an end user signing in with a bearer [tokens] gives (reason → token or `null`). */
         public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
             throw JazzException.NotSupported("bearer sign-in through this opener")
+
+        /**
+         * Opens an app that declares end-to-end encryption, with [store] answering the device's
+         * private store requests; [tokens] for a bearer sign-in.
+         */
+        public fun openWithStore(configJson: String, store: PrivateStore, tokens: ((String) -> String?)?): Native =
+            throw JazzException.NotSupported("end-to-end encryption through this opener")
     }
 }
 

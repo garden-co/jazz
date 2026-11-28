@@ -48,6 +48,21 @@ export function printSchemaTs(
     unsupported,
     transforms: app.transforms,
   });
+  let schemaOptions = "";
+  for (const [key, value] of Object.entries(app.encryption ?? {})) {
+    if (key === "allowAccountReset" && typeof value === "boolean") {
+      schemaOptions = `, { encryption: { allowAccountReset: ${value} } }`;
+    } else {
+      unsupported.push({
+        path: `encryption.${key}`,
+        text: JSON.stringify(value),
+        reason:
+          key === "allowAccountReset"
+            ? "allowAccountReset must be a boolean"
+            : "Printing this app-wide encryption setting is not supported yet",
+      });
+    }
+  }
   // Transforms are spelt on the columns that use them: one no column uses would be lost.
   const used = new Set(
     JSON.stringify(app.tables)
@@ -70,7 +85,7 @@ export function printSchemaTs(
     })),
   );
   const header = options.header ? `${options.header.trimEnd()}\n` : "";
-  const schemaTs = `${header}import { schema as s } from "jazz-tools";\n\nexport const schema = s.defineSchema(${tables});\n`;
+  const schemaTs = `${header}import { schema as s } from "jazz-tools";\n\nexport const schema = s.defineSchema(${tables}${schemaOptions});\n`;
   const files: Record<string, string> = {};
   if (options.separatePermissions) {
     files["schema.ts"] = schemaTs;

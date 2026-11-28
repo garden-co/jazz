@@ -41,6 +41,12 @@ pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
+#[cfg(feature = "e2ee-client")]
+pub mod e2ee;
+// The shared database paths compile against the hook contract in either build.
+#[cfg(not(feature = "e2ee-client"))]
+#[allow(dead_code)]
+mod e2ee;
 pub mod format;
 pub mod host;
 pub(crate) mod large;
@@ -55,6 +61,8 @@ pub mod storage;
 pub mod thin_transactions;
 pub mod values;
 
+#[cfg(feature = "testing")]
+pub use db::derived_binds_for_test;
 #[cfg(feature = "testing")]
 pub use db::sync::{decode_session_read_cells_for_test, pruned_txs_lookups_for_test};
 #[cfg(feature = "testing")]

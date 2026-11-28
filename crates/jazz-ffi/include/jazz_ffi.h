@@ -23,7 +23,8 @@
  * (see "callBegin"), "interrupted" (its control cut it short; with
  * "reason": "cancelled" | "timeout", and "queued": true when it committed
  * a write locally, which may still apply))
- * (*err is set to NULL on success). Functions block until done. Calls on
+ * (*err is set to NULL on success). Encryption failures also include "code".
+ * Functions block until done. Calls on
  * one handle may come from any threads at once, except the ones that free
  * it, jazz_close, jazz_close_within and jazz_session_close: no call on that
  * handle (or session) may run concurrently with them or follow them.
@@ -43,7 +44,13 @@
  * Closing waits for a token callback that is running, so make yours
  * cancellable and cancel it as you close. From inside a token callback do
  * step 1 only, and the rest later from another thread: waiting there
- * deadlocks.
+ * deadlocks. The same goes for the private store's callback
+ * (jazz_open_encrypted), which runs on the client's own thread: there
+ * "close" waits for nothing and returns at once, the handle closed; the
+ * client stops once the callback returns. It ignores a timeoutMs (nothing
+ * drains): the writes such a close asks for and loses at once (memory
+ * storage, unsent) fail it "unsynced" with "pending", as a close that
+ * waited would at its timeout.
  *
  * One app at a time has a persistent store open: jazz_open of a dataDir
  * another app has open, in this process or another, fails with kind
@@ -97,6 +104,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "insert"  {"table": T, "row": R}          -> the inserted row, with "id"
  *   "update"  {"table": T, "id": I, "patch": P} -> null
  *   "delete"  {"table": T, "id": I}           -> null
+ *   "memberAdd"    {"table": T, "id": I, "accountId": A, "tier"?} -> member row
+ *   "memberList"   {"table": T, "id": I}                         -> [member row, ...]
+ *   "memberRemove" {"table": T, "id": I, "accountId": A}          -> count
  *   "account" {}                              -> "<account uuid>" | null
  *   "backendClient" {}  -> "trusted" | "scoped" | null (not a backend
  *                          client; a jazz_for_user handle: its parent's)
@@ -258,6 +268,42 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
  */
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);
+
+/*
+ * A private store's callback, for an app that declares end-to-end
+ * encryption: the device's keys live where the app puts them (a Keychain, an
+ * OS key store). `request` is JSON text {"op": ...}: "openScope", "load",
+ * "save", "list", "delete", "protect", "unprotect"; bytes are base64 and
+ * numbers that may exceed 2^53 are decimal text (see the README). Called on
+ * the client's thread, one request at a time: a slow store holds the client
+ * up. Return 0 with *payload the result as JSON text (a malloc'ed string,
+ * Go: C.CString), or non-zero with *payload the error: "conflict", "wiped"
+ * or a message. Requests and answers carry key bytes: jazz zeroes *payload
+ * before it frees it, and its own copy of the request once the callback
+ * returns, so wipe any copy of either your callback makes.
+ *
+ * The callback runs on the client's thread, which every other call on the
+ * handle waits for: from inside it, call nothing on the handle but "close"
+ * (jazz_call), which closes it without waiting and ignores a timeoutMs,
+ * failing "unsynced" when that loses writes (see the top): its calls fail
+ * "closed" from then on, no store or token callback starts after this one,
+ * and the client stops once this one returns. Free the handle later, from
+ * another thread.
+ */
+typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload);
+
+/*
+ * Opens an app that declares end-to-end encryption as an end user
+ * ("auth": {"deviceKey": ...}, or {"bearer": true} with a token callback;
+ * "environment": the deployment's, default "dev"). store_cb and store_ctx
+ * (and the token callback) stay valid, from any thread, until jazz_close
+ * returns. The encryption calls go through jazz_call method
+ * "encryptionCall" with {"op", "args"?} (see the README). An app that declares encryption
+ * opened without a store (jazz_open) is refused.
+ */
+JazzHandle *jazz_open_encrypted(const char *config_json, JazzTokenCallback token_cb,
+                                void *token_ctx, JazzStoreCallback store_cb, void *store_ctx,
+                                char **err);
 
 typedef struct JazzWatch JazzWatch;
 

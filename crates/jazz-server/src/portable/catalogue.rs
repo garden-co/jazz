@@ -62,6 +62,10 @@ pub struct DeploymentResponse {
     /// The published permissions bundle (see [`jazz::catalogue`]): what
     /// the backend pins its sessions to.
     pub bundle: String,
+    /// What the deploy can see of an encrypted app's policies that may not
+    /// be what the app means (E2EE protocol §1.5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -327,6 +331,7 @@ impl CatalogueIndex {
                 changed,
                 published,
                 bundle: bundle.to_hex(),
+                warnings: Vec::new(),
             },
         })
     }

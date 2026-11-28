@@ -453,6 +453,13 @@ fi
  * function instance, since all of them reach the same Sandbox. Claims of
  * earlier sessions (a resumed snapshot keeps /tmp) are dropped.
  *
+ * The claim is a file bash creates under `noclobber` (`set -C`), which opens
+ * it with O_CREAT|O_EXCL: exactly one creator wins, whatever coreutils the
+ * image ships. `mkdir` isn't such a claim everywhere: uutils' mkdir (the
+ * default coreutils since Ubuntu 25.10) exits 0 when it loses the race to a
+ * concurrent mkdir of the same path. Claims of releases that used a
+ * directory (still empty) are dropped by `find -delete` just the same.
+ *
  * @internal
  */
 export function claimRecycleScript(
@@ -461,8 +468,24 @@ export function claimRecycleScript(
 ): string {
   return `set -u
 run=${shellQuote(`${root}/tmp`)}
-find "$run" -maxdepth 1 -name 'jazz-recycled-*' ! -name "jazz-recycled-$1" -exec rmdir {} + 2>/dev/null
-mkdir "$run/jazz-recycled-$1" 2>/dev/null
+find "$run" -maxdepth 1 -name 'jazz-recycled-*' ! -name "jazz-recycled-$1" -delete 2>/dev/null
+set -C
+{ : > "$run/jazz-recycled-$1"; } 2>/dev/null
+`;
+}
+
+/**
+ * Gives back the claim on the recycle of the session started at `$1`, after
+ * a stop that failed, so another waiter can try.
+ *
+ * @internal
+ */
+export function releaseRecycleScript(
+  /** @internal Prefix for /tmp, for tests. */
+  root = "",
+): string {
+  return `set -u
+rm -f ${shellQuote(`${root}/tmp`)}/"jazz-recycled-$1" 2>/dev/null || true
 `;
 }
 
@@ -1084,9 +1107,21 @@ async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
     return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
-    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error, {
+      requireEsm: SANDBOX_REQUIRE_ESM_HINT,
+    });
   }
 }
+
+/**
+ * @vercel/sandbox 4.1.0 to 5.0.0 depend on @vercel/drives 1.0.0, whose
+ * CommonJS build require()s the ES-only @workflow/serde. A function Vercel
+ * bundles (Next.js) never runs that require(); a plain `api/` function, which
+ * Vercel only traces, does, and fails on Vercel's runtime.
+ */
+const SANDBOX_REQUIRE_ESM_HINT =
+  "@vercel/sandbox 4.1.0 to 5.0.0 do this through @vercel/drives in a function Vercel doesn't bundle " +
+  "(a plain Node function in api/; Next.js bundles it): install @vercel/sandbox@4.0.0.";
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
@@ -1283,13 +1318,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   /**
    * Stop the session `sbx` belongs to, so the next wake starts a fresh one.
    * Other instances may be watching the same session; only the session this
-   * one saw fail is stopped, never a newer one.
+   * one saw fail is stopped, never a newer one. Says how it went: `gone`
+   * when that session no longer runs (stopped, or replaced by a newer one),
+   * and the error when Vercel refused to stop it.
    */
-  const stopSession = async (sbx: SandboxHandle) => {
+  const stopSession = async (
+    sbx: SandboxHandle,
+  ): Promise<{ stopped: true } | { gone: true } | { failed: unknown }> => {
     const watched = sbx.currentSession().startedAt.getTime();
     const now = await getRunning();
-    if (now && now.currentSession().startedAt.getTime() === watched) {
-      await now.stop().catch(() => {});
+    if (!now || now.currentSession().startedAt.getTime() !== watched) return { gone: true };
+    try {
+      await now.stop();
+      return { stopped: true };
+    } catch (error) {
+      return { failed: error };
     }
   };
 
@@ -1333,7 +1376,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     console.warn(
       `jazz: vercel(): stopping core ${name}'s session, whose core listens, so the next wake starts a fresh one: ${why}`,
     );
-    await stopSession(sbx);
+    const stop = await stopSession(sbx);
+    if ("failed" in stop) {
+      // Left claimed, the session could never be recycled again: every
+      // later waiter would wait out its deadline. Give the claim back.
+      await sbx
+        .runCommand({
+          cmd: "bash",
+          args: ["-c", releaseRecycleScript(), "jazz-release-recycle", String(session)],
+        })
+        .catch(() => undefined);
+      console.warn(
+        `jazz: vercel(): could not stop core ${name}'s session (${String(stop.failed)}); released its recycle for the next waiter`,
+      );
+      return false;
+    }
     return true;
   };
 

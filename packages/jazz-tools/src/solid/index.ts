@@ -15,6 +15,7 @@ export {
 } from "./provider.js";
 
 export { useAll, type UseAllResult } from "./use-all.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, type UseOneResult } from "./use-one.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 

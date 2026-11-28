@@ -37,7 +37,7 @@
 //! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
 //! callback that frees through mimalloc instead.
 
-mod e2ee_crypto;
+mod schema_checks;
 mod serve_core;
 mod text;
 
@@ -69,6 +69,7 @@ use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
 };
 mod embedded;
+use jazz_e2ee_client::host::runtime as encryption;
 
 use napi::bindgen_prelude::*;
 use napi::sys;
@@ -572,6 +573,7 @@ pub struct InsertOptions {
     pub attribution: Option<Uint8Array>,
     pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
+    pub add_creator_as_member: Option<bool>,
 }
 
 #[napi(object)]
@@ -651,6 +653,10 @@ fn insert_options(options: Option<InsertOptions>) -> serde_json::Value {
         .bytes("attribution", options.attribution)
         .json("branch", options.branch)
         .number("updatedAtMs", options.updated_at_ms)
+        .json(
+            "addCreatorAsMember",
+            options.add_creator_as_member.map(serde_json::Value::Bool),
+        )
         .done()
 }
 
@@ -684,6 +690,7 @@ fn restore_options(options: Option<RestoreOptions>) -> serde_json::Value {
         attribution: options.attribution,
         branch: options.branch,
         updated_at_ms: options.updated_at_ms,
+        add_creator_as_member: None,
     }))
 }
 
@@ -743,41 +750,24 @@ fn json_or_null(value: Option<JsonValue>) -> serde_json::Value {
 
 // ---- errors --------------------------------------------------------------------------
 
-/// Prefix of the private `cause` that carries a core error code, and after
-/// [`CORE_ERROR_REASON_SEPARATOR`] its reason name, from where the core error
-/// is converted to the exported method that throws it or the promise it
-/// rejects. It never reaches JavaScript: [`BindingError`] strips it.
+/// Carries the core code through napi-rs until the exported method throws it.
 const CORE_ERROR_CODE_CARRIER: &str = "\u{0}jazz-core-error-code:";
-const CORE_ERROR_REASON_SEPARATOR: char = '\u{0}';
 
-/// Convert a core error into a `napi::Error` with its unchanged `Display`
-/// text, recording its stable [`jazz::db::ErrorCode::as_str`] code and
-/// `Reason::as_str` name. They ride inside the `napi::Error` until an
-/// exported method returns it as a [`BindingError`], which throws the code as
-/// the JavaScript `error.code`, or a promise rejects with it, which also sets
-/// `error.reason` (see [`js_error_value`]).
 fn napi_core_error(error: &CoreError) -> napi::Error {
     let mut napi_error = napi::Error::from_reason(error.to_string());
-    let mut carrier = format!("{CORE_ERROR_CODE_CARRIER}{}", error.code.as_str());
-    if let Some(reason) = error.reason {
-        carrier.push(CORE_ERROR_REASON_SEPARATOR);
-        carrier.push_str(reason.as_str());
-    }
-    napi_error.set_cause(napi::Error::from_reason(carrier));
+    napi_error.set_cause(napi::Error::from_reason(format!(
+        "{CORE_ERROR_CODE_CARRIER}{}",
+        error.code.as_str()
+    )));
     napi_error
 }
 
-/// The core code and reason name `error` carries, if it is a core error.
-fn carried_core(error: &napi::Error) -> Option<(&str, Option<&str>)> {
-    let carried = error
+fn carried_code(error: &napi::Error) -> Option<&str> {
+    error
         .cause
         .as_ref()?
         .reason
-        .strip_prefix(CORE_ERROR_CODE_CARRIER)?;
-    Some(match carried.split_once(CORE_ERROR_REASON_SEPARATOR) {
-        Some((code, reason)) => (code, Some(reason)),
-        None => (carried, None),
-    })
+        .strip_prefix(CORE_ERROR_CODE_CARRIER)
 }
 
 /// The error a shared-layer failure throws: an engine error keeps its stable
@@ -787,6 +777,19 @@ fn host_error(error: HostError) -> napi::Error {
         HostError::Engine(error) => napi_core_error(&error),
         HostError::Argument(message) => napi::Error::from_reason(message),
     }
+}
+
+/// napi-rs normally constructs a synchronous exception from just its code and
+/// message. Throw the completed JS object when a write needs its space field.
+fn sync_host_error(env: &Env, error: HostError) -> napi::Error {
+    if matches!(&error, HostError::Engine(core) if core.space.is_some()) {
+        let value = js_error_value(env.raw(), error);
+        if unsafe { sys::napi_throw(env.raw(), value) } == sys::Status::napi_ok {
+            return napi::Error::from_status(napi::Status::PendingException);
+        }
+        return napi::Error::from_reason("could not throw the encryption refusal");
+    }
+    host_error(error)
 }
 
 fn not_supported(what: &str) -> napi::Error {
@@ -814,7 +817,7 @@ impl From<napi::Error> for BindingError {
     fn from(mut error: napi::Error) -> Self {
         // A thrown error carries only the code: napi-rs creates it from a
         // code and a message, with no way to add properties.
-        let carried = carried_core(&error).map(|(code, _)| code.to_owned());
+        let carried = carried_code(&error).map(str::to_owned);
         let (code, cause) = match carried {
             Some(code) => (code, None),
             None => (error.status.as_ref().to_owned(), error.cause.take()),
@@ -858,52 +861,36 @@ fn closed() -> napi::Error {
 
 // ---- promises --------------------------------------------------------------------------
 
-/// A JavaScript promise waiting on a binding future.
-struct PendingPromise {
-    env: sys::napi_env,
-    deferred: sys::napi_deferred,
-    future: HostFuture<()>,
-}
-
 thread_local! {
-    /// Promises whose futures were pending when last polled. Each database
-    /// is owned by one JavaScript thread, and so are its promises.
-    static PENDING_PROMISES: RefCell<Vec<PendingPromise>> = const { RefCell::new(Vec::new()) };
+    static PENDING_PROMISES: jazz_e2ee_client::host::PromiseQueue = Default::default();
 }
 
-/// A promise settled by `future`: at once when it is ready, otherwise by a
-/// later [`settle_promises`].
-fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'static, ()>> {
+fn promise_for<T, R: 'static>(
+    env: &Env,
+    future: impl std::future::Future<Output = R> + 'static,
+    settle: impl FnOnce(sys::napi_env, sys::napi_deferred, R) + 'static,
+    failure: &str,
+) -> napi::Result<PromiseRaw<'static, T>> {
     let env = env.raw();
     let mut deferred = std::ptr::null_mut();
     let mut promise = std::ptr::null_mut();
-    let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
-    if status != sys::Status::napi_ok {
-        return Err(napi::Error::from_reason(
-            "failed to create a write wait promise",
-        ));
+    if unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) } != sys::Status::napi_ok
+    {
+        return Err(napi::Error::from_reason(failure.to_owned()));
     }
-    let mut pending = PendingPromise {
-        env,
-        deferred,
-        future,
-    };
-    if !pending.poll() {
-        PENDING_PROMISES.with(|promises| promises.borrow_mut().push(pending));
-    }
+    PENDING_PROMISES.with(|queue| {
+        queue.submit(async move {
+            settle(env, deferred, future.await);
+        })
+    });
     Ok(PromiseRaw::new(env, promise))
 }
 
-impl PendingPromise {
-    /// Settle the promise if its future is ready; `false` while pending.
-    fn poll(&mut self) -> bool {
-        let mut context = Context::from_waker(Waker::noop());
-        let result = match self.future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return false,
-        };
-        let (env, deferred) = (self.env, self.deferred);
-        match result {
+fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'static, ()>> {
+    promise_for(
+        env,
+        future,
+        |env, deferred, result| match result {
             Ok(()) => {
                 let mut undefined = std::ptr::null_mut();
                 if unsafe { sys::napi_get_undefined(env, &mut undefined) } == sys::Status::napi_ok {
@@ -911,19 +898,26 @@ impl PendingPromise {
                 }
             }
             Err(error) => {
-                let rejection = js_error_value(env, &host_error(error));
+                let rejection = js_error_value(env, error);
                 unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
             }
-        }
-        true
-    }
+        },
+        "failed to create a write wait promise",
+    )
 }
 
 /// A JavaScript `Error` with `error`'s message, code and, for a core error
 /// that has one, its reason name as `error.reason` (see [`BindingError`]).
-fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
-    let carried = carried_core(error);
-    let code = carried.map_or_else(|| error.status.as_ref(), |(code, _)| code);
+fn js_error_value(env: sys::napi_env, error: HostError) -> sys::napi_value {
+    let (code, reason, space, detail) = match &error {
+        HostError::Engine(core) => (
+            core.code.as_str(),
+            core.reason,
+            core.space.as_ref(),
+            core.to_string(),
+        ),
+        HostError::Argument(message) => ("GenericFailure", None, None, message.clone()),
+    };
     let string = |text: &str| {
         let mut value = std::ptr::null_mut();
         unsafe {
@@ -931,16 +925,38 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
         };
         value
     };
-    let message = string(&error.reason);
+    let message = string(&detail);
     let mut js_error = std::ptr::null_mut();
     // `napi_create_error` sets the JavaScript `error.code` from its code.
     let status = unsafe { sys::napi_create_error(env, string(code), message, &mut js_error) };
     if status != sys::Status::napi_ok {
         return message;
     }
-    if let Some((_, Some(reason))) = carried {
+    if let Some(reason) = reason {
         // Setting a data property on a fresh error object cannot fail.
-        unsafe { sys::napi_set_named_property(env, js_error, c"reason".as_ptr(), string(reason)) };
+        unsafe {
+            sys::napi_set_named_property(env, js_error, c"reason".as_ptr(), string(reason.as_str()))
+        };
+    }
+    if let Some(space) = space {
+        let mut address = std::ptr::null_mut();
+        unsafe {
+            if sys::napi_create_object(env, &mut address) == sys::Status::napi_ok {
+                sys::napi_set_named_property(
+                    env,
+                    address,
+                    c"scopeId".as_ptr(),
+                    string(&space.scope_id),
+                );
+                sys::napi_set_named_property(
+                    env,
+                    address,
+                    c"identifier".as_ptr(),
+                    string(&space.identifier),
+                );
+                sys::napi_set_named_property(env, js_error, c"space".as_ptr(), address);
+            }
+        }
     }
     js_error
 }
@@ -949,13 +965,154 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
 /// tick, a local write or a claims change made progress, so every call that
 /// can do so ends here.
 fn settle_promises() {
-    let mut pending = PENDING_PROMISES.with(|promises| std::mem::take(&mut *promises.borrow_mut()));
-    pending.retain_mut(|promise| !promise.poll());
-    PENDING_PROMISES.with(|promises| {
-        let mut promises = promises.borrow_mut();
-        pending.append(&mut promises);
-        *promises = pending;
-    });
+    PENDING_PROMISES.with(|queue| queue.settle());
+}
+
+/// The encryption hooks an open installs: a client's, over its runtime, or a
+/// backend's keyless ones.
+enum Hooks<'a> {
+    Client(&'a EncryptionRuntime),
+    Keyless(Rc<dyn jazz::e2ee::E2eeHooks>),
+}
+
+/// A Jazz self-signed client identity for an encrypted open, as for the
+/// plain one.
+#[napi(object)]
+pub struct EncryptionProof {
+    pub token: String,
+    pub claimed_author: String,
+    /// The session proof names its app. A device open always uses its runtime's app.
+    pub app_id: Option<String>,
+}
+
+/// The end-to-end encryption runtime of an app, built over the private store
+/// the app supplies, before the database that uses it opens. The store is
+/// JavaScript: its requests are taken with `takeStoreRequests` and answered
+/// with `replyStore` (see `js_store`).
+#[napi]
+pub struct EncryptionRuntime {
+    builder: encryption::RuntimeBuilder,
+}
+
+#[napi]
+impl EncryptionRuntime {
+    /// A runtime for the app whose generated bindings embed the compiled app
+    /// `bindings` (JSON of `{ schema, relations }`, the options they pass to
+    /// `bindApp`): what a deployed app has in place of `jazz.app.json`.
+    #[napi(factory, js_name = "fromBindings")]
+    pub fn from_bindings(
+        bindings: String,
+        app_id: String,
+        environment: String,
+        account_id: String,
+        device_account_secret: Option<String>,
+    ) -> napi::Result<Self> {
+        Ok(Self {
+            builder: encryption::RuntimeBuilder::from_bindings(
+                bindings,
+                app_id,
+                environment,
+                account_id,
+                device_account_secret,
+            )
+            .map_err(napi::Error::from_reason)?,
+        })
+    }
+
+    #[napi(js_name = "setAddCreatorAsMember")]
+    pub fn set_add_creator_as_member(&self, enabled: bool) {
+        self.builder.add_creator_as_member.set(enabled);
+    }
+
+    /// Builds the runtime: settles when its device is loaded or made, which
+    /// takes the app's store (answer its requests while waiting).
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
+        let future = self
+            .builder
+            .start_build()
+            .map_err(napi::Error::from_reason)?;
+        Ok(json_promise(env, future)?)
+    }
+
+    /// Subscribe to new store requests and deadlines while serving the store.
+    #[napi(js_name = "setStoreWake")]
+    pub fn set_store_wake(&self, callback: Option<Function<'_, String, ()>>) -> napi::Result<()> {
+        let callback = callback
+            .map(|callback| {
+                callback
+                    .build_threadsafe_function::<String>()
+                    .callee_handled::<false>()
+                    .weak::<true>()
+                    .build()
+            })
+            .transpose()?;
+        self.builder.set_store_wake(callback.map(|callback| {
+            Box::new(move |wake: jazz_e2ee_client::host::bridge::StoreWake| {
+                let _ = callback.call(wake.urgency(), ThreadsafeFunctionCallMode::NonBlocking);
+            }) as Box<dyn Fn(_)>
+        }));
+        Ok(())
+    }
+
+    /// The store requests queued since the last call, each a JSON text.
+    #[napi(js_name = "takeStoreRequests")]
+    pub fn take_store_requests(&self) -> Vec<String> {
+        let requests = self.builder.take_requests();
+        self.builder.drive(settle_promises);
+        requests
+    }
+
+    /// The app's answer to a store request; `false` when no such request is
+    /// outstanding (the answer is dropped).
+    #[napi(js_name = "replyStore")]
+    pub fn reply_store(&self, id: String, ok: bool, payload: String) -> bool {
+        let accepted = self.builder.reply(&id, ok, &payload);
+        self.builder.drive(settle_promises);
+        accepted
+    }
+}
+
+fn json_promise(
+    env: &Env,
+    future: encryption::JsonFuture,
+) -> napi::Result<PromiseRaw<'static, String>> {
+    promise_for(
+        env,
+        future,
+        |env, deferred, result| {
+            let string = |text: &str| {
+                let mut value = std::ptr::null_mut();
+                unsafe {
+                    sys::napi_create_string_utf8(
+                        env,
+                        text.as_ptr().cast(),
+                        text.len() as isize,
+                        &mut value,
+                    )
+                };
+                value
+            };
+            match result {
+                Ok(value) => unsafe {
+                    sys::napi_resolve_deferred(env, deferred, string(&value.to_string()));
+                },
+                Err(message) => {
+                    let mut error = std::ptr::null_mut();
+                    unsafe {
+                        sys::napi_create_error(
+                            env,
+                            std::ptr::null_mut(),
+                            string(&message),
+                            &mut error,
+                        )
+                    };
+                    unsafe { sys::napi_reject_deferred(env, deferred, error) };
+                }
+            }
+        },
+        "failed to create a promise",
+    )
 }
 
 // ---- host hooks ------------------------------------------------------------------
@@ -963,9 +1120,16 @@ fn settle_promises() {
 /// Node's half of the hooks: the tick and mutation-error callbacks.
 #[derive(Default)]
 struct Host {
+    /// Shared by the owner and its schema views until the owner closes.
+    encryption: RefCell<Option<Rc<encryption::Encryption>>>,
     tick_scheduler: RefCell<Option<ThreadsafeFunction<String, ()>>>,
     /// A tick is requested and not yet delivered: further requests coalesce.
     tick_requested: Arc<AtomicBool>,
+    /// Every request for an immediate tick so far, coalesced or not. The
+    /// scheduler callback arrives on a later turn; comparing this count
+    /// around a call tells the host which requests that call made, so a
+    /// pending read can tell the tick its own poll asked for from news.
+    tick_requests: Cell<u64>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<FunctionRef<JsonValue, ()>>>,
     /// The same callback, told of an upload the authority refused that no
@@ -982,6 +1146,7 @@ impl Host {
         let Some(scheduler) = scheduler.as_ref() else {
             return;
         };
+        self.tick_requests.set(self.tick_requests.get() + 1);
         if self.tick_requested.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -1034,6 +1199,15 @@ impl Inner {
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+            if let Some(scheduler) = timer.tick_scheduler.borrow().as_ref() {
+                scheduler.call(
+                    Ok(format!("after:{ms}")),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            }
+        }));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
@@ -1056,7 +1230,7 @@ impl Inner {
     /// A write's receipt. A rejected write is reported to the
     /// mutation-error callback unless a wait claims it first.
     fn write(&self, env: &Env, write: HostResult<binding_host::Write>) -> napi::Result<Write> {
-        let write = write.map_err(host_error)?;
+        let write = write.map_err(|error| sync_host_error(env, error))?;
         settle_promises();
         let claimed = Rc::new(Cell::new(false));
         if let Some(error) = &write.rejected {
@@ -1168,21 +1342,40 @@ impl NapiUpstreamLink {
 /// execute on a Send worker pool, whereas a Jazz database is deliberately
 /// `Rc`/thread-affine. The adapter drives this object after its peer
 /// transport makes progress instead of blocking Node.
+///
+/// A one-shot read that left rows out because the encryption runtime could
+/// not open them comes back as one of these even when it is done at once:
+/// [`PendingNativeRead::unreadable`] names those rows.
 #[napi]
 pub struct PendingNativeRead {
     future: RefCell<Option<ReadFuture>>,
+    /// The answer of a read that was done when it was returned.
+    done: RefCell<Option<Vec<u8>>>,
+    /// The rows the read left out, as JSON, once it is done.
+    unreadable: Rc<RefCell<Option<String>>>,
 }
 
 impl PendingNativeRead {
-    fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+    fn new(future: ReadFuture) -> Self {
+        Self {
+            future: RefCell::new(Some(future)),
+            done: RefCell::default(),
+            unreadable: Rc::default(),
+        }
+    }
+
+    fn poll_once(&self) -> HostResult<Option<Uint8Array>> {
+        if let Some(bytes) = self.done.borrow_mut().take() {
+            return Ok(Some(bytes.into()));
+        }
         let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
-                "native pending read is already complete",
+            return Err(HostError::Argument(
+                "native pending read is already complete".to_owned(),
             ));
         };
         let mut context = Context::from_waker(Waker::noop());
         match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.map(|bytes| Some(bytes.into())).map_err(host_error),
+            Poll::Ready(result) => result.map(|bytes| Some(bytes.into())),
             Poll::Pending => {
                 *self.future.borrow_mut() = Some(future);
                 Ok(None)
@@ -1194,24 +1387,57 @@ impl PendingNativeRead {
 #[napi]
 impl PendingNativeRead {
     #[napi]
-    pub fn poll(&self) -> js::Result<Option<Uint8Array>> {
-        Ok(self.poll_once()?)
+    pub fn poll(&self, env: &Env) -> js::Result<Option<Uint8Array>> {
+        Ok(self.poll_once().map_err(|err| sync_host_error(env, err))?)
     }
 
     #[napi]
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.done.borrow_mut().take();
+    }
+
+    /// Once the read is done: the rows it left out because they could not
+    /// be opened, as a JSON array of `{ table, id, column, code }`; `null`
+    /// when it left none out.
+    #[napi]
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable.borrow().clone()
     }
 }
 
 fn read_or_pending(future: ReadFuture) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
-    let pending = PendingNativeRead {
-        future: RefCell::new(Some(future)),
-    };
-    Ok(match pending.poll_once()? {
+    let pending = PendingNativeRead::new(future);
+    Ok(match pending.poll_once().map_err(host_error)? {
         Some(bytes) => Either::A(bytes),
         None => Either::B(pending),
     })
+}
+
+/// [`read_or_pending`] for a read that reports the rows it left out: such a
+/// read is answered as a [`PendingNativeRead`] even when done at once, so the
+/// rows reach JS with it.
+fn reporting_read_or_pending(
+    env: &Env,
+    future: HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
+) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+    let unreadable = Rc::<RefCell<Option<String>>>::default();
+    let future = binding_host::reporting_read(future, Rc::clone(&unreadable));
+    let pending = PendingNativeRead {
+        unreadable,
+        ..PendingNativeRead::new(future)
+    };
+    match pending
+        .poll_once()
+        .map_err(|err| sync_host_error(env, err))?
+    {
+        Some(bytes) if pending.unreadable.borrow().is_none() => Ok(Either::A(bytes)),
+        Some(bytes) => {
+            *pending.done.borrow_mut() = Some(bytes.to_vec());
+            Ok(Either::B(pending))
+        }
+        None => Ok(Either::B(pending)),
+    }
 }
 
 /// A JavaScript-thread-owned permission preflight waiting for the upstream
@@ -1372,6 +1598,11 @@ pub struct SubscriptionDeltaEvent {
     pub settled: bool,
     #[napi(ts_type = "'None' | 'Local' | 'Global'")]
     pub tier: String,
+    /// The rows the result leaves out because the encryption runtime could
+    /// not open them, as a JSON array of `{ table, id, column, code }`.
+    /// Set on an opening, a reset, and a delta that changed the list, which
+    /// it replaces; absent when the list is unchanged.
+    pub unreadable: Option<String>,
 }
 
 #[napi(object)]
@@ -1428,6 +1659,7 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 coalesced,
                 settled,
                 tier,
+                unreadable,
             } => Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_owned(),
                 reset,
@@ -1436,6 +1668,7 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 terminal_operations: Vec::new(),
                 settled,
                 tier,
+                unreadable,
             }),
             EventChunk::Rejected { detail, code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),
@@ -1631,8 +1864,8 @@ pub struct SubscriptionBatchError {
 
 impl From<napi::Error> for SubscriptionBatchError {
     fn from(error: napi::Error) -> Self {
-        let code = carried_core(&error)
-            .map(|(code, _)| code.to_owned())
+        let code = carried_code(&error)
+            .map(str::to_owned)
             .unwrap_or_else(|| error.status.as_ref().to_owned());
         Self {
             message: error.reason,
@@ -1792,15 +2025,70 @@ impl Drop for NapiDb {
     fn drop(&mut self) {
         // Release the tick callback so it no longer keeps Node's event loop
         // alive once JavaScript dropped an unclosed database.
-        if self.owns_runtime
-            && let Some(inner) = self.inner.borrow_mut().take()
-        {
-            inner.host.tick_scheduler.borrow_mut().take();
-        }
+        self.take_inner();
     }
 }
 
 impl NapiDb {
+    fn take_inner(&self) -> Option<Inner> {
+        let inner = self.inner.borrow_mut().take()?;
+        if self.owns_runtime {
+            inner.host.tick_scheduler.borrow_mut().take();
+            if let Some(runtime) = inner.host.encryption.borrow_mut().take() {
+                runtime.stop();
+            }
+        }
+        Some(inner)
+    }
+
+    /// The runtime of an encrypted app, or why there is none.
+    fn encryption(&self) -> napi::Result<Rc<encryption::Encryption>> {
+        self.open_inner()?
+            .host
+            .encryption
+            .borrow()
+            .clone()
+            .ok_or_else(|| napi::Error::from_reason("this database has no encryption runtime"))
+    }
+
+    fn keyless_hooks(
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+    ) -> napi::Result<Rc<dyn jazz::e2ee::E2eeHooks>> {
+        let declarations = encryption::keyless_declarations(bindings, app_id, environment)
+            .map_err(napi::Error::from_reason)?;
+        Ok(jazz_e2ee_client::KeylessHooks::hooks(declarations))
+    }
+
+    fn open_keyless(
+        schema: &[u8],
+        config: &[u8],
+        path: Option<&str>,
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+        how: OpenAs<'_>,
+    ) -> napi::Result<Self> {
+        let hooks = Self::keyless_hooks(bindings, app_id, environment)?;
+        Self::open_with(schema, config, path, how, Some(Hooks::Keyless(hooks)))
+    }
+
+    fn open_encrypted(
+        schema: &[u8],
+        config: &[u8],
+        path: Option<&str>,
+        runtime: &EncryptionRuntime,
+        proof: Option<&EncryptionProof>,
+    ) -> napi::Result<Self> {
+        let how = proof.map_or(OpenAs::Untrusted, |proof| OpenAs::SelfSigned {
+            token: &proof.token,
+            app_id: &runtime.builder.app_id,
+            claimed_author: &proof.claimed_author,
+        });
+        Self::open_with(schema, config, path, how, Some(Hooks::Client(runtime)))
+    }
+
     fn open_inner(&self) -> napi::Result<Inner> {
         self.inner.borrow().clone().ok_or_else(closed)
     }
@@ -1822,14 +2110,40 @@ impl NapiDb {
         data_path: Option<&str>,
         how: OpenAs<'_>,
     ) -> napi::Result<Self> {
+        Self::open_with(schema, config, data_path, how, None)
+    }
+
+    fn open_with(
+        schema: &[u8],
+        config: &[u8],
+        data_path: Option<&str>,
+        how: OpenAs<'_>,
+        encrypted: Option<Hooks<'_>>,
+    ) -> napi::Result<Self> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = jazz::tools::deployment::published::with_client_migrations(
+        let mut db_config = jazz::tools::deployment::published::with_client_migrations(
             binding_host::db_config(schema, &config, identity),
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        // An app that declares encryption opens with the runtime's hooks,
+        // built from its own declarations.
+        let mut runtime = None;
+        if let Some(Hooks::Keyless(hooks)) = &encrypted {
+            db_config = db_config.with_e2ee(Rc::clone(hooks));
+        }
+        if let Some(Hooks::Client(encrypted)) = encrypted {
+            db_config = db_config.with_e2ee(
+                encrypted
+                    .builder
+                    .hooks(identity)
+                    .map_err(napi::Error::from_reason)?,
+            );
+            db_config.add_creator_as_member = encrypted.builder.add_creator_as_member.get();
+            runtime = Some(encrypted);
+        }
         let db = match data_path {
             None => block_on(binding_host::open_memory(db_config)),
             Some(data_path) => block_on(binding_host::open_file(
@@ -1839,9 +2153,22 @@ impl NapiDb {
             )),
         }
         .map_err(|error| napi_core_error(&error))?;
-        Ok(Self::runtime_owner(block_on(Binding::new(
-            db, identity, trusted,
-        ))))
+        let binding = block_on(Binding::new(db, identity, trusted));
+        let owner = Self::runtime_owner(binding);
+        if let Some(runtime) = runtime {
+            let inner = owner.inner.borrow();
+            let inner = inner.as_ref().expect("just opened");
+            let host = Rc::downgrade(&inner.host);
+            *inner.host.encryption.borrow_mut() = Some(runtime.builder.attach(
+                Rc::clone(&inner.binding.db),
+                Box::new(move || {
+                    if let Some(host) = host.upgrade() {
+                        host.request_tick();
+                    }
+                }),
+            ));
+        }
+        Ok(owner)
     }
 
     fn request_permission_advice(
@@ -2026,6 +2353,7 @@ impl NapiDb {
     #[napi(js_name = "insertInTransaction")]
     pub fn insert_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         cells: Uint8Array,
@@ -2039,7 +2367,7 @@ impl NapiDb {
                 &cells,
                 &insert_options(options),
             )
-            .map_err(host_error)?;
+            .map_err(|error| sync_host_error(env, error))?;
         Ok(row.to_bytes().to_vec().into())
     }
 
@@ -2062,6 +2390,7 @@ impl NapiDb {
     #[napi(js_name = "updateInTransaction")]
     pub fn update_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2077,14 +2406,16 @@ impl NapiDb {
                 &patch,
                 &update_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     /// Binding-only entrypoint for typed partial-value updates staged inside
     /// an open transaction. The transaction's bound identity authors them.
     #[napi(js_name = "updateLargeValuesInTransaction")]
+    #[allow(clippy::too_many_arguments)] // The JS binding has six arguments plus the NAPI environment.
     pub fn update_large_values_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2103,7 +2434,7 @@ impl NapiDb {
                 mutations,
                 updated_at_ms,
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     /// Binding-only entrypoint for typed partial-value updates. The public
@@ -2146,6 +2477,7 @@ impl NapiDb {
     #[napi(js_name = "upsertInTransaction")]
     pub fn upsert_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2156,7 +2488,7 @@ impl NapiDb {
         Ok(self
             .binding()?
             .upsert_in_transaction(&open_transaction_id, &table, &row_id, &cells, &options)
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "delete")]
@@ -2177,6 +2509,7 @@ impl NapiDb {
     #[napi(js_name = "deleteInTransaction")]
     pub fn delete_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2190,7 +2523,7 @@ impl NapiDb {
                 &row_id,
                 &delete_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "restore")]
@@ -2213,6 +2546,7 @@ impl NapiDb {
     #[napi(js_name = "restoreInTransaction")]
     pub fn restore_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2228,13 +2562,14 @@ impl NapiDb {
                 cells.as_deref(),
                 &restore_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "beginStreamingMutation")]
     #[allow(clippy::too_many_arguments)]
     pub fn begin_streaming_mutation(
         &self,
+        env: &Env,
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
@@ -2246,11 +2581,12 @@ impl NapiDb {
         head: Option<JsonValue>,
         base: Option<JsonValue>,
         transaction: Option<String>,
+        add_creator_as_member: Option<bool>,
     ) -> js::Result<StreamingMutation> {
         let head = structured(head, "head")?;
         let base = structured(base, "base")?;
         let inner = self.open_inner()?;
-        let mutation = inner
+        let mut mutation = inner
             .binding
             .begin_streaming_mutation(
                 table,
@@ -2265,8 +2601,91 @@ impl NapiDb {
                 base,
                 transaction.as_deref(),
             )
-            .map_err(host_error)?;
+            .map_err(|error| sync_host_error(env, error))?;
+        mutation
+            .set_add_creator_as_member(add_creator_as_member)
+            .map_err(|error| sync_host_error(env, error))?;
         Ok(StreamingMutation { inner, mutation })
+    }
+
+    /// Open a backend runtime for an app that declares encryption, with
+    /// hooks that hold no keys: it relays the clients' ciphertext and works
+    /// on plain columns (`bindings` is the generated bindings' compiled app).
+    #[napi(factory, js_name = "openMemoryAsBackendKeyless")]
+    pub fn open_memory_as_backend_keyless(
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+    ) -> js::Result<Self> {
+        Ok(Self::open_keyless(
+            &schema,
+            &config,
+            None,
+            &bindings,
+            &app_id,
+            &environment,
+            OpenAs::Backend,
+        )?)
+    }
+
+    /// Open a session's in-memory database for an app that declares
+    /// encryption, with hooks that hold no keys, as the session's own author
+    /// (the configured one, or the one `proof` proves), never SYSTEM: the
+    /// client a backend serves a thin session's transactions with. Encrypted
+    /// writes are refused, encrypted cells unreadable, plain data normal.
+    #[napi(factory, js_name = "openMemoryKeyless")]
+    pub fn open_memory_keyless(
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+        proof: Option<EncryptionProof>,
+    ) -> js::Result<Self> {
+        let how = match &proof {
+            Some(proof) => OpenAs::SelfSigned {
+                token: &proof.token,
+                app_id: proof
+                    .app_id
+                    .as_deref()
+                    .ok_or_else(|| napi::Error::from_reason("missing proof appId"))?,
+                claimed_author: &proof.claimed_author,
+            },
+            None => OpenAs::Untrusted,
+        };
+        Ok(Self::open_keyless(
+            &schema,
+            &config,
+            None,
+            &bindings,
+            &app_id,
+            &environment,
+            how,
+        )?)
+    }
+
+    /// [`Self::open_memory_as_backend_keyless`] over a durable store in
+    /// directory `data_path`.
+    #[napi(factory, js_name = "openPersistentAsBackendKeyless")]
+    pub fn open_persistent_as_backend_keyless(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+    ) -> js::Result<Self> {
+        Ok(Self::open_keyless(
+            &schema,
+            &config,
+            Some(&data_path),
+            &bindings,
+            &app_id,
+            &environment,
+            OpenAs::Backend,
+        )?)
     }
 
     #[napi(factory, js_name = "openMemory")]
@@ -2349,6 +2768,98 @@ impl NapiDb {
         Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
+    /// Open an encrypted app's in-memory database with its runtime
+    /// installed (see [`EncryptionRuntime`]).
+    #[napi(factory, js_name = "openMemoryEncrypted")]
+    pub fn open_memory_encrypted(
+        schema: Uint8Array,
+        config: Uint8Array,
+        runtime: &EncryptionRuntime,
+        proof: Option<EncryptionProof>,
+    ) -> js::Result<Self> {
+        Ok(Self::open_encrypted(
+            &schema,
+            &config,
+            None,
+            runtime,
+            proof.as_ref(),
+        )?)
+    }
+
+    /// Open an encrypted app's durable database in directory `data_path`
+    /// with its runtime installed. The private store is the app's.
+    #[napi(factory, js_name = "openPersistentEncrypted")]
+    pub fn open_persistent_encrypted(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        runtime: &EncryptionRuntime,
+        proof: Option<EncryptionProof>,
+    ) -> js::Result<Self> {
+        Ok(Self::open_encrypted(
+            &schema,
+            &config,
+            Some(&data_path),
+            runtime,
+            proof.as_ref(),
+        )?)
+    }
+
+    /// Run one end-to-end encryption operation: its name and arguments (JSON),
+    /// answered with the JSON text of its result.
+    #[napi(js_name = "encryptionCall", ts_return_type = "Promise<string>")]
+    pub fn encryption_call(
+        &self,
+        env: &Env,
+        op: String,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] args: Option<
+            Unknown<'_>,
+        >,
+    ) -> js::Result<PromiseRaw<'static, String>> {
+        let encryption = self.encryption()?;
+        let args = args.map(JsonValue::from_unknown).transpose()?;
+        let future = encryption.call_driven(op, json_or_null(args));
+        let promise = json_promise(env, future)?;
+        encryption.drive();
+        settle_promises();
+        Ok(promise)
+    }
+
+    /// The runtime's reports since the last call, each a JSON text.
+    #[napi(js_name = "takeEncryptionReports")]
+    pub fn take_encryption_reports(&self) -> js::Result<Vec<String>> {
+        Ok(self.encryption()?.take_reports())
+    }
+
+    /// The runtime's account status and last error, as JSON text.
+    #[napi(js_name = "encryptionState")]
+    pub fn encryption_state(&self) -> js::Result<String> {
+        Ok(self.encryption()?.state().to_string())
+    }
+
+    /// An app subscription on an encrypted table opened (`open`) or closed:
+    /// `table` is the space table's name, `id` the space's row.
+    #[napi(js_name = "encryptionUseSpace")]
+    pub fn encryption_use_space(&self, table: String, id: String, open: bool) -> js::Result<()> {
+        self.encryption()?.use_space(open, table, id);
+        Ok(())
+    }
+
+    /// Where each encrypted table keeps its space, as JSON text:
+    /// `{ table: { scope, column } }` (`column` is `id` when a table's rows
+    /// are their own spaces).
+    #[napi(js_name = "encryptionSpaces")]
+    pub fn encryption_spaces(&self) -> js::Result<String> {
+        Ok(self.encryption()?.spaces.to_string())
+    }
+
+    /// The connection to the server went away (`false`) or came back (`true`).
+    #[napi(js_name = "encryptionSetOnline")]
+    pub fn encryption_set_online(&self, online: bool) -> js::Result<()> {
+        self.encryption()?.set_online(online);
+        Ok(())
+    }
+
     /// Register and return a typed view backed by this same runtime owner,
     /// of an app shipping `migrations` (its bundle as JSON).
     #[napi(js_name = "registerSchema")]
@@ -2415,8 +2926,20 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// How many immediate ticks this database has asked its tick callback
+    /// for, coalesced requests included (0 once closed). The callback runs on
+    /// a later turn; a host compares the count around a call to know which
+    /// requests that call made.
+    #[napi(js_name = "tickRequests")]
+    pub fn tick_requests(&self) -> f64 {
+        self.inner
+            .borrow()
+            .as_ref()
+            .map_or(0.0, |inner| inner.host.tick_requests.get() as f64)
+    }
+
+    /// The host's tick callback: `"immediate"` for ready sync work or
+    /// `"after:<milliseconds>"` for pending work with a deadline.
     #[napi(
         js_name = "setTickScheduler",
         ts_args_type = "callback: ((err: Error | null, arg: string) => void)"
@@ -2430,7 +2953,9 @@ impl NapiDb {
             .build_callback(move |context| {
                 // Clear before calling JS so reentrant progress can request
                 // the next turn without losing its wake.
-                requested.store(false, Ordering::Release);
+                if context.value == "immediate" {
+                    requested.store(false, Ordering::Release);
+                }
                 Ok(context.value)
             })?;
         *inner.host.tick_scheduler.borrow_mut() = Some(callback);
@@ -2461,6 +2986,7 @@ impl NapiDb {
     #[napi]
     pub fn all(
         &self,
+        env: &Env,
         query: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
@@ -2472,15 +2998,15 @@ impl NapiDb {
     ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         let read = self
             .binding()?
-            .all(
+            .all_reporting(
                 query.to_vec(),
                 &json_or_null(opts),
                 open_transaction_id.as_deref(),
                 author.as_deref(),
                 claims,
             )
-            .map_err(host_error)?;
-        read_or_pending(read)
+            .map_err(|err| sync_host_error(env, err))?;
+        reporting_read_or_pending(env, read)
     }
 
     /// Bind receipt-correlation claims to this client's own admitted identity.
@@ -2514,15 +3040,27 @@ impl NapiDb {
         Ok(())
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table.
+    #[napi(js_name = "tableIdentity")]
+    pub fn table_identity(&self, table: String) -> js::Result<String> {
+        Ok(self.binding()?.table_identity(&table).map_err(host_error)?)
+    }
+
     /// Exact local state for the write-merge bridge: the row as stored,
     /// deleted or not. Write authorization remains at the mutation boundary;
     /// this is not a query.
     #[napi(js_name = "localCurrentRow")]
-    pub fn local_current_row(&self, table: String, row_id: Uint8Array) -> js::Result<Uint8Array> {
+    pub fn local_current_row(
+        &self,
+        env: &Env,
+        table: String,
+        row_id: Uint8Array,
+    ) -> js::Result<Uint8Array> {
         Ok(self
             .binding()?
             .local_current_row(&table, &row_id)
-            .map_err(host_error)?
+            .map_err(|err| sync_host_error(env, err))?
             .into())
     }
 
@@ -2579,6 +3117,9 @@ impl NapiDb {
     #[napi]
     pub fn tick(&self) -> js::Result<()> {
         let result = block_on(self.binding()?.tick());
+        if let Some(encryption) = self.open_inner()?.host.encryption.borrow().clone() {
+            encryption.drive();
+        }
         settle_promises();
         Ok(result.map_err(host_error)?)
     }
@@ -2887,11 +3428,10 @@ impl NapiDb {
     pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         // A close failure still consumes the binding: retrying a partially
         // failed close would re-enter an indeterminate runtime.
-        let Some(inner) = self.inner.borrow_mut().take() else {
+        let Some(inner) = self.take_inner() else {
             return Ok(Either::A(Vec::new().into()));
         };
         if self.owns_runtime {
-            inner.host.tick_scheduler.borrow_mut().take();
             inner.host.mutation_errors.borrow_mut().take();
             inner.host.upstream_mutation_errors.borrow_mut().take();
             block_on(inner.binding.close()).map_err(host_error)?;
@@ -3024,8 +3564,7 @@ impl JazzServer {
             .transpose()
             .map_err(host_error)?;
 
-        let app_id =
-            AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
+        let app_id = AppId::from_text(&opts.app_id);
 
         // A trusted workload replaces the shared secrets.
         let trusted_workload = opts.trusted_workload.take().map(|workload| {
@@ -3339,6 +3878,154 @@ mod native_root_tests {
         ] {
             assert!(names_foreign_store(name), "{name} should be refused");
         }
+    }
+}
+
+#[cfg(all(test, feature = "rn-test-bridge"))]
+mod encryption_tests {
+    use super::*;
+    use jazz::binding_host::{OpenConfig, OpenIdentity};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+
+    /// Alice's malformed device secret is refused at binding construction, before
+    /// her application declarations or private store are read.
+    #[test]
+    fn device_secret_is_checked_before_readiness() {
+        let result = EncryptionRuntime::from_bindings(
+            "invalid app".into(),
+            "test".into(),
+            "test".into(),
+            "alice".into(),
+            Some("jazz-auth-v1:short".into()),
+        );
+        assert!(result.is_err_and(|error| error.reason == "invalid device account secret"));
+    }
+
+    /// A build whose store never answers refuses a second `ready` as still
+    /// running, not as built, and frees the slot once it is abandoned.
+    #[test]
+    fn encryption_startup_refuses_a_second_ready_while_the_store_is_silent() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let runtime = EncryptionRuntime::from_bindings(
+            jazz_codegen::compile_app(app).unwrap(),
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            None,
+        )
+        .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut silent = runtime.builder.start_build().ok().unwrap();
+        assert!(silent.as_mut().poll(&mut context).is_pending());
+        assert!(!runtime.take_store_requests().is_empty());
+        assert_eq!(
+            runtime.builder.start_build().err(),
+            Some(encryption::STILL_BUILDING)
+        );
+        drop(silent);
+        assert!(
+            runtime.builder.start_build().is_ok(),
+            "an abandoned build frees the slot"
+        );
+    }
+
+    /// Alice can retry readiness after her private store refuses a request,
+    /// and Bob's refused open leaves the built runtime available to Alice.
+    /// Rust drives the same build future as `ready` because its JS promise
+    /// requires a Node environment.
+    #[test]
+    fn encryption_startup_can_retry_after_store_failure_and_account_mismatch() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let definition = jazz::tools::deployment::artifact::load_app(app).unwrap();
+        let schema = serde_json::to_vec(definition.current_schema()).unwrap();
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let bob = AuthorSubject::for_test_bytes([2; 16]);
+        let runtime = EncryptionRuntime::from_bindings(
+            jazz_codegen::compile_app(app).unwrap(),
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            Some(
+                jazz::identity::DeviceAccountSecret::from_bytes([1; 32])
+                    .format()
+                    .to_string(),
+            ),
+        )
+        .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut failed = runtime.builder.build_future().unwrap();
+        assert!(failed.as_mut().poll(&mut context).is_pending());
+        assert!(
+            runtime.builder.build_future().is_none(),
+            "build in progress"
+        );
+        let id = |request: &str| {
+            serde_json::from_str::<JsonValue>(request).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let requests = runtime.take_store_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(runtime.reply_store(id(&requests[0]), false, "store unavailable".into()));
+        let Poll::Ready(Err(failure)) = failed.as_mut().poll(&mut context) else {
+            panic!("readiness should report the failed store request");
+        };
+        assert!(failure.contains("store unavailable"), "{failure}");
+        let store =
+            jazz_e2ee_client::host::bridge::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
+        let mut retry = runtime
+            .builder
+            .build_future()
+            .expect("readiness can be retried");
+        loop {
+            if let Poll::Ready(result) = retry.as_mut().poll(&mut context) {
+                result.expect("the recovered store builds the runtime");
+                break;
+            }
+            let requests = runtime.take_store_requests();
+            assert!(!requests.is_empty());
+            for request in requests {
+                let request_id = id(&request);
+                let (ok, payload) = block_on(store(request));
+                assert!(ok, "{payload}");
+                assert!(runtime.reply_store(request_id, ok, payload));
+            }
+        }
+        assert!(runtime.builder.build_future().is_none(), "build completed");
+
+        let open = |author| {
+            let config = postcard::to_allocvec(&OpenConfig {
+                identity: OpenIdentity {
+                    node: NodeUuid::from_bytes([3; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+                migrations: None,
+                system_node: None,
+            })
+            .unwrap();
+            NapiDb::open_with(
+                &schema,
+                &config,
+                None,
+                OpenAs::Untrusted,
+                Some(Hooks::Client(&runtime)),
+            )
+        };
+        let failure = open(bob).err().expect("Bob cannot open Alice's runtime");
+        assert!(failure.reason.contains("for another account"), "{failure}");
+        let owner = open(alice).expect("Alice can still open her runtime");
+        assert!(owner.encryption().is_ok());
+        let failure = open(alice)
+            .err()
+            .expect("the runtime is attached only once");
+        assert!(failure.reason.contains("not ready"), "{failure}");
     }
 }
 

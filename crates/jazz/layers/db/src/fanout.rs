@@ -34,7 +34,10 @@
 //! an update or delete stamp, a recursive `INHERITS` chain) watches every
 //! table it reads whole, as do branch views.
 
+use super::e2ee_read::MissingReadKeys;
 use super::*;
+#[cfg(feature = "e2ee-client")]
+use crate::e2ee::{SpaceAddress, UnreadableCode};
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -180,19 +183,23 @@ impl EventQueue {
         self.stale.is_some_and(|stale| stale.ahead == 0)
     }
 
-    /// The next event. A due coalesced reset reads as a reset of `rows`:
-    /// `None` when the group cannot be read now, and the reset then waits
-    /// for the next read instead of being lost.
-    pub(super) fn pop_front(&mut self, rows: Option<&[CurrentRow]>) -> Option<SubscriptionEvent> {
+    /// The next event. A due coalesced reset reads as a reset of `rows`,
+    /// which leave out `unreadable`: `None` when the group cannot be read
+    /// now, and the reset then waits for the next read instead of being
+    /// lost.
+    pub(super) fn pop_front(
+        &mut self,
+        result: Option<(&[CurrentRow], &Arc<[UnreadableRow]>)>,
+    ) -> Option<SubscriptionEvent> {
         if let Some(stale) = &mut self.stale {
             if stale.ahead > 0 {
                 stale.ahead -= 1;
                 return self.events.pop_front();
             }
-            let rows = rows?;
+            let (rows, unreadable) = result?;
             let Stale { settled, tier, .. } = *stale;
             self.stale = None;
-            let mut event = opening(rows);
+            let mut event = opening(rows, unreadable);
             if let SubscriptionEvent::Delta {
                 settled: s,
                 tier: t,
@@ -451,6 +458,10 @@ struct GroupKey {
     /// The position the result reads as of: results of different upstream
     /// reads settle apart.
     position: String,
+    /// A rewritten query's residual (its filter and window on opened rows,
+    /// outside the SQL), as a digest: queries that differ only in it share
+    /// SQL but not rows.
+    residual: Option<[u8; 32]>,
 }
 
 /// Whose queue a member's events go to.
@@ -496,6 +507,13 @@ pub(super) struct Group {
     identity: Option<AuthorSubject>,
     read: ReadSpec,
     pub(super) rows: Vec<CurrentRow>,
+    /// The rows the result leaves out because the client's encryption
+    /// hooks could not open them, as of `rows` (protocol §4.3). Replaced
+    /// only when it changes, so a pointer comparison tells a change.
+    pub(super) unreadable: Arc<[UnreadableRow]>,
+    missing_read_keys: MissingReadKeys,
+    /// The list the members were last told ([`Group::push`]).
+    told_unreadable: Arc<[UnreadableRow]>,
     members: Vec<Member>,
     watches: Vec<Watch>,
     /// Per table watched as [`Watch::Evidence`], how its read policies
@@ -980,6 +998,10 @@ impl Store {
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
             position: format!("{:?}", read.position),
+            residual: prepared
+                .planned
+                .as_ref()
+                .map(|planned| planned.residual_key),
         }
     }
 
@@ -1010,7 +1032,9 @@ impl Store {
             )))
         };
         self.check_splices(prepared, &read.splices)?;
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
+        let namespace = self.read_namespace(prepared).await?;
+        let (compiled, session_used) =
+            self.compile_tracked(prepared, identity, &read, namespace)?;
         let key = self.group_key(prepared, identity, &read, &compiled, session_used, dormant);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
@@ -1027,8 +1051,8 @@ impl Store {
             }),
         };
         let tier = settled.tier();
-        let open = |rows: &[CurrentRow]| {
-            let mut event = opening(rows);
+        let open = |rows: &[CurrentRow], unreadable: &Arc<[UnreadableRow]>| {
+            let mut event = opening(rows, unreadable);
             if let SubscriptionEvent::Delta {
                 settled, tier: t, ..
             } = &mut event
@@ -1050,12 +1074,13 @@ impl Store {
             // While the group awaits chunks its rows may be stale: the
             // joiner opens with the group's next successful run instead.
             let opened = group.opened && !group.awaiting;
-            let queue = new_queue(opened.then(|| open(&group.rows)));
+            let queue = new_queue(opened.then(|| open(&group.rows, &group.unreadable)));
             group.members.push(member(&queue, opened));
             self.fan.borrow().stats.borrow_mut().shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        let (gid, handle) = self.register_read_watches(prepared, identity, read, &compiled, key)?;
+        let (gid, handle) =
+            self.register_read_watches(prepared, identity, read, &compiled, key, namespace)?;
         let mut group = handle.edit();
         if !dormant && let Err(error) = self.open_registered_read(&mut group, &compiled).await {
             drop(group);
@@ -1063,7 +1088,7 @@ impl Store {
             return Err(error);
         }
         let opened = group.opened;
-        let queue = new_queue(opened.then(|| open(&group.rows)));
+        let queue = new_queue(opened.then(|| open(&group.rows, &group.unreadable)));
         group.members.push(member(&queue, opened));
         Ok((queue, Rc::downgrade(&handle)))
     }
@@ -1077,6 +1102,7 @@ impl Store {
         read: ReadSpec,
         compiled: &Compiled,
         key: GroupKey,
+        namespace: Option<[u8; 16]>,
     ) -> Result<(u64, Rc<GroupSlot>), Error> {
         let tables = self.with_relation_tables(prepared, &compiled.tables)?;
         let (watches, correlations, evidence) =
@@ -1104,11 +1130,12 @@ impl Store {
             watches.iter().map(Watch::table),
         );
         let projected = order_projected(&prepared.query, compiled);
-        let includes = self.output_only_includes(prepared, identity, &read, compiled)?;
+        let includes = self.output_only_includes(prepared, identity, &read, compiled, namespace)?;
         let gid = self.fan.borrow().next;
         self.fan.borrow_mut().next += 1;
         self.fan.borrow_mut().index(gid, &watches);
         self.fan.borrow_mut().by_key.insert(key.clone(), gid);
+        let unreadable = Arc::default();
         let handle = Rc::new(GroupSlot::new(Group {
             key,
             prepared: prepared.clone(),
@@ -1117,6 +1144,9 @@ impl Store {
             read,
             rows: Vec::new(),
             members: Vec::new(),
+            told_unreadable: Arc::clone(&unreadable),
+            unreadable,
+            missing_read_keys: MissingReadKeys::new(),
             watches,
             evidence,
             recheck,
@@ -1163,14 +1193,27 @@ impl Store {
             Cow::Borrowed(_) => self.execute(compiled, &prepared.query.table).await,
             Cow::Owned(visible) => {
                 (async {
-                    let compiled = self.compile(prepared, identity, visible)?;
+                    let compiled = self.compile(
+                        prepared,
+                        identity,
+                        visible,
+                        self.read_namespace(prepared).await?,
+                    )?;
                     self.execute(&compiled, &prepared.query.table).await
                 })
                 .await
             }
         };
+        let mut unreadable = Vec::new();
         let (rows, awaiting) = match (async {
-            let rows = run?;
+            let mut rows = run?;
+            unreadable = self.open_read(
+                prepared,
+                &visible,
+                false,
+                &mut rows,
+                Some(&mut group.missing_read_keys),
+            )?;
             self.nest_relations(prepared, identity, &visible, rows)
                 .await
         })
@@ -1180,6 +1223,8 @@ impl Store {
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
             Err(error) => return Err(error),
         };
+        group.unreadable = unreadable.into();
+        group.told_unreadable = Arc::clone(&group.unreadable);
         group.rows = rows;
         group.applied = applied;
         group.awaiting = awaiting;
@@ -1198,6 +1243,7 @@ impl Store {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
         compiled: &Compiled,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<(String, String)>, Error> {
         let query = &prepared.query;
         if query.includes.iter().all(|include| include.require) {
@@ -1208,7 +1254,10 @@ impl Store {
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let others = self
+            .compile_tracked(&bare, identity, read, namespace)?
+            .0
+            .tables;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -1234,8 +1283,9 @@ impl Store {
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        namespace: Option<[u8; 16]>,
     ) -> Result<BTreeSet<String>, Error> {
-        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
+        self.read_dependencies_in(prepared, identity, &ReadSpec::default(), namespace)
     }
 
     /// [`Self::read_dependencies`] of a read in `read`'s view.
@@ -1244,8 +1294,9 @@ impl Store {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Result<BTreeSet<String>, Error> {
-        let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
+        let (compiled, _) = self.compile_tracked(prepared, identity, read, namespace)?;
         let mut tables = compiled.tables.clone();
         for watch in self.watch_plan(prepared, identity, read, &compiled)?.0 {
             tables.insert(watch.table().clone());
@@ -1271,10 +1322,18 @@ impl Store {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let compiled = self
-            .read_ctx(&self.owner(), prepared, policy.as_ref(), &claims, read)
+            .read_ctx(
+                &self.owner(),
+                prepared,
+                policy.as_ref(),
+                &claims,
+                read,
+                namespace,
+            )
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
@@ -1369,7 +1428,7 @@ impl Store {
         let mut bare = prepared.clone();
         bare.query.array_subqueries.clear();
         let bare = self
-            .read_ctx(&self.owner(), &bare, None, &claims, read)
+            .read_ctx(&self.owner(), &bare, None, &claims, read, None)
             .compile_query(&bare.query, read.include_deleted)?;
         structural.extend(bare.tables.iter().filter(|t| **t != root.stored).cloned());
         let root_reread = bare.sql.matches(&quote(&root.stored)).count() != 1;
@@ -2067,6 +2126,54 @@ impl Store {
         self.refresh_where(|_| true, true).await;
     }
 
+    /// Re-run the groups that read one of the stored tables `tables`: rows
+    /// the encryption hooks could not open before may open now, and arrive
+    /// as additions.
+    #[cfg(feature = "e2ee-client")]
+    pub(super) async fn refresh_reading(&self, tables: &BTreeSet<String>) {
+        self.refresh_where(
+            |group| group.tables.iter().any(|table| tables.contains(table)),
+            false,
+        )
+        .await;
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    pub(super) fn update_unreadable(
+        &self,
+        space: &SpaceAddress,
+        reason: impl Fn(&str) -> UnreadableCode,
+    ) {
+        let groups: Vec<_> = self
+            .fan
+            .borrow()
+            .groups
+            .values()
+            .filter(|group| group.borrow().missing_read_keys.contains_key(space))
+            .cloned()
+            .collect();
+        for group in groups {
+            let mut group = group.edit();
+            let missing = &group.missing_read_keys[space];
+            let changes: Vec<_> = group
+                .unreadable
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| {
+                    let code = reason(missing.get(&row.id)?).as_str();
+                    (code != row.code).then_some((index, code))
+                })
+                .collect();
+            if !changes.is_empty() {
+                let unreadable = Arc::make_mut(&mut group.unreadable);
+                for (index, code) in changes {
+                    unreadable[index].code = code;
+                }
+                group.flush_unreadable();
+            }
+        }
+    }
+
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
     /// claims from this node's own author. Only request claims matching
@@ -2116,7 +2223,11 @@ impl Store {
                 self.fan.borrow_mut().by_key.remove(&group.key);
             }
             let (watches, correlations, evidence) = self
-                .compile_tracked(&group.prepared, group.identity, &group.read)
+                .read_namespace(&group.prepared)
+                .await
+                .and_then(|namespace| {
+                    self.compile_tracked(&group.prepared, group.identity, &group.read, namespace)
+                })
                 .and_then(|(compiled, session_used)| {
                     let plan =
                         self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)?;
@@ -2271,13 +2382,14 @@ impl Store {
         identity: Option<AuthorSubject>,
         ids: &BTreeSet<RowUuid>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Option<Compiled> {
         // The sessions a compile would resolve anyway; the kept stamp is
         // compared with them where they stand.
         let sessions = self.read_sessions(prepared, identity);
         if !crate::db::PlanStamp::keep(
             &mut plans.stamp,
-            &self.plan_inputs(prepared, &sessions, read),
+            &self.plan_inputs(prepared, &sessions, read, namespace),
         ) {
             plans.by_count.clear();
         }
@@ -2291,7 +2403,7 @@ impl Store {
                 kept.clone()
             }
             None => {
-                let built = self.build_root_plan(prepared, identity, n, read);
+                let built = self.build_root_plan(prepared, identity, n, read, namespace);
                 if plans.by_count.len() >= ROOT_PLANS_MAX {
                     plans.by_count.clear();
                 }
@@ -2320,6 +2432,7 @@ impl Store {
         identity: Option<AuthorSubject>,
         n: usize,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Option<(Compiled, Vec<usize>)> {
         let sentinels = |tag: u8| -> Vec<[u8; 16]> {
             (0..n)
@@ -2335,7 +2448,7 @@ impl Store {
                 .iter()
                 .map(|id| Value::Uuid(uuid::Uuid::from_bytes(*id)))
                 .collect();
-            self.compile(&narrowed_to(prepared, &ids), identity, read)
+            self.compile(&narrowed_to(prepared, &ids), identity, read, namespace)
                 .ok()
         };
         let (a, b) = (sentinels(0xa5), sentinels(0x5a));
@@ -2367,6 +2480,11 @@ impl Store {
         group: &mut Group,
         ids: &BTreeSet<RowUuid>,
     ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
+        // A rewritten query filters and windows its opened rows: only a
+        // full run applies that.
+        if group.prepared.planned.is_some() {
+            return None;
+        }
         #[cfg(any(test, feature = "testing"))]
         if FAIL_RECHECKS.with(|cell| {
             let left = cell.get();
@@ -2399,6 +2517,10 @@ impl Store {
         // The same query narrowed to the changed ids, as a root filter, so
         // SQLite seeks them by primary key instead of sorting the view.
         let ids_as_values: Vec<Value> = ids.iter().map(|id| Value::Uuid(id.0)).collect();
+        let namespace = match self.read_namespace(&group.prepared).await {
+            Ok(namespace) => namespace,
+            Err(error) => return Some(Err(error)),
+        };
         let kept = if read.view.is_none() && read.cut.is_none() {
             self.root_plan(
                 &mut group.root_plans,
@@ -2406,6 +2528,7 @@ impl Store {
                 group.identity,
                 ids,
                 &read,
+                namespace,
             )
         } else {
             None
@@ -2418,6 +2541,7 @@ impl Store {
                             &narrowed_to(&group.prepared, &ids_as_values),
                             group.identity,
                             &read,
+                            namespace,
                         )
                         .ok();
                     assert!(
@@ -2432,15 +2556,60 @@ impl Store {
                 &narrowed_to(&group.prepared, &ids_as_values),
                 group.identity,
                 &read,
+                namespace,
             ) {
                 Ok(compiled) => compiled,
                 Err(error) => return Some(Err(error)),
             },
         };
-        let fresh = match self.execute(&narrowed, &group.prepared.query.table).await {
+        let mut fresh = match self.execute(&narrowed, &group.prepared.query.table).await {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
+        // The changed rows leave toward the subscription's members: opened
+        // as a full run's are.
+        if self.e2ee_hooks().is_some() {
+            let mut missing_read_keys = MissingReadKeys::new();
+            let left_out = match self.open_read(
+                &group.prepared,
+                &read,
+                false,
+                &mut fresh,
+                Some(&mut missing_read_keys),
+            ) {
+                Ok(left_out) => left_out,
+                Err(error) => return Some(Err(error)),
+            };
+            // A page's window counted the rows it left out, which the
+            // result does not hold: only a full run places them.
+            if group.prepared.query.limit.is_some()
+                && (!left_out.is_empty() || !group.unreadable.is_empty())
+            {
+                return None;
+            }
+            // The changed rows' entries are replaced by what they read as now.
+            if !left_out.is_empty() || group.unreadable.iter().any(|row| ids.contains(&row.id)) {
+                let mut unreadable: Vec<UnreadableRow> = group
+                    .unreadable
+                    .iter()
+                    .filter(|row| !ids.contains(&row.id))
+                    .cloned()
+                    .collect();
+                unreadable.extend(left_out);
+                replace_unreadable(&mut group.unreadable, unreadable);
+                group.missing_read_keys.retain(|_, missing| {
+                    missing.retain(|id, _| !ids.contains(id));
+                    !missing.is_empty()
+                });
+                for (space, missing) in missing_read_keys {
+                    group
+                        .missing_read_keys
+                        .entry(space)
+                        .or_default()
+                        .extend(missing);
+                }
+            }
+        }
         // Relations of the changed roots only; the others' are unchanged.
         let fresh = match self
             .nest_relations_kept(
@@ -2751,19 +2920,34 @@ impl Store {
         }
     }
 
-    /// A group's rows, with array relations nested in their cells.
-    async fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+    /// A group's rows, with array relations nested in their cells, and
+    /// the rows the run left out because they could not be opened.
+    async fn group_rows(
+        &self,
+        group: &mut Group,
+    ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        let rows = self.run(&group.prepared, group.identity, &read).await?;
-        self.nest_relations_kept(
+        let mut rows = self.run(&group.prepared, group.identity, &read).await?;
+        let mut missing_read_keys = MissingReadKeys::new();
+        let unreadable = self.open_read(
             &group.prepared,
-            group.identity,
             &read,
-            rows,
-            &mut group.plans,
-        )
-        .await
+            false,
+            &mut rows,
+            Some(&mut missing_read_keys),
+        )?;
+        let rows = self
+            .nest_relations_kept(
+                &group.prepared,
+                group.identity,
+                &read,
+                rows,
+                &mut group.plans,
+            )
+            .await?;
+        group.missing_read_keys = missing_read_keys;
+        Ok((rows, unreadable))
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
@@ -2786,8 +2970,9 @@ impl Store {
     async fn reset_group(&self, group: &mut Group) {
         match self.group_rows(group).await {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
-            Ok(rows) => {
+            Ok((rows, unreadable)) => {
                 group.awaiting = false;
+                group.set_unreadable(unreadable);
                 // Rows that left the result go out as removals before the
                 // re-opening: a reset tells local readers to replace their
                 // result, but a replica only drops rows it is told to (a
@@ -2813,7 +2998,8 @@ impl Store {
                     }
                 }
                 group.opened = true;
-                group.push(opening(&rows));
+                let event = opening(&rows, &group.unreadable);
+                group.push(event);
                 group.rows = rows;
                 Self::hold(group, false);
                 group.keys.clear();
@@ -2964,6 +3150,7 @@ impl Store {
                     return Refresh::Rechecked;
                 }
                 Some(Ok(None)) => {
+                    group.flush_unreadable();
                     #[cfg(any(test, feature = "testing"))]
                     if relations {
                         oracle::compare(self, group, "recheck").await;
@@ -2983,8 +3170,8 @@ impl Store {
                 None => {}
             }
         }
-        let rows = match self.group_rows(group).await {
-            Ok(rows) => rows,
+        let (rows, unreadable) = match self.group_rows(group).await {
+            Ok(result) => result,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
                 return Refresh::Reran;
@@ -3000,12 +3187,16 @@ impl Store {
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
+        group.set_unreadable(unreadable);
         if let Some(mut event) = diff(&group.rows, &rows) {
             self.add_splices(group, &prior, &mut event).await;
             group.push(event);
         } else if was_awaiting {
             // Settlement withheld while waiting is published now.
             group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
+        } else {
+            // The rows stayed, but which ones are left out may not have.
+            group.flush_unreadable();
         }
         // Members that joined while the group waited saw no rows: they
         // open on the current ones (the deltas above went to the others).
@@ -3337,6 +3528,8 @@ fn compose(
         tier,
         // Composed from plain deltas only: never a coalesced reset.
         coalesced: false,
+        // Stamped when the composed delta is pushed.
+        unreadable: None,
     }]
 }
 
@@ -3371,6 +3564,19 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
 }
 
 impl Group {
+    /// The result now leaves out `unreadable` (see [`replace_unreadable`]).
+    fn set_unreadable(&mut self, unreadable: Vec<UnreadableRow>) {
+        replace_unreadable(&mut self.unreadable, unreadable);
+    }
+
+    /// Tell the members a changed unreadable list that no event since
+    /// carried (the rows themselves did not change), as an empty delta.
+    fn flush_unreadable(&mut self) {
+        if self.opened && !self.awaiting && !Arc::ptr_eq(&self.unreadable, &self.told_unreadable) {
+            self.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
+        }
+    }
+
     /// Whether a root-only wake may be applied by re-checking its ids.
     /// With relations, a root row's write
     /// may change another root row's relation cells (a relation over the
@@ -3387,11 +3593,21 @@ impl Group {
     }
 
     /// Publish `event` to every member. A delta reaches only opened
-    /// members; an opening opens the others too.
-    fn push(&mut self, event: SubscriptionEvent) {
+    /// members; an opening opens the others too. A delta carries the
+    /// result's unreadable rows when they changed since the members were
+    /// last told them.
+    fn push(&mut self, mut event: SubscriptionEvent) {
         if let Some(deferred) = &mut self.deferred {
             deferred.push(event);
             return;
+        }
+        if let SubscriptionEvent::Delta { unreadable, .. } = &mut event {
+            if unreadable.is_none() && !Arc::ptr_eq(&self.unreadable, &self.told_unreadable) {
+                *unreadable = Some(Arc::clone(&self.unreadable));
+            }
+            if let Some(told) = unreadable {
+                self.told_unreadable = Arc::clone(told);
+            }
         }
         #[cfg(any(test, feature = "testing"))]
         if oracle::on() && self.oracle_before.is_some() {
@@ -3412,7 +3628,7 @@ impl Group {
         {
             return;
         }
-        let event = opening(rows);
+        let event = opening(rows, &self.unreadable);
         for member in &self.members {
             if member.joined.get() == Joined::AwaitingOpening {
                 Self::deliver(self.query(), member, event.clone());
@@ -3838,7 +4054,10 @@ mod oracle {
             return;
         }
         let read = fanout.visible_read(&group.read, &group.tables);
-        let Ok(rows) = fanout.run(&group.prepared, group.identity, &read).await else {
+        let Ok(rows) = fanout
+            .run_for_reader(&group.prepared, group.identity, &read, false)
+            .await
+        else {
             return;
         };
         let Ok(full) = fanout
@@ -4072,7 +4291,17 @@ fn sql_order(a: &[(Sql, bool)], b: &[(Sql, bool)]) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
+/// Replace a group's unreadable list with `unreadable` when it differs, so
+/// a pointer comparison tells a change (see [`Group::unreadable`]).
+fn replace_unreadable(slot: &mut Arc<[UnreadableRow]>, unreadable: Vec<UnreadableRow>) {
+    if **slot != *unreadable {
+        *slot = unreadable.into();
+    }
+}
+
+/// The opening (a reset) of a result of `rows`, which leaves out
+/// `unreadable`.
+pub(super) fn opening(rows: &[CurrentRow], unreadable: &Arc<[UnreadableRow]>) -> SubscriptionEvent {
     let added = rows
         .iter()
         .enumerate()
@@ -4083,7 +4312,11 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
             splices: Vec::new(),
         })
         .collect();
-    delta(true, added, Vec::new(), Vec::new())
+    let mut event = delta(true, added, Vec::new(), Vec::new());
+    if let SubscriptionEvent::Delta { unreadable: u, .. } = &mut event {
+        *u = Some(Arc::clone(unreadable));
+    }
+    event
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
@@ -4311,6 +4544,7 @@ pub(super) fn policy_pins(
                     | PolicyExpr::ExistsRel { .. }
                     | PolicyExpr::Inherits { .. }
                     | PolicyExpr::InheritsReferencing { .. }
+                    | PolicyExpr::InheritsFrom { .. }
                     | PolicyExpr::Not(_)
                     | PolicyExpr::Or(_) => {
                         return false;
@@ -4328,9 +4562,11 @@ pub(super) fn policy_pins(
             }
             true
         }
+        // `InheritsFrom` reads another row, through a policy that can change.
         PolicyExpr::ExistsRel { .. }
         | PolicyExpr::Inherits { .. }
-        | PolicyExpr::InheritsReferencing { .. } => false,
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. } => false,
         // Everything else reads only the protected row (and the session).
         _ => true,
     }
@@ -4532,6 +4768,33 @@ impl EvidenceWalk<'_> {
                     });
                 column(via_column, &mut columns) && self.inherit(source, *operation, columns, link)
             }
+            // The address columns are this row's; each candidate's rows are
+            // read by id through its policy for the operation (both update
+            // clauses for an update).
+            PolicyExpr::InheritsFrom {
+                operation,
+                table_column,
+                id_column,
+                tables,
+            } => {
+                if !column(table_column, own) || !column(id_column, own) {
+                    return false;
+                }
+                for name in tables {
+                    let Ok(target) = self.policies.table(name) else {
+                        return false;
+                    };
+                    let clauses = target.inherited_clauses(*operation).flatten().collect();
+                    // No link: the address names the target row from this
+                    // row, as an `INHERITS` reference does.
+                    if !self.inherit_clauses(target, *operation, clauses, BTreeSet::new(), None) {
+                        return false;
+                    }
+                }
+                true
+            }
+            // Reads no row: false outside a write check.
+            PolicyExpr::InsertedByThisTransaction => true,
             PolicyExpr::ExistsRel { .. } => false,
         }
     }
@@ -4544,6 +4807,21 @@ impl EvidenceWalk<'_> {
         &mut self,
         table: &Table,
         operation: Operation,
+        columns: BTreeSet<String>,
+        link: Option<Link>,
+    ) -> bool {
+        let clauses = table.policy(operation).into_iter().collect();
+        self.inherit_clauses(table, operation, clauses, columns, link)
+    }
+
+    /// [`Self::inherit`] through `clauses`, all of which a row must pass
+    /// (an `InheritsFrom` update's two): a pin any of them requires bounds
+    /// the rows.
+    fn inherit_clauses(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        clauses: Vec<&PolicyExpr>,
         mut columns: BTreeSet<String>,
         link: Option<Link>,
     ) -> bool {
@@ -4552,19 +4830,23 @@ impl EvidenceWalk<'_> {
             add_evidence(&mut self.out, &table.stored, None);
             return true;
         }
-        let Some(policy) = table.policy(operation) else {
+        if clauses.is_empty() {
             // No policy: the inherited check is false whatever the rows.
             return true;
-        };
+        }
         self.through.push(key);
-        let read = self.walk(policy, table, &mut columns, &mut BTreeSet::new());
+        let read = clauses
+            .iter()
+            .all(|policy| self.walk(policy, table, &mut columns, &mut BTreeSet::new()));
         self.through.pop();
         if !read {
             return false;
         }
-        let pin = conjuncts(policy)
-            .into_iter()
-            .find_map(|c| value_pin(table, c, self.session, self.kept));
+        let pin = clauses.iter().find_map(|policy| {
+            conjuncts(policy)
+                .into_iter()
+                .find_map(|c| value_pin(table, c, self.session, self.kept))
+        });
         self.linked_occurrence(table, pin, columns, link);
         true
     }
@@ -5240,20 +5522,20 @@ mod event_queue_tests {
             before.push_back(one_row_delta(), "notes");
         }
         assert!(matches!(
-            before.pop_front(Some(&[])),
+            before.pop_front(Some((&[], &Arc::from([])))),
             Some(SubscriptionEvent::Rejected { .. })
         ));
-        assert!(is_reset(&before.pop_front(Some(&[]))));
-        assert!(before.pop_front(Some(&[])).is_none());
+        assert!(is_reset(&before.pop_front(Some((&[], &Arc::from([]))))));
+        assert!(before.pop_front(Some((&[], &Arc::from([])))).is_none());
 
         let mut after = queue(2);
         for _ in 0..3 {
             after.push_back(one_row_delta(), "notes");
         }
         after.push_back(rejected(), "notes");
-        assert!(is_reset(&after.pop_front(Some(&[]))));
+        assert!(is_reset(&after.pop_front(Some((&[], &Arc::from([]))))));
         assert!(matches!(
-            after.pop_front(Some(&[])),
+            after.pop_front(Some((&[], &Arc::from([])))),
             Some(SubscriptionEvent::Rejected { .. })
         ));
     }
@@ -5267,7 +5549,7 @@ mod event_queue_tests {
         assert!(queue.reset_due());
         assert!(queue.pop_front(None).is_none());
         assert!(queue.reset_due());
-        assert!(is_reset(&queue.pop_front(Some(&[]))));
+        assert!(is_reset(&queue.pop_front(Some((&[], &Arc::from([]))))));
         assert!(queue.is_empty());
     }
 }

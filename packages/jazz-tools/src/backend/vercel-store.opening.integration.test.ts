@@ -160,9 +160,14 @@ describe("vercel() store: a core that takes a while to open", () => {
     expect(fake.calls).not.toContain("stop");
   }, 90_000);
 
-  it("recycles a session the router doesn't reach while its core listens, exactly once for all instances", async () => {
-    // The core listens, but Vercel's router answers SANDBOX_NOT_LISTENING
-    // for the first session it resumes in; a fresh session routes.
+  /**
+   * A core that listens, behind a router that answers SANDBOX_NOT_LISTENING
+   * for the first session it resumes in; a fresh session routes. Three
+   * instances wake it at once, and one writes and another reads through it.
+   */
+  async function glitchedSession(
+    prepare: (fake: ReturnType<typeof fakeVercel>) => void = () => {},
+  ) {
     const core = await startTrustedCore(randomUUID());
     const port = Number(new URL(core.url).port);
     let glitched: Date | undefined;
@@ -176,6 +181,7 @@ describe("vercel() store: a core that takes a while to open", () => {
       glitched ??= routed.state.startedAt;
     };
     Object.assign(routed.state, { exists: true, drive: true, status: "stopped" });
+    prepare(routed);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "info").mockImplementation(() => {});
     cleanups.push(async () => vi.restoreAllMocks());
@@ -188,18 +194,41 @@ describe("vercel() store: a core that takes a while to open", () => {
     });
     const seen = await instances[2]!.db.all(app.notes.where({ id: row.id }), { tier: "remote" });
     expect(seen.map((note) => note.text)).toEqual(["routed"]);
+    expect(routed.state.startedAt).not.toBe(glitched);
+    const warned = (pattern: RegExp) =>
+      warn.mock.calls.map(([message]) => String(message)).filter((m) => pattern.test(m));
+    return { fake: routed, glitched: glitched!, warned };
+  }
 
+  it("recycles a session the router doesn't reach while its core listens, exactly once for all instances", async () => {
+    const { fake, glitched, warned } = await glitchedSession();
     // The glitched session was stopped once, by the one waiter that
     // claimed it; every instance came up on the next.
-    expect(routed.calls.filter((call) => call === "stop")).toHaveLength(1);
-    expect(routed.recycleClaims).toEqual([glitched!.getTime()]);
-    expect(routed.state.startedAt).not.toBe(glitched);
-    expect(warn.mock.calls.filter(([message]) => /stopping core/.test(String(message)))).toEqual([
-      [
-        expect.stringMatching(
-          /stopping core jazz-prj-test-production's session, whose core listens, so the next wake starts a fresh one: Vercel's router answered SANDBOX_NOT_LISTENING for \d+ ms while it listened/,
-        ),
-      ],
+    expect(fake.calls.filter((call) => call === "stop")).toHaveLength(1);
+    expect(fake.recycleClaims).toEqual([glitched.getTime()]);
+    expect(warned(/stopping core/)).toEqual([
+      expect.stringMatching(
+        /stopping core jazz-prj-test-production's session, whose core listens, so the next wake starts a fresh one: Vercel's router answered SANDBOX_NOT_LISTENING for \d+ ms while it listened/,
+      ),
+    ]);
+  }, 90_000);
+
+  it("gives back a session's recycle when its stop fails, so another waiter stops it", async () => {
+    const { fake, glitched, warned } = await glitchedSession((fake) => {
+      fake.state.failStops = 1;
+    });
+    // The first claimant's stop failed and it released the claim; the next
+    // claimed it again and stopped the session.
+    expect(fake.calls.filter((call) => /stop|recycle/.test(call))).toEqual([
+      "stop failed",
+      "release recycle",
+      "stop",
+    ]);
+    expect(fake.recycleClaims).toEqual([glitched.getTime()]);
+    expect(warned(/could not stop/)).toEqual([
+      expect.stringMatching(
+        /could not stop core jazz-prj-test-production's session \(Error: Status code 500 is not ok\); released its recycle for the next waiter/,
+      ),
     ]);
   }, 90_000);
 });

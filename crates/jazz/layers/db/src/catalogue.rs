@@ -37,7 +37,7 @@
 //! An authority's server writes these in the same transaction as the
 //! admission they describe, so a deploy is never half written.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::storage::{OptionalExtension, params};
 use serde::Serialize;
@@ -739,6 +739,56 @@ pub(crate) async fn schema(
         ));
     }
     Ok(Some(schema))
+}
+
+/// The targets of the forward migrations starting at this schema.
+pub(crate) async fn successors(
+    conn: &Storage,
+    source: &SchemaHash,
+) -> Result<HashSet<SchemaHash>, Error> {
+    forward_targets(
+        conn,
+        source,
+        "SELECT target FROM _jazz_lenses WHERE source = ?1",
+    )
+    .await
+}
+
+/// Every schema reachable from `source` by a forward migration.
+pub(crate) async fn descendants(
+    conn: &Storage,
+    source: &SchemaHash,
+) -> Result<HashSet<SchemaHash>, Error> {
+    forward_targets(
+        conn,
+        source,
+        "WITH RECURSIVE descendants(hash) AS (
+             SELECT target FROM _jazz_lenses WHERE source = ?1
+             UNION SELECT l.target FROM _jazz_lenses l JOIN descendants d ON l.source = d.hash
+         ) SELECT hash FROM descendants",
+    )
+    .await
+}
+
+async fn forward_targets(
+    conn: &Storage,
+    source: &SchemaHash,
+    sql: &str,
+) -> Result<HashSet<SchemaHash>, Error> {
+    let mut statement = conn.prepare_cached(sql).map_err(storage)?;
+    let hashes: Vec<Vec<u8>> = statement
+        .query_map([source.as_bytes().as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .await
+        .map_err(storage)?
+        .collect()
+        .await
+        .map_err(storage)?;
+    hashes
+        .into_iter()
+        .map(|hash| hash_of(hash, "_jazz_lenses"))
+        .collect()
 }
 
 /// The admitted versions' schemas, in admission order, each checked to
