@@ -2169,6 +2169,8 @@ impl Db {
                 composite_scans: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
                 seq_scans: RefCell::new(recovered.scanned),
+                #[cfg(any(test, feature = "testing"))]
+                abort_in_seq_cover: Cell::default(),
                 seq_uncovered: Cell::new(seq_uncovered),
                 accepted: Default::default(),
                 #[cfg(any(test, feature = "testing"))]
@@ -5138,6 +5140,11 @@ impl Store {
         self.seq_scans.borrow_mut().extend(recovered.scanned);
         #[cfg(not(any(test, feature = "testing")))]
         let _ = recovered;
+        // A crash after covering wrote, before its scope commits.
+        #[cfg(any(test, feature = "testing"))]
+        if self.abort_in_seq_cover.get() {
+            std::process::abort();
+        }
         // A scope that rolls back takes the triggers with it; the next
         // open finds those tables uncovered and scans them again.
         self.seq_uncovered.set(false);
@@ -11344,6 +11351,10 @@ struct Store {
     /// `Db::seq_scans_for_test`).
     #[cfg(any(test, feature = "testing"))]
     seq_scans: RefCell<Vec<String>>,
+    /// Abort the process inside the next commit seq cover, after it wrote
+    /// and before its scope commits (see `Db::abort_in_seq_cover_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    abort_in_seq_cover: Cell<bool>,
     /// Whether some table may lack the commit seq row's triggers: the open
     /// scanned it, and the next write scope covers it
     /// ([`Store::cover_commit_seq`]).

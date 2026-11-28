@@ -14,6 +14,10 @@ name: Nightly tests
 #   maintained benchmark API (including `cargo check -p jazz-sim --benches`).
 #   This is its only CI home since the realistic benchmark workflow was
 #   retired on 2026-10-15.
+# - commit-seq-older-core: this tree and a released older core (beta.0, what
+#   Jazz Cloud runs) take turns on one store, and the commit seq row
+#   (jazz#6367) must follow every commit of either. It builds the older tag
+#   from source, so it is too slow for every PR.
 #
 # A scheduled failure opens (or reopens) one issue per job.
 
@@ -140,10 +144,35 @@ jobs:
       - name: Run jazz-tools' Durable Object suite on it
         run: node dev/gates/run-ts-consumers.mjs --shard durable-objects
 
+  commit-seq-older-core:
+    name: Commit seq row across an older core
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:876077e2099226423646748686e4a383e586d8b673df15e51d9cffffaee536c1
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Fetch the older core's tag
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --depth=1 --no-tags origin "refs/tags/v2.0.0-beta.0:refs/tags/v2.0.0-beta.0"
+      - name: Round trip with beta.0
+        run: node dev/gates/commit-seq-older-core.mjs v2.0.0-beta.0
+
   report:
     name: Report nightly failures
     if: ${{ always() && github.event_name == 'schedule' }}
-    needs: [oracle-300, browser-soak, benchmark-api, durable-object-release-host]
+    needs:
+      [oracle-300, browser-soak, benchmark-api, durable-object-release-host, commit-seq-older-core]
     runs-on: ubuntu-latest
     permissions:
       contents: read
