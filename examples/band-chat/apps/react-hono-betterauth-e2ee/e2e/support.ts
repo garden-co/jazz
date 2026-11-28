@@ -288,7 +288,7 @@ export async function signIn(page: Page, name: string, path = "/"): Promise<void
   await expect(signInHeading(page)).toBeVisible({ timeout: T });
   await page.getByLabel("Email").fill(emailOf(name));
   await page.getByLabel("Password").fill(PASSWORD);
-  await submitAuth(page, "Sign in", page.getByRole("button", { name: "Account" }));
+  await submitAuth(page, "Sign in", page.getByRole("button", { name: "Account", exact: true }));
 }
 
 /**

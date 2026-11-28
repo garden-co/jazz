@@ -11,6 +11,8 @@ export const auth = betterAuth({
   baseURL: config.origin,
   trustedOrigins: [config.origin],
   secret: config.betterAuthSecret,
+  rateLimit:
+    process.env.BANDCHAT_E2E_DISABLE_AUTH_RATE_LIMIT === "1" ? { enabled: false } : undefined,
   // Better Auth's tables live in BandChat's own Jazz, through the backend's
   // database; their client policies deny everything.
   database: jazzAdapter({
