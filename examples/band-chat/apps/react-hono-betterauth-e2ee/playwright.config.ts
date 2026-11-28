@@ -18,6 +18,8 @@ export default defineConfig({
   webServer: {
     command: PROD ? "pnpm start" : "pnpm dev",
     url: ORIGIN,
+    // These browser contexts share the same sign-in quota on the test server.
+    env: PROD ? { BANDCHAT_E2E_DISABLE_AUTH_RATE_LIMIT: "1" } : undefined,
     reuseExistingServer: !PROD,
     timeout: 180_000,
   },

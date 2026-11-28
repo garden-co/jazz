@@ -169,7 +169,9 @@ test("removing a member renews the room's key at once; they read nothing written
   });
   await expect(message(b.page, later)).toHaveCount(0);
   await b.page.reload();
-  await expect(b.page.getByRole("button", { name: "Account" })).toBeVisible({ timeout: T });
+  await expect(b.page.getByRole("button", { name: "Account", exact: true })).toBeVisible({
+    timeout: T,
+  });
   await b.page.goto(`/?join=${roomId}`);
   await expect(b.page.getByRole("button", { name: "Ask to join" })).toBeVisible({ timeout: T });
   await expect(message(b.page, later)).toHaveCount(0);
