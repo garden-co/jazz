@@ -8,11 +8,11 @@ async function signUp(browser: Browser, name: string) {
   const page = await context.newPage();
   page.setDefaultTimeout(TIMEOUT);
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name").fill(name);
   await page.getByLabel("Email").fill(`${name.toLowerCase()}-${run}@band-book.test`);
   await page.getByLabel("Password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
   await page.waitForURL(/\/workspace/);
   await page.getByRole("button", { name: "Setlist: spring tour" }).first().waitFor();
   return page;

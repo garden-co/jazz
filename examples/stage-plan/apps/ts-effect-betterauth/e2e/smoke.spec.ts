@@ -7,11 +7,11 @@ test("a crew chief plans a show, the server adds the checklist, and it survives 
 }) => {
   const run = Date.now().toString(36);
   await page.goto("/");
-  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Ada");
   await page.getByLabel("Email", { exact: true }).fill(`ada-${run}@stage-plan.test`);
   await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
-  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
 
   await page.getByLabel("Your name", { exact: true }).fill("Ada");
   await page.getByRole("button", { name: "Continue" }).click();
