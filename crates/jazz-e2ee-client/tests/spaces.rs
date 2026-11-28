@@ -5896,3 +5896,68 @@ fn concurrent_reads_do_not_disturb_a_repair() {
         assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 2);
     });
 }
+
+/// Contract: a first read of a space whose key the runtime then obtains
+/// files no missing-key report: nothing is told while the key is fetched.
+///
+/// ```text
+/// alice ──space, note, delivery to bob
+/// bob   ──reads: rows left out ──► settle acquires ──► read again: the note,
+///          no missing-key report
+/// ```
+#[test]
+fn a_first_read_of_a_space_whose_key_arrives_reports_no_missing_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.deliver_keys(&alice.db)).unwrap();
+        pump(&server, &alice.db);
+
+        let heard = observe_reports(&bob.client);
+        bob.follow_notes(&server);
+        bob.client.take_reports();
+        assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+        assert!(!missing_key_of(&bob.client.take_reports(), &bob, space));
+        assert!(!missing_key_of(&heard.borrow(), &bob, space));
+    });
+}
+
+/// Contract: a space whose key cannot be obtained (no delivery to bob) is
+/// reported missing once its fetch has finished without the key, and once
+/// only across reads.
+#[test]
+fn a_space_whose_key_cannot_be_obtained_reports_missing_once() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+
+        let heard = observe_reports(&bob.client);
+        bob.follow_notes(&server);
+        for _ in 0..2 {
+            assert!(read_notes(&server, &bob, space).unwrap().is_empty());
+        }
+        let address = space_address(&bob, space);
+        let told = heard
+            .borrow()
+            .iter()
+            .filter(
+                |report| matches!(report, Report::MissingKey { space, .. } if *space == address),
+            )
+            .count();
+        assert_eq!(told, 1, "the listeners hear it once");
+    });
+}

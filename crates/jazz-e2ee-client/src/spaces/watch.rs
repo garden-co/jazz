@@ -328,9 +328,11 @@ impl E2eeClient {
             (rows::SPACE_DELIVERIES, "recipientAccountId"),
         ] {
             let query = Query::from(table).filter(eq(col(column), lit(account.clone())));
+            // The rows already stored when the app opens are not changes:
+            // only what arrives or changes after the opening triggers work.
             own.push((
                 table,
-                WatchedRows::new(
+                WatchedRows::from_baseline(
                     db.subscribe(&db.prepare_query(&query)?, Default::default())
                         .await?,
                 ),
@@ -443,6 +445,32 @@ impl E2eeClient {
         Ok(served)
     }
 
+    /// `spaces` in the order they are served: first those a read waits
+    /// for (a report waiting for a key or a root, or a read that left rows
+    /// out and is not settled yet), then those an open subscription uses,
+    /// then the rest; by address within each.
+    fn by_priority(&self, spaces: BTreeSet<SpaceAddress>, watch: &SpaceWatch) -> Vec<SpaceAddress> {
+        let mut waited = self.shared.published.borrow().pending_spaces();
+        waited.extend(
+            self.shared
+                .missing
+                .borrow()
+                .iter()
+                .map(|missing| missing.space.clone()),
+        );
+        let mut ordered: Vec<SpaceAddress> = spaces.into_iter().collect();
+        ordered.sort_by_key(|space| {
+            if waited.contains(space) {
+                0
+            } else if watch.uses.contains_key(space) {
+                1
+            } else {
+                2
+            }
+        });
+        ordered
+    }
+
     /// Acquires the keys of every space of interest (see
     /// [`E2eeClient::watch_spaces`]) when something the device watches
     /// changed, or a space joined the watch: a delivery or a new version
@@ -458,12 +486,14 @@ impl E2eeClient {
     ) -> Result<Vec<(DbSpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError> {
         // A new round of `delivery-failed` reports starts here, before
         // anything that can fail: a sync that stops early must not leave
-        // the last round's spaces muted in this round's sweep.
-        self.shared
-            .member_watch
-            .borrow_mut()
-            .delivery_failures_told
-            .clear();
+        // the last round's spaces muted in this round's sweep. The background
+        // pass's round spans its turns.
+        {
+            let mut watch = self.shared.member_watch.borrow_mut();
+            if !watch.failure_round_held {
+                watch.delivery_failures_told.clear();
+            }
+        }
         self.ensure_open()?;
         let mut interest = self.shared.published.borrow().pending_spaces();
         interest.extend(watch.uses.keys().cloned());
@@ -515,7 +545,7 @@ impl E2eeClient {
             pending_deliveries.difference(&served).cloned().collect();
         served.extend(pending_deliveries.iter().cloned());
         let mut results = Vec::new();
-        for space in served {
+        for space in self.by_priority(served, watch) {
             // Interest may include malformed coordinates registered by a
             // caller. Report that space's error and continue with the rest.
             let validated = self.ensure_open().and_then(|()| {

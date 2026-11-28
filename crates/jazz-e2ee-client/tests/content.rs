@@ -396,19 +396,23 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
 
-    // Each read reports the missing version itself; the listener hears it once.
+    // Each read leaves the rows out; nothing is reported while the key may
+    // still be fetched. Once the fetch has finished without it, the listener
+    // hears the missing version once.
     alice.take_reports();
     for _ in 0..2 {
         assert!(all(&db, query.clone()).unwrap().is_empty());
         let taken = alice.take_reports();
         assert!(
-            taken.iter().any(|report| matches!(
-                report,
-                Report::MissingKey { table, space: missing, .. }
-                    if table == "notes" && missing.identifier == space.to_string()
-            )),
+            !taken
+                .iter()
+                .any(|report| matches!(report, Report::MissingKey { .. })),
             "{taken:?}"
         );
+        // This fixture has no space tables: the fetch fails (then waits out
+        // its back-off), and a failed fetch reports the version missing.
+        let _ = drive(&server, &[&db], alice.settle_reads(&db));
+        alice.take_reports();
     }
     alice.flush_reports();
     let reports = seen.borrow();

@@ -36,6 +36,7 @@ use crate::state::{Missing, Report, SettleBackoff, Shared, db_address};
 
 pub use delivery::MEMBER_LIMIT;
 use delivery::Rotation;
+pub(crate) use delivery::{BackgroundSpace, retry_delay};
 pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
 
 /// Reads that keep meeting concurrent writes give up after this many
@@ -850,6 +851,7 @@ impl E2eeClient {
         #[cfg(any(test, feature = "testing"))]
         {
             let mut watch = self.shared.member_watch.borrow_mut();
+            watch.work.push(("acquire", space.clone()));
             if watch.fail_acquisitions > 0 {
                 watch.fail_acquisitions -= 1;
                 return Err(
@@ -1119,12 +1121,16 @@ impl E2eeClient {
         for (space, entries) in by_space {
             let backoff = self.shared.settle_backoff.borrow().get(&space).copied();
             if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+                // Its last fetch failed: the version is still missing.
+                self.report_missing(&entries);
                 for entry in entries {
                     self.shared.missing(entry);
                 }
                 continue;
             }
-            match self.settle_space(db, &space, &entries).await {
+            let settled = self.settle_space(db, &space, &entries).await;
+            self.report_missing(&entries);
+            match settled {
                 Ok((settled, any_held)) => {
                     self.shared.settle_backoff.borrow_mut().remove(&space);
                     reports.extend(settled);
@@ -1220,10 +1226,81 @@ impl E2eeClient {
     pub async fn settle_reads(&self, db: &Db) -> Result<bool, ClientError> {
         self.ensure_open()?;
         let missing: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
-        if missing.is_empty() || !self.shared.keys.borrow().online {
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        if !self.shared.keys.borrow().online {
+            // No fetch runs offline: the versions are missing now.
+            self.report_missing(&missing);
             return Ok(false);
         }
         self.settle_missing(db, missing).await
+    }
+
+    /// Tells the listeners of each of `entries` whose version this device
+    /// still does not hold: a read left its row out, and the fetch of the
+    /// key finished or failed (or none can run) without it. While the
+    /// fetch runs nothing is told, so a first read of a space whose key
+    /// arrives is not reported (protocol §4.2).
+    fn report_missing(&self, entries: &[Missing]) {
+        // One report per table, space and version, not per row: a
+        // settlement of thousands of rows must not push other reports (an
+        // eviction's) out of the bounded queue before they are delivered.
+        let reports: BTreeSet<(String, SpaceAddress, String)> = {
+            let keys = self.shared.keys.borrow();
+            entries
+                .iter()
+                .filter(|entry| !keys.held.holds(&entry.space, &entry.epoch_id))
+                .map(|entry| {
+                    (
+                        entry.table.clone(),
+                        entry.space.clone(),
+                        entry.epoch_id.clone(),
+                    )
+                })
+                .collect()
+        };
+        let reports = reports
+            .into_iter()
+            .map(|(table, space, epoch_id)| Report::MissingKey {
+                table,
+                space: db_address(&space),
+                epoch_id,
+            });
+        for report in reports {
+            self.shared.report(report);
+        }
+        self.shared.flush(Vec::new());
+    }
+
+    /// Whether a read that left rows out is due to be settled: online, and
+    /// its space not waiting out a back-off after failed settles. A read in
+    /// back-off holds back nothing (see [`E2eeClient::settle_reads`]).
+    pub(crate) fn reads_due(&self) -> bool {
+        if !self.shared.keys.borrow().online {
+            return false;
+        }
+        let now = self.shared.now();
+        let backoff = self.shared.settle_backoff.borrow();
+        self.shared.missing.borrow().iter().any(|entry| {
+            backoff
+                .get(&entry.space)
+                .is_none_or(|backoff| now >= backoff.retry_at)
+        })
+    }
+
+    /// When a read in back-off is next due to be settled, if after now: the
+    /// runtime wakes then instead of polling.
+    pub(crate) fn next_settle_retry(&self) -> Option<web_time::Instant> {
+        let now = self.shared.now();
+        let backoff = self.shared.settle_backoff.borrow();
+        self.shared
+            .missing
+            .borrow()
+            .iter()
+            .filter_map(|entry| backoff.get(&entry.space).map(|backoff| backoff.retry_at))
+            .filter(|at| *at > now)
+            .min()
     }
 
     /// Keep rotation marks private while preparing. Grant the host its

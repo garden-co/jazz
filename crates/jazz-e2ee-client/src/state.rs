@@ -582,6 +582,9 @@ pub(crate) struct WatchedMembers {
 pub(crate) struct WatchedRows<K> {
     pub stream: jazz::db::SubscriptionStream,
     pub rows: BTreeMap<RowUuid, (K, jazz::db::Pos)>,
+    /// The next delta is the stream's opening, kept as the rows already
+    /// seen rather than reported as changes.
+    baseline: bool,
 }
 
 impl<K: Ord + Clone> WatchedRows<K> {
@@ -589,6 +592,16 @@ impl<K: Ord + Clone> WatchedRows<K> {
         Self {
             stream,
             rows: BTreeMap::new(),
+            baseline: false,
+        }
+    }
+
+    /// A stream whose opening is a baseline: the rows it opens with are
+    /// not changes, only what later deltas add, update or remove is.
+    pub fn from_baseline(stream: jazz::db::SubscriptionStream) -> Self {
+        Self {
+            baseline: true,
+            ..Self::new(stream)
         }
     }
 
@@ -609,6 +622,14 @@ impl<K: Ord + Clone> WatchedRows<K> {
                     reset,
                     ..
                 } => {
+                    if std::mem::take(&mut self.baseline) {
+                        self.rows = added
+                            .into_iter()
+                            .chain(updated)
+                            .filter_map(|row| Some((row.row_uuid(), (owner(&row)?, row.seq()))))
+                            .collect();
+                        continue;
+                    }
                     let mut previous = if reset {
                         std::mem::take(&mut self.rows)
                     } else {
@@ -685,12 +706,29 @@ pub(crate) struct MemberWatch {
     /// Spaces told `delivery-failed` in the current round: one sync and the
     /// startup or reconnect sweep that follows it.
     pub delivery_failures_told: BTreeSet<SpaceAddress>,
+    /// While the session's background pass runs, over several turns of the
+    /// loop, the round lasts until it ends: a space is told once.
+    pub failure_round_held: bool,
     /// Tests: the next sync fails before it serves anything.
     #[cfg(any(test, feature = "testing"))]
     pub fail_next_sync: bool,
+    /// Tests: how many of the next listings of the background pass's
+    /// spaces fail.
+    #[cfg(any(test, feature = "testing"))]
+    pub fail_background_lists: u32,
+    /// Tests: the background pass's steps wait forever.
+    #[cfg(any(test, feature = "testing"))]
+    pub hold_background: bool,
+    /// Tests: the background pass's step of this space waits forever.
+    #[cfg(any(test, feature = "testing"))]
+    pub hold_background_space: Option<SpaceAddress>,
     /// Tests: how many of the next full acquisitions fail.
     #[cfg(any(test, feature = "testing"))]
     pub fail_acquisitions: u32,
+    /// Tests: the full acquisitions and passes run, in order, each with
+    /// its space.
+    #[cfg(any(test, feature = "testing"))]
+    pub work: Vec<(&'static str, SpaceAddress)>,
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 
@@ -759,6 +797,9 @@ pub(crate) struct Shared {
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
     pub(crate) outbox: RefCell<VecDeque<Report>>,
+    /// The missing keys (table, space, version) the outbox holds a report
+    /// of: one report each, however many rows or evictions name it.
+    pub(crate) queued_missing: RefCell<BTreeSet<(String, SpaceAddress, String)>>,
     /// Test observation: every report a hook made since the test last
     /// took them, before delivery and de-duplication.
     #[cfg(any(test, feature = "testing"))]
@@ -824,6 +865,7 @@ impl Shared {
             .into(),
             random: RefCell::new(random),
             outbox: Default::default(),
+            queued_missing: Default::default(),
             #[cfg(any(test, feature = "testing"))]
             taken: Default::default(),
             published: Default::default(),
@@ -920,9 +962,11 @@ impl Shared {
 /// entry of a space that is not backed off: a backed-off space's entries
 /// are the rows its reads are unresolved for (re-queued ahead of newer
 /// ones), so they go last. When every entry is backed off, `missing` itself
-/// is dropped, never silently: the report a row left out for want of a key
-/// gets is returned for it (a later read queues it again). That covers an
-/// entry the settle loop re-queues, which no read reports again.
+/// is dropped. A dropped entry is never dropped silently: it will not be
+/// fetched, and a read reports a missing key only once its fetch settles,
+/// so the report a row left out for want of a key gets is returned for it
+/// (a later read queues it again). That covers an entry the settle loop
+/// re-queues, which no read reports again.
 #[must_use]
 fn enqueue_missing(
     queue: &mut VecDeque<Missing>,
@@ -939,7 +983,13 @@ fn enqueue_missing(
             .position(|entry| !backoff.contains_key(&entry.space))
         {
             Some(oldest) => {
-                queue.remove(oldest);
+                let evicted = queue.remove(oldest).expect("a queued entry");
+                queue.push_back(missing);
+                return Some(Report::MissingKey {
+                    table: evicted.table,
+                    space: db_address(&evicted.space),
+                    epoch_id: evicted.epoch_id,
+                });
             }
             None => {
                 return Some(Report::MissingKey {
@@ -972,8 +1022,25 @@ impl Shared {
     pub(crate) fn report(&self, report: Report) {
         #[cfg(any(test, feature = "testing"))]
         push_bounded(&mut self.taken.borrow_mut(), report.clone(), MAX_REPORTS);
+        let mut queued = self.queued_missing.borrow_mut();
+        if let Report::MissingKey {
+            table,
+            space,
+            epoch_id,
+        } = &report
+            && !queued.insert((table.clone(), unchecked_address(space), epoch_id.clone()))
+        {
+            return;
+        }
         let mut outbox = self.outbox.borrow_mut();
-        push_bounded(&mut outbox, report, MAX_REPORTS);
+        if let Some(Report::MissingKey {
+            table,
+            space,
+            epoch_id,
+        }) = push_bounded(&mut outbox, report, MAX_REPORTS)
+        {
+            queued.remove(&(table, unchecked_address(&space), epoch_id));
+        }
     }
 
     /// Notes that `column` of the row opened under a refused creation's key
@@ -1020,6 +1087,7 @@ impl Shared {
     /// listeners, each distinct report once, and `extra` too.
     pub(crate) fn flush(&self, extra: Vec<Report>) {
         let mut outbox = std::mem::take(&mut *self.outbox.borrow_mut());
+        self.queued_missing.borrow_mut().clear();
         outbox.extend(extra);
         let mut deliver = Vec::new();
         let listeners = {
@@ -1076,6 +1144,7 @@ impl Shared {
     pub(crate) fn reset_reports(&self) {
         let withdrawn = self.published.borrow_mut().reset();
         *self.outbox.borrow_mut() = withdrawn.into();
+        self.queued_missing.borrow_mut().clear();
     }
 
     /// Withdraws the reports of `space` with one of `codes`.
@@ -1294,13 +1363,37 @@ mod missing_queue_tests {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for (space, n) in [("held", 1), ("other", 2), ("other", 3), ("other", 4)] {
-            assert_eq!(
-                enqueue_missing(&mut queue, &backoff, entry(space, n), 3),
-                None
-            );
+            // The fourth evicts the second, which is reported (see
+            // `an_evicted_entry_is_reported`).
+            let _ = enqueue_missing(&mut queue, &backoff, entry(space, n), 3);
         }
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 3, 4]);
+    }
+
+    /// An entry a full queue evicts is never dropped silently: it will not
+    /// be fetched, and its read reports a missing key only once a fetch
+    /// settles, so the report it would get is returned for it. A unit test:
+    /// filling the queue through reads takes 10,000 rows.
+    #[test]
+    fn an_evicted_entry_is_reported() {
+        let backoff = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        for n in 1..=3 {
+            assert_eq!(
+                enqueue_missing(&mut queue, &backoff, entry("first", n), 3),
+                None
+            );
+        }
+        let evicted = entry("first", 1);
+        assert_eq!(
+            enqueue_missing(&mut queue, &backoff, entry("second", 4), 3),
+            Some(Report::MissingKey {
+                table: evicted.table.clone(),
+                space: db_address(&evicted.space),
+                epoch_id: evicted.epoch_id,
+            })
+        );
     }
 
     /// When every queued entry is backed off, the newcomer is dropped.

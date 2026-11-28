@@ -664,11 +664,9 @@ impl E2eeHooks for Hooks {
                     },
                     Opened::Missing { epoch_id } => {
                         let space = db_address(&address);
-                        self.shared.report(Report::MissingKey {
-                            table: site.table.to_owned(),
-                            space: space.clone(),
-                            epoch_id: epoch_id.clone(),
-                        });
+                        // Reported once the runtime's fetch of the key has
+                        // finished or failed and the version is still not
+                        // held (see `E2eeClient::settle_reads`).
                         self.shared.missing(Missing {
                             table: site.table.to_owned(),
                             id: row_uuid,

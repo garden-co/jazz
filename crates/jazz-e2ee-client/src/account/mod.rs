@@ -184,14 +184,24 @@ pub(crate) async fn serializable<T>(
     attempts: usize,
     mut step: impl AsyncFnMut(OpenTransactionId) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
+    /// Abandons the transaction when the step ends or is dropped: a caller
+    /// may stop waiting for it (the runtime puts a background step back
+    /// when a read is due), and no transaction is left open.
+    struct Abandon<'a>(&'a Db, OpenTransactionId);
+    impl Drop for Abandon<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.abandon_transaction_handle(self.1);
+        }
+    }
     let mut last = None;
     for _ in 0..attempts {
         let tx = OpenTransactionId::new();
         db.begin_serializable(tx).await?;
+        let abandon = Abandon(db, tx);
         // Boxed: the step's state stays off the stack of the loop that
         // polls it.
         let outcome = Box::pin(step(tx)).await;
-        let _ = db.abandon_transaction_handle(tx);
+        drop(abandon);
         let retry = match &outcome {
             Err(ClientError::Database(error)) => error.is_conflict(),
             Err(ClientError::AccountResetPublication { source, .. }) => {

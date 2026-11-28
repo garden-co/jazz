@@ -50,6 +50,16 @@ pub(crate) fn retry_delay(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs(1u64 << failures.clamp(1, ROTATION_ATTEMPTS - 1))
 }
 
+/// A space of the session's background pass (see
+/// [`E2eeClient::background_spaces`]).
+pub(crate) struct BackgroundSpace {
+    pub space: SpaceAddress,
+    /// This device held keys of it when the pass began.
+    pub held: bool,
+    /// A stored delivery to this account is of a version it does not hold.
+    pub newer: bool,
+}
+
 /// Which rotation to make.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Rotation {
@@ -307,6 +317,12 @@ impl E2eeClient {
         resume: bool,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
+        #[cfg(any(test, feature = "testing"))]
+        self.shared
+            .member_watch
+            .borrow_mut()
+            .work
+            .push(("pass", space.clone()));
         if !self.shared.keys.borrow().online {
             return Err(offline());
         }
@@ -354,30 +370,159 @@ impl E2eeClient {
             if watch.is_some_and(|watch| watch.covers_delivery(&space)) {
                 continue;
             }
-            let mut outcome = self.deliver_pass_with(db, &space, resume).await;
-            if resume
-                && let Ok(written) = outcome
-                && self
-                    .shared
-                    .member_watch
-                    .borrow()
-                    .pending_deliveries
-                    .contains_key(&space)
-            {
-                outcome = self
-                    .finish_rotation(db, &space)
-                    .await
-                    .map(|rest| written + rest);
-            }
-            if outcome.is_ok()
-                && self.holds_refused_key(&space)
-                && let Err(error) = self.repair_auto(db, &space).await
-            {
-                outcome = Err(error);
-            }
+            let outcome = self.pass_outside_watch(db, &space, resume).await;
             results.push((db_address(&space), outcome));
         }
         Ok(results)
+    }
+
+    /// One space's pass outside the watch: with `resume`, also the rest of
+    /// this device's last rotation of it; then the repair of rows written
+    /// under a refused creation's key.
+    async fn pass_outside_watch(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        resume: bool,
+    ) -> Result<usize, ClientError> {
+        let mut outcome = self.deliver_pass_with(db, space, resume).await;
+        if resume
+            && let Ok(written) = outcome
+            && self
+                .shared
+                .member_watch
+                .borrow()
+                .pending_deliveries
+                .contains_key(space)
+        {
+            outcome = self
+                .finish_rotation(db, space)
+                .await
+                .map(|rest| written + rest);
+        }
+        if outcome.is_ok()
+            && self.holds_refused_key(space)
+            && let Err(error) = self.repair_auto(db, space).await
+        {
+            outcome = Err(error);
+        }
+        outcome
+    }
+
+    /// The spaces of the session's background pass (protocol §3.4): every
+    /// held space and every space a delivery to this account in the local
+    /// store names, each with whether one of those deliveries is of a
+    /// version this device does not hold. Read from the local store only,
+    /// and the held keys looked up once.
+    pub(crate) async fn background_spaces(
+        &self,
+        db: &Db,
+    ) -> Result<Vec<BackgroundSpace>, ClientError> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            let mut watch = self.shared.member_watch.borrow_mut();
+            if watch.fail_background_lists > 0 {
+                watch.fail_background_lists -= 1;
+                return Err(crate::StoreError::Failed("listing failed for the test".into()).into());
+            }
+        }
+        let account = crate::account::rows::account_id_cell(&self.shared.account_id)?;
+        let query = jazz::query::Query::from(crate::account::rows::SPACE_DELIVERIES).filter(
+            jazz::query::eq(
+                jazz::query::col("recipientAccountId"),
+                jazz::query::lit(account),
+            ),
+        );
+        let stored = db
+            .all(
+                &db.prepare_query(&query)?,
+                jazz::db::ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly),
+            )
+            .await?;
+        let mut spaces: std::collections::BTreeMap<SpaceAddress, BTreeSet<String>> =
+            Default::default();
+        {
+            let keys = self.shared.keys.borrow();
+            for root in keys.held.spaces() {
+                let epochs = spaces.entry(root.address().clone()).or_default();
+                for (depth, _) in root.held() {
+                    epochs.extend(root.epoch_at(depth).map(str::to_owned));
+                }
+            }
+        }
+        let held: BTreeSet<SpaceAddress> = spaces.keys().cloned().collect();
+        let mut newer = BTreeSet::new();
+        for row in &stored {
+            let (Some(space), Some(jazz::records::Value::Uuid(epoch))) =
+                (crate::state::row_space(row), row.cell("keyEpochId"))
+            else {
+                continue;
+            };
+            let Ok(space) = SpaceAddress::new(&space.scope_id, &space.identifier) else {
+                continue;
+            };
+            if !spaces
+                .get(&space)
+                .is_some_and(|epochs| epochs.contains(&epoch.to_string()))
+            {
+                newer.insert(space.clone());
+            }
+            spaces.entry(space).or_default();
+        }
+        Ok(spaces
+            .into_keys()
+            .filter(|space| held.contains(space) || newer.contains(space))
+            .map(|space| BackgroundSpace {
+                held: held.contains(&space),
+                newer: newer.contains(&space),
+                space,
+            })
+            .collect())
+    }
+
+    /// One step of the session's background pass: acquires the space when
+    /// a stored delivery is of a version this device does not hold, then
+    /// runs its pass, with the rest of this device's last rotation of it,
+    /// if it holds keys of it. A failed acquisition does not stop the pass
+    /// with the keys already held; the first error is returned.
+    pub(crate) async fn background_step(
+        &self,
+        db: &Db,
+        step: &BackgroundSpace,
+    ) -> Result<usize, ClientError> {
+        let space = &step.space;
+        #[cfg(any(test, feature = "testing"))]
+        self.shared
+            .member_watch
+            .borrow_mut()
+            .work
+            .push(("background", space.clone()));
+        #[cfg(any(test, feature = "testing"))]
+        if self.shared.member_watch.borrow().hold_background
+            || self
+                .shared
+                .member_watch
+                .borrow()
+                .hold_background_space
+                .as_ref()
+                == Some(space)
+        {
+            std::future::pending::<()>().await;
+        }
+        let mut held = step.held;
+        let mut acquired = Ok(());
+        if step.newer {
+            match self.acquire_full(db, space).await {
+                Ok(done) => held |= done.state == super::SpaceKeyState::Held,
+                Err(error) => acquired = Err(error),
+            }
+        }
+        let passed = if held {
+            self.pass_outside_watch(db, space, true).await
+        } else {
+            Ok(0)
+        };
+        acquired.and(passed)
     }
 
     /// After a device removal this device made: the pass over every space
