@@ -1,0 +1,164 @@
+---
+title: Introducing E2EE in Jazz 2.0
+description: End-to-end encryption is back in Jazz, rebuilt for Jazz 2.0 around spaces, per-column opt-in and performance by design
+author: Joe Innes
+date: "2026-11-27"
+---
+
+This blog post introduces end-to-end encryption for Jazz 2.0. We're happy to answer questions on our [Discord](https://discord.gg/RN9UKh52be)!
+
+# Classic Jazz, and why we stopped doing E2EE by default
+
+One of the distinguishing features of classic Jazz was that end-to-end encryption was built into the protocol. The approach was simple: any client could load any data by ID, but only authorised clients would be able to decrypt the content. To determine whether writes were legitimate, we checked each write against a chain of signed hashes. In case we couldn't validate the write was authorised, it was ignored.
+
+We used fast crypto and hashing algorithms, and for a lot of apps, performance was good. But towards the end of 2025, we began to run into challenges. As users put more and more data into Jazz, we discovered an uncomfortable implication of our design. Some of the core features we’d built on top of the protocol, such as groups and history, were causing slowness in apps with either deeply nested group structures or deep history.
+
+We spent a lot of time working on optimisations, benchmarking, and making improvements, with some success. However, the architecture itself meant that the cost of a read kept growing, without limit, with the history behind it. In bigger apps, the most expensive operations were verifying the signatures and replaying the group histories that current reads depended on. This was built into the protocol, and no amount of smart engineering could fix it completely.
+
+This problem was one of the reasons we started work on Jazz 2.0. We decided on a radically different architecture: we built a database which looked at first glance more like traditional databases, and we removed the E2EE functionality, promising to revisit it once we had performance where we wanted it to be. Since the beginning of 2026, we’ve focused on performance, correctness, and more expressive permissions which govern what clients are allowed to see, while leaving the server able to access the plaintext written into your database.
+
+Until today.
+
+Today, we’re launching E2EE in Jazz 2.0.
+
+# Overview of E2EE in Jazz 2.0
+
+End-to-end encryption in Jazz 2.0 has been built from the ground up to be resilient and performant. We’ve drawn on what we learned from classic Jazz, while taking advantage of the new ways Jazz 2.0 works to keep performance as fast as possible.
+
+The guiding principles:
+
+## Jazz permissions govern access to ciphertext
+
+Controlling reads and writes of encrypted data is handled through Jazz's normal permissions model. E2EE layers on top of that, rather than replacing it.
+
+Encryption in Jazz 2.0 is organised around _spaces_. A space is a group of rows that share an encryption key, which means the same group of people can read all of them. For example, a space might hold all the `tasks` in a `project`. The `project` is the space. Every member of the project gets the project's key.
+
+Space members can decrypt values using their own copy of the space’s key. These copies are encrypted so that only their account can unlock them (known as _sealing_). Any device they’ve approved can use this key to decrypt the space’s rows.
+
+<E2eeKeyHierarchyDiagram />
+
+A device unseals its account key, the account unseals each space key, and the space key encrypts and decrypts the columns. The server only ever holds sealed keys and ciphertext.
+
+Jazz determines who can decrypt an encrypted row based on the membership of the `space`. This doesn't stop you from writing more complex permission rules (e.g. only the creator can read a `task` if its `status` is `draft`), but bear in mind that the `space` alone is the cryptographic boundary. If you need more control over who can decrypt a piece of data, you can create more spaces. Jazz warns you when a table’s read rule is narrower than its space, so you can decide whether you are comfortable relying on permissions, or whether you would rather move this data into its own space.
+
+When someone leaves or is removed, the space switches to a new key (known as _rotation_), either straight away if you call `rotate`, or before the next write by someone who manages the space. Content written after the switch is encrypted with the new key, so they can’t read it.
+
+## Per-column opt-in
+
+You choose which columns you want to encrypt in your schema, so you can keep plaintext and encrypted data side by side in the same table. Where users have access, Jazz encrypts and decrypts automatically, with no extra code.
+
+Plain columns keep everything Jazz 2.0 can do with them: indexes, ordering, ranges, aggregates, etc., as well as backend reads and writes. You can also choose to have an equality token stored next to an encrypted column, which allows exact-match filtering at a small cost to privacy: the server can see which rows share the same value. As the server can't read what's in the column, any other operation on an encrypted column (ordering, ranges, aggregates) returns an error.
+
+## Performance by design
+
+For Jazz 2.0, we built E2EE with performance in mind from the start. The figures below come from our own local runs of a native client and of Chromium, comparing an encrypted app with the same app in plaintext, for a space with 10 members.
+
+The key lesson from classic Jazz was that the cryptography itself was always fast. What introduced the performance concerns was that work kept growing as history piled up. So, in Jazz 2.0, a read never replays signed history. The server checks permissions with its ordinary indexes, and a device decrypts each value with a key it already holds. The most expensive thing a reader does in Jazz 2.0 is setting up keys. This is a small up-front cost, paid once per device: the first time an account opens the app on a new device, getting its keys ready adds about 90ms in a native client, and about 300ms in the browser. Opening a space for the first time means unsealing the newest key the device was given, and opening older space keys. That work grows with the number of key rotations, not with how much data the space holds, and it adds only a few milliseconds in a native client, where it overlaps start-up, and about 20–40ms in the browser.
+
+After that, the cost is small. A device that opens the app again pays about 12–14ms more at start-up in a native client. Reading encrypted data costs under a millisecond more per query than plaintext, whether the query returns one row or 200, and a write costs about 0.2ms more.
+
+## No homegrown cryptography
+
+Every building block we use for E2EE in Jazz is standard and widely reviewed, taken from well-established open-source Rust libraries:
+
+- XChaCha20-Poly1305 for encrypting values and wrapping keys, with a streaming construction (STREAM) for large ones such as files
+- HPKE (RFC 9180) with X25519 for sealing keys to accounts and devices
+- Ed25519 for signatures
+- BLAKE2 and SHA-2 for hashing
+
+The protocol that puts them together (how keys are created, delivered, rotated and recovered) is our own. It’s [written down in full](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/E2EE_PROTOCOL.md) in the Jazz repository, next to the code, so anyone can review it.
+
+## Swappable algorithms
+
+We've built a core which allows you to swap out cryptography without painful migrations. Every encrypted value and every published key records which algorithm (and which version) produced it. Each role (encrypting content, wrapping and sealing keys, signing, equality tokens, large values) sits behind its own small interface, so a new algorithm can arrive alongside the old one, and data written under either stays readable.
+
+That's important today for use cases that require specific algorithms, or for applications where you want to adopt newer cryptography early. For example, key sealing is shaped after HPKE, so a post-quantum hybrid such as X-Wing can be swapped in. Once a new algorithm is available in your build, new content uses it straight away, and keys are sealed with it from the space’s next key rotation. Old content remains readable, so you can have clients that hold the key re-encrypt it as they go.
+
+For now, adding alternative crypto implementations requires a custom build, but the interfaces are designed to make this easy, and there's [an example of how you could do this](https://github.com/garden-co/jazz/blob/main/crates/jazz-e2ee/examples/custom_mechanism.rs) to get you (or your agent) going.
+
+_Note: as a last minute addition, we also added 'commitments' before releasing. Each recovery root commits to a post-quantum signing key (SLH-DSA, a hash-based signature scheme standardised as FIPS 205), so a future version can still verify an account's history if classical signatures are ever broken. This holds as long as SHA-2 does._
+
+## Limitations
+
+Because a key belongs to a space, the space is also the smallest thing encryption can protect: any member holding a space key can decrypt all values in it. Your read rules can still limit which rows each member is sent, and the server enforces them, but that’s a permission check, not encryption.
+
+If you remove someone's access to a space, the server stops sending them that space’s ciphertext. But if they still have a copy (cached on their device, for example), they may still be able to read it with keys they already hold. This is true of all end-to-end encryption, not just Jazz.
+
+It is _technically_ possible to grant access to the row directly through Jazz permissions so that people outside the space can read its plain columns but not decrypt the encrypted ones. But this exposes the ciphertext to anyone who can read the row, so we recommend keeping encrypted data in a second, related table instead.
+
+# Getting started
+
+Encryption is opt-in per column, so you can start with one sensitive field.
+
+Here’s a table with one encrypted column, `title`:
+
+```ts
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  projects: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
+  tasks: s.table(
+    {
+      projectId: s.uuid(),
+      title: s.string().encrypted(),
+    },
+    { project: s.rel("projects", "projectId") },
+    { space: "project" },
+  ),
+});
+```
+
+We also need to make sure that the user has the appropriate permissions:
+
+```ts
+const { definePermissions, isMember, session } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: (project) => isMember("projects", project.id),
+    insert: { "$createdBy.account": session.user },
+    update: { ownerId: session.user },
+  },
+  tasks: {
+    read: (task) => isMember("projects", task.projectId),
+    insert: (task) => isMember("projects", task.projectId),
+  },
+});
+```
+
+Reading and writing look exactly as they would for a plain column:
+
+```ts
+await db.insert(app.tasks, { projectId, title: "Call the venue" });
+
+const latest = await db.all(app.tasks.where({ projectId }).orderBy("$createdAt", "desc").limit(10));
+```
+
+The full guide is in our docs: [Getting started with encryption](/docs/e2ee/getting-started).
+
+# Good to know
+
+## What happens if someone loses all their devices?
+
+Keys live only on your users’ devices, so Jazz gives each account a way back in: a 24-word recovery phrase, or a passkey (in the browser, for now). A device restored this way gets back everything the account could read. Without either, someone who loses every device loses their encrypted data for good, because nobody else holds a copy of their keys: not us, and not your server. Local-first accounts use the same recovery phrase for the account, so you don't need users to remember two different phrases.
+
+## How does a new device get access?
+
+A member’s copy of the space key is sealed to their account, so any device they’ve approved can read the space. A new device starts out waiting for approval. The person approves it from a device they already use, after checking that both show the same six-digit code, or restores it with their recovery phrase or passkey. Until then, it can see plain data but not encrypted data.
+
+## Can my backend read encrypted columns?
+
+Your backend can always read plain columns. Encrypted columns are client-only: your main backend has no account and no keys. Its reads come back without encrypted columns, and it refuses writes to them. If your server needs to compute on some data, that data has to stay plain.
+
+## Is it ready for production?
+
+Yes. It runs everywhere Jazz does.
+
+# What’s next
+
+Our next priority is getting text merging working correctly with E2EE.
+
+We’d love to hear what you build with it, and what you’d like to see next. Come and tell us on our [Discord](https://discord.gg/RN9UKh52be).
