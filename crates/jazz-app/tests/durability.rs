@@ -389,6 +389,23 @@ fn abandon<F: std::future::Future>(call: F) {
     assert!(call.now_or_never().is_none(), "the call finished at once");
 }
 
+/// [`abandon`]s a durable write with the client disconnected, then
+/// reconnects: the write is committed locally and its wait has begun, but
+/// no verdict can reach it before it is dropped. Connected, the first
+/// poll can find the call already refused: the job runs on the client's
+/// thread and the server in this process, so if the test's thread is
+/// preempted between handing the job over and polling its answer, the
+/// whole round trip finishes first, and the caller hears the refusal.
+async fn abandon_offline<F: std::future::Future>(jazz: &Jazz, what: &str, call: F) {
+    use futures::FutureExt as _;
+    jazz.disconnect().await.unwrap();
+    assert!(
+        call.now_or_never().is_none(),
+        "{what}: the call finished at once"
+    );
+    jazz.reconnect().await.unwrap();
+}
+
 /// The refusal of a durable write whose caller stopped waiting: it reaches
 /// both `mutation_errors()` and the next `wait_for_sync()`, as a plain
 /// write's refusal does.
@@ -436,35 +453,60 @@ async fn an_abandoned_durable_write_keeps_its_refusal() {
         .unwrap();
     let mut errors = jazz.mutation_errors().await.unwrap();
 
-    abandon(durable.insert(NewNote::new(someone_else, "insert")));
+    abandon_offline(
+        &jazz,
+        "insert",
+        durable.insert(NewNote::new(someone_else, "insert")),
+    )
+    .await;
     assert_refusal_kept(&jazz, &mut errors, "insert").await;
 
-    abandon(durable.upsert(ObjectId::new(), NewNote::new(someone_else, "upsert")));
+    abandon_offline(
+        &jazz,
+        "upsert",
+        durable.upsert(ObjectId::new(), NewNote::new(someone_else, "upsert")),
+    )
+    .await;
     assert_refusal_kept(&jazz, &mut errors, "upsert").await;
 
-    abandon(durable.update(
-        to_update.id,
-        bindings::NoteUpdate {
-            owner: Some(someone_else),
-            body: None,
-        },
-    ));
+    abandon_offline(
+        &jazz,
+        "update",
+        durable.update(
+            to_update.id,
+            bindings::NoteUpdate {
+                owner: Some(someone_else),
+                body: None,
+            },
+        ),
+    )
+    .await;
     assert_refusal_kept(&jazz, &mut errors, "update").await;
 
-    abandon(durable.restore_with(to_restore.id, NewNote::new(someone_else, "restore")));
+    abandon_offline(
+        &jazz,
+        "restore",
+        durable.restore_with(to_restore.id, NewNote::new(someone_else, "restore")),
+    )
+    .await;
     assert_refusal_kept(&jazz, &mut errors, "restore").await;
 
-    abandon(durable.transaction(move |tx| async move {
-        tx.insert(NewNote::new(someone_else, "transaction"))?;
-        Ok(())
-    }));
+    abandon_offline(
+        &jazz,
+        "transaction",
+        durable.transaction(move |tx| async move {
+            tx.insert(NewNote::new(someone_else, "transaction"))?;
+            Ok(())
+        }),
+    )
+    .await;
     assert_refusal_kept(&jazz, &mut errors, "transaction").await;
 
     let open = durable.begin_transaction().await.unwrap();
     open.insert(NewNote::new(someone_else, "open transaction"))
         .await
         .unwrap();
-    abandon(open.commit());
+    abandon_offline(&jazz, "OpenTransaction::commit", open.commit()).await;
     assert_refusal_kept(&jazz, &mut errors, "OpenTransaction::commit").await;
 
     // Each was reported once.
