@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const MAX_TRACED_BYTES = 150_000_000;
+export const MAX_TRACED_BYTES = 200_000_000;
 // Exact pin: this runs in the release checks, on registry code.
 const NFT_VERSION = "1.11.12";
 const PLATFORM_PACKAGE = "@garden-co/jazz-napi-linux-x64-gnu";
