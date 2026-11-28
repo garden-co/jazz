@@ -17999,7 +17999,7 @@ impl Store {
             .inherited_merge_bases
             .borrow()
             .iter()
-            .map(|((table, row, _), (from, built))| (table.clone(), *row, from.clone(), *built))
+            .map(|((table, row, _), (from, built, _))| (table.clone(), *row, from.clone(), *built))
             .collect();
         for (table, row, from, built) in inherited {
             let (crate::db::sync::Built::Seq(seq) | crate::db::sync::Built::On(seq)) = built;

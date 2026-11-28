@@ -8944,7 +8944,11 @@ impl Store {
         let source = match built {
             Some(built) => MergeSource::Chain(built),
             None => match self.inherited_merge_bases.borrow().get(&version).cloned() {
-                Some((from, built)) => MergeSource::Inherited(from, built),
+                Some((from, built, frozen)) => MergeSource::Inherited {
+                    from,
+                    built,
+                    frozen,
+                },
                 None => return Ok(None),
             },
         };
@@ -9035,7 +9039,7 @@ impl Store {
                 }
             };
             if let Some(built) = built {
-                inherited.insert(head_row, (base_key, built));
+                inherited.insert(head_row, (base_key, built, snapshot.is_some()));
             }
         }
         self.inherited_merge_bases.replace(inherited);
@@ -9096,9 +9100,19 @@ impl Store {
                         self.merge_base((&table.stored, row, key), built, seq, &column.stored)
                             .await?
                     }
+                    // The copy lands as the head's first version over a
+                    // frozen base: the authority copies the base as of the
+                    // cut, which is the version the writer edited, so there
+                    // is nothing to merge with. Merging over the held base
+                    // row would pull in its edits after the cut.
+                    MergeSource::Inherited {
+                        from, frozen: true, ..
+                    } if held == from.as_slice() => {
+                        return Ok(None);
+                    }
                     // The head's first version, built on the base's: its
                     // value is the merge base, whatever the head holds now.
-                    MergeSource::Inherited(from, built) => {
+                    MergeSource::Inherited { from, built, .. } => {
                         self.inherited_merge_base(
                             (&table.stored, row, &from),
                             built,
@@ -10571,13 +10585,23 @@ fn relation_is_monotone(rel: &crate::query::RelationExpr) -> bool {
     }
 }
 
+/// [`Store::inherited_merge_bases`]: per head row, the base row's branch
+/// key, the version of it the write was built on, and whether the base is
+/// frozen.
+type InheritedMergeBases = HashMap<(String, RowUuid, Vec<u8>), (Vec<u8>, sync::Built, bool)>;
+
 /// Where a text merge's base comes from.
 enum MergeSource {
     /// The writer's chain of versions of the written row (SPEC 4 §4.6).
     Chain(sync::Built),
-    /// The version of the base row, by its branch key, that a branch-view
-    /// write copied into the head (SPEC 11 §11.4).
-    Inherited(Vec<u8>, sync::Built),
+    /// The version of the base row, by its branch key (`from`), that a
+    /// branch-view write copied into the head (SPEC 11 §11.4); `frozen` when
+    /// the view's base is a snapshot.
+    Inherited {
+        from: Vec<u8>,
+        built: sync::Built,
+        frozen: bool,
+    },
 }
 
 /// Which branch a write addresses.
@@ -11266,7 +11290,7 @@ struct Store {
     /// keeps its as-sent copy (INV-HIST-24), so later chains resolve from
     /// the head's own history. A cross-key base in `_base` would make the
     /// head's history depend on the base's.
-    inherited_merge_bases: RefCell<HashMap<(String, RowUuid, Vec<u8>), (Vec<u8>, sync::Built)>>,
+    inherited_merge_bases: RefCell<InheritedMergeBases>,
     /// What the session whose commit is being applied holds (SPEC 19.4):
     /// set while a synced commit applies, `None` for local writes.
     pub(crate) possession: RefCell<Option<Rc<crate::large::Possession>>>,

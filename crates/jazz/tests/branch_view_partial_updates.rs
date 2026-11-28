@@ -31,11 +31,11 @@ use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OpenTransactionId, RowDescriptor, Schema,
-    TableName, TableSchema,
+    CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, OpenTransactionId, PolicyExpr,
+    PolicyValue, RowDescriptor, Schema, TableName, TablePolicies, TableSchema,
 };
 
-use crate::common::{allow_all_policies, compile_schema};
+use crate::common::compile_schema;
 
 /// Over the 64 KiB inline threshold and several leaves long, so the value
 /// is chunked and edits land in its epoch's edit tail.
@@ -54,22 +54,48 @@ fn schema() -> JazzSchema {
                     .merge_strategy(ColumnMergeStrategy::Markdown),
                 ColumnDescriptor::new("blob", ColumnType::Bytea),
                 ColumnDescriptor::new("meta", ColumnType::Json { schema: None }),
+                ColumnDescriptor::new("owner", ColumnType::Text).nullable(),
             ]),
             indexed_columns: None,
             composite_indexes: Vec::new(),
-            policies: allow_all_policies(),
+            policies: owner_or_unowned(),
             branch_by: vec!["branch_id".into()],
             history: Default::default(),
         },
     )]))
 }
 
+/// Anyone reads an unowned row; an owned one only its owner (the system
+/// author, which every test but one connects as, reads everything).
+/// Anyone may write.
+fn owner_or_unowned() -> TablePolicies {
+    let read = PolicyExpr::Or(vec![
+        PolicyExpr::IsNull {
+            column: "owner".to_owned(),
+        },
+        PolicyExpr::Cmp {
+            column: "owner".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
+        },
+    ]);
+    TablePolicies::new()
+        .with_select(read)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True)
+}
+
 fn open(node: u8) -> Db {
+    open_as(node, AuthorSubject::SYSTEM)
+}
+
+fn open_as(node: u8, author: AuthorSubject) -> Db {
     block_on(Db::open(DbConfig::new(
         schema(),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     )))
     .unwrap()
@@ -488,6 +514,15 @@ fn connect(server: &Db, client: &Db) {
 
 /// [`connect`], with the queue of what the client sends the server.
 fn connect_tapped(server: &Db, client: &Db) -> Rc<RefCell<VecDeque<SyncMessage>>> {
+    connect_tapped_as(server, client, AuthorSubject::SYSTEM)
+}
+
+/// [`connect_tapped`], the server serving the client as `who`.
+fn connect_tapped_as(
+    server: &Db,
+    client: &Db,
+    who: AuthorSubject,
+) -> Rc<RefCell<VecDeque<SyncMessage>>> {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let upstream = block_on(client.connect_upstream(Box::new(Pipe {
@@ -500,7 +535,7 @@ fn connect_tapped(server: &Db, client: &Db) -> Rc<RefCell<VecDeque<SyncMessage>>
                 out: down,
                 inbound: up.clone(),
             }),
-            AuthorSubject::SYSTEM,
+            who,
         )
         .unwrap();
     std::mem::forget(upstream);
@@ -880,7 +915,11 @@ fn a_tampered_inherited_base_is_rejected(tamper: impl Fn(&mut WireBase, &Tamperi
     let fate = block_on(
         mallory.wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
     );
-    assert!(fate.is_err(), "the tampered commit is rejected: {fate:?}");
+    assert_eq!(
+        fate.as_ref().map_err(|error| error.code),
+        Err(jazz::db::ErrorCode::WriteRejected),
+        "the tampered commit is rejected: {fate:?}"
+    );
     assert_eq!(
         cell(
             &server,
@@ -912,4 +951,291 @@ fn an_inherited_base_on_another_branch_key_is_rejected() {
         base.key = tampering.other_key.clone();
         base.on = jazz::db::BuiltOn::Seq(tampering.other_key_version);
     });
+}
+
+fn frozen_draft(server: &Db) -> WriteTarget {
+    WriteTarget::BranchView {
+        head: draft(),
+        base: Some(BranchViewBase::Snapshot {
+            branch: main_branch(),
+            snapshot: block_on(server.capture_snapshot()).unwrap(),
+        }),
+    }
+}
+
+fn set_notes(db: &Db, text: String, opts: UpdateOptions) -> jazz::db::WriteHandle {
+    block_on(db.update(
+        "docs",
+        row(),
+        BTreeMap::from([("notes".to_owned(), Value::String(text))]),
+        opts,
+    ))
+    .unwrap()
+}
+
+fn text_edit(db: &Db, text: String, from: &str, opts: UpdateOptions) -> jazz::db::WriteHandle {
+    block_on(db.update_with_large_value_mutations(
+        "docs",
+        row(),
+        BTreeMap::new(),
+        vec![LargeValueUpdate::TextEdit {
+            column: "notes".to_owned(),
+            text,
+            edited_from: from.to_owned(),
+        }],
+        opts,
+    ))
+    .unwrap()
+}
+
+/// Alice makes the draft's first edit of notes through a view over main
+/// frozen at a capture; main's notes changed after the capture. Across sync
+/// the authority copies main as of the cut, as her replica did, and her
+/// edit stands on it: main's later edit reaches neither the draft nor her
+/// replica once it converges. (Merging over main's held value would pull
+/// that later edit in.)
+///
+/// ```text
+/// main:  notes ──capture── "omega main"
+/// alice: frozen view at capture ──"alpha alice"──► authority: cut + edit
+/// ```
+#[test]
+fn a_first_edit_through_a_frozen_view_stands_on_the_cut_across_sync() {
+    for whole in [true, false] {
+        let server = open(0x90);
+        block_on(server.set_authority()).unwrap();
+        let notes = format!("{}\n\nalpha\n\nomega\n", text(LARGE, 51));
+        seed(&server, &text(LARGE, 53), &notes);
+        let alice = open(0x91);
+        connect(&server, &alice);
+        let _live = subscribe(&alice, view_of(&live()));
+        pump(&server, &[&alice]);
+        let frozen = frozen_draft(&server);
+        let _frozen = subscribe(&alice, view_of(&frozen));
+        pump(&server, &[&alice]);
+        set_notes(&server, notes.replace("omega", "omega main"), on_main());
+        pump(&server, &[&alice]);
+        assert_eq!(string(&alice, "notes", view_of(&frozen)), notes);
+
+        let edited = notes.replace("alpha", "alpha alice");
+        if whole {
+            set_notes(&alice, edited.clone(), on(frozen.clone()));
+        } else {
+            text_edit(&alice, edited.clone(), &notes, on(frozen.clone()));
+        }
+        pump(&server, &[&alice]);
+        let draft_only = ReadOpts::default().branch_view(draft(), None);
+        assert_eq!(
+            string(&server, "notes", draft_only.clone()),
+            edited,
+            "whole: {whole}"
+        );
+        assert_eq!(
+            string(&alice, "notes", draft_only),
+            edited,
+            "whole: {whole}"
+        );
+        assert_eq!(
+            string(&server, "notes", main_view()),
+            notes.replace("omega", "omega main")
+        );
+    }
+}
+
+/// Alice and Bob both make the draft's first edit through the same frozen
+/// view, after main moved past the cut. Alice's copy stands on the cut; Bob's
+/// lands over her head version and merges with the cut version as its base:
+/// both edits survive, and main's later edit is in neither.
+#[test]
+fn concurrent_first_edits_through_a_frozen_view_merge_over_the_cut() {
+    for whole in [true, false] {
+        let server = open(0x80);
+        block_on(server.set_authority()).unwrap();
+        let notes = format!("{}\n\nalpha\n\nomega\n", text(LARGE, 41));
+        seed(&server, &text(LARGE, 43), &notes);
+        let alice = open(0x81);
+        let bob = open(0x82);
+        connect(&server, &alice);
+        connect(&server, &bob);
+        let _a = subscribe(&alice, view_of(&live()));
+        let _b = subscribe(&bob, view_of(&live()));
+        pump(&server, &[&alice, &bob]);
+        let frozen = frozen_draft(&server);
+        let _af = subscribe(&alice, view_of(&frozen));
+        let _bf = subscribe(&bob, view_of(&frozen));
+        pump(&server, &[&alice, &bob]);
+        set_notes(&server, notes.replace("alpha", "alpha main"), on_main());
+        pump(&server, &[&alice, &bob]);
+
+        let edit = |db: &Db, text: String| match whole {
+            true => set_notes(db, text, on(frozen.clone())),
+            false => text_edit(db, text, &notes, on(frozen.clone())),
+        };
+        let first = edit(&alice, notes.replace("alpha", "alpha alice"));
+        let second = edit(&bob, notes.replace("omega", "omega bob"));
+        for _ in 0..4 {
+            block_on(alice.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        pump(&server, &[&alice, &bob]);
+        let fate = |db: &Db, write: &jazz::db::WriteHandle| {
+            block_on(
+                db.wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
+            )
+        };
+        assert!(fate(&alice, &first).is_ok());
+        assert!(fate(&bob, &second).is_ok());
+        let draft_only = ReadOpts::default().branch_view(draft(), None);
+        let held = string(&server, "notes", draft_only.clone());
+        assert!(
+            held.contains("alpha alice") && held.contains("omega bob"),
+            "both edits survive (whole: {whole})"
+        );
+        assert!(
+            !held.contains("alpha main"),
+            "the cut is the base (whole: {whole})"
+        );
+        assert_eq!(string(&alice, "notes", draft_only.clone()), held);
+        assert_eq!(string(&bob, "notes", draft_only), held);
+    }
+}
+
+/// Carol deletes the row on main while Bob makes the draft's first edit of
+/// it through the live view. The authority has no base row to copy, so the
+/// edit is rejected with a typed error, and Bob's replica converges to the
+/// authority: no draft version, and main's row deleted.
+#[test]
+fn a_first_head_edit_over_a_base_deleted_meanwhile_is_rejected() {
+    let server = open(0x88);
+    block_on(server.set_authority()).unwrap();
+    let notes = format!("{}\n\nalpha\n", text(LARGE, 45));
+    seed(&server, &text(LARGE, 47), &notes);
+    let bob = open(0x89);
+    let carol = open(0x8a);
+    connect(&server, &bob);
+    connect(&server, &carol);
+    let _b = subscribe(&bob, view_of(&live()));
+    let _c = subscribe(&carol, main_view());
+    pump(&server, &[&bob, &carol]);
+    block_on(carol.delete(
+        "docs",
+        row(),
+        DeleteOptions {
+            target: WriteTarget::BranchView {
+                head: main_branch(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let write = text_edit(
+        &bob,
+        notes.replace("alpha", "alpha bob"),
+        &notes,
+        on(live()),
+    );
+    for _ in 0..4 {
+        block_on(carol.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    pump(&server, &[&bob, &carol]);
+    let fate = block_on(
+        bob.wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
+    );
+    assert!(fate.is_err(), "{fate:?}");
+    let draft_only = ReadOpts::default().branch_view(draft(), None);
+    assert_eq!(cell(&server, "notes", draft_only.clone()), None);
+    assert_eq!(cell(&bob, "notes", draft_only), None);
+    assert_eq!(cell(&bob, "notes", view_of(&live())), None);
+}
+
+/// Mallory may read main's row now, but not its earlier version, which was
+/// Bob's own. Her commit copying the row into the draft is rewritten to name
+/// that earlier version as its base before the authority reads it: merging
+/// over it would disclose Bob's text, so the authority rejects the commit
+/// with the same typed error as for an absent version, and nothing lands.
+#[test]
+fn an_inherited_base_the_writer_may_not_read_is_rejected() {
+    let mallory_id = AuthorSubject::for_test_bytes([0x5a; 16]);
+    let bob_id = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = open(0x78);
+    block_on(server.set_authority()).unwrap();
+    let notes = format!("{}\n\nalpha\n", text(LARGE, 61));
+    // Bob's own version, before the row was shared.
+    let bobs_version = block_on(server.insert(
+        "docs",
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("bob's".to_owned())),
+            (
+                "notes".to_owned(),
+                Value::String(format!("{notes}secret\n")),
+            ),
+            ("blob".to_owned(), Value::Bytes(vec![1])),
+            ("meta".to_owned(), Value::String("{}".to_owned())),
+            (
+                "owner".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(bob_id.principal_parts().1)))),
+            ),
+        ]),
+        InsertOptions {
+            row_id: Some(row()),
+            target: ExactWriteTarget::Branch(main_branch()),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .version()
+    .seq;
+    block_on(server.update(
+        "docs",
+        row(),
+        BTreeMap::from([
+            ("notes".to_owned(), Value::String(notes.clone())),
+            ("owner".to_owned(), Value::Nullable(None)),
+        ]),
+        on_main(),
+    ))
+    .unwrap();
+
+    let mallory = open_as(0x79, mallory_id);
+    let up = connect_tapped_as(&server, &mallory, mallory_id);
+    let _m = subscribe(&mallory, view_of(&live()));
+    pump(&server, &[&mallory]);
+    assert_eq!(string(&mallory, "notes", view_of(&live())), notes);
+
+    let write = text_edit(
+        &mallory,
+        notes.replace("alpha", "alpha mallory"),
+        &notes,
+        on(live()),
+    );
+    block_on(mallory.tick()).unwrap();
+    let mut tampered = 0;
+    for message in up.borrow_mut().iter_mut() {
+        if let SyncMessage::Commit { ops, .. } = message {
+            for base in ops.iter_mut().flat_map(|op| op.bases.iter_mut()) {
+                base.on = jazz::db::BuiltOn::Seq(bobs_version);
+                tampered += 1;
+            }
+        }
+    }
+    assert_eq!(tampered, 1, "the copy names main's version");
+    pump(&server, &[&mallory]);
+    let fate = block_on(
+        mallory.wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
+    );
+    assert_eq!(
+        fate.as_ref().map_err(|error| error.code),
+        Err(jazz::db::ErrorCode::WriteRejected),
+        "{fate:?}"
+    );
+    assert_eq!(
+        cell(
+            &server,
+            "notes",
+            ReadOpts::default().branch_view(draft(), None)
+        ),
+        None
+    );
 }

@@ -328,8 +328,6 @@ impl Store {
         (author != AuthorSubject::SYSTEM).then_some(author)
     }
 
-    /// The stored cell of `column` in the row visible to `identity`, with
-    /// its column. Errors when the row is not visible.
     /// The read view a write to `target` sees its row through: `None` at
     /// the root, else the head over its live or frozen base, resolved as a
     /// branch-view read resolves it.
@@ -352,6 +350,8 @@ impl Store {
         }))
     }
 
+    /// The stored cell of `column` in the row visible to `identity`, with
+    /// its column. Errors when the row is not visible.
     async fn physical_cell(
         &self,
         cell: &PreparedCell,

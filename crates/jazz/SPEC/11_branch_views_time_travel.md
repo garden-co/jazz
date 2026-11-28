@@ -375,17 +375,23 @@ For a mergeable update or existing-target upsert that creates that first head
 overlay, its branch-write intent carries **branch-view copy evidence v1**. It names the
 projected target head key, either a live current base key or a frozen
 `SnapshotRef` base, table, `RowUuid`, and the exact selected source content
-version: for a live base, the version of the base row the writer copied (its
-base for the base key, SPEC 4 §4.6); for a frozen base, the base row's version
-at the cut. At admission the authority validates it as a well-formed version
-of the same `RowUuid` on the branch key the view's base resolves to (a base a
-row's view write names for any other key is malformed), that the store holds
-and that the write's permission subject may read, by the ordinary source-row read policy (as an access proof is,
-SPEC 19.4). A malformed, unknown or policy-denied descriptor rejects the whole
-transaction, with one error whether the version is absent or unreadable, so
-it discloses neither the source nor its policy-support rows. A store that
-cannot read the named version (for example a shard that does not hold the base
-key) fails the write closed rather than writing its value as sent.
+version: for a live base, the version of the base row the writer names as
+copied (its base for the base key, SPEC 4 §4.6); for a frozen base, the base
+row's version at the cut, which the authority resolves itself. At admission
+the authority validates it as a version of the same `RowUuid` on the branch
+key the view's base resolves to, that the store holds and that the write's
+permission subject may read, by the ordinary source-row read policy (as an
+access proof is, SPEC 19.4). The authority cannot tell which readable version
+a live-base writer actually copied, and need not: naming another readable
+version of the same row steers only that writer's own merge, which grants no
+more than writing the merged value whole. When a commit writes a row only
+through one branch view, a base it names for any other branch key of that row
+is malformed. A malformed, unknown or policy-denied descriptor rejects the
+whole transaction, with one error whether the version is absent or
+unreadable, so it discloses neither the source nor its policy-support rows. A
+store that cannot read the named version (for example a shard that does not
+hold the base key) fails the write closed rather than writing its value as
+sent.
 
 The descriptor supplies the merge ancestor of the head's first version when
 the writer named no version of the head row. A stale or concurrent copy is not
@@ -394,7 +400,10 @@ since the copy, the write lands like any concurrent edit of one row and merges
 per strategy (SPEC 4 §4.3). Counter and set columns merge their contributions;
 a text-merge column merges three-way over the copied source version, the
 head's current value and the written value, so two writers' first edits of an
-inherited document both survive. Its content still never implies
+inherited document both survive. Over a frozen base, a copy that lands as
+the head's first version copies the base as of the cut, the version the writer
+edited, so its value stands as written; base edits after the cut never enter
+the head, by a copy or by a merge. Its content still never implies
 restoration: a copy concurrent with a head deletion lands under the head's
 `Deleted` winner (`INV-BVIEW-10`).
 
