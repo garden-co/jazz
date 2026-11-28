@@ -24,9 +24,10 @@ test("beta.3's shape fails: over budget, and every platform's binary bundled", (
     [linux, 63_000_000],
     ["node_modules/jazz-napi/jazz-napi.darwin-arm64.node", 51_000_000],
     ["node_modules/jazz-napi/jazz-napi.linux-x64-gnu.node", 63_000_000],
+    ["node_modules/jazz-napi/jazz-napi.win32-x64-msvc.node", 60_000_000],
   ]);
   assert.equal(receipt.problems.length, 2);
-  assert.match(receipt.problems[0], /over the 150 MB budget/);
+  assert.match(receipt.problems[0], /over the 200 MB budget/);
   assert.match(receipt.problems[1], /jazz-napi\/jazz-napi\.darwin-arm64\.node/);
 });
 
