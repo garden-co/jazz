@@ -299,7 +299,7 @@ test("leaves across a reload: the request is completed while the page is closed"
   // A opens again and completes the removal; B is still closed.
   const aPage = await reopen(a);
   await aPage.goto("/");
-  await expect(aPage.getByRole("button", { name: "Account" })).toBeVisible({ timeout: T });
+  await expect(aPage.getByRole("button", { name: "Account", exact: true })).toBeVisible({ timeout: T });
   const list = await openDevices(aPage);
   await expect(deviceRows(list).filter({ hasText: "Waiting for approval" })).toHaveCount(0);
   await expect(deviceRows(list)).toHaveCount(1, { timeout: 90_000 });

@@ -279,7 +279,7 @@ export async function signUp(page: Page, name: string, path = "/"): Promise<void
   );
   await page.getByLabel("Display name").fill(name);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Account" })).toBeVisible({ timeout: T });
+  await expect(page.getByRole("button", { name: "Account", exact: true })).toBeVisible({ timeout: T });
 }
 
 /** Signs in on the sign-in form, which shows on any page while signed out. */
@@ -312,7 +312,7 @@ export async function signOut(page: Page): Promise<void> {
   // The menu closes if the side bar re-renders while it is open; open it again.
   await expect(async () => {
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("button", { name: "Account", exact: true }).click();
     await page.getByRole("menuitem", { name: "Sign out" }).click({ timeout: 2000 });
   }).toPass({ timeout: T });
   await expect(signInHeading(page)).toBeVisible({ timeout: T });
@@ -373,7 +373,7 @@ export function waitingBanner(page: Page): Locator {
 export async function openDevices(page: Page): Promise<Locator> {
   await expect(async () => {
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("button", { name: "Account", exact: true }).click();
     await page.getByRole("menuitem", { name: "Edit profile" }).click({ timeout: 2000 });
   }).toPass({ timeout: T });
   const dialog = page.getByRole("dialog");
