@@ -116,6 +116,40 @@ async function client(
 
 type Client = Awaited<ReturnType<typeof client>>;
 
+/**
+ * A copy of `store` (every scope it opened) without the account floors: the
+ * keys a device kept, without the record that makes an honest runtime notice
+ * its removal and wipe them.
+ */
+async function withoutFloors(store: ScopeRecordingStore): Promise<PrivateStore> {
+  const copy = memoryPrivateStore();
+  for (const scope of store.scopes) {
+    const incarnation = await copy.openScope(scope);
+    for (const doc of await store.list(scope)) {
+      if (doc.startsWith("floor-")) continue;
+      const found = await store.load(scope, doc);
+      if (found) await copy.save(scope, incarnation, doc, found.bytes, null);
+    }
+  }
+  return copy;
+}
+
+type ScopeRecordingStore = PrivateStore & { scopes: Set<string> };
+
+/** A memory store that remembers which scopes were opened in it. */
+function scopeRecordingStore(): ScopeRecordingStore {
+  const store = memoryPrivateStore();
+  const scopes = new Set<string>();
+  return {
+    ...store,
+    scopes,
+    openScope: (scope) => {
+      scopes.add(scope);
+      return store.openScope(scope);
+    },
+  };
+}
+
 async function makeProject(owner: Client, name: string) {
   const id = crypto.randomUUID();
   const self = await owner.db.encryption.members.row({ table: "projects", id }, owner.account);
@@ -247,7 +281,7 @@ describe("encryption on the browser-style client, end to end", () => {
       .wait({ tier: "global" });
 
     // A second device, approved; it keeps its private store when it goes away.
-    const lostStore = memoryPrivateStore();
+    const lostStore = scopeRecordingStore();
     const lostAccounts = memoryStore();
     const lost = await client(host, "alice", { privateStore: lostStore, accounts: lostAccounts });
     expect(await lost.db.encryption.ready({ timeoutMs: 30_000 })).toBe("awaiting-approval");
@@ -306,15 +340,37 @@ describe("encryption on the browser-style client, end to end", () => {
       { authorEpochId: removal!.epochId },
     ]);
 
-    // The removed device comes back with the keys it kept: the earlier task
-    // opens, the later one does not.
-    const again = await client(host, "alice", { privateStore: lostStore, accounts: lostAccounts });
+    // The removed device comes back with the keys it kept. Its own runtime
+    // finds at once that the account no longer has it, wipes its keys and
+    // enrols again (see the end of this test), so whether a read through it
+    // opens anything races that check. A copy of its store without the floors
+    // it verified the account at is a device that kept every key and makes no
+    // such check: the earlier task opens, the later one does not.
+    const kept = await withoutFloors(lostStore);
+    const thief = await client(host, "alice", { privateStore: kept, accounts: memoryStore() });
     const seen = await until(async () => {
-      const rows = await again.db.all(tasks, { tier: "remote" });
-      return rows.length + unreadableRows(rows).length >= 2 ? rows : undefined;
-    }, "the removed device to be sent both tasks");
+      const rows = await thief.db.all(tasks, { tier: "remote" });
+      const unreadable = unreadableRows(rows).map((row) => row.id);
+      return rows.some((row) => row.title === "kept") && unreadable.includes(after)
+        ? rows
+        : undefined;
+    }, "the removed device to read the earlier task and not the later one");
     expect(seen.map((row) => row.title)).toEqual(["kept"]);
     expect(unreadableRows(seen).map((row) => row.id)).toEqual([after]);
+    await thief.session.close();
+
+    // The removed device's own runtime, on the store it kept, enrols again
+    // as a new device and reads neither task.
+    const again = await client(host, "alice", { privateStore: lostStore, accounts: lostAccounts });
+    await until(
+      async () => ((await again.db.encryption.deviceId()) !== lostId ? true : undefined),
+      "the removed device to enrol again",
+    );
+    const reenrolled = await until(async () => {
+      const rows = await again.db.all(tasks, { tier: "remote" });
+      return unreadableRows(rows).length === 2 ? rows : undefined;
+    }, "the re-enrolled device to be sent both tasks");
+    expect(reenrolled).toEqual([]);
   }, 120_000);
 
   it("an idle active device completes another device's removal request", async () => {
