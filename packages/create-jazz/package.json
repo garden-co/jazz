@@ -1,6 +1,6 @@
 {
   "name": "create-jazz",
-  "version": "2.0.0-beta.5",
+  "version": "2.0.0-beta.6",
   "description": "Print the Jazz agent brief: setup instructions for your coding agent.",
   "license": "MIT",
   "repository": {

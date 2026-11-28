@@ -1,5 +1,12 @@
 # cojson-core-rn
 
+## 2.0.0-beta.6
+
+### Patch Changes
+
+- jazz-rn-ios@2.0.0-beta.6
+- jazz-rn-android@2.0.0-beta.6
+
 ## 2.0.0-beta.5
 
 ### Patch Changes
